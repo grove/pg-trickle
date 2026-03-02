@@ -26,7 +26,9 @@
   {%- set status = config.get('status', none) -%}
   {%- set st_name = config.get('stream_table_name', target_relation.identifier) -%}
   {%- set st_schema = config.get('stream_table_schema', target_relation.schema) -%}
-  {%- set full_refresh_mode = (flags.FULL_REFRESH == True) -%}
+  {#- should_full_refresh() is the stable API from dbt 1.0+; flags.FULL_REFRESH
+      was deprecated in dbt 1.10 and may warn or fail in 1.11+. -#}
+  {%- set full_refresh_mode = should_full_refresh() -%}
 
   {# -- Always schema-qualify the stream table name -- #}
   {%- set qualified_name = st_schema ~ '.' ~ st_name -%}
