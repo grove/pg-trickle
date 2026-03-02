@@ -391,6 +391,7 @@ fn create_stream_table_impl(
             needs_count,
             needs_dual_count,
             needs_union_dedup,
+            topk_info.as_ref(),
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 
@@ -1701,6 +1702,7 @@ fn initialize_st(
     needs_pgt_count: bool,
     needs_dual_count: bool,
     needs_union_dedup: bool,
+    topk_info: Option<&crate::dvm::TopKInfo>,
 ) -> Result<(), PgTrickleError> {
     // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
     // defining query so the auxiliary column is populated correctly.
@@ -1746,6 +1748,14 @@ fn initialize_st(
         }
     } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
         ua_sql
+    } else if let Some(info) = topk_info {
+        // TopK: use the full query (with ORDER BY + LIMIT) for initial population,
+        // so only the top K rows are inserted.
+        let row_id_expr = crate::dvm::row_id_expr_for_query(query);
+        format!(
+            "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub",
+            topk_query = info.full_query,
+        )
     } else {
         let row_id_expr = crate::dvm::row_id_expr_for_query(query);
         format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)

@@ -120,7 +120,9 @@ async fn test_topk_monitoring_view_shows_is_topk() {
     .await;
 
     let is_topk: bool = db
-        .query_scalar("SELECT is_topk FROM pgtrickle.stream_tables_info WHERE name = 'topk_mon_st'")
+        .query_scalar(
+            "SELECT is_topk FROM pgtrickle.stream_tables_info WHERE pgt_name = 'topk_mon_st'",
+        )
         .await;
     assert!(is_topk, "is_topk should be true in monitoring view");
 }

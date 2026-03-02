@@ -796,8 +796,8 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
 
     // Build the source subquery with row IDs.
-    let source_sql =
-        format!("SELECT {row_id_expr} AS __pgt_row_id, __pgt_src.* FROM ({topk_query}) __pgt_src");
+    // Use alias `sub` to match what row_id_expr_for_query() generates.
+    let source_sql = format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub");
 
     // Get column names from the storage table (excluding __pgt_row_id).
     let columns = crate::dvm::get_defining_query_columns(&st.defining_query)?;
