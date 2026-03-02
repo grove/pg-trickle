@@ -15,118 +15,122 @@ coverage, all in plain language.
 
 pg_trickle is a PostgreSQL 18 extension that implements streaming tables with
 incremental view maintenance (IVM) via differential dataflow. All 13 design
-phases are complete. This roadmap tracks the path from pre-release to 1.0
-and beyond.
+phases are complete. This roadmap tracks the path from the v0.1.x series to
+1.0 and beyond.
 
 ```
- We are here
-     │
-     ▼
- ┌─────────┐   ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
- │  0.1.0  │──▶│  0.2.0  │──▶│  0.3.0   │──▶│  0.4.0   │──▶│  1.0.0   │──▶│  1.x+    │
- │ Pre-    │   │ Correct-│   │ Prod-    │   │ Observ-  │   │ Stable   │   │ Scale &  │
- │ release │   │ ness    │   │ ready    │   │ ability  │   │ Release  │   │ Ecosystem│
- └─────────┘   └─────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘
+                                      We are here
+                                           │
+                                           ▼
+ ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+ │  0.1.x   │   │  0.2.0   │   │  0.3.0   │──▶│  0.4.0   │──▶│  1.0.0   │──▶│  1.x+    │
+ │ Released │   │ Released │   │ Prod-    │   │ Observ-  │   │ Stable   │   │ Scale &  │
+ │ ✅       │   │ (merged) │   │ ready    │   │ ability  │   │ Release  │   │ Ecosystem│
+ └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘
 ```
 
 ---
 
-## v0.1.0 — Released (2026-02-26)
+## v0.1.x Series — Released
+
+### v0.1.0 — Released (2026-02-26)
 
 **Status: Released — all 13 design phases implemented.**
 
 Core engine, DVM with 21 OpTree operators, trigger-based CDC, DAG-aware
 scheduling, monitoring, dbt macro package, and 1,300+ tests.
 
+Key additions over pre-release:
+- WAL decoder pgoutput edge cases (F4)
+- JOIN key column change limitation docs (F7)
+- Keyless duplicate-row behavior documented (F11)
+- CUBE explosion guard (F14)
+
+### v0.1.1 — Released (2026-02-27)
+
+Patch release: WAL decoder keyless pk_hash fix (F2), old_* column population
+for UPDATEs (F3), and `delete_insert` merge strategy removal (F1).
+
+### v0.1.2 — Released (2026-02-28)
+
+Patch release: ALTER TYPE/POLICY DDL tracking (F6), window partition key E2E
+tests (F8), PgBouncer compatibility docs (F12), read replica detection (F16),
+SPI retry with SQLSTATE classification (F29), and 40+ additional E2E tests.
+
+### v0.1.3 — Released (2026-03-01)
+
+Patch release: Completed 50/51 SQL_GAPS_7 items across all tiers. Highlights:
+- Adaptive fallback threshold (F27), delta change metrics (F30)
+- WAL decoder hardening: replay deduplication, slot lag alerting (F31–F38)
+- TPC-H 22-query correctness baseline (22/22 pass, SF=0.01)
+- 460 E2E tests (≥ 400 exit criterion met)
+- CNPG extension image published to GHCR
+
 See [CHANGELOG.md](CHANGELOG.md) for the full feature list.
-
-### Late additions (pre-March 1st)
-
-Low-risk, high-value items pulled forward from v0.2.0:
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| F4 | WAL decoder: pgoutput message parsing edge cases | 2–3h | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G3.3 |
-| F7 | Document JOIN key column change limitations | 1–2h | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G4.2 |
-| F11 | Keyless table duplicate-rows: document known behavior | 1h | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G7.1 |
-| F14 | CUBE explosion guard (reject oversized CUBE grouping sets) | 1h | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G5.2 |
 
 ---
 
-## v0.2.0 — Correctness & Stability
+## v0.2.0 — Correctness & Stability — Released (merged into v0.1.x)
 
-**Goal:** Close all critical and high-priority gaps to reach a provably
-correct baseline. No new features — only fixes, verification, and test
-coverage.
+**Status: All work delivered in the v0.1.x patch series.**
 
-> **Status: Substantially complete.** 50/51 SQL_GAPS_7 items were completed
-> in v0.1.3. The only remaining item is F40 (extension upgrade migration
-> scripts), deferred to PLAN_DB_SCHEMA_STABILITY.md.
+The 51-item SQL_GAPS_7 correctness plan was completed ahead of schedule: 50
+items landed in v0.1.0–v0.1.3. The one remaining item (F40 — extension upgrade
+migration scripts) is deferred to v0.3.0 as O1.
 
-### Tier 0 — Critical (must-fix) — ✅ COMPLETE
+<details>
+<summary>Completed items (click to expand)</summary>
 
-| Item | Description | Status |
-|------|-------------|--------|
-| F1 | Remove `delete_insert` merge strategy | ✅ Done in v0.1.3 |
-| F2 | WAL decoder: keyless-table pk_hash computation | ✅ Done in v0.1.3 |
-| F3 | WAL decoder: old_* column population for UPDATEs | ✅ Done in v0.1.3 |
-| F5 | JOIN key column change detection in delta SQL | ✅ Done in v0.1.0 |
-| F6 | ALTER TYPE / ALTER POLICY DDL tracking | ✅ Done in v0.1.3 |
+| Tier | Items | Status |
+|------|-------|--------|
+| 0 — Critical | F1–F3, F5–F6 | ✅ Done in v0.1.1–v0.1.3 |
+| 1 — Verification | F8–F10, F12 | ✅ Done in v0.1.2–v0.1.3 |
+| 2 — Robustness | F13, F15–F16 | ✅ Done in v0.1.2–v0.1.3 |
+| 3 — Test coverage | F17–F26 (62 E2E tests) | ✅ Done in v0.1.2–v0.1.3 |
+| 4 — Operational hardening | F27–F39 | ✅ Done in v0.1.3 |
+| 4 — Upgrade migrations | F40 | ⬜ Deferred → v0.3.0 O1 |
+| 5 — Nice-to-have | F41–F51 | ✅ Done in v0.1.3 |
 
-### Tier 1 — Verification — ✅ COMPLETE
-
-| Item | Description | Status |
-|------|-------------|--------|
-| F8–F10, F12 | Window partition key E2E, recursive CTE monotonicity audit, ALTER DOMAIN tracking, PgBouncer compatibility docs | ✅ Done in v0.1.3 |
-
-### Tier 2 — Robustness — ✅ COMPLETE
-
-| Item | Description | Status |
-|------|-------------|--------|
-| F13, F15–F16 | LIMIT-in-subquery warning, RANGE_AGG recognition, read replica detection | ✅ Done in v0.1.3 |
-
-### Tier 3 — Test coverage — ✅ COMPLETE
-
-| Item | Description | Status |
-|------|-------------|--------|
-| F17–F26 | 62 E2E tests across 10 test files | ✅ Done in v0.1.3 |
-
-**TPC-H-derived coverage baseline** — The 22-query correctness test suite
-now achieves **22/22 queries create and pass deterministic correctness checks**
-across multiple mutation cycles (`just test-tpch`, local-only, SF=0.01).
-See [plans/testing/PLAN_TEST_SUITE_TPC_H.md](plans/testing/PLAN_TEST_SUITE_TPC_H.md).
+**TPC-H baseline:** 22/22 queries pass deterministic correctness checks across
+multiple mutation cycles (`just test-tpch`, SF=0.01).
 
 > *Queries are derived from the TPC-H Benchmark specification; results are not
 > comparable to published TPC results. TPC Benchmark™ is a trademark of TPC.*
 
-### Tier 4 — Operational Hardening — 13/14 COMPLETE
-
-| Item | Description | Status |
-|------|-------------|--------|
-| F27–F39 | Adaptive threshold, SPI retry, delta metrics, WAL hardening, etc. | ✅ Done in v0.1.3 |
-| F40 | Extension upgrade migration scripts | ⬜ Deferred to PLAN_DB_SCHEMA_STABILITY.md |
-
-### Tier 5 — Nice-to-Have — ✅ COMPLETE
-
-| Item | Description | Status |
-|------|-------------|--------|
-| F41–F51 | Wide table hash, memory docs, monitoring, keyless E2E, etc. | ✅ Done in v0.1.3 |
-
-**v0.2.0 total: ~30 hours actual** (originally estimated 66–92h)
-
-**Exit criteria:**
-- [x] Zero P0 gaps
-- [x] All P1 gaps resolved or documented as known limitations
-- [x] E2E test count ≥ 400 with 0 pre-existing failures (currently 460)
-- [ ] Combined coverage ≥ 75%
+</details>
 
 ---
 
 ## v0.3.0 — Production Readiness
 
-**Goal:** Operational polish, parallel refresh, and production-grade
-WAL-based CDC. The extension is suitable for production use after this
-milestone.
+**Goal:** Operational polish, parallel refresh, production-grade WAL-based CDC,
+and diamond dependency consistency. The extension is suitable for production
+use after this milestone.
+
+### Diamond Dependency Consistency
+
+Diamond DAGs (where two stream tables share an upstream source and both feed a
+third) currently have an inconsistency window: if B refreshes but C fails, the
+fan-in table D sees a split view of the source data.
+
+**Decision:** Option 1 — Epoch-Based Atomic Refresh Groups. Detected multi-path
+groups in the DAG refresh atomically within a SAVEPOINT; on failure the group
+rolls back and retries next cycle. Linear (non-diamond) STs are unaffected.
+
+| Step | Description | Effort |
+|------|-------------|--------|
+| D1 | Data structures (`Diamond`, `ConsistencyGroup`) in `dag.rs` | 2–3h |
+| D2 | Diamond detection algorithm in `dag.rs` (pure, unit-tested) | 3–4h |
+| D3 | Consistency group computation in `dag.rs` (pure, unit-tested) | 2–3h |
+| D4 | Catalog column + GUC (`diamond_consistency`) in `catalog.rs`/`config.rs`/`api.rs` | 3–4h |
+| D5 | Scheduler wiring (`scheduler.rs`) with SAVEPOINT loop | 4–6h |
+| D6 | Monitoring function `pgtrickle.diamond_groups()` | 2–3h |
+| D7 | E2E test suite (`tests/e2e_diamond_tests.rs`, 7 tests) | 4–6h |
+| D8 | Documentation (`SQL_REFERENCE.md`, `CONFIGURATION.md`, `ARCHITECTURE.md`) | 2–3h |
+
+See [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md).
+
+> **Diamond subtotal: ~22–32 hours**
 
 ### Performance & Parallelism
 
@@ -155,12 +159,13 @@ milestone.
 | W3 | WAL→trigger automatic fallback hardening | 4–6h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 | W4 | Promote `pg_trickle.cdc_mode = 'auto'` to recommended | Documentation | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 
-> **v0.3.0 total: ~40–58 hours** (excluding v0.2.0 prerequisites)
+> **v0.3.0 total: ~62–90 hours**
 
 **Exit criteria:**
 - [ ] `max_concurrent_refreshes` drives real parallel refresh
 - [ ] WAL CDC mode passes full E2E suite
-- [ ] Extension upgrade path tested (`0.1.0 → 0.3.0`)
+- [ ] Extension upgrade path tested (`0.1.x → 0.3.0`)
+- [ ] Diamond dependency consistency (D1–D8) implemented and E2E-tested
 - [ ] Zero P0/P1 gaps remaining
 
 ---
@@ -256,14 +261,14 @@ These are not gated on 1.0 but represent the longer-term horizon.
 
 ## Effort Summary
 
-| Milestone | Effort estimate | Cumulative |
-|-----------|-----------------|------------|
-| v0.2.0 — Correctness | 66–92h | 66–92h |
-| v0.3.0 — Production ready | 40–58h | 106–150h |
-| v0.4.0 — Observability & Integration | 18–27h | 124–177h |
-| v1.0.0 — Stable release | 18–27h | 142–204h |
-| Post-1.0 (ecosystem) | 88–134h | 232–340h |
-| Post-1.0 (scale) | 6+ months | — |
+| Milestone | Effort estimate | Cumulative | Status |
+|-----------|-----------------|------------|--------|
+| v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
+| v0.3.0 — Production ready | 62–90h | 92–120h | 🔜 Next |
+| v0.4.0 — Observability & Integration | 18–27h | 110–147h | |
+| v1.0.0 — Stable release | 18–27h | 128–174h | |
+| Post-1.0 (ecosystem) | 88–134h | 218–308h | |
+| Post-1.0 (scale) | 6+ months | — | |
 
 ---
 
@@ -287,5 +292,6 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | [plans/infra/PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) | PostgreSQL 19 forward-compatibility |
 | [plans/sql/PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) | Extension upgrade migrations |
 | [plans/sql/PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) | Transactional IVM (immediate, same-transaction refresh) |
+| [plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | Diamond dependency consistency (multi-path refresh atomicity) |
 | [plans/adrs/PLAN_ADRS.md](plans/adrs/PLAN_ADRS.md) | Architectural decisions |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture |
