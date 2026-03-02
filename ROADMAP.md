@@ -104,8 +104,9 @@ multiple mutation cycles (`just test-tpch`, SF=0.01).
 ## v0.3.0 — Production Readiness
 
 **Goal:** Operational polish, parallel refresh, production-grade WAL-based CDC,
-and diamond dependency consistency. The extension is suitable for production
-use after this milestone.
+diamond dependency consistency, correctness safeguards, and validated
+partitioning support. The extension is suitable for production use after this
+milestone.
 
 ### Diamond Dependency Consistency
 
@@ -131,6 +132,80 @@ rolls back and retries next cycle. Linear (non-diamond) STs are unaffected.
 See [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md).
 
 > **Diamond subtotal: ~22–32 hours**
+
+### Non-Deterministic Function Handling
+
+Volatile functions (`random()`, `gen_random_uuid()`, `clock_timestamp()`) break
+delta computation in DIFFERENTIAL mode — values change on each evaluation,
+causing phantom changes and corrupted row identity hashes. This is a silent
+correctness gap.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| ND1 | Volatility lookup via `pg_proc.provolatile` + recursive `Expr` scanner | 1–2h | [PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) §Part 1 |
+| ND2 | OpTree volatility walker + enforcement policy (reject volatile in DIFFERENTIAL, warn for stable) | 1h | [PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) §Part 2 |
+| ND3 | E2E tests (volatile rejected, stable warned, immutable allowed, nested volatile in WHERE) | 1–2h | [PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) §E2E Tests |
+| ND4 | Documentation (`SQL_REFERENCE.md`, `DVM_OPERATORS.md`) | 0.5h | [PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) §Files |
+
+> **Non-determinism subtotal: ~4–6 hours**
+
+### ORDER BY / LIMIT / OFFSET — TopK Support
+
+`ORDER BY ... LIMIT N` in defining queries is currently rejected. This is a
+competitive gap (Epsio supports incremental TopK) and a common
+dashboard/leaderboard pattern. The plan also closes FETCH FIRST test coverage
+and adds OFFSET-without-ORDER-BY warnings for subqueries.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TK1 | E2E tests for `FETCH FIRST` / `FETCH NEXT` rejection (G1) | 0.5h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 1 |
+| TK2 | Extend subquery warning to OFFSET without ORDER BY (G2/G3) | 1–2h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 2 |
+| TK3 | `detect_topk_pattern()` + `TopKInfo` struct in `parser.rs` | 3–4h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 3 |
+| TK4 | Catalog columns: `pgt_topk_limit`, `pgt_topk_order_by` | 2–3h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 4 |
+| TK5 | TopK-aware refresh path (scoped recomputation via MERGE) | 4–6h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 5 |
+| TK6 | DVM pipeline bypass for TopK tables in `api.rs` | 2–3h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 6 |
+| TK7 | E2E + unit tests (`e2e_topk_tests.rs`, 18 tests) | 6–8h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Step 7 |
+| TK8 | Documentation (SQL Reference, FAQ, CHANGELOG) | 2–3h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Steps 8–10 |
+| TK9 | TPC-H: restore ORDER BY + LIMIT in 5 queries (Q2, Q3, Q10, Q18, Q21) | 1–2h | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) §Part 4 |
+
+> **TopK subtotal: ~20–28 hours**
+>
+> Note: boundary-tracked recomputation (Option C) and dedicated TopK operator
+> with overflow buffer (Option D) are documented as future optimizations.
+
+### Partitioning Support (Source Tables)
+
+Partitioned source tables already work with trigger-based CDC (PG 13+ trigger
+propagation), but there are validation gaps, missing tests, and an ATTACH
+PARTITION detection hole. This section addresses the near-term items only;
+partitioned storage tables are deferred to a future release.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PT1 | E2E tests for partitioned source tables (RANGE, basic CRUD, differential refresh) | 8–12h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §7 |
+| PT2 | ATTACH PARTITION detection in DDL hook → force `needs_reinit` | 4–8h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §3.3 |
+| PT3 | WAL publication: set `publish_via_partition_root = true` for partitioned sources | 2–4h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §3.4 |
+| PT4 | Foreign table source detection (`relkind = 'f'`) → restrict to FULL mode | 2–4h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §6.3 |
+| PT5 | Documentation: partitioned source table support & caveats | 2–4h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §8 |
+
+> **Partitioning subtotal: ~18–32 hours**
+
+### PostgreSQL Backward Compatibility (PG 16–18)
+
+pg_trickle currently targets PG 18 only. pgrx 0.17.0 supports PG 13–18 via
+feature flags. Starting with PG 16–18 minimizes scope (only JSON_TABLE gating
+needed) while widening the deployment target for the production-ready release.
+PG 14–15 support can follow in a later release.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| BC1 | Cargo.toml feature flags (`pg16`, `pg17`, `pg18`) + `cfg_aliases` | 4–8h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 1 |
+| BC2 | `#[cfg]` gate JSON_TABLE nodes in `parser.rs` (~250 lines, PG 17+) | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 2 |
+| BC3 | `pg_get_viewdef()` trailing-semicolon behavior verification | 2–4h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 3 |
+| BC4 | CI matrix expansion (PG 16, 17, 18) + parameterized Dockerfiles | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phases 4–5 |
+| BC5 | WAL decoder validation against PG 16–17 `pgoutput` format | 8–12h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §6A |
+
+> **Backward compatibility subtotal: ~38–56 hours**
 
 ### Performance & Parallelism
 
@@ -159,13 +234,18 @@ See [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_C
 | W3 | WAL→trigger automatic fallback hardening | 4–6h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 | W4 | Promote `pg_trickle.cdc_mode = 'auto'` to recommended | Documentation | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 
-> **v0.3.0 total: ~62–90 hours**
+> **v0.3.0 total: ~142–212 hours**
 
 **Exit criteria:**
 - [ ] `max_concurrent_refreshes` drives real parallel refresh
 - [ ] WAL CDC mode passes full E2E suite
 - [ ] Extension upgrade path tested (`0.1.x → 0.3.0`)
 - [ ] Diamond dependency consistency (D1–D8) implemented and E2E-tested
+- [ ] Volatile functions rejected in DIFFERENTIAL mode; stable functions warned
+- [ ] `ORDER BY ... LIMIT N` (TopK) defining queries accepted and refreshed correctly
+- [ ] TPC-H queries Q2, Q3, Q10, Q18, Q21 pass with original LIMIT restored
+- [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
+- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
 - [ ] Zero P0/P1 gaps remaining
 
 ---
@@ -254,8 +334,10 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | A1 | Circular dependency support (SCC fixpoint iteration) | ~40h | [CIRCULAR_REFERENCES.md](plans/sql/CIRCULAR_REFERENCES.md) |
-| A2 | Transactional IVM (immediate, same-transaction refresh) | TBD | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
+| A2 | Transactional IVM (all phases, incl. immediate mode MVP) | TBD | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
 | A3 | PostgreSQL 19 forward-compatibility | TBD | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
+| A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
+| A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
 
 ---
 
@@ -264,10 +346,10 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | Milestone | Effort estimate | Cumulative | Status |
 |-----------|-----------------|------------|--------|
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
-| v0.3.0 — Production ready | 62–90h | 92–120h | 🔜 Next |
-| v0.4.0 — Observability & Integration | 18–27h | 110–147h | |
-| v1.0.0 — Stable release | 18–27h | 128–174h | |
-| Post-1.0 (ecosystem) | 88–134h | 218–308h | |
+| v0.3.0 — Production ready | 142–212h | 172–242h | 🔜 Next |
+| v0.4.0 — Observability & Integration | 18–27h | 190–269h | |
+| v1.0.0 — Stable release | 18–27h | 208–296h | |
+| Post-1.0 (ecosystem) | 88–134h | 296–430h | |
 | Post-1.0 (scale) | 6+ months | — | |
 
 ---
@@ -292,6 +374,10 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | [plans/infra/PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) | PostgreSQL 19 forward-compatibility |
 | [plans/sql/PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) | Extension upgrade migrations |
 | [plans/sql/PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) | Transactional IVM (immediate, same-transaction refresh) |
+| [plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) | ORDER BY / LIMIT / OFFSET gaps & TopK support |
+| [plans/sql/PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) | Non-deterministic function handling |
+| [plans/infra/PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) | PostgreSQL partitioning & sharding compatibility |
+| [plans/infra/PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) | Supporting older PostgreSQL versions (13–17) |
 | [plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | Diamond dependency consistency (multi-path refresh atomicity) |
 | [plans/adrs/PLAN_ADRS.md](plans/adrs/PLAN_ADRS.md) | Architectural decisions |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture |
