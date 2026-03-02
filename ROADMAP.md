@@ -173,6 +173,36 @@ and adds OFFSET-without-ORDER-BY warnings for subqueries.
 > Note: boundary-tracked recomputation (Option C) and dedicated TopK operator
 > with overflow buffer (Option D) are documented as future optimizations.
 
+### Transactional IVM — Phase 1 (Immediate Mode MVP)
+
+Add an `IMMEDIATE` refresh mode that updates stream tables **within the same
+transaction** as base table DML, using statement-level AFTER triggers with
+transition tables. This makes pg_trickle a **drop-in replacement for pg_ivm**
+and provides read-your-writes consistency. Only Phase 1 (core engine + single-
+and multi-table immediate IVM) is in scope; the pg_ivm compatibility layer
+(Phase 2), extended SQL support (Phase 3), and performance optimizations
+(Phase 4) are deferred to post-1.0.
+
+The DVM engine is ~90% reusable — only the `Scan` operator needs a dual-path
+for reading from transition-table ENRs instead of change buffer tables. All
+other operators (Join, Aggregate, Filter, TopK, etc.) are source-agnostic.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TI1 | Add `IMMEDIATE` to `RefreshMode` enum, catalog CHECK constraint, API validation | 4h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §3.1, §3.6–3.8 |
+| TI2 | Statement-level IVM trigger functions (`pgt_ivm_before` / `pgt_ivm_after`) with transition table access | 12h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §3.2, §6.1 |
+| TI3 | In-memory trigger state management (before/after counting, tuplestore collection, `RegisterXactCallback` cleanup) | 4h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §6.2 |
+| TI4 | ENR registration for transition tables in SPI context | 6h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §6.3 |
+| TI5 | `Scan` operator dual-path: `DeltaSource::TransitionTable` vs `DeltaSource::ChangeBuffer` | 4h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §3.3 |
+| TI6 | Concurrency: ExclusiveLock on stream table during IMMEDIATE maintenance + TRUNCATE handling | 2–4h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §3.5, §5 Phase 1.5–1.6 |
+| TI7 | E2E tests: INSERT/UPDATE/DELETE immediate consistency, concurrent transactions, isolation levels | 8–12h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §10 |
+| TI8 | Documentation (SQL Reference, Architecture, FAQ, CHANGELOG) | 2–4h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
+
+> **Transactional IVM Phase 1 subtotal: ~32–48 hours**
+>
+> Phases 2–4 (pg_ivm compat wrappers, extended SQL in IMMEDIATE mode,
+> C-level trigger optimization) are tracked under post-1.0 A2.
+
 ### Partitioning Support (Source Tables)
 
 Partitioned source tables already work with trigger-based CDC (PG 13+ trigger
@@ -235,7 +265,7 @@ PG 14–15 support can follow in a later release.
 | W3 | WAL→trigger automatic fallback hardening | 4–6h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 | W4 | Promote `pg_trickle.cdc_mode = 'auto'` to recommended | Documentation | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 
-> **v0.3.0 total: ~143–213 hours**
+> **v0.3.0 total: ~175–261 hours**
 
 **Exit criteria:**
 - [ ] `max_concurrent_refreshes` drives real parallel refresh
@@ -247,6 +277,7 @@ PG 14–15 support can follow in a later release.
 - [ ] TPC-H queries Q2, Q3, Q10, Q18, Q21 pass with original LIMIT restored
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
+- [ ] IMMEDIATE refresh mode: INSERT/UPDATE/DELETE on base table updates stream table within the same transaction
 - [ ] Zero P0/P1 gaps remaining
 
 ---
@@ -335,7 +366,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | A1 | Circular dependency support (SCC fixpoint iteration) | ~40h | [CIRCULAR_REFERENCES.md](plans/sql/CIRCULAR_REFERENCES.md) |
-| A2 | Transactional IVM (all phases, incl. immediate mode MVP) | TBD | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
+| A2 | Transactional IVM Phases 2–4 (pg_ivm compat layer, extended SQL, C-level triggers) | ~36–54h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
 | A3 | PostgreSQL 19 forward-compatibility | TBD | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 | A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
@@ -347,10 +378,10 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | Milestone | Effort estimate | Cumulative | Status |
 |-----------|-----------------|------------|--------|
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
-| v0.3.0 — Production ready | 143–213h | 173–243h | 🔜 Next |
-| v0.4.0 — Observability & Integration | 18–27h | 191–270h | |
-| v1.0.0 — Stable release | 18–27h | 209–297h | |
-| Post-1.0 (ecosystem) | 88–134h | 297–431h | |
+| v0.3.0 — Production ready | 175–261h | 205–291h | 🔜 Next |
+| v0.4.0 — Observability & Integration | 18–27h | 223–318h | |
+| v1.0.0 — Stable release | 18–27h | 241–345h | |
+| Post-1.0 (ecosystem) | 88–134h | 329–479h | |
 | Post-1.0 (scale) | 6+ months | — | |
 
 ---
