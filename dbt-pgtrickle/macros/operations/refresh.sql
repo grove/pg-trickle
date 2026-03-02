@@ -21,5 +21,5 @@
   {% else %}
     {% set qualified = target.schema ~ '.' ~ model_name %}
   {% endif %}
-  {{ pgtrickle_refresh_stream_table(qualified) }}
+  {{ dbt_pgtrickle.pgtrickle_refresh_stream_table(qualified) }}
 {% endmacro %}

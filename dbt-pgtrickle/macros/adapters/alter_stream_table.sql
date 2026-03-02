@@ -15,7 +15,7 @@
 #}
 {% macro pgtrickle_alter_stream_table(name, schedule, refresh_mode, status=none, current_info=none) %}
   {# Use pre-fetched metadata if available, otherwise look it up #}
-  {% set current = current_info if current_info else pgtrickle_get_stream_table_info(name) %}
+  {% set current = current_info if current_info else dbt_pgtrickle.pgtrickle_get_stream_table_info(name) %}
   {% if current %}
     {% set needs_alter = false %}
 
