@@ -25,8 +25,8 @@
       {% set st_name = model.config.get('stream_table_name', model.name) %}
       {% set st_schema = model.config.get('stream_table_schema', target.schema) %}
       {% set qualified = st_schema ~ '.' ~ st_name %}
-      {% if pgtrickle_stream_table_exists(qualified) %}
-        {{ pgtrickle_drop_stream_table(qualified) }}
+      {% if dbt_pgtrickle.pgtrickle_stream_table_exists(qualified) %}
+        {{ dbt_pgtrickle.pgtrickle_drop_stream_table(qualified) }}
         {% do dropped.append(qualified) %}
       {% endif %}
     {% endfor %}
@@ -44,7 +44,7 @@
     {% set results = run_query(query) %}
     {% if results and results.rows | length > 0 %}
       {% for row in results.rows %}
-        {{ pgtrickle_drop_stream_table(row['qualified_name']) }}
+        {{ dbt_pgtrickle.pgtrickle_drop_stream_table(row['qualified_name']) }}
       {% endfor %}
       {{ log("pg_trickle: force-dropped " ~ results.rows | length ~ " stream table(s)", info=true) }}
     {% else %}

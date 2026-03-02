@@ -34,7 +34,7 @@
   {# -- Authoritative existence check via pg_trickle catalog.
        We don't rely solely on dbt's relation cache because the stream table
        may have been created/dropped outside dbt. -- #}
-  {%- set st_exists = pgtrickle_stream_table_exists(qualified_name) -%}
+  {%- set st_exists = dbt_pgtrickle.pgtrickle_stream_table_exists(qualified_name) -%}
 
   {{ log("pg_trickle: materializing stream table '" ~ qualified_name ~ "'", info=true) }}
 
@@ -42,7 +42,7 @@
 
   {# -- Full refresh: drop and recreate -- #}
   {% if full_refresh_mode and st_exists %}
-    {{ pgtrickle_drop_stream_table(qualified_name) }}
+    {{ dbt_pgtrickle.pgtrickle_drop_stream_table(qualified_name) }}
     {% set st_exists = false %}
   {% endif %}
 
@@ -51,25 +51,25 @@
 
   {% if not st_exists %}
     {# -- CREATE: stream table does not exist yet -- #}
-    {{ pgtrickle_create_stream_table(
+    {{ dbt_pgtrickle.pgtrickle_create_stream_table(
          qualified_name, defining_query, schedule, refresh_mode, initialize
        ) }}
     {% do adapter.cache_new(this.incorporate(type='table')) %}
   {% else %}
     {# -- UPDATE: stream table exists — check if query changed -- #}
-    {%- set current_info = pgtrickle_get_stream_table_info(qualified_name) -%}
+    {%- set current_info = dbt_pgtrickle.pgtrickle_get_stream_table_info(qualified_name) -%}
 
     {% if current_info and current_info.defining_query != defining_query %}
       {# Query changed: must drop and recreate (no in-place ALTER for query) #}
       {{ log("pg_trickle: query changed — dropping and recreating '" ~ qualified_name ~ "'", info=true) }}
-      {{ pgtrickle_drop_stream_table(qualified_name) }}
-      {{ pgtrickle_create_stream_table(
+      {{ dbt_pgtrickle.pgtrickle_drop_stream_table(qualified_name) }}
+      {{ dbt_pgtrickle.pgtrickle_create_stream_table(
            qualified_name, defining_query, schedule, refresh_mode, initialize
          ) }}
     {% else %}
       {# Query unchanged: update schedule/mode/status if they differ.
          Pass current_info to avoid redundant catalog lookup. #}
-      {{ pgtrickle_alter_stream_table(
+      {{ dbt_pgtrickle.pgtrickle_alter_stream_table(
            qualified_name, schedule, refresh_mode,
            status=status, current_info=current_info
          ) }}
