@@ -70,10 +70,10 @@ new entries when creating documents.
 
 | File | Type | Status | Summary |
 |------|------|--------|---------|
-| [PLAN_CIRCUIT_BREAKER.md](sql/PLAN_CIRCUIT_BREAKER.md) | PLAN | Exploration | Circuit breaker — halt refresh on anomalous change volume |
 | [PLAN_CIRCULAR_REFERENCES.md](sql/PLAN_CIRCULAR_REFERENCES.md) | PLAN | Not started | Circular references in the dependency graph |
 | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](sql/PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) | PLAN | Proposed | Cross-source snapshot consistency for converging independent branches |
 | [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | PLAN | Decided | Diamond consistency decision: prioritize atomic refresh groups (with aligned mode fallback) |
+| [PLAN_FUSE.md](sql/PLAN_FUSE.md) | PLAN | Exploration | Fuse — halt refresh on anomalous change volume |
 | [PLAN_LATERAL_JOINS.md](sql/PLAN_LATERAL_JOINS.md) | PLAN | Implemented | LATERAL join support (subqueries with LATERAL) |
 | [PLAN_NON_DETERMINISM.md](sql/PLAN_NON_DETERMINISM.md) | PLAN | Not started | Non-deterministic function handling |
 | [REPORT_CUSTOM_SQL_SYNTAX.md](sql/REPORT_CUSTOM_SQL_SYNTAX.md) | REPORT | Reference | PostgreSQL extension syntax mechanisms research |
