@@ -37,6 +37,10 @@ pub struct StreamTableMeta {
     pub functions_used: Option<Vec<String>>,
     /// Serialized frontier (JSONB). None means never refreshed.
     pub frontier: Option<Frontier>,
+    /// TopK LIMIT value. None means this is not a TopK stream table.
+    pub topk_limit: Option<i32>,
+    /// TopK ORDER BY clause SQL. None means this is not a TopK stream table.
+    pub topk_order_by: Option<String>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -134,13 +138,15 @@ impl StreamTableMeta {
         schedule: Option<String>,
         refresh_mode: RefreshMode,
         functions_used: Option<Vec<String>>,
+        topk_limit: Option<i32>,
+        topk_order_by: Option<&str>,
     ) -> Result<i64, PgTrickleError> {
         Spi::connect_mut(|client| {
             let row = client
                 .update(
                     "INSERT INTO pgtrickle.pgt_stream_tables \
-                     (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, schedule, refresh_mode, functions_used) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                     (pgt_relid, pgt_name, pgt_schema, defining_query, original_query, schedule, refresh_mode, functions_used, topk_limit, topk_order_by) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -152,6 +158,8 @@ impl StreamTableMeta {
                         schedule.into(),
                         refresh_mode.as_str().into(),
                         functions_used.into(),
+                        topk_limit.into(),
+                        topk_order_by.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -171,7 +179,7 @@ impl StreamTableMeta {
                     "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
                      original_query, schedule, refresh_mode, status, is_populated, \
                      data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used \
+                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -195,7 +203,7 @@ impl StreamTableMeta {
                     "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
                      original_query, schedule, refresh_mode, status, is_populated, \
                      data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used \
+                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -222,7 +230,7 @@ impl StreamTableMeta {
                     "SELECT pgt_id, pgt_relid, pgt_name, pgt_schema, defining_query, \
                      original_query, schedule, refresh_mode, status, is_populated, \
                      data_timestamp, consecutive_errors, needs_reinit, frontier, \
-                     auto_threshold, last_full_ms, functions_used \
+                     auto_threshold, last_full_ms, functions_used, topk_limit, topk_order_by \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -506,6 +514,8 @@ impl StreamTableMeta {
         let auto_threshold = table.get::<f64>(15).map_err(map_spi)?;
         let last_full_ms = table.get::<f64>(16).map_err(map_spi)?;
         let functions_used = table.get::<Vec<String>>(17).map_err(map_spi)?;
+        let topk_limit = table.get::<i32>(18).map_err(map_spi)?;
+        let topk_order_by = table.get::<String>(19).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -525,6 +535,8 @@ impl StreamTableMeta {
             last_full_ms,
             functions_used,
             frontier,
+            topk_limit,
+            topk_order_by,
         })
     }
 
@@ -587,6 +599,8 @@ impl StreamTableMeta {
         let auto_threshold = row.get::<f64>(15).map_err(map_spi)?;
         let last_full_ms = row.get::<f64>(16).map_err(map_spi)?;
         let functions_used = row.get::<Vec<String>>(17).map_err(map_spi)?;
+        let topk_limit = row.get::<i32>(18).map_err(map_spi)?;
+        let topk_order_by = row.get::<String>(19).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -606,6 +620,8 @@ impl StreamTableMeta {
             last_full_ms,
             functions_used,
             frontier,
+            topk_limit,
+            topk_order_by,
         })
     }
 }

@@ -1,6 +1,6 @@
 -- Q21: Suppliers Who Kept Orders Waiting
 -- Operators: 4-table Join -> EXISTS + NOT EXISTS (anti-join)
--- LIMIT removed (unsupported by pg_trickle)
+-- TopK: ORDER BY + LIMIT restored (now supported by pg_trickle)
 SELECT
     s_name,
     COUNT(*) AS numwait
@@ -25,3 +25,5 @@ WHERE s_suppkey = l1.l_suppkey
   AND s_nationkey = n_nationkey
   AND n_name = 'SAUDI ARABIA'
 GROUP BY s_name
+ORDER BY numwait DESC, s_name
+LIMIT 100

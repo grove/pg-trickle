@@ -613,89 +613,99 @@ fn execute_scheduled_refresh(st: &StreamTableMeta, action: RefreshAction) -> Ref
     let data_ts_frontier = format!("{}Z", now_secs);
 
     // Execute the refresh
-    let result = match action {
-        RefreshAction::NoData => refresh::execute_no_data_refresh(st).map(|_| (0i64, 0i64)),
-        RefreshAction::Full => {
-            let new_frontier =
-                version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
-            match refresh::execute_full_refresh(st) {
-                Ok((ins, del)) => {
-                    if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                        log!(
-                            "pg_trickle: failed to store frontier for {}.{}: {}",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            e
-                        );
-                    }
-                    Ok((ins, del))
-                }
-                Err(e) => Err(e),
-            }
-        }
-        RefreshAction::Reinitialize => {
-            let new_frontier =
-                version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
-            match refresh::execute_reinitialize_refresh(st) {
-                Ok((ins, del)) => {
-                    if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                        log!(
-                            "pg_trickle: failed to store frontier for {}.{}: {}",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            e
-                        );
-                    }
-                    Ok((ins, del))
-                }
-                Err(e) => Err(e),
-            }
-        }
-        RefreshAction::Differential => {
-            let prev_frontier = st.frontier.clone().unwrap_or_default();
-
-            if prev_frontier.is_empty() {
-                log!(
-                    "pg_trickle: no previous frontier for {}.{}, doing FULL refresh",
-                    st.pgt_schema,
-                    st.pgt_name
-                );
+    let result = if st.topk_limit.is_some() {
+        // TopK tables bypass the normal Full/Differential refresh paths and use
+        // scoped-recomputation MERGE (ORDER BY … LIMIT N) instead.
+        refresh::execute_topk_refresh(st)
+    } else {
+        match action {
+            RefreshAction::NoData => refresh::execute_no_data_refresh(st).map(|_| (0i64, 0i64)),
+            RefreshAction::Full => {
                 let new_frontier =
                     version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
                 match refresh::execute_full_refresh(st) {
                     Ok((ins, del)) => {
                         if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                            log!("pg_trickle: failed to store frontier: {}", e);
+                            log!(
+                                "pg_trickle: failed to store frontier for {}.{}: {}",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                e
+                            );
                         }
                         Ok((ins, del))
                     }
                     Err(e) => Err(e),
                 }
-            } else {
+            }
+            RefreshAction::Reinitialize => {
                 let new_frontier =
-                    version::compute_new_frontier(&slot_positions, &data_ts_frontier);
-
-                match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
+                    version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
+                match refresh::execute_reinitialize_refresh(st) {
                     Ok((ins, del)) => {
                         if let Err(e) = StreamTableMeta::store_frontier(st.pgt_id, &new_frontier) {
-                            log!("pg_trickle: failed to store frontier: {}", e);
+                            log!(
+                                "pg_trickle: failed to store frontier for {}.{}: {}",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                e
+                            );
                         }
                         Ok((ins, del))
                     }
-                    Err(e) => {
-                        log!(
-                            "pg_trickle: differential refresh failed for {}.{}: {}, will reinitialize on next cycle",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            e
-                        );
-                        let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
-                        Err(e)
+                    Err(e) => Err(e),
+                }
+            }
+            RefreshAction::Differential => {
+                let prev_frontier = st.frontier.clone().unwrap_or_default();
+
+                if prev_frontier.is_empty() {
+                    log!(
+                        "pg_trickle: no previous frontier for {}.{}, doing FULL refresh",
+                        st.pgt_schema,
+                        st.pgt_name
+                    );
+                    let new_frontier =
+                        version::compute_initial_frontier(&slot_positions, &data_ts_frontier);
+                    match refresh::execute_full_refresh(st) {
+                        Ok((ins, del)) => {
+                            if let Err(e) =
+                                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
+                            {
+                                log!("pg_trickle: failed to store frontier: {}", e);
+                            }
+                            Ok((ins, del))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    let new_frontier =
+                        version::compute_new_frontier(&slot_positions, &data_ts_frontier);
+
+                    match refresh::execute_differential_refresh(st, &prev_frontier, &new_frontier) {
+                        Ok((ins, del)) => {
+                            if let Err(e) =
+                                StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
+                            {
+                                log!("pg_trickle: failed to store frontier: {}", e);
+                            }
+                            Ok((ins, del))
+                        }
+                        Err(e) => {
+                            log!(
+                                "pg_trickle: differential refresh failed for {}.{}: {}, will reinitialize on next cycle",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                e
+                            );
+                            let _ = StreamTableMeta::mark_for_reinitialize(st.pgt_id);
+                            Err(e)
+                        }
                     }
                 }
             }
         }
-    };
+    }; // close else + let result
 
     // Release the advisory lock now that refresh is done
     release_advisory_lock(lock_key);

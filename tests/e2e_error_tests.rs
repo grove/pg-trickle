@@ -286,24 +286,34 @@ async fn test_offset_returns_unsupported_error() {
 }
 
 #[tokio::test]
-async fn test_order_by_with_limit_returns_unsupported_error() {
+async fn test_order_by_with_limit_accepted_as_topk() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute("CREATE TABLE orderlimit_src (id INT PRIMARY KEY, val INT)")
         .await;
+    db.execute("INSERT INTO orderlimit_src VALUES (1, 10), (2, 20)")
+        .await;
 
+    // ORDER BY + LIMIT is now accepted as a TopK stream table
     let result = db
         .try_execute(
             "SELECT pgtrickle.create_stream_table('orderlimit_st', \
              $$ SELECT id, val FROM orderlimit_src ORDER BY id LIMIT 10 $$, '1m', 'FULL')",
         )
         .await;
-    assert!(result.is_err(), "ORDER BY + LIMIT should be rejected");
-    let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("LIMIT"),
-        "Error should mention LIMIT, got: {err_msg}"
+        result.is_ok(),
+        "ORDER BY + LIMIT should be accepted as TopK, got: {:?}",
+        result.err()
     );
+
+    // Verify it was created with TopK metadata
+    let topk_limit: i32 = db
+        .query_scalar(
+            "SELECT topk_limit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'orderlimit_st'",
+        )
+        .await;
+    assert_eq!(topk_limit, 10, "topk_limit should be stored");
 }
 
 #[tokio::test]
@@ -323,6 +333,43 @@ async fn test_limit_offset_combined_returns_error() {
         result.is_err(),
         "LIMIT + OFFSET together should be rejected"
     );
+}
+
+// ── FETCH FIRST / FETCH NEXT rejection (G1) ────────────────────────────
+
+#[tokio::test]
+async fn test_fetch_first_returns_unsupported_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fetch_src (id INT PRIMARY KEY, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('fetch_st', \
+             $$ SELECT id, val FROM fetch_src FETCH FIRST 5 ROWS ONLY $$, '1m', 'FULL')",
+        )
+        .await;
+    assert!(result.is_err(), "FETCH FIRST should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("LIMIT"),
+        "Error should mention LIMIT, got: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_next_returns_unsupported_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fetchnext_src (id INT PRIMARY KEY, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('fetchnext_st', \
+             $$ SELECT id, val FROM fetchnext_src FETCH NEXT 3 ROWS ONLY $$, '1m', 'FULL')",
+        )
+        .await;
+    assert!(result.is_err(), "FETCH NEXT should be rejected");
 }
 
 // ── FOR UPDATE / FOR SHARE rejection ───────────────────────────────────

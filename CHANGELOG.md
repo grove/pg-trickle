@@ -9,7 +9,11 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
-*(No unreleased changes.)*
+### Added
+
+- **TopK (ORDER BY + LIMIT) support** — Queries with a top-level `ORDER BY … LIMIT N` (constant integer, no OFFSET) are now recognized as "TopK" and accepted. TopK stream tables store only the top-N rows. Refreshes use scoped-recomputation via MERGE (bypass the DVM delta pipeline). Catalog columns `topk_limit` and `topk_order_by` record the pattern. Monitoring view exposes `is_topk`.
+- **FETCH FIRST / FETCH NEXT rejection** — `FETCH FIRST N ROWS ONLY` and `FETCH NEXT N ROWS ONLY` now produce the same unsupported-feature error as `LIMIT`.
+- **OFFSET without ORDER BY warning** — Subqueries using `OFFSET` without `ORDER BY` now emit a parser warning (alongside the existing `LIMIT` without `ORDER BY` warning).
 
 ---
 

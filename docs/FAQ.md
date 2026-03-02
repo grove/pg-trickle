@@ -653,15 +653,17 @@ SELECT * FROM order_stream_table WHERE random() < 0.1
 
 ### Why is `LIMIT` / `OFFSET` rejected?
 
-Stream tables materialize the complete result set and keep it synchronized with source data. `LIMIT`/`OFFSET` would truncate the result:
+Stream tables materialize the complete result set and keep it synchronized with source data. Bare `LIMIT`/`OFFSET` (without a recognized pattern) would truncate the result:
 
-1. **Undefined ordering.** `LIMIT` without `ORDER BY` returns an arbitrary subset. Even with `ORDER BY`, stream tables discard ordering — the "top N" rows concept doesn't apply to a set-based materialized result.
+1. **Undefined ordering.** `LIMIT` without `ORDER BY` returns an arbitrary subset.
 
-2. **Delta instability.** When source rows change, the boundary between "in the LIMIT" and "out of the LIMIT" shifts. A single INSERT could evict one row and admit another, requiring the refresh to track the full ordered position of every row — essentially a full rescan.
+2. **Delta instability.** When source rows change, the boundary between "in the LIMIT" and "out of the LIMIT" shifts. A single INSERT could evict one row and admit another, requiring the refresh to track the full ordered position of every row.
 
-3. **Semantic mismatch.** Users who write `LIMIT 100` typically want to limit what they *read*, not what is *stored*. Since stream tables are queried separately from their definition, the `LIMIT` belongs in the consuming query.
+3. **Semantic mismatch.** Users who write `LIMIT 100` typically want to limit what they *read*, not what is *stored*.
 
-**Rewrite:**
+**Exception — TopK pattern:** When the defining query has a top-level `ORDER BY … LIMIT N` (constant integer, no OFFSET), pg_trickle recognizes this as a "TopK" query and accepts it. The stream table stores only the top-N rows and is refreshed via a MERGE-based scoped-recomputation strategy. See the SQL Reference for details.
+
+**Rewrite (when TopK doesn't apply):**
 ```sql
 -- Instead of:
 'SELECT * FROM orders ORDER BY created_at DESC LIMIT 100'

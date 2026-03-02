@@ -1,6 +1,6 @@
 -- Q2: Minimum Cost Supplier
 -- Operators: 8-table Join -> Scalar Subquery (correlated MIN) -> Filter
--- LIMIT removed (unsupported by pg_trickle)
+-- TopK: ORDER BY + LIMIT restored (now supported by pg_trickle)
 -- LIKE rewritten with right() to avoid A_Expr kind 7 (LIKE).
 SELECT
     s_acctbal,
@@ -28,3 +28,5 @@ WHERE p_partkey = ps_partkey
         AND n_regionkey = r_regionkey
         AND r_name = 'EUROPE'
   )
+ORDER BY s_acctbal DESC, n_name, s_name, p_partkey
+LIMIT 100

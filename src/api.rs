@@ -101,8 +101,35 @@ fn create_stream_table_impl(
     // Validate the defining query by running LIMIT 0
     let columns = validate_defining_query(query)?;
 
-    // Reject LIMIT / OFFSET in the defining query — stream tables
-    // materialize the full result set regardless of refresh mode.
+    // ── TopK detection (ORDER BY + LIMIT) ──────────────────────────────
+    // Detect TopK pattern BEFORE reject_limit_offset, so ORDER BY + LIMIT
+    // queries are accepted and routed through the TopK path.
+    let topk_info = crate::dvm::detect_topk_pattern(query)?;
+
+    // For TopK tables, the "defining query" stored in the catalog is the
+    // base query (without ORDER BY + LIMIT). The TopK metadata (limit,
+    // order_by) is stored separately. The base query is what goes through
+    // validation, dependency analysis, and (for non-TopK) DVM parsing.
+    let (effective_query, topk_info) = if let Some(info) = topk_info {
+        pgrx::info!(
+            "pg_trickle: TopK pattern detected (ORDER BY {} LIMIT {}). \
+             The stream table will maintain the top {} rows.",
+            info.order_by_sql,
+            info.limit_value,
+            info.limit_value,
+        );
+        let base = info.base_query.clone();
+        (base, Some(info))
+    } else {
+        (query.to_string(), None)
+    };
+    let query = if topk_info.is_some() {
+        &effective_query
+    } else {
+        query
+    };
+
+    // Reject LIMIT / OFFSET in the defining query (TopK already handled above).
     crate::dvm::reject_limit_offset(query)?;
 
     // F13 (G4.2): Warn when LIMIT appears in a subquery without ORDER BY.
@@ -128,7 +155,10 @@ fn create_stream_table_impl(
     // aggregates, FILTER clauses, etc. that are specifically problematic
     // for incremental view maintenance. FULL mode skips this since it
     // just truncates and reloads.
-    let parsed_tree = if refresh_mode == RefreshMode::Differential {
+    // TopK tables bypass the DVM pipeline entirely — they use scoped
+    // recomputation (re-execute the ORDER BY + LIMIT query) instead of
+    // delta-based incremental maintenance.
+    let parsed_tree = if refresh_mode == RefreshMode::Differential && topk_info.is_none() {
         Some(crate::dvm::parse_defining_query_full(query)?)
     } else {
         None
@@ -277,6 +307,8 @@ fn create_stream_table_impl(
         schedule_str,
         refresh_mode,
         parsed_tree.as_ref().map(|pr| pr.functions_used()),
+        topk_info.as_ref().map(|i| i.limit_value as i32),
+        topk_info.as_ref().map(|i| i.order_by_sql.as_str()),
     )?;
 
     // Build per-source column usage map from the parsed OpTree so that
@@ -359,6 +391,7 @@ fn create_stream_table_impl(
             needs_count,
             needs_dual_count,
             needs_union_dedup,
+            topk_info.as_ref(),
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 
@@ -644,6 +677,20 @@ fn execute_manual_refresh(
     table_name: &str,
     source_oids: &[pg_sys::Oid],
 ) -> Result<(), PgTrickleError> {
+    // TopK tables use the scoped-recomputation refresh path regardless of
+    // refresh_mode (they always do ORDER BY … LIMIT N via MERGE).
+    if st.topk_limit.is_some() {
+        let (rows_inserted, rows_deleted) = refresh::execute_topk_refresh(st)?;
+        pgrx::info!(
+            "Stream table {}.{} refreshed (TopK MERGE: +{} -{})",
+            schema,
+            table_name,
+            rows_inserted,
+            rows_deleted,
+        );
+        return Ok(());
+    }
+
     match st.refresh_mode {
         RefreshMode::Full => execute_manual_full_refresh(st, schema, table_name, source_oids),
         RefreshMode::Differential => {
@@ -1655,6 +1702,7 @@ fn initialize_st(
     needs_pgt_count: bool,
     needs_dual_count: bool,
     needs_union_dedup: bool,
+    topk_info: Option<&crate::dvm::TopKInfo>,
 ) -> Result<(), PgTrickleError> {
     // For aggregate/distinct STs, inject COUNT(*) AS __pgt_count into the
     // defining query so the auxiliary column is populated correctly.
@@ -1700,6 +1748,14 @@ fn initialize_st(
         }
     } else if let Some(ua_sql) = crate::dvm::try_union_all_refresh_sql(query) {
         ua_sql
+    } else if let Some(info) = topk_info {
+        // TopK: use the full query (with ORDER BY + LIMIT) for initial population,
+        // so only the top K rows are inserted.
+        let row_id_expr = crate::dvm::row_id_expr_for_query(query);
+        format!(
+            "SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub",
+            topk_query = info.full_query,
+        )
     } else {
         let row_id_expr = crate::dvm::row_id_expr_for_query(query);
         format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({effective_query}) sub",)
