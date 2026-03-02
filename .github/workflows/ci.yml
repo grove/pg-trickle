@@ -295,9 +295,17 @@ jobs:
           # Transitional: combine extension image with postgres:18.1
           # until kind supports K8s 1.33 ImageVolume feature gate.
           # This image is NOT shipped — only used for CI validation.
+          #
+          # CNPG runs containers as UID 26 (postgres in RHEL/CNPG operand
+          # images). The Docker Hub postgres:18.1 image uses UID 999.
+          # Remap so initdb (which CNPG runs as UID 26) can resolve its
+          # user identity from /etc/passwd.
           cat > /tmp/Dockerfile.cnpg-smoke <<'DOCKERFILE'
           FROM pg_trickle-ext:ci AS ext
           FROM postgres:18.1
+          RUN sed -i 's/^postgres:x:999:999:/postgres:x:26:26:/' /etc/passwd && \
+              sed -i 's/^postgres:x:999:/postgres:x:26:/' /etc/group && \
+              chown -R 26:26 /var/lib/postgresql /var/run/postgresql
           COPY --from=ext /lib/ /usr/lib/postgresql/18/lib/
           COPY --from=ext /share/extension/ /usr/share/postgresql/18/extension/
           DOCKERFILE
