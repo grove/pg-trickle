@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     auto_threshold  DOUBLE PRECISION,
     last_full_ms    DOUBLE PRECISION,
     functions_used  TEXT[],
+    topk_limit      INT,
+    topk_order_by   TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -185,7 +187,8 @@ SELECT st.*,
             THEN EXTRACT(EPOCH FROM (now() - st.data_timestamp)) >
                  pgtrickle.parse_duration_seconds(st.schedule)
             ELSE NULL::boolean
-       END AS stale
+       END AS stale,
+       CASE WHEN st.topk_limit IS NOT NULL THEN TRUE ELSE FALSE END AS is_topk
 FROM pgtrickle.pgt_stream_tables st;
 "#,
     name = "pg_trickle_info_view",

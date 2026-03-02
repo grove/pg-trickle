@@ -1,6 +1,6 @@
 # PLAN: Close ORDER BY / LIMIT / OFFSET Gaps
 
-**Status:** Not started
+**Status:** In progress — Parts 1–3 implemented, Part 4 partially done
 **Effort:** ~20–28 hours total (G1–G3 quick wins, G4 main body of work)
 
 ---
@@ -619,20 +619,20 @@ supported.
 
 ## Task Checklist
 
-- [ ] **G1** — E2E test: `FETCH FIRST` / `FETCH NEXT` rejection (Step 1)
-- [ ] **G2** — Extend subquery warning to OFFSET (Step 2)
-- [ ] **G4** — `detect_topk_pattern()` + `TopKInfo` struct (Step 3)
-- [ ] **G4** — Catalog schema: `pgt_topk_limit`, `pgt_topk_order_by` (Step 4)
-- [ ] **G4** — TopK-aware refresh path in `refresh.rs` (Step 5)
-- [ ] **G4** — DVM pipeline bypass in `api.rs` (Step 6)
-- [ ] **G4** — E2E + unit tests for TopK (Step 7)
-- [ ] Docs — SQL Reference, FAQ, CHANGELOG (Steps 8–10)
-- [ ] **TPC-H** — Restore ORDER BY + LIMIT in 5 query files (Part 4)
+- [x] **G1** — E2E test: `FETCH FIRST` / `FETCH NEXT` rejection (Step 1)
+- [x] **G2** — Extend subquery warning to OFFSET (Step 2)
+- [x] **G4** — `detect_topk_pattern()` + `TopKInfo` struct (Step 3)
+- [x] **G4** — Catalog schema: `pgt_topk_limit`, `pgt_topk_order_by` (Step 4)
+- [x] **G4** — TopK-aware refresh path in `refresh.rs` (Step 5)
+- [x] **G4** — DVM pipeline bypass in `api.rs` (Step 6)
+- [x] **G4** — E2E tests for TopK (Step 7) — `tests/e2e_topk_tests.rs`
+- [x] Docs — SQL Reference, FAQ, CHANGELOG (Steps 8–10)
+- [x] **TPC-H** — Restore ORDER BY + LIMIT in 5 query files (Part 4)
 - [ ] **TPC-H** — Update PLAN_TEST_SUITE_TPC_H.md workaround tables (Part 4)
 - [ ] **TPC-H** — Update PLAN_TEST_SUITES.md tables + feature matrix (Part 4)
 - [ ] **Gap analyses** — Update GAP_SQL_PHASE_4/6/7, GAP_SQL_OVERVIEW (Part 4)
 - [ ] **Ecosystem** — Update GAP_ANALYSIS_EPSIO.md, GAP_PG_IVM_COMPARISON.md (Part 4)
-- [ ] `just fmt && just lint` clean
+- [x] `just fmt && just lint` clean
 - [ ] `just test-e2e` green
 - [ ] `just test-tpch` green (with restored LIMIT queries)
 

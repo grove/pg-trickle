@@ -1,6 +1,6 @@
 -- Q18: Large Volume Customer
 -- Operators: 3-table Join -> IN subquery with HAVING -> Aggregate
--- LIMIT removed (unsupported by pg_trickle)
+-- TopK: ORDER BY + LIMIT restored (now supported by pg_trickle)
 SELECT
     c_name,
     c_custkey,
@@ -18,3 +18,5 @@ WHERE o_orderkey IN (
   AND c_custkey = o_custkey
   AND o_orderkey = l_orderkey
 GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+ORDER BY o_totalprice DESC, o_orderdate
+LIMIT 100

@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     last_refresh_at TIMESTAMPTZ,
     consecutive_errors INT NOT NULL DEFAULT 0,
     needs_reinit    BOOLEAN NOT NULL DEFAULT FALSE,
+    topk_limit      INT,
+    topk_order_by   TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

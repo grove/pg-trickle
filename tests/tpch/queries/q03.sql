@@ -1,6 +1,6 @@
 -- Q3: Shipping Priority
 -- Operators: 3-table Join -> Filter -> Aggregate
--- LIMIT removed (unsupported by pg_trickle)
+-- TopK: ORDER BY + LIMIT restored (now supported by pg_trickle)
 SELECT
     l_orderkey,
     SUM(l_extendedprice * (1 - l_discount)) AS revenue,
@@ -13,3 +13,5 @@ WHERE c_mktsegment = 'BUILDING'
   AND o_orderdate < DATE '1995-03-15'
   AND l_shipdate > DATE '1995-03-15'
 GROUP BY l_orderkey, o_orderdate, o_shippriority
+ORDER BY revenue DESC, o_orderdate
+LIMIT 10

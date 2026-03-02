@@ -5582,6 +5582,11 @@ unsafe fn from_item_to_sql(node: *mut pg_sys::Node) -> Result<String, PgTrickleE
 }
 
 pub fn reject_limit_offset(query: &str) -> Result<(), PgTrickleError> {
+    // If the query matches the TopK pattern (ORDER BY + LIMIT), allow it.
+    if detect_topk_pattern(query)?.is_some() {
+        return Ok(());
+    }
+
     use std::ffi::CString;
 
     let c_query = CString::new(query)
@@ -5611,8 +5616,9 @@ pub fn reject_limit_offset(query: &str) -> Result<(), PgTrickleError> {
 
     if !select.limitCount.is_null() {
         return Err(PgTrickleError::UnsupportedOperator(
-            "LIMIT is not supported in defining queries. \
-             Stream tables materialize the full result set."
+            "LIMIT is not supported in defining queries without ORDER BY. \
+             Use ORDER BY + LIMIT for TopK stream tables, or omit LIMIT \
+             to materialize the full result set."
                 .into(),
         ));
     }
@@ -5625,6 +5631,235 @@ pub fn reject_limit_offset(query: &str) -> Result<(), PgTrickleError> {
     }
 
     Ok(())
+}
+
+/// Metadata for a TopK stream table (ORDER BY + LIMIT pattern).
+#[derive(Debug, Clone)]
+pub struct TopKInfo {
+    /// The LIMIT value as an integer.
+    pub limit_value: i64,
+    /// The full defining query including ORDER BY + LIMIT (for refresh).
+    pub full_query: String,
+    /// The defining query with ORDER BY and LIMIT stripped (for DVM, deps).
+    pub base_query: String,
+    /// The deparsed ORDER BY clause (e.g., "score DESC, name ASC").
+    pub order_by_sql: String,
+}
+
+/// Detect the TopK pattern in a defining query: ORDER BY + LIMIT with
+/// a constant integer limit value, no OFFSET, and no set operations.
+///
+/// Returns `Some(TopKInfo)` if the pattern matches, `None` otherwise.
+///
+/// Validation rules:
+/// - `LIMIT` without `ORDER BY` → not TopK (will be rejected later)
+/// - `ORDER BY` without `LIMIT` → not TopK (ORDER BY silently discarded)
+/// - `ORDER BY` + `LIMIT` → TopK pattern ✓
+/// - `ORDER BY` + `LIMIT` + `OFFSET` → error
+/// - `LIMIT ALL` → not TopK (equivalent to no LIMIT)
+/// - `LIMIT 0` → TopK with zero rows
+/// - `LIMIT (SELECT ...)` → error (require constant integer)
+/// - Set operations (UNION, INTERSECT, EXCEPT) → not TopK
+pub fn detect_topk_pattern(query: &str) -> Result<Option<TopKInfo>, PgTrickleError> {
+    use std::ffi::CString;
+
+    let c_query = CString::new(query)
+        .map_err(|_| PgTrickleError::QueryParseError("Query contains null bytes".into()))?;
+
+    // SAFETY: raw_parser is safe within a PostgreSQL backend with a valid memory context.
+    let raw_list =
+        unsafe { pg_sys::raw_parser(c_query.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT) };
+    if raw_list.is_null() {
+        return Ok(None);
+    }
+
+    let list = unsafe { pgrx::PgList::<pg_sys::RawStmt>::from_pg(raw_list) };
+    let raw_stmt = match list.head() {
+        Some(rs) => rs,
+        None => return Ok(None),
+    };
+
+    let node = unsafe { (*raw_stmt).stmt };
+    if !unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_SelectStmt) } {
+        return Ok(None);
+    }
+
+    let select = unsafe { &*(node as *const pg_sys::SelectStmt) };
+
+    // Not TopK if it's a set operation (UNION, INTERSECT, EXCEPT)
+    if select.op != pg_sys::SetOperation::SETOP_NONE {
+        return Ok(None);
+    }
+
+    // Not TopK if no LIMIT
+    if select.limitCount.is_null() {
+        return Ok(None);
+    }
+
+    // Not TopK if no ORDER BY
+    if select.sortClause.is_null() {
+        return Ok(None);
+    }
+    let sort_list = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(select.sortClause) };
+    if sort_list.is_empty() {
+        return Ok(None);
+    }
+
+    // Reject ORDER BY + LIMIT + OFFSET
+    if !select.limitOffset.is_null() {
+        return Err(PgTrickleError::UnsupportedOperator(
+            "OFFSET is not supported with LIMIT in defining queries. \
+             Use ORDER BY + LIMIT alone for TopK patterns, and apply OFFSET \
+             when querying the stream table."
+                .into(),
+        ));
+    }
+
+    // Extract LIMIT value — must be a constant integer.
+    let limit_node = select.limitCount;
+    let limit_value = unsafe { extract_const_int_from_node(limit_node) };
+    let limit_value = match limit_value {
+        Some(v) => v,
+        None => {
+            // Could be LIMIT ALL (represented as NULL in some contexts),
+            // or a non-constant expression like LIMIT (SELECT ...).
+            // Check if it's a non-constant: reject with clear error.
+            return Err(PgTrickleError::UnsupportedOperator(
+                "LIMIT in defining queries must be a constant integer \
+                 (e.g., LIMIT 100). Dynamic expressions like LIMIT (SELECT ...) \
+                 are not supported for TopK stream tables."
+                    .into(),
+            ));
+        }
+    };
+
+    // LIMIT ALL is represented as a very large or negative value in some
+    // parse trees — treat it as "no limit" → not TopK.
+    if limit_value < 0 {
+        return Ok(None);
+    }
+
+    // Deparse the ORDER BY clause from the sort items.
+    let order_by_sql = unsafe { deparse_sort_clause(&sort_list)? };
+
+    // Build the base query by stripping ORDER BY and LIMIT.
+    let base_query = strip_order_by_and_limit(query);
+
+    Ok(Some(TopKInfo {
+        limit_value,
+        full_query: query.to_string(),
+        base_query,
+        order_by_sql,
+    }))
+}
+
+/// Extract a constant integer value from a parse tree Node.
+///
+/// Returns `Some(value)` for Integer constants, `None` for anything else.
+///
+/// # Safety
+/// Caller must ensure `node` points to a valid Node.
+unsafe fn extract_const_int_from_node(node: *mut pg_sys::Node) -> Option<i64> {
+    if node.is_null() {
+        return None;
+    }
+
+    // Check for A_Const (Integer constant in raw parse tree)
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_A_Const) } {
+        let a_const = unsafe { &*(node as *const pg_sys::A_Const) };
+
+        // In PostgreSQL 18, A_Const uses a union `val` with a `node.type` tag field.
+        // Check if it's an Integer type.
+        // SAFETY: accessing union fields of A_Const requires unsafe; we check
+        // the node tag before reading the corresponding union variant.
+        let val_tag = unsafe { a_const.val.node.type_ };
+        if val_tag == pg_sys::NodeTag::T_Integer {
+            // SAFETY: we checked the tag is T_Integer, so accessing ival is valid.
+            let ival = unsafe { a_const.val.ival.ival } as i64;
+            return Some(ival);
+        }
+
+        // Check for T_String — could be LIMIT ALL or similar
+        if val_tag == pg_sys::NodeTag::T_String {
+            // LIMIT ALL is represented as a NULL limitCount in most cases;
+            // if it's a string, it's not a constant int.
+            return None;
+        }
+
+        return None;
+    }
+
+    // TypeCast wrapping an integer constant (e.g., LIMIT 5::bigint)
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_TypeCast) } {
+        let tc = unsafe { &*(node as *const pg_sys::TypeCast) };
+        return unsafe { extract_const_int_from_node(tc.arg) };
+    }
+
+    None
+}
+
+/// Strip ORDER BY and LIMIT / FETCH FIRST clauses from a query string.
+///
+/// Finds the last top-level `ORDER BY` keyword (not inside parentheses) and
+/// removes everything from there to the end. This is safe because TopK
+/// detection already verified the query has a top-level ORDER BY + LIMIT
+/// (no set operations).
+fn strip_order_by_and_limit(query: &str) -> String {
+    let q = query.trim().trim_end_matches(';').trim();
+    let upper = q.to_uppercase();
+
+    // Walk backwards through the string to find the last top-level ORDER BY.
+    // Track parenthesis depth to skip ORDER BY inside subqueries.
+    let bytes = upper.as_bytes();
+    let mut depth: i32 = 0;
+    let mut last_order_by_pos: Option<usize> = None;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'\'' => {
+                // Skip string literals
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\'' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                            i += 2; // escaped quote
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'O' if depth == 0 => {
+                // Check for "ORDER BY" at this position
+                if upper[i..].starts_with("ORDER") {
+                    let after_order = i + 5;
+                    if after_order < bytes.len() && bytes[after_order].is_ascii_whitespace() {
+                        // Skip whitespace
+                        let mut j = after_order;
+                        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if upper[j..].starts_with("BY")
+                            && (j + 2 >= bytes.len() || !bytes[j + 2].is_ascii_alphanumeric())
+                        {
+                            last_order_by_pos = Some(i);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    match last_order_by_pos {
+        Some(pos) => q[..pos].trim().to_string(),
+        None => q.to_string(),
+    }
 }
 
 /// F13 (G4.2): Warn when a FROM-clause subquery or LATERAL uses LIMIT without
@@ -5724,30 +5959,30 @@ unsafe fn check_from_item_limit_warning(node: *mut pg_sys::Node) {
             && unsafe { pgrx::is_a(sub.subquery, pg_sys::NodeTag::T_SelectStmt) }
         {
             let inner = unsafe { &*(sub.subquery as *const pg_sys::SelectStmt) };
-            // Check: has LIMIT but no ORDER BY
-            if !inner.limitCount.is_null() {
+            let has_order_by = !inner.sortClause.is_null() && {
                 let sort_list = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(inner.sortClause) };
-                if sort_list.is_empty() {
-                    let alias = if !sub.alias.is_null() {
-                        let a = unsafe { &*(sub.alias) };
-                        if !a.aliasname.is_null() {
-                            unsafe { std::ffi::CStr::from_ptr(a.aliasname) }
-                                .to_str()
-                                .unwrap_or("(subquery)")
-                                .to_string()
-                        } else {
-                            "(subquery)".to_string()
-                        }
-                    } else {
-                        "(subquery)".to_string()
-                    };
-                    pgrx::warning!(
-                        "pg_trickle: subquery '{}' uses LIMIT without ORDER BY. \
-                         This produces non-deterministic results that may differ between \
-                         FULL and DIFFERENTIAL refresh. Add ORDER BY for deterministic behavior.",
-                        alias
-                    );
-                }
+                !sort_list.is_empty()
+            };
+
+            // Check: has LIMIT but no ORDER BY
+            if !inner.limitCount.is_null() && !has_order_by {
+                let alias = unsafe { resolve_range_subselect_alias(sub) };
+                pgrx::warning!(
+                    "pg_trickle: subquery '{}' uses LIMIT without ORDER BY. \
+                     This produces non-deterministic results that may differ between \
+                     FULL and DIFFERENTIAL refresh. Add ORDER BY for deterministic behavior.",
+                    alias
+                );
+            }
+            // G2: Check: has OFFSET but no ORDER BY
+            if !inner.limitOffset.is_null() && !has_order_by {
+                let alias = unsafe { resolve_range_subselect_alias(sub) };
+                pgrx::warning!(
+                    "pg_trickle: subquery '{}' uses OFFSET without ORDER BY. \
+                     This produces non-deterministic results that may differ between \
+                     FULL and DIFFERENTIAL refresh. Add ORDER BY for deterministic behavior.",
+                    alias
+                );
             }
             // Recurse into the subquery's FROM clause
             unsafe { walk_from_for_limit_warning(sub.subquery as *const pg_sys::SelectStmt) };
@@ -5757,6 +5992,23 @@ unsafe fn check_from_item_limit_warning(node: *mut pg_sys::Node) {
         unsafe { check_from_item_limit_warning(join.larg) };
         unsafe { check_from_item_limit_warning(join.rarg) };
     }
+}
+
+/// Extract the alias name from a `RangeSubselect` node.
+///
+/// # Safety
+/// Caller must ensure `sub` points to a valid `RangeSubselect`.
+unsafe fn resolve_range_subselect_alias(sub: &pg_sys::RangeSubselect) -> String {
+    if !sub.alias.is_null() {
+        let a = unsafe { &*(sub.alias) };
+        if !a.aliasname.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(a.aliasname) }
+                .to_str()
+                .unwrap_or("(subquery)")
+                .to_string();
+        }
+    }
+    "(subquery)".to_string()
 }
 
 /// Lightweight validation that rejects SQL constructs unsupported in
@@ -7374,10 +7626,15 @@ unsafe fn parse_select_stmt(
     // No need to inspect `select.sortClause` — it is ignored.
 
     // ── Step 7: Reject LIMIT / OFFSET ──────────────────────────────────
+    // TopK tables (ORDER BY + LIMIT) bypass the DVM pipeline entirely —
+    // they never reach this point. This rejection handles the case where
+    // LIMIT/OFFSET appears in a non-TopK context (e.g., LIMIT without
+    // ORDER BY in DIFFERENTIAL mode, which reject_limit_offset should
+    // have already caught at the API layer).
     if !select.limitCount.is_null() {
         return Err(PgTrickleError::UnsupportedOperator(
-            "LIMIT is not supported in defining queries. \
-             Stream tables materialize the full result set."
+            "LIMIT is not supported in the DVM pipeline. \
+             Use ORDER BY + LIMIT for TopK stream tables."
                 .into(),
         ));
     }
