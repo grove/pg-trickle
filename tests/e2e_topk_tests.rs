@@ -422,3 +422,314 @@ async fn test_topk_drop_stream_table() {
     let exists = db.table_exists("public", "topk_drop_st").await;
     assert!(!exists, "TopK stream table should be dropped");
 }
+
+// ── Full refresh ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_full_refresh_matches_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_fr_src (id INT PRIMARY KEY, score INT)")
+        .await;
+    db.execute("INSERT INTO topk_fr_src VALUES (1,10),(2,50),(3,30),(4,40),(5,20)")
+        .await;
+
+    // Create with DIFFERENTIAL — TopK tables use scoped recomputation for both modes
+    db.create_st(
+        "topk_fr_st",
+        "SELECT id, score FROM topk_fr_src ORDER BY score DESC LIMIT 3",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.topk_fr_st").await, 3);
+
+    // Mutate and do a manual (full) refresh
+    db.execute("INSERT INTO topk_fr_src VALUES (6, 100)").await;
+    db.refresh_st("topk_fr_st").await;
+
+    assert_eq!(db.count("public.topk_fr_st").await, 3);
+    let max_score: i32 = db
+        .query_scalar("SELECT MAX(score) FROM public.topk_fr_st")
+        .await;
+    assert_eq!(
+        max_score, 100,
+        "Full refresh should pick up the new top row"
+    );
+}
+
+// ── No-change skip ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_no_change_skips_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_nc_src (id INT PRIMARY KEY, score INT)")
+        .await;
+    db.execute("INSERT INTO topk_nc_src VALUES (1,10),(2,20),(3,30)")
+        .await;
+
+    db.create_st(
+        "topk_nc_st",
+        "SELECT id, score FROM topk_nc_src ORDER BY score DESC LIMIT 2",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.topk_nc_st").await, 2);
+
+    // Refresh without any source changes — should succeed without error
+    // and stream table contents should be unchanged.
+    db.refresh_st("topk_nc_st").await;
+    assert_eq!(db.count("public.topk_nc_st").await, 2);
+
+    let max_score: i32 = db
+        .query_scalar("SELECT MAX(score) FROM public.topk_nc_st")
+        .await;
+    assert_eq!(
+        max_score, 30,
+        "Content should be unchanged after no-op refresh"
+    );
+}
+
+// ── LIMIT edge cases ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_limit_zero_accepted() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_lz_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO topk_lz_src VALUES (1,10),(2,20)")
+        .await;
+
+    db.create_st(
+        "topk_lz_st",
+        "SELECT id, val FROM topk_lz_src ORDER BY val DESC LIMIT 0",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // LIMIT 0 produces an empty stream table
+    assert_eq!(db.count("public.topk_lz_st").await, 0);
+}
+
+#[tokio::test]
+async fn test_topk_limit_all_no_topk() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_la_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO topk_la_src VALUES (1,10),(2,20),(3,30)")
+        .await;
+
+    // LIMIT ALL is equivalent to no LIMIT — should produce a normal ST, not TopK
+    db.create_st(
+        "topk_la_st",
+        "SELECT id, val FROM topk_la_src ORDER BY val DESC LIMIT ALL",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // All rows should be present (no TopK restriction)
+    assert_eq!(db.count("public.topk_la_st").await, 3);
+
+    // Catalog should show no TopK metadata (topk_limit is NULL)
+    let has_topk: bool = db
+        .query_scalar(
+            "SELECT topk_limit IS NOT NULL FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'topk_la_st'",
+        )
+        .await;
+    assert!(!has_topk, "LIMIT ALL should not set topk_limit in catalog");
+}
+
+// ── Rejection cases ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_with_offset_rejected() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_rej_off (id INT PRIMARY KEY, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('topk_rej_off_st', \
+             $$ SELECT id, val FROM topk_rej_off ORDER BY val DESC LIMIT 10 OFFSET 5 $$, \
+             '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "ORDER BY + LIMIT + OFFSET should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_topk_non_constant_limit_rejected() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_rej_nc (id INT PRIMARY KEY, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('topk_rej_nc_st', \
+             $$ SELECT id, val FROM topk_rej_nc ORDER BY val DESC LIMIT (SELECT 5) $$, \
+             '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Non-constant LIMIT expression should be rejected"
+    );
+}
+
+// ── FETCH FIRST syntax as TopK ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_fetch_first_syntax_accepted() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_ff_src (id INT PRIMARY KEY, score INT)")
+        .await;
+    db.execute("INSERT INTO topk_ff_src VALUES (1,10),(2,50),(3,30)")
+        .await;
+
+    // FETCH FIRST N ROWS ONLY with ORDER BY should be accepted as TopK
+    db.create_st(
+        "topk_ff_st",
+        "SELECT id, score FROM topk_ff_src ORDER BY score DESC FETCH FIRST 2 ROWS ONLY",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.topk_ff_st").await, 2);
+
+    let max_score: i32 = db
+        .query_scalar("SELECT MAX(score) FROM public.topk_ff_st")
+        .await;
+    assert_eq!(max_score, 50);
+}
+
+// ── TopK with WHERE clause ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_with_where() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_where (id INT PRIMARY KEY, score INT, active BOOLEAN)")
+        .await;
+    db.execute(
+        "INSERT INTO topk_where VALUES \
+         (1,10,true),(2,50,false),(3,30,true),(4,40,true),(5,20,true)",
+    )
+    .await;
+
+    db.create_st(
+        "topk_where_st",
+        "SELECT id, score FROM topk_where WHERE active ORDER BY score DESC LIMIT 2",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.topk_where_st").await, 2);
+
+    // Top-2 active by score: 40, 30 (50 is inactive)
+    let max_score: i32 = db
+        .query_scalar("SELECT MAX(score) FROM public.topk_where_st")
+        .await;
+    assert_eq!(max_score, 40);
+}
+
+// ── Alter behavior ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_topk_alter_schedule_works() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE topk_alt_src (id INT PRIMARY KEY, v INT)")
+        .await;
+    db.execute("INSERT INTO topk_alt_src VALUES (1,1),(2,2)")
+        .await;
+
+    db.create_st(
+        "topk_alt_st",
+        "SELECT id, v FROM topk_alt_src ORDER BY v DESC LIMIT 1",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // Altering schedule/status should work on TopK tables
+    db.alter_st("topk_alt_st", "schedule => '5m'").await;
+
+    let schedule: String = db
+        .query_scalar(
+            "SELECT schedule FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'topk_alt_st'",
+        )
+        .await;
+    assert!(
+        schedule.contains("300") || schedule.contains("5m") || schedule.contains("5 min"),
+        "Schedule should be updated to 5m, got: {schedule}"
+    );
+}
+
+// ── Subquery OFFSET without ORDER BY (G2) ──────────────────────────────
+// The warning is emitted to the PG log — we can't easily assert on it from
+// E2E, but we *can* verify the stream table is created successfully
+// (warning is non-fatal) and that the query with ORDER BY + OFFSET also works.
+
+#[tokio::test]
+async fn test_subquery_offset_without_order_by_accepted_with_warning() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE sub_off_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO sub_off_src VALUES (1,10),(2,20),(3,30),(4,40),(5,50)")
+        .await;
+
+    // Subquery uses OFFSET without ORDER BY — should succeed with a warning
+    db.create_st(
+        "sub_off_st",
+        "SELECT * FROM (SELECT id, val FROM sub_off_src OFFSET 2) sub",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // Stream table should be populated (non-deterministic subset, but 3 rows)
+    let count = db.count("public.sub_off_st").await;
+    assert_eq!(count, 3, "OFFSET 2 from 5 rows should yield 3 rows");
+}
+
+#[tokio::test]
+async fn test_subquery_offset_with_order_by_no_warning() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE sub_oob_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO sub_oob_src VALUES (1,10),(2,20),(3,30),(4,40),(5,50)")
+        .await;
+
+    // Subquery uses OFFSET with ORDER BY — should succeed without warning
+    db.create_st(
+        "sub_oob_st",
+        "SELECT * FROM (SELECT id, val FROM sub_oob_src ORDER BY val OFFSET 2) sub",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    let count = db.count("public.sub_oob_st").await;
+    assert_eq!(
+        count, 3,
+        "OFFSET 2 with ORDER BY from 5 rows should yield 3 rows"
+    );
+}

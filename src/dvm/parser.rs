@@ -5615,12 +5615,16 @@ pub fn reject_limit_offset(query: &str) -> Result<(), PgTrickleError> {
     let select = unsafe { &*(node as *const pg_sys::SelectStmt) };
 
     if !select.limitCount.is_null() {
-        return Err(PgTrickleError::UnsupportedOperator(
-            "LIMIT is not supported in defining queries without ORDER BY. \
-             Use ORDER BY + LIMIT for TopK stream tables, or omit LIMIT \
-             to materialize the full result set."
-                .into(),
-        ));
+        // LIMIT ALL is semantically equivalent to no LIMIT — don't reject.
+        // SAFETY: limit node is non-null and points to a valid Node.
+        if !unsafe { is_limit_all_node(select.limitCount) } {
+            return Err(PgTrickleError::UnsupportedOperator(
+                "LIMIT is not supported in defining queries without ORDER BY. \
+                 Use ORDER BY + LIMIT for TopK stream tables, or omit LIMIT \
+                 to materialize the full result set."
+                    .into(),
+            ));
+        }
     }
     if !select.limitOffset.is_null() {
         return Err(PgTrickleError::UnsupportedOperator(
@@ -5721,9 +5725,12 @@ pub fn detect_topk_pattern(query: &str) -> Result<Option<TopKInfo>, PgTrickleErr
     let limit_value = match limit_value {
         Some(v) => v,
         None => {
-            // Could be LIMIT ALL (represented as NULL in some contexts),
-            // or a non-constant expression like LIMIT (SELECT ...).
-            // Check if it's a non-constant: reject with clear error.
+            // Check if this is LIMIT ALL (A_Const with isnull=true) — treat as
+            // "no LIMIT" → not a TopK table.
+            if unsafe { is_limit_all_node(limit_node) } {
+                return Ok(None);
+            }
+            // Otherwise it's a non-constant expression like LIMIT (SELECT ...).
             return Err(PgTrickleError::UnsupportedOperator(
                 "LIMIT in defining queries must be a constant integer \
                  (e.g., LIMIT 100). Dynamic expressions like LIMIT (SELECT ...) \
@@ -5796,6 +5803,24 @@ unsafe fn extract_const_int_from_node(node: *mut pg_sys::Node) -> Option<i64> {
     }
 
     None
+}
+
+/// Check whether a LIMIT node represents `LIMIT ALL`.
+///
+/// In PostgreSQL 18, `LIMIT ALL` is parsed as a non-null A_Const with
+/// `isnull = true`. This is semantically equivalent to no LIMIT.
+///
+/// # Safety
+/// Caller must ensure `node` points to a valid Node (or is null).
+unsafe fn is_limit_all_node(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_A_Const) } {
+        let a_const = unsafe { &*(node as *const pg_sys::A_Const) };
+        return a_const.isnull;
+    }
+    false
 }
 
 /// Strip ORDER BY and LIMIT / FETCH FIRST clauses from a query string.
