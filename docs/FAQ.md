@@ -111,6 +111,36 @@ Use **IMMEDIATE** when:
 - Write-side overhead per DML statement is acceptable
 - The defining query is relatively simple (no TopK, no materialized view sources)
 
+### What are the advantages and disadvantages of IMMEDIATE vs. deferred (FULL/DIFFERENTIAL) refresh modes?
+
+**IMMEDIATE mode**
+
+| | Detail |
+|---|---|
+| ✅ Read-your-writes consistency | The stream table is updated within the same transaction as the base table DML — always current from the writer's perspective. |
+| ✅ No lag | No background worker, no schedule interval. The view is never stale. |
+| ✅ No change buffers | `pgtrickle_changes.*` tables are not used, reducing write overhead on source tables. |
+| ✅ pg_ivm compatibility | Drop-in migration path for existing pg_ivm / IMMV users. |
+| ❌ Write amplification | Every DML statement on a base table also executes IVM trigger logic, adding latency to the original transaction. |
+| ❌ Serialized concurrent writes | An `ExclusiveLock` is taken on the stream table during maintenance, serializing writers. |
+| ❌ Limited SQL support | Window functions, recursive CTEs, `LATERAL` joins, scalar subqueries, and TopK (`ORDER BY … LIMIT`) are not supported — use `DIFFERENTIAL` instead. |
+| ❌ No cascading | IMMEDIATE stream tables that depend on other IMMEDIATE stream tables are not supported. |
+| ❌ No throttling | The refresh cannot be delayed or rate-limited. |
+
+**Deferred mode (`FULL` / `DIFFERENTIAL`)**
+
+| | Detail |
+|---|---|
+| ✅ Decoupled write path | Base table writes are fast; view maintenance runs later via the scheduler or manual refresh. |
+| ✅ Broadest SQL support | Window functions, recursive CTEs, `LATERAL`, `UNION`, user-defined aggregates, TopK, cascading stream tables, and more. |
+| ✅ Adaptive cost control | `DIFFERENTIAL` automatically falls back to `FULL` when the change ratio exceeds `pg_trickle.differential_max_change_ratio`. |
+| ✅ Concurrency-friendly | Writers never block on view maintenance. |
+| ❌ Staleness | The stream table lags by up to one schedule interval (e.g. `1m`). |
+| ❌ No read-your-writes | A writer querying the stream table immediately after a write may see the pre-change data. |
+| ❌ Infrastructure overhead | Requires change buffer tables, a background worker, and frontier tracking. |
+
+**Rule of thumb:** use `IMMEDIATE` when the query is simple and freshness within the transaction matters. Use `DIFFERENTIAL` (or `FULL`) for complex queries, high concurrency, or when you want to decouple write latency from view maintenance.
+
 ### What schedule formats are supported?
 
 **Duration strings:**
