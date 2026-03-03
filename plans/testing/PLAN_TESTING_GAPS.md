@@ -55,16 +55,27 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | H  | E2E coverage pipeline in CI | `.github/workflows/coverage.yml` | **Done** |
 | I  | `test_tpch_performance_comparison` (T1-B) | `e2e_tpch_tests.rs` | **Done** |
 | I  | `test_tpch_sustained_churn` (T1-C) | `e2e_tpch_tests.rs` | **Done** |
+| K1 | `test_cross_source_two_st_overlapping_sources` | `e2e_snapshot_consistency_tests.rs` | **Done** |
+| K2 | `test_cross_source_diamond_convergence` | `e2e_snapshot_consistency_tests.rs` | **Done** |
+| K3 | `test_cross_source_interleaved_mutations_converge` | `e2e_snapshot_consistency_tests.rs` | **Done** |
+| K4 | `test_cross_source_atomic_diamond_snapshot` | `e2e_snapshot_consistency_tests.rs` | **Done** |
+| K5 | `test_cross_source_multi_round_no_drift` | `e2e_snapshot_consistency_tests.rs` | **Done** |
+| L1 | `test_upgrade_catalog_schema_stability` | `e2e_upgrade_tests.rs` | **Done** |
+| L2 | `test_upgrade_catalog_indexes_present` | `e2e_upgrade_tests.rs` | **Done** |
+| L3 | `test_upgrade_drop_recreate_roundtrip` | `e2e_upgrade_tests.rs` | **Done** |
+| L4 | `test_upgrade_extension_version_consistency` | `e2e_upgrade_tests.rs` | **Done** |
+| L5 | `test_upgrade_dependencies_schema_stability` | `e2e_upgrade_tests.rs` | **Done** |
+| L6 | `test_upgrade_event_triggers_installed` | `e2e_upgrade_tests.rs` | **Done** |
+| L7 | `test_upgrade_monitoring_views_present` | `e2e_upgrade_tests.rs` | **Done** |
+| L  | Migration SQL template | `sql/pg_trickle--0.1.3--0.2.0.sql` | **Done** |
 
-**Total: 38 new tests/benchmarks across 10 files.**
+**Total: 52 new tests/benchmarks across 13 files.**
 
 ### Remaining (prioritised)
 
 | # | Gap | Description | Effort | Risk |
 |---|-----|-------------|--------|------|
 | 1 | J  | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
-| 2 | K  | Cross-source snapshot consistency | 240 min | High |
-| 3 | L  | Extension upgrade migration SQL + test | 120 min | High |
 
 ---
 
@@ -997,12 +1008,15 @@ All items from Priorities 1–6 plus the infrastructure items E, H, I are now
 - **Round 3 (2026-03-03):** CDC trigger overhead benchmark (E),
   E2E coverage CI pipeline (H), TPC-H T1-B performance comparison +
   T1-C sustained churn tests (I)
+- **Round 4 (2026-03-03):** Cross-source snapshot consistency tests K1–K5
+  (`e2e_snapshot_consistency_tests.rs`), extension upgrade/migration tests
+  L1–L7 (`e2e_upgrade_tests.rs`), migration SQL template
+  (`sql/pg_trickle--0.1.3--0.2.0.sql`)
 
-The remaining items (J, K, L) are long-term infrastructure:
+The remaining item is long-term infrastructure:
 
 1. **J** (External suites) — integration with sqllogictest, JOB, Nexmark
-2. **K** (Cross-source consistency) — design needed for multi-source snapshots
-3. **L** (Upgrade migration) — blocked on extension migration SQL infrastructure
+   (see `plans/testing/PLAN_TEST_SUITES.md` for detailed roadmap)
 
 ## Notes
 
@@ -1027,3 +1041,12 @@ The remaining items (J, K, L) are long-term infrastructure:
 - I (T1-B) records per-query FULL vs DIFFERENTIAL refresh times and outputs a
   speedup table; (T1-C) runs 50+ churn cycles with periodic correctness checks,
   asserting zero cumulative drift.
+- K tests cover 5 cross-source scenarios: overlapping sources (K1), diamond
+  convergence with partitioned predicates (K2), 3-source interleaved mutations
+  over 3 rounds (K3), atomic diamond consistency with cross-ST invariant (K4),
+  and 10-round multi-source stress test checking for drift (K5).
+- L tests validate catalog schema stability (L1), index presence (L2),
+  DROP+CREATE extension round-trip (L3), version consistency (L4),
+  dependencies schema (L5), event triggers (L6), and monitoring views (L7).
+  The migration SQL template (`sql/pg_trickle--0.1.3--0.2.0.sql`) provides
+  a documented pattern for future version upgrades.
