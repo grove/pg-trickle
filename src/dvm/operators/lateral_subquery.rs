@@ -70,11 +70,23 @@ pub fn diff_lateral_subquery(
     //
     // The ST may have aliased column names (e.g. `a.id AS a_id`
     // becomes `a_id` in the ST, while the child scan has `id`).
-    // Build a mapping from output_cols[i] → st_user_columns[i] so
-    // we can reference ST columns by their actual names.
+    // `ctx.st_user_columns` may have been remapped by diff_project to
+    // use child-level names. Use `st_column_alias_map` to translate
+    // back to the *actual* ST column names for `st.*` references.
+    let actual_st_col = |col: &str| -> String {
+        if let Some(ref map) = ctx.st_column_alias_map {
+            map.get(col).cloned().unwrap_or_else(|| col.to_string())
+        } else {
+            col.to_string()
+        }
+    };
+
     let st_col_names: Vec<String> = if let Some(ref st_cols) = ctx.st_user_columns {
         if st_cols.len() >= all_output_cols.len() {
-            st_cols[..all_output_cols.len()].to_vec()
+            st_cols[..all_output_cols.len()]
+                .iter()
+                .map(|c| actual_st_col(c))
+                .collect()
         } else {
             all_output_cols.clone()
         }

@@ -8606,7 +8606,12 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
 
         match fields.len() {
             1 => {
-                let col_name = unsafe { node_to_string(fields.head().unwrap())? };
+                let field = fields.head().unwrap();
+                // Bare `SELECT *` arrives as ColumnRef with a single A_Star field.
+                if unsafe { pgrx::is_a(field, pg_sys::NodeTag::T_A_Star) } {
+                    return Ok(Expr::Star { table_alias: None });
+                }
+                let col_name = unsafe { node_to_string(field)? };
                 Ok(Expr::ColumnRef {
                     table_alias: None,
                     column_name: col_name,
