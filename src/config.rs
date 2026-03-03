@@ -8,6 +8,15 @@ use pgrx::guc::*;
 /// Master enable/disable switch for the extension.
 pub static PGS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// Database the background scheduler connects to.
+///
+/// Must be the name of the database where pg_trickle is installed.
+/// Defaults to `"postgres"`. Change this (and reload + restart the
+/// background worker) when you install pg_trickle into a non-default
+/// database.
+pub static PGS_DATABASE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"postgres"));
+
 /// Scheduler wake interval in milliseconds.
 pub static PGS_SCHEDULER_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(1000);
 
@@ -139,6 +148,18 @@ pub fn register_gucs() {
         c"When false, the scheduler will not run and no refreshes will be triggered.",
         &PGS_ENABLED,
         GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_string_guc(
+        c"pg_trickle.database",
+        c"Database the background scheduler connects to.",
+        c"The scheduler background worker connects to this database on startup. \
+           Must match the database where pg_trickle is installed. \
+           After changing, run: SELECT pg_reload_conf(); then wait for the background \
+           worker to restart (it restarts every 5 s on error).",
+        &PGS_DATABASE,
+        GucContext::Sighup,
         GucFlags::default(),
     );
 
@@ -427,6 +448,14 @@ pub fn pg_trickle_diamond_consistency() -> String {
         .get()
         .map(|cs| cs.to_str().unwrap_or("none").to_string())
         .unwrap_or_else(|| "none".to_string())
+}
+
+/// Returns the target database name for the background scheduler.
+pub fn pg_trickle_database() -> String {
+    PGS_DATABASE
+        .get()
+        .map(|cs| cs.to_str().unwrap_or("postgres").to_string())
+        .unwrap_or_else(|| "postgres".to_string())
 }
 
 /// Returns the default diamond schedule policy as a `DiamondSchedulePolicy`.

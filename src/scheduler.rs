@@ -56,7 +56,8 @@ pub fn register_scheduler_worker() {
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
+    let db_name = config::pg_trickle_database();
+    BackgroundWorker::connect_worker_to_spi(Some(db_name.as_str()), None);
 
     // F16 (G8.2): Detect read replicas — the scheduler cannot write on a
     // standby. Skip all work and sleep until promotion.

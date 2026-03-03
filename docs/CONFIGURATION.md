@@ -45,6 +45,37 @@ SET pg_trickle.enabled = true;
 
 ---
 
+### pg_trickle.database
+
+The name of the database the background scheduler connects to on startup.
+
+| Property | Value |
+|---|---|
+| Type | `string` |
+| Default | `'postgres'` |
+| Context | `SIGHUP` |
+| Restart Required | Background worker restart (automatic after reload) |
+
+The scheduler background worker must connect to the database where pg_trickle is installed. The default (`'postgres'`) only works if the extension is installed in the `postgres` database. If you install pg_trickle in a different database (e.g., `myapp`), you **must** set this GUC or the scheduler will crash on every startup with `relation "pgtrickle.pgt_refresh_history" does not exist`.
+
+**This is the most common cause of stream tables not refreshing automatically.**
+
+```sql
+-- Set once (persisted to postgresql.auto.conf):
+ALTER SYSTEM SET pg_trickle.database = 'myapp';
+SELECT pg_reload_conf();
+-- The background worker will restart within ~5 seconds and connect to the correct DB.
+```
+
+You can verify the scheduler is running after the reload:
+
+```sql
+SELECT pid, backend_type FROM pg_stat_activity
+WHERE application_name = 'pg_trickle scheduler';
+```
+
+---
+
 ### pg_trickle.scheduler_interval_ms
 
 How often the background scheduler checks for stream tables that need refreshing.
@@ -493,6 +524,10 @@ The effective refresh cadence of the convergence node becomes `min(all member sc
 ```ini
 # Required
 shared_preload_libraries = 'pg_trickle'
+
+# IMPORTANT: set this to the database where pg_trickle is installed
+# (default 'postgres' only works if the extension is in the postgres DB)
+pg_trickle.database = 'postgres'
 
 # Optional tuning
 pg_trickle.enabled = true

@@ -1053,10 +1053,11 @@ impl OpTree {
                         .map(|raw| {
                             // Handle ordinal GROUP BY (e.g., GROUP BY 1):
                             // resolve the integer position to the Nth alias.
-                            if let Ok(pos) = raw.parse::<usize>() {
-                                if pos >= 1 && pos <= aliases.len() {
-                                    return aliases[pos - 1].clone();
-                                }
+                            if let Ok(pos) = raw.parse::<usize>()
+                                && pos >= 1
+                                && pos <= aliases.len()
+                            {
+                                return aliases[pos - 1].clone();
                             }
                             // Find the expression in this Project that
                             // references the raw group-by column, and return
@@ -7768,12 +7769,12 @@ unsafe fn parse_select_stmt(
         // the Nth output column. Resolve these to the actual target
         // expressions now so that rename detection below can match them.
         for gb_expr in &mut group_by {
-            if let Expr::Raw(s) = &gb_expr {
-                if let Ok(pos) = s.parse::<usize>() {
-                    if pos >= 1 && pos <= target_exprs.len() {
-                        *gb_expr = target_exprs[pos - 1].clone();
-                    }
-                }
+            if let Expr::Raw(s) = &gb_expr
+                && let Ok(pos) = s.parse::<usize>()
+                && pos >= 1
+                && pos <= target_exprs.len()
+            {
+                *gb_expr = target_exprs[pos - 1].clone();
             }
         }
 
@@ -13659,13 +13660,14 @@ mod tests {
                     filter: None,
                     order_within_group: None,
                 }],
-                child: Box::new(scan_node("department_stats", 1, &["full_path", "headcount"])),
+                child: Box::new(scan_node(
+                    "department_stats",
+                    1,
+                    &["full_path", "headcount"],
+                )),
             }),
         };
-        assert_eq!(
-            tree.group_by_columns(),
-            Some(vec!["division".to_string()])
-        );
+        assert_eq!(tree.group_by_columns(), Some(vec!["division".to_string()]));
     }
 
     // ── OpTree::row_id_key_columns tests ────────────────────────────

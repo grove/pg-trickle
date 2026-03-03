@@ -69,6 +69,7 @@ By the end you will have:
 
 - PostgreSQL 18.x with pg_trickle installed (see [INSTALL.md](../INSTALL.md))
 - `shared_preload_libraries = 'pg_trickle'` in `postgresql.conf`
+- `pg_trickle.database` set to the name of your database in `postgresql.conf` (or via `ALTER SYSTEM SET pg_trickle.database = 'mydb';` followed by `SELECT pg_reload_conf();`). The default is `'postgres'` — if you're using a different database, **you must set this or stream tables will not refresh automatically**.
 - `psql` or any SQL client
 
 ---

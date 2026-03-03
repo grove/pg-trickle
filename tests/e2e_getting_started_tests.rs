@@ -258,12 +258,11 @@ async fn test_getting_started_step3_department_report_initial_data() {
         "Engineering, Sales, Operations"
     );
 
-    let divs: Vec<String> = sqlx::query_scalar(
-        "SELECT division FROM department_report ORDER BY division",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .expect("department_report query failed");
+    let divs: Vec<String> =
+        sqlx::query_scalar("SELECT division FROM department_report ORDER BY division")
+            .fetch_all(&db.pool)
+            .await
+            .expect("department_report query failed");
     assert_eq!(divs, vec!["Engineering", "Operations", "Sales"]);
 
     // Engineering: Alice(5) + Bob(5) + Charlie(6) + Diana(7) = 4 employees
@@ -309,10 +308,8 @@ async fn test_getting_started_step4a_employee_insert_cascades() {
     assert_eq!(pre_hc, 1, "Frontend starts with Charlie only");
 
     // Insert Heidi
-    db.execute(
-        "INSERT INTO employees (name, department_id, salary) VALUES ('Heidi', 6, 105000)",
-    )
-    .await;
+    db.execute("INSERT INTO employees (name, department_id, salary) VALUES ('Heidi', 6, 105000)")
+        .await;
 
     // Refresh in source-to-sink order (department_tree not involved)
     db.refresh_st("department_stats").await;
@@ -371,12 +368,11 @@ async fn test_getting_started_step4b_department_insert_cascades_all_layers() {
     db.refresh_st("department_report").await;
 
     // department_tree: DevOps at depth 2 with correct path
-    let (devops_path, devops_depth): (String, i32) = sqlx::query_as(
-        "SELECT path, depth FROM department_tree WHERE name = 'DevOps'",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("DevOps tree row missing");
+    let (devops_path, devops_depth): (String, i32) =
+        sqlx::query_as("SELECT path, depth FROM department_tree WHERE name = 'DevOps'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("DevOps tree row missing");
     assert_eq!(devops_path, "Company > Engineering > DevOps");
     assert_eq!(devops_depth, 2);
     assert_eq!(
@@ -400,7 +396,10 @@ async fn test_getting_started_step4b_department_insert_cascades_all_layers() {
             "SELECT total_headcount::bigint FROM department_report WHERE division = 'Engineering'",
         )
         .await;
-    assert_eq!(eng_hc, 4, "DevOps has no employees; Engineering headcount unchanged");
+    assert_eq!(
+        eng_hc, 4,
+        "DevOps has no employees; Engineering headcount unchanged"
+    );
 }
 
 // ── Step 4c ──────────────────────────────────────────────────────────────────
@@ -424,17 +423,13 @@ async fn test_getting_started_step4c_department_rename_cascades() {
 
     // department_tree: no path contains "Engineering"
     let old_path_count: i64 = db
-        .query_scalar(
-            "SELECT count(*) FROM department_tree WHERE path LIKE '%Engineering%'",
-        )
+        .query_scalar("SELECT count(*) FROM department_tree WHERE path LIKE '%Engineering%'")
         .await;
     assert_eq!(old_path_count, 0, "No paths should reference 'Engineering'");
 
     // R&D itself + 3 sub-teams = 4 rows with 'R&D' in path
     let rnd_count: i64 = db
-        .query_scalar(
-            "SELECT count(*) FROM department_tree WHERE path LIKE '%R&D%'",
-        )
+        .query_scalar("SELECT count(*) FROM department_tree WHERE path LIKE '%R&D%'")
         .await;
     assert_eq!(rnd_count, 4);
 
@@ -445,17 +440,13 @@ async fn test_getting_started_step4c_department_rename_cascades() {
 
     // department_stats: full_path updated
     let rnd_full_path: String = db
-        .query_scalar(
-            "SELECT full_path FROM department_stats WHERE department_name = 'R&D'",
-        )
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'R&D'")
         .await;
     assert_eq!(rnd_full_path, "Company > R&D");
 
     // department_report: "Engineering" gone, "R&D" present with same headcount
     let old_div_count: i64 = db
-        .query_scalar(
-            "SELECT count(*) FROM department_report WHERE division = 'Engineering'",
-        )
+        .query_scalar("SELECT count(*) FROM department_report WHERE division = 'Engineering'")
         .await;
     assert_eq!(old_div_count, 0, "'Engineering' division should be removed");
 
