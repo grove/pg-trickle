@@ -494,7 +494,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }
 
                     let has_changes = check_upstream_changes(&st);
-                    let action = refresh::determine_refresh_action(&st, has_changes);
+                    let action = if has_changes && has_stream_table_source_changes(&st) {
+                        RefreshAction::Full
+                    } else {
+                        refresh::determine_refresh_action(&st, has_changes)
+                    };
                     let result = execute_scheduled_refresh(&st, action);
 
                     match result {
@@ -760,17 +764,20 @@ fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
             return crate::api::cron_is_due(trimmed, last_refresh_epoch);
         }
 
-        // Duration-based: compare staleness against parsed seconds
+        // Duration-based: compare staleness against parsed seconds.
+        // Uses last_refresh_at (updated on every run, including NO_DATA)
+        // rather than data_timestamp (only updated when data changes).
+        // This ensures the 1-minute schedule fires at most once per minute
+        // regardless of whether the previous run found any data changes.
         if let Ok(max_secs) = crate::api::parse_duration(trimmed) {
             let stale = Spi::get_one_with_args::<bool>(
-                "SELECT CASE WHEN data_timestamp IS NULL THEN true \
-                 ELSE EXTRACT(EPOCH FROM (now() - data_timestamp)) > $2 END \
+                "SELECT CASE WHEN last_refresh_at IS NULL THEN true \
+                 ELSE EXTRACT(EPOCH FROM (now() - last_refresh_at)) > $2 END \
                  FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
                 &[st.pgt_id.into(), max_secs.into()],
             )
             .unwrap_or(Some(false))
             .unwrap_or(false);
-
             return stale;
         }
 
@@ -828,15 +835,29 @@ fn emit_stale_alert_if_needed(st: &StreamTableMeta) {
 
 /// Check if any upstream source has pending changes.
 fn check_upstream_changes(st: &StreamTableMeta) -> bool {
-    // With trigger-based CDC, changes are written directly to buffer tables.
-    // Check if any buffer table for this ST's sources has pending rows.
-    let change_schema = config::pg_trickle_change_buffer_schema();
+    // Walk every dependency of this stream table and check whether any source
+    // has pending changes that have not yet been reflected in our data.
+    //
+    // Two kinds of upstream sources:
+    //   TABLE        — base tables with trigger-based CDC.  Pending changes
+    //                  live in pgtrickle_changes.changes_{oid}.
+    //   STREAM_TABLE — intermediate stream tables (no change buffer).  We
+    //                  detect staleness by comparing data_timestamps: if the
+    //                  upstream ST was last refreshed *after* we were, our
+    //                  data is out-of-date.
+    if !st.is_populated {
+        return true;
+    }
+    has_table_source_changes(st) || has_stream_table_source_changes(st)
+}
 
-    // Get source OIDs for this ST
+/// Returns `true` if any TABLE-type upstream source has rows in its CDC change
+/// buffer that have not yet been consumed by a differential refresh.
+fn has_table_source_changes(st: &StreamTableMeta) -> bool {
+    let change_schema = config::pg_trickle_change_buffer_schema();
     let source_oids = get_source_oids_for_st(st.pgt_id);
 
     for oid in &source_oids {
-        // Check if the buffer table has any rows
         let has_rows = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(SELECT 1 FROM {}.changes_{} LIMIT 1)",
             change_schema,
@@ -849,12 +870,43 @@ fn check_upstream_changes(st: &StreamTableMeta) -> bool {
             return true;
         }
     }
+    false
+}
 
-    // If no CDC tracking yet, assume changes exist (conservative)
-    if !st.is_populated {
-        return true;
+/// Returns `true` if any STREAM_TABLE upstream has a `data_timestamp` more
+/// recent than our own `data_timestamp`.
+///
+/// STREAM_TABLE upstreams have no CDC change buffer.  We detect staleness via
+/// a `data_timestamp` comparison instead.  When this returns `true`, the
+/// caller **must** use `RefreshAction::Full` — a differential refresh cannot
+/// incorporate stream-table changes (no change buffer to diff against).
+fn has_stream_table_source_changes(st: &StreamTableMeta) -> bool {
+    let deps = crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+
+    for dep in &deps {
+        if dep.source_type != "STREAM_TABLE" {
+            continue;
+        }
+
+        let upstream_newer = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS ( \
+               SELECT 1 \
+               FROM pgtrickle.pgt_stream_tables upstream \
+               JOIN pgtrickle.pgt_stream_tables us ON us.pgt_id = {} \
+               WHERE upstream.pgt_relid = {}::oid \
+                 AND upstream.data_timestamp \
+                     > COALESCE(us.data_timestamp, '-infinity'::timestamptz) \
+             )",
+            st.pgt_id,
+            dep.source_relid.to_u32(),
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+
+        if upstream_newer {
+            return true;
+        }
     }
-
     false
 }
 
@@ -899,7 +951,18 @@ fn refresh_single_st(
     }
 
     let has_changes = check_upstream_changes(&st);
-    let action = refresh::determine_refresh_action(&st, has_changes);
+
+    // STREAM_TABLE upstream sources have no CDC change buffer.  When an
+    // upstream stream table has newer data (detected via data_timestamp
+    // comparison in check_upstream_changes/has_stream_table_source_changes),
+    // a DIFFERENTIAL refresh would be a no-op — there are no buffer rows to
+    // merge.  Force a FULL refresh instead so the data actually incorporates
+    // the upstream's latest rows.
+    let action = if has_changes && has_stream_table_source_changes(&st) {
+        RefreshAction::Full
+    } else {
+        refresh::determine_refresh_action(&st, has_changes)
+    };
     let result = execute_scheduled_refresh(&st, action);
 
     let retry = retry_states.entry(pgt_id).or_default();
@@ -1152,7 +1215,14 @@ fn execute_scheduled_refresh(st: &StreamTableMeta, action: RefreshAction) -> Ref
                 was_full_fallback,
             );
 
-            let _ = StreamTableMeta::update_after_refresh(st.pgt_id, now, rows_inserted);
+            // For NO_DATA refreshes, data_timestamp must NOT be updated —
+            // execute_no_data_refresh already updated last_refresh_at only.
+            // Updating data_timestamp here would cause downstream stream
+            // tables that compare upstream.data_timestamp to see a false
+            // "upstream changed" signal on every no-data polling cycle.
+            if action != RefreshAction::NoData {
+                let _ = StreamTableMeta::update_after_refresh(st.pgt_id, now, rows_inserted);
+            }
 
             monitor::alert_refresh_completed(
                 &st.pgt_schema,
