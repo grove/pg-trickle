@@ -113,6 +113,12 @@ pub struct DiffContext {
     /// Q21-type numwait regression where EXCEPT ALL at sub-join levels
     /// interacts with the SemiJoin's R_old snapshot computation.
     pub inside_semijoin: bool,
+    /// Whether the stream table has a `__pgt_count` auxiliary column.
+    /// True when the top-level OpTree contains Aggregate or Distinct.
+    /// Used by the aggregate operator to detect intermediate aggregates
+    /// (e.g., aggregates inside CTE bodies) whose output columns match
+    /// the ST but whose `__pgt_count` is not stored.
+    pub st_has_pgt_count: bool,
     /// Source of delta data: change buffer tables (deferred) or transition
     /// tables (immediate). Determines how the Scan operator generates SQL.
     pub delta_source: DeltaSource,
@@ -136,6 +142,7 @@ impl DiffContext {
             st_user_columns: None,
             merge_safe_dedup: false,
             inside_semijoin: false,
+            st_has_pgt_count: false,
             delta_source: DeltaSource::ChangeBuffer,
         }
     }
@@ -160,6 +167,7 @@ impl DiffContext {
             st_user_columns: None,
             merge_safe_dedup: false,
             inside_semijoin: false,
+            st_has_pgt_count: false,
             delta_source: DeltaSource::ChangeBuffer,
         }
     }

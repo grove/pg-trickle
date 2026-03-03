@@ -481,14 +481,45 @@ fn build_intermediate_agg_delta(
 
         let final_cte = ctx.next_cte_name("agg_final");
 
-        // Row ID from group-by columns (d prefix for D events, n for I)
+        // Row ID: hash ALL output columns (group + aggregates) so the
+        // row_id matches the initial load's content hash.  This is
+        // necessary for CTE-wrapped aggregates where the intermediate
+        // aggregate's row_id flows directly to the MERGE.
+        //
+        // For D events, the aggregate values are the OLD (pre-change)
+        // values computed algebraically;  for I events, they are the
+        // NEW values from the rescan CTE.  A value change thus produces
+        // different row_ids for D and I, which is correct: the D event
+        // deletes the old ST row (matched by old content hash), and the
+        // I event inserts a new ST row (with new content hash).
+        let old_agg_hash_exprs: Vec<String> = aggregates
+            .iter()
+            .map(|agg| {
+                let alias = &agg.alias;
+                let ins_col = format!("__ins_{alias}");
+                let del_col = format!("__del_{alias}");
+                format!(
+                    "(COALESCE(n.{a}, 0) - COALESCE(d.{i}, 0) + COALESCE(d.{d}, 0))::TEXT",
+                    a = quote_ident(alias),
+                    i = quote_ident(&ins_col),
+                    d = quote_ident(&del_col),
+                )
+            })
+            .collect();
+        let new_agg_hash_exprs: Vec<String> = aggregates
+            .iter()
+            .map(|a| format!("n.{}::TEXT", quote_ident(&a.alias)))
+            .collect();
+
         let group_hash_d: Vec<String> = group_output
             .iter()
             .map(|c| format!("d.{}::TEXT", quote_ident(c)))
+            .chain(old_agg_hash_exprs)
             .collect();
         let group_hash_n: Vec<String> = group_output
             .iter()
             .map(|c| format!("n.{}::TEXT", quote_ident(c)))
+            .chain(new_agg_hash_exprs)
             .collect();
         let row_id_d = if group_hash_d.is_empty() {
             "pgtrickle.pg_trickle_hash('__singleton_group')".to_string()
@@ -1211,8 +1242,17 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // the ST doesn't have the intermediate columns.  Instead, we build an
     // "old snapshot" CTE by re-aggregating the child's old data (current
     // data minus child delta inserts, plus child delta deletes).
+    //
+    // Also intermediate when the ST does NOT have `__pgt_count` — e.g.,
+    // an aggregate inside a CTE body where the top-level tree is
+    // Filter(CteScan{...}).  The aggregate's group/value columns match
+    // the ST's user columns, but `__pgt_count` was never added because
+    // `needs_pgt_count()` returns false for the top-level CteScan.
     let is_intermediate = if let Some(ref st_cols) = ctx.st_user_columns {
-        if !group_output.is_empty() {
+        if !ctx.st_has_pgt_count {
+            // ST has no __pgt_count → aggregate merge cannot read st.__pgt_count
+            true
+        } else if !group_output.is_empty() {
             // Grouped aggregate: check if any group column is missing from ST
             group_output.iter().any(|g| !st_cols.contains(g))
         } else if !aggregates.is_empty() {

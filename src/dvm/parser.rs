@@ -1129,10 +1129,11 @@ impl OpTree {
                 }
             }
             OpTree::Subquery { child, .. } => child.row_id_key_columns(),
-            OpTree::CteScan { .. } => {
-                // CTE scan: the row_id comes from the CTE body diff.
-                // We can't easily determine this statically.
-                None
+            OpTree::CteScan { columns, .. } => {
+                // CTE scan: use all CTE output columns as content hash.
+                // This matches the intermediate aggregate's row_id formula
+                // when the CTE body contains an aggregate.
+                Some(columns.clone())
             }
             OpTree::Window { .. } => {
                 // Window functions like RANK/DENSE_RANK can produce identical
@@ -1148,9 +1149,10 @@ impl OpTree {
                 None
             }
             OpTree::LateralSubquery { .. } => {
-                // LATERAL subquery results have no natural primary key.
-                // Row IDs are content-hash based, computed by the diff operator.
-                None
+                // Use content-hash for row IDs so that the initial population
+                // and differential refresh produce consistent __pgt_row_id values.
+                let cols = self.output_columns();
+                if cols.is_empty() { None } else { Some(cols) }
             }
             // Join, UnionAll, RecursiveCte: complex hash, no simple column list
             _ => None,
@@ -13612,7 +13614,7 @@ mod tests {
     }
 
     #[test]
-    fn test_row_id_key_columns_cte_scan_returns_none() {
+    fn test_row_id_key_columns_cte_scan_returns_columns() {
         let tree = OpTree::CteScan {
             cte_id: 0,
             cte_name: "x".to_string(),
@@ -13621,7 +13623,7 @@ mod tests {
             cte_def_aliases: vec![],
             column_aliases: vec![],
         };
-        assert_eq!(tree.row_id_key_columns(), None);
+        assert_eq!(tree.row_id_key_columns(), Some(vec!["id".to_string()]));
     }
 
     #[test]
