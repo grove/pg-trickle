@@ -216,7 +216,8 @@ async fn test_diamond_atomic_all_succeed() {
     );
 
     // Verify D's content is consistent
-    let total: i64 = db
+    // total = b.val + c.val (INT4 + INT4 = INT4 in PostgreSQL)
+    let total: i32 = db
         .query_scalar("SELECT total FROM st_d WHERE b_id = 2")
         .await;
     assert_eq!(total, 40, "expected total = 20 + 20 = 40");
