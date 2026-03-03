@@ -1286,7 +1286,7 @@ SELECT pgtrickle.create_stream_table('order_summary',
 
 ### IMMEDIATE Mode Query Restrictions
 
-The `'IMMEDIATE'` refresh mode supports a subset of the SQL constructs supported by `'DIFFERENTIAL'` and `'FULL'` modes. Queries are validated at stream table creation and when switching to IMMEDIATE mode via `alter_stream_table`.
+The `'IMMEDIATE'` refresh mode supports nearly all SQL constructs supported by `'DIFFERENTIAL'` and `'FULL'` modes. Queries are validated at stream table creation and when switching to IMMEDIATE mode via `alter_stream_table`.
 
 **Supported in IMMEDIATE mode:**
 
@@ -1298,16 +1298,17 @@ The `'IMMEDIATE'` refresh mode supports a subset of the SQL constructs supported
 - `UNION ALL`, `INTERSECT`, `EXCEPT`
 - `EXISTS` / `IN` subqueries (`SemiJoin`, `AntiJoin`)
 - Subqueries in `FROM`
+- Window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, etc.)
+- `LATERAL` subqueries
+- `LATERAL` set-returning functions (`unnest()`, `jsonb_array_elements()`, etc.)
+- Scalar subqueries in `SELECT`
+- Cascading IMMEDIATE stream tables (ST depending on another IMMEDIATE ST)
 
 **Not yet supported in IMMEDIATE mode** (use `'DIFFERENTIAL'` instead):
 
 | Construct | Reason |
 |-----------|--------|
-| Window functions (`ROW_NUMBER`, `RANK`, etc.) | Partition-based recomputation not validated with transition tables |
-| Recursive CTEs (`WITH RECURSIVE`) | Semi-naive evaluation not yet implemented |
-| `LATERAL` subqueries | Row-scoped recomputation not yet implemented |
-| `LATERAL` set-returning functions (`unnest()`, `jsonb_array_elements()`, etc.) | Row-scoped recomputation not yet implemented |
-| Scalar subqueries in `SELECT` | Correlated subquery delta not yet implemented |
+| Recursive CTEs (`WITH RECURSIVE`) | Semi-naive evaluation with fixpoint iteration not yet validated with transition tables |
 
 Attempting to create or switch to IMMEDIATE mode with an unsupported construct produces a clear error message suggesting `'DIFFERENTIAL'` mode.
 

@@ -30,9 +30,10 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
     DIFFERENTIAL↔IMMEDIATE and FULL↔IMMEDIATE: tears down old infrastructure
     (IVM triggers or CDC triggers), sets up new infrastructure, updates
     catalog, runs full refresh, restores schedule when leaving IMMEDIATE.
-  - `validate_immediate_mode_support()` — rejects window functions, recursive
-    CTEs, LATERAL subqueries, LATERAL functions, and scalar subqueries at
+  - `validate_immediate_mode_support()` — rejects recursive CTEs at
     creation/alter time with clear error messages suggesting DIFFERENTIAL mode.
+    Window functions, LATERAL subqueries, LATERAL functions, and scalar
+    subqueries are fully supported in IMMEDIATE mode.
   - Delta SQL template caching — thread-local `IVM_DELTA_CACHE` keyed by
     (pgt_id, source_oid, has_new, has_old) avoids re-parsing the defining
     query on every trigger invocation. Cross-session invalidation via shared
@@ -41,12 +42,12 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   - Manual `refresh_stream_table()` for IMMEDIATE STs does a full refresh.
   - TopK + IMMEDIATE combination is explicitly rejected.
   - Catalog `get_by_id(pgt_id)` lookup method added.
-  - E2E tests: `tests/e2e_ivm_tests.rs` with 22 tests covering
+  - E2E tests: `tests/e2e_ivm_tests.rs` with 29 tests covering
     INSERT/UPDATE/DELETE/TRUNCATE propagation, DROP cleanup, validation,
     mixed-operation tests, mode switching (DIFFERENTIAL↔IMMEDIATE,
-    FULL↔IMMEDIATE), query restriction validation (window functions,
-    LATERAL, scalar subqueries), aggregate + join in IMMEDIATE mode, and
-    alter-to-IMMEDIATE rejection for unsupported queries.
+    FULL↔IMMEDIATE), window functions, LATERAL joins, scalar subqueries,
+    cascading IMMEDIATE stream tables, concurrent inserts, recursive CTE
+    rejection, aggregate + join in IMMEDIATE mode, and alter mode switching.
   - Unit tests for transition table scan path (7 tests) and
     `RefreshMode::Immediate` helpers.
 - **TopK (ORDER BY + LIMIT) support** — Queries with a top-level `ORDER BY … LIMIT N` (constant integer, no OFFSET) are now recognized as "TopK" and accepted. TopK stream tables store only the top-N rows. Refreshes use scoped-recomputation via MERGE (bypass the DVM delta pipeline). Catalog columns `topk_limit` and `topk_order_by` record the pattern. Monitoring view exposes `is_topk`.

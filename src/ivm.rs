@@ -31,8 +31,7 @@
 //! - No cascading IVM (stream table depending on another stream table).
 //! - TRUNCATE causes a full refresh of the stream table.
 //! - No ENR-based access (uses temp tables instead for simplicity).
-//! - Window functions, recursive CTEs, LATERAL joins, and scalar subqueries
-//!   are not yet supported in IMMEDIATE mode.
+//! - Recursive CTEs are not yet supported in IMMEDIATE mode.
 
 use crate::error::PgTrickleError;
 use pgrx::prelude::*;

@@ -2225,8 +2225,7 @@ fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleError> {
 /// **Rejected (deferred to later phases):**
 /// - Window functions (use partition-based recomputation — complex)
 /// - Recursive CTEs (use semi-naive evaluation — complex)
-/// - LATERAL subqueries and functions (use row-scoped recomputation)
-/// - Scalar subqueries in SELECT
+/// - Recursive CTEs (semi-naive evaluation with iteration)
 pub fn validate_immediate_mode_support(defining_query: &str) -> Result<(), PgTrickleError> {
     let result = parse_defining_query_full(defining_query)?;
 
@@ -2287,43 +2286,35 @@ fn check_immediate_support(tree: &OpTree) -> Result<(), PgTrickleError> {
             check_immediate_support(right)
         }
 
+        // Window functions — partition-based recomputation via DVM engine.
+        // The delta is derived from child Scan nodes which support both
+        // ChangeBuffer and TransitionTable modes.
+        OpTree::Window { child, .. } => check_immediate_support(child),
+
+        // LATERAL subqueries — row-scoped recomputation. Delta derived
+        // from child Scan nodes.
+        OpTree::LateralSubquery { child, .. } => check_immediate_support(child),
+
+        // LATERAL set-returning functions (unnest(), jsonb_array_elements())
+        // — row-scoped recomputation via child delta.
+        OpTree::LateralFunction { child, .. } => check_immediate_support(child),
+
+        // Scalar subqueries in SELECT — delta derived from child and
+        // subquery Scan nodes.
+        OpTree::ScalarSubquery {
+            child, subquery, ..
+        } => {
+            check_immediate_support(child)?;
+            check_immediate_support(subquery)
+        }
+
         // ── Rejected constructs ─────────────────────────────────────
 
-        // Window functions use partition-based recomputation which requires
-        // re-executing parts of the query. Deferred to Phase 3.
-        OpTree::Window { .. } => Err(PgTrickleError::UnsupportedOperator(
-            "Window functions are not yet supported in IMMEDIATE mode. \
-             The partition-based recomputation strategy has not been validated \
-             with transition-table-based delta computation. Use 'DIFFERENTIAL' \
-             mode instead."
-                .into(),
-        )),
-
         // Recursive CTEs use semi-naive evaluation with iteration.
+        // The fixpoint computation interacts with transaction state in ways
+        // that have not been validated with transition tables.
         OpTree::RecursiveCte { .. } => Err(PgTrickleError::UnsupportedOperator(
             "Recursive CTEs (WITH RECURSIVE) are not yet supported in IMMEDIATE \
-             mode. Use 'DIFFERENTIAL' mode instead."
-                .into(),
-        )),
-
-        // LATERAL subqueries use row-scoped recomputation.
-        OpTree::LateralSubquery { .. } => Err(PgTrickleError::UnsupportedOperator(
-            "LATERAL subqueries are not yet supported in IMMEDIATE mode. \
-             Use 'DIFFERENTIAL' mode instead."
-                .into(),
-        )),
-
-        // LATERAL set-returning functions use row-scoped recomputation.
-        OpTree::LateralFunction { .. } => Err(PgTrickleError::UnsupportedOperator(
-            "LATERAL set-returning functions (e.g. unnest(), \
-             jsonb_array_elements()) are not yet supported in IMMEDIATE \
-             mode. Use 'DIFFERENTIAL' mode instead."
-                .into(),
-        )),
-
-        // Scalar subqueries in SELECT.
-        OpTree::ScalarSubquery { .. } => Err(PgTrickleError::UnsupportedOperator(
-            "Scalar subqueries in SELECT are not yet supported in IMMEDIATE \
              mode. Use 'DIFFERENTIAL' mode instead."
                 .into(),
         )),

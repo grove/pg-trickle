@@ -1,8 +1,8 @@
 # Plan: Transactionally Updated Views (Immediate IVM)
 
 Date: 2026-02-28
-Status: IN PROGRESS (Phase 1 complete, Phase 3 & 4 partially complete)
-Last Updated: 2026-07-10
+Status: IN PROGRESS (Phase 1 complete, Phase 3 mostly complete, Phase 4 partially complete)
+Last Updated: 2026-07-11
 
 ---
 
@@ -390,12 +390,15 @@ creation time with a clear message suggesting `'DIFFERENTIAL'` mode instead.
 
 **Deferred to later phases:**
 
-- Window functions
-- `UNION`/`INTERSECT`/`EXCEPT`
-- Recursive CTEs
-- `LATERAL` subqueries and functions
-- Scalar subqueries in SELECT
+- Recursive CTEs (semi-naive evaluation with fixpoint iteration not validated
+  with transition tables)
 - User-defined aggregates (needs verification of incremental formulas)
+
+**Now supported (Phase 3 complete):**
+
+- Window functions (partition-based recomputation via transition tables)
+- `LATERAL` subqueries and functions (row-scoped recomputation)
+- Scalar subqueries in SELECT (correlated subquery delta via transition tables)
 - Cascading IMMEDIATE stream tables (ST depending on another IMMEDIATE ST)
 
 ---
@@ -587,9 +590,10 @@ SELECT pgivm.create_immv('my_view', 'SELECT a, sum(b) FROM t GROUP BY a');
 
 8. **Query restriction validation for IMMEDIATE mode** ✅ DONE
    - `validate_immediate_mode_support()` in `src/dvm/parser.rs` walks the
-     OpTree and rejects: Window functions, RecursiveCte, LateralSubquery,
-     LateralFunction, ScalarSubquery. Clear error messages suggest using
-     DIFFERENTIAL mode instead.
+     OpTree and rejects `RecursiveCte` only. Window functions, LATERAL
+     subqueries, LATERAL functions, and scalar subqueries are now allowed
+     (they all bottom out at Scan nodes which already support transition
+     tables). Clear error message suggests using DIFFERENTIAL mode.
    - Called at both `create_stream_table` and `alter_stream_table` time.
 
 9. **Delta SQL template caching** ✅ DONE
@@ -602,12 +606,14 @@ SELECT pgivm.create_immv('my_view', 'SELECT a, sum(b) FROM t GROUP BY a');
 10. **Tests** ✅ DONE
    - 7 unit tests for transition table scan path in `scan.rs`.
    - 1 unit test for `RefreshMode::Immediate` helpers.
-   - 22 E2E tests in `tests/e2e_ivm_tests.rs`: create, INSERT/UPDATE/DELETE
+   - 29 E2E tests in `tests/e2e_ivm_tests.rs`: create, INSERT/UPDATE/DELETE
      propagation, TRUNCATE, DROP cleanup, TopK rejection, manual refresh,
      mixed operations, mode switching (DIFFERENTIAL↔IMMEDIATE,
-     FULL↔IMMEDIATE), query restriction validation (window functions,
-     LATERAL, scalar subqueries), aggregate + join in IMMEDIATE mode,
-     alter-to-IMMEDIATE rejection for unsupported queries.
+     FULL↔IMMEDIATE), window function creation + propagation, LATERAL join
+     creation + propagation, scalar subquery creation, cascading IMMEDIATE
+     stream tables, concurrent inserts, recursive CTE rejection, aggregate
+     + join in IMMEDIATE mode, alter mode switching (recursive CTE
+     rejection, window function acceptance).
 
 ### Phase 2: pg_ivm Compatibility Layer — POSTPONED
 
@@ -632,18 +638,24 @@ be revisited if there is user demand for pg_ivm migration support.
 
 **Goal:** Support more SQL features in IMMEDIATE mode.
 
-1. **Window functions** — partition-based recomputation (already supported in
-   deferred mode).
-2. **UNION/INTERSECT/EXCEPT** — merge deltas from branches. ✅ DONE
+1. **Window functions** ✅ DONE — partition-based recomputation via
+   `diff_window` works unchanged with transition tables. Enabled in
+   `check_immediate_support()`. E2E tests verify creation + INSERT propagation.
+2. **UNION/INTERSECT/EXCEPT** ✅ DONE
    (already allowed; `validate_immediate_mode_support` passes UNION ALL,
    INTERSECT, EXCEPT through without restriction).
-3. **LATERAL subqueries and functions**.
-4. **Cascading IMMEDIATE stream tables** — when ST A updates, immediately
-   propagate to downstream ST B (within the same transaction).
-5. **Optimized locking** — use RowExclusiveLock when safe (single-table,
-   no agg/distinct, INSERT-only). ✅ DONE
+3. **LATERAL subqueries and functions** ✅ DONE — `diff_lateral_subquery` and
+   `diff_lateral_function` use `ctx.diff_node(child)` → Scan →
+   `diff_scan_transition()`. E2E tests verify creation + INSERT propagation.
+4. **Cascading IMMEDIATE stream tables** ✅ DONE — DML triggers on ST_A fire
+   ST_B's IVM triggers via nested trigger execution. Temp table names are
+   scoped by OID/pgt_id. E2E test verifies base → ST_A → ST_B propagation.
+5. **Optimized locking** ✅ DONE
    (`IvmLockMode::for_query()` analysis in `src/ivm.rs`; simple scan
    chains use `pg_try_advisory_xact_lock`, others use `pg_advisory_xact_lock`).
+6. **Scalar subqueries in SELECT** ✅ DONE — `diff_scalar_subquery` uses
+   `ctx.diff_node()` for both child and subquery nodes. E2E test verifies
+   creation.
 
 ### Phase 4: Performance Optimization
 
@@ -691,18 +703,19 @@ the rest are ordered by priority.
 | Priority | Item | Phase | Status |
 |----------|------|-------|--------|
 | ~~P0~~ | ~~`alter_stream_table` mode switching~~ | 1 | ✅ Done |
-| ~~P0~~ | ~~E2E test validation~~ | 1 | ✅ Done (22 tests) |
+| ~~P0~~ | ~~E2E test validation~~ | 1 | ✅ Done (29 tests) |
 | **P1** | In-memory state tracking (`IvmTriggerState`) | 1 | Not started |
 | ~~P1~~ | ~~Query restriction validation~~ | 1 | ✅ Done |
 | **P1** | ENR-based transition table access | 4 | Not started |
 | ~~P2~~ | ~~pg_ivm compatibility layer~~ | 2 | POSTPONED |
 | ~~P2~~ | ~~Optimized locking (RowExclusiveLock)~~ | 3 | ✅ Done |
-| **P2** | Concurrent transaction tests | 1 | Not started |
+| ~~P2~~ | ~~Concurrent transaction tests~~ | 1 | ✅ Done |
 | ~~P3~~ | ~~`DROP TABLE` interception for IMMEDIATE STs~~ | 2 | POSTPONED |
-| **P3** | Cascading IMMEDIATE stream tables | 3 | Not started |
+| ~~P3~~ | ~~Cascading IMMEDIATE stream tables~~ | 3 | ✅ Done |
 | ~~P3~~ | ~~Delta SQL template caching~~ | 4 | ✅ Done |
-| **P3** | Window functions in IMMEDIATE mode | 3 | Not started |
-| **P3** | LATERAL subqueries in IMMEDIATE mode | 3 | Not started |
+| ~~P3~~ | ~~Window functions in IMMEDIATE mode~~ | 3 | ✅ Done |
+| ~~P3~~ | ~~LATERAL subqueries in IMMEDIATE mode~~ | 3 | ✅ Done |
+| ~~P3~~ | ~~Scalar subqueries in IMMEDIATE mode~~ | 3 | ✅ Done |
 | **P4** | Aggregate fast-path optimization | 4 | Not started |
 | **P4** | C-level trigger functions | 4 | Not started |
 | **P4** | Prepared statement reuse | 4 | Not started |
