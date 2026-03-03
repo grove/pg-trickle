@@ -2222,10 +2222,9 @@ fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleError> {
 /// - Non-recursive CTEs
 /// - EXISTS/IN subqueries (SemiJoin/AntiJoin)
 ///
-/// **Rejected (deferred to later phases):**
-/// - Window functions (use partition-based recomputation — complex)
-/// - Recursive CTEs (use semi-naive evaluation — complex)
-/// - Recursive CTEs (semi-naive evaluation with iteration)
+/// **Rejected:**
+/// - Recursive CTEs (semi-naive evaluation with fixpoint iteration
+///   not yet validated with transition tables)
 pub fn validate_immediate_mode_support(defining_query: &str) -> Result<(), PgTrickleError> {
     let result = parse_defining_query_full(defining_query)?;
 

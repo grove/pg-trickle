@@ -28,10 +28,10 @@
 //!
 //! ## Current Limitations
 //!
-//! - No cascading IVM (stream table depending on another stream table).
-//! - TRUNCATE causes a full refresh of the stream table.
-//! - No ENR-based access (uses temp tables instead for simplicity).
-//! - Recursive CTEs are not yet supported in IMMEDIATE mode.
+//! - Recursive CTEs (`WITH RECURSIVE`) are not yet supported in IMMEDIATE mode.
+//! - TRUNCATE on a base table causes a full refresh of the stream table.
+//! - Uses temp tables for transition table access (ENR-based access is a
+//!   future optimization).
 
 use crate::error::PgTrickleError;
 use pgrx::prelude::*;

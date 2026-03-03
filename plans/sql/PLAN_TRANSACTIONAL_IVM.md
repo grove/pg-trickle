@@ -1,8 +1,8 @@
 # Plan: Transactionally Updated Views (Immediate IVM)
 
 Date: 2026-02-28
-Status: IN PROGRESS (Phase 1 complete, Phase 3 mostly complete, Phase 4 partially complete)
-Last Updated: 2026-07-11
+Status: IN PROGRESS (Phase 1 complete, Phase 3 complete, Phase 4 partially complete)
+Last Updated: 2026-03-03
 
 ---
 
@@ -698,27 +698,59 @@ be revisited if there is user demand for pg_ivm migration support.
 ### Prioritized Remaining Work (post Phase 1)
 
 The following items remain from the original plan. Items marked ✅ are done;
-the rest are ordered by priority.
+the rest are ordered by priority. **All remaining items are Phase 4
+performance optimizations** — the feature surface is complete.
 
-| Priority | Item | Phase | Status |
-|----------|------|-------|--------|
-| ~~P0~~ | ~~`alter_stream_table` mode switching~~ | 1 | ✅ Done |
-| ~~P0~~ | ~~E2E test validation~~ | 1 | ✅ Done (29 tests) |
-| **P1** | In-memory state tracking (`IvmTriggerState`) | 1 | Not started |
-| ~~P1~~ | ~~Query restriction validation~~ | 1 | ✅ Done |
-| **P1** | ENR-based transition table access | 4 | Not started |
-| ~~P2~~ | ~~pg_ivm compatibility layer~~ | 2 | POSTPONED |
-| ~~P2~~ | ~~Optimized locking (RowExclusiveLock)~~ | 3 | ✅ Done |
-| ~~P2~~ | ~~Concurrent transaction tests~~ | 1 | ✅ Done |
-| ~~P3~~ | ~~`DROP TABLE` interception for IMMEDIATE STs~~ | 2 | POSTPONED |
-| ~~P3~~ | ~~Cascading IMMEDIATE stream tables~~ | 3 | ✅ Done |
-| ~~P3~~ | ~~Delta SQL template caching~~ | 4 | ✅ Done |
-| ~~P3~~ | ~~Window functions in IMMEDIATE mode~~ | 3 | ✅ Done |
-| ~~P3~~ | ~~LATERAL subqueries in IMMEDIATE mode~~ | 3 | ✅ Done |
-| ~~P3~~ | ~~Scalar subqueries in IMMEDIATE mode~~ | 3 | ✅ Done |
-| **P4** | Aggregate fast-path optimization | 4 | Not started |
-| **P4** | C-level trigger functions | 4 | Not started |
-| **P4** | Prepared statement reuse | 4 | Not started |
+| Priority | Item | Phase | Status | Complexity |
+|----------|------|-------|--------|------------|
+| ~~P0~~ | ~~`alter_stream_table` mode switching~~ | 1 | ✅ Done | — |
+| ~~P0~~ | ~~E2E test validation~~ | 1 | ✅ Done (29 tests) | — |
+| ~~P1~~ | ~~Query restriction validation~~ | 1 | ✅ Done | — |
+| ~~P2~~ | ~~pg_ivm compatibility layer~~ | 2 | POSTPONED | — |
+| ~~P2~~ | ~~Optimized locking (RowExclusiveLock)~~ | 3 | ✅ Done | — |
+| ~~P2~~ | ~~Concurrent transaction tests~~ | 1 | ✅ Done | — |
+| ~~P3~~ | ~~`DROP TABLE` interception for IMMEDIATE STs~~ | 2 | POSTPONED | — |
+| ~~P3~~ | ~~Cascading IMMEDIATE stream tables~~ | 3 | ✅ Done | — |
+| ~~P3~~ | ~~Delta SQL template caching~~ | 4 | ✅ Done | — |
+| ~~P3~~ | ~~Window functions in IMMEDIATE mode~~ | 3 | ✅ Done | — |
+| ~~P3~~ | ~~LATERAL subqueries in IMMEDIATE mode~~ | 3 | ✅ Done | — |
+| ~~P3~~ | ~~Scalar subqueries in IMMEDIATE mode~~ | 3 | ✅ Done | — |
+| **P3** | ENR-based transition table access | 4 | Not started | High (`unsafe` pg_sys ENR APIs) |
+| **P3** | In-memory state tracking (`IvmTriggerState`) | 1 | Not started | High (`unsafe` snapshot/xact callbacks) |
+| **P4** | Aggregate fast-path optimization | 4 | Not started | Medium (detect invertible aggs, emit UPDATE) |
+| **P4** | C-level trigger functions | 4 | Not started | Very High (`unsafe` TriggerData access) |
+| **P4** | Prepared statement reuse | 4 | Not started | Medium (`unsafe` SPI_prepare/SPI_keepplan) |
+
+#### Assessment of Remaining Items
+
+**ENR-based transition table access (P3):** Replace PL/pgSQL wrappers that
+copy transition tables to temp tables (`CREATE TEMP TABLE ... ON COMMIT DROP
+AS SELECT * FROM __pgt_newtable`) with Ephemeral Named Relations registered
+directly in the SPI executor. Eliminates CREATE/DROP overhead per trigger
+invocation. Requires `unsafe` access to `pg_sys::EphemeralNamedRelation*`
+APIs. Estimated ~200 lines of unsafe code.
+
+**In-memory state tracking (P3):** Track per-ST before/after trigger counts
+to batch delta application when multiple source tables of the same ST are
+modified in a single statement. Marginal benefit for most use cases (single-
+table or single-source-modified queries). Requires `unsafe` snapshot
+management and `RegisterXactCallback` for abort cleanup.
+
+**Aggregate fast-path (P4):** For "pure aggregate" queries (single GROUP BY,
+all aggregates invertible — COUNT, SUM, AVG), bypass the full DVM delta
+pipeline and emit a single `UPDATE st SET sum = sum + $val WHERE key = $key`.
+Requires invertible-aggregate detection, empty-group handling (delete when
+count reaches 0), and new-group insertion. Estimated ~300 lines.
+
+**C-level trigger functions (P4):** Replace PL/pgSQL trigger wrappers with
+C-level trigger functions that access `TriggerData` and `Tuplestorestate`
+directly. Maximum performance but highest risk. Requires extensive unsafe
+code and thorough testing.
+
+**Prepared statement reuse (P4):** Cache SPI prepared statement handles across
+trigger invocations within the same transaction. Avoids PostgreSQL's parse →
+analyze → plan overhead on repeated trigger firings. Requires `unsafe`
+`SPI_prepare` / `SPI_keepplan` calls (not exposed by pgrx).
 
 ---
 
