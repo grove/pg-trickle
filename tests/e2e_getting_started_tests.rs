@@ -477,7 +477,9 @@ async fn test_getting_started_step4d_employee_delete_updates_aggregates() {
 
     // Backend: 2 → 1 employee; 235000 → 120000
     let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
-        "SELECT headcount::bigint, total_salary::text, avg_salary::text
+        "SELECT headcount::bigint,
+                round(total_salary, 2)::text,
+                round(avg_salary, 2)::text
          FROM department_stats WHERE department_name = 'Backend'",
     )
     .fetch_one(&db.pool)
