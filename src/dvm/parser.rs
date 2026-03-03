@@ -1051,6 +1051,13 @@ impl OpTree {
                     let resolved: Vec<String> = raw_names
                         .iter()
                         .map(|raw| {
+                            // Handle ordinal GROUP BY (e.g., GROUP BY 1):
+                            // resolve the integer position to the Nth alias.
+                            if let Ok(pos) = raw.parse::<usize>() {
+                                if pos >= 1 && pos <= aliases.len() {
+                                    return aliases[pos - 1].clone();
+                                }
+                            }
                             // Find the expression in this Project that
                             // references the raw group-by column, and return
                             // the corresponding alias.
@@ -1676,8 +1683,8 @@ pub fn lookup_operator_volatility(op_name: &str) -> Result<char, PgTrickleError>
     Spi::connect(|client| {
         let result = client.select(
             "SELECT p.provolatile::text AS vol, \
-                    COALESCE(tl.typcategory, 'X') AS lcat, \
-                    COALESCE(tr.typcategory, 'X') AS rcat \
+                    COALESCE(tl.typcategory::text, 'X') AS lcat, \
+                    COALESCE(tr.typcategory::text, 'X') AS rcat \
              FROM pg_catalog.pg_operator o \
              JOIN pg_catalog.pg_proc p ON o.oprcode = p.oid \
              LEFT JOIN pg_catalog.pg_type tl ON o.oprleft = tl.oid \
@@ -13603,6 +13610,46 @@ mod tests {
         assert_eq!(
             tree.group_by_columns(),
             Some(vec!["department_id".to_string(), "dept_name".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_group_by_columns_project_ordinal_group_by() {
+        // Simulates: SELECT split_part(full_path, ' > ', 2) AS division,
+        //                   SUM(headcount) AS total_headcount
+        //            FROM ... GROUP BY 1
+        // The Aggregate group_by has ordinal Literal("1"). The Project must
+        // resolve position 1 → alias "division".
+        let tree = OpTree::Project {
+            expressions: vec![
+                Expr::FuncCall {
+                    func_name: "split_part".to_string(),
+                    args: vec![
+                        col("full_path"),
+                        Expr::Literal("' > '".to_string()),
+                        Expr::Literal("2".to_string()),
+                    ],
+                },
+                col("total_headcount"),
+            ],
+            aliases: vec!["division".to_string(), "total_headcount".to_string()],
+            child: Box::new(OpTree::Aggregate {
+                group_by: vec![Expr::Literal("1".to_string())],
+                aggregates: vec![AggExpr {
+                    function: AggFunc::Sum,
+                    argument: Some(col("headcount")),
+                    alias: "total_headcount".to_string(),
+                    is_distinct: false,
+                    second_arg: None,
+                    filter: None,
+                    order_within_group: None,
+                }],
+                child: Box::new(scan_node("department_stats", 1, &["full_path", "headcount"])),
+            }),
+        };
+        assert_eq!(
+            tree.group_by_columns(),
+            Some(vec!["division".to_string()])
         );
     }
 
