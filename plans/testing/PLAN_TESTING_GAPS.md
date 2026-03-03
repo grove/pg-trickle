@@ -40,6 +40,7 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | A7 | `test_property_intersect_differential` | `e2e_property_tests.rs` | **Done** |
 | A8 | `test_property_composite_pk_differential` | `e2e_property_tests.rs` | **Done** |
 | A9 | `test_property_recursive_cte_full` | `e2e_property_tests.rs` | **Done** |
+| E  | `bench_cdc_trigger_overhead` | `e2e_bench_tests.rs` | **Done** |
 | F1 | `test_pg_get_viewdef_cte_view` | `catalog_compat_tests.rs` | **Done** |
 | F2 | `test_pg_proc_volatility_column_values` | `catalog_compat_tests.rs` | **Done** |
 | F3 | `test_relkind_for_partitioned_index` | `catalog_compat_tests.rs` | **Done** |
@@ -51,19 +52,19 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | G  | `test_frontier_get_snapshot_ts_*` (2 tests) | `src/version.rs` | **Done** |
 | G  | `test_frontier_is_empty_*` (2 tests) | `src/version.rs` | **Done** |
 | G  | `AlertEvent::Resumed` added to existing tests | `src/monitor.rs` | **Done** |
+| H  | E2E coverage pipeline in CI | `.github/workflows/coverage.yml` | **Done** |
+| I  | `test_tpch_performance_comparison` (T1-B) | `e2e_tpch_tests.rs` | **Done** |
+| I  | `test_tpch_sustained_churn` (T1-C) | `e2e_tpch_tests.rs` | **Done** |
 
-**Total: 35 new tests (29 E2E/integration + 12 unit — some unit tests grouped above as 6+2+2).**
+**Total: 38 new tests/benchmarks across 10 files.**
 
 ### Remaining (prioritised)
 
 | # | Gap | Description | Effort | Risk |
 |---|-----|-------------|--------|------|
-| 1 | E  | Write-side CDC trigger overhead benchmark | 90 min | Low |
-| 2 | H  | E2E coverage pipeline in CI | 120 min | Medium |
-| 3 | I  | TPC-H T1-B performance + T1-C sustained churn | 180 min | Medium |
-| 4 | J  | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
-| 5 | K  | Cross-source snapshot consistency | 240 min | High |
-| 6 | L  | Extension upgrade migration SQL + test | 120 min | High |
+| 1 | J  | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
+| 2 | K  | Cross-source snapshot consistency | 240 min | High |
+| 3 | L  | Extension upgrade migration SQL + test | 120 min | High |
 
 ---
 
@@ -987,21 +988,21 @@ async fn test_resume_unknown_stream_table_errors() {
 
 ## Implementation Order
 
-All items from the original Priority 1–6 are now **implemented**, plus the
-remaining code-level items (D1, A7–A9, F4–F5, G):
+All items from Priorities 1–6 plus the infrastructure items E, H, I are now
+**implemented** across three rounds:
 
 - **Round 1 (2026-03-03):** 23 E2E/integration tests across B, C, D, A1–A6, F1–F3
 - **Round 2 (2026-03-03):** 6 more E2E tests (D1, A7, A8, A9, F4, F5) +
   12 pure-function unit tests (G) across parser, error, version, monitor modules
+- **Round 3 (2026-03-03):** CDC trigger overhead benchmark (E),
+  E2E coverage CI pipeline (H), TPC-H T1-B performance comparison +
+  T1-C sustained churn tests (I)
 
-The remaining items (E, H–L) are infrastructure, benchmarks, and long-term:
+The remaining items (J, K, L) are long-term infrastructure:
 
-1. **E** (CDC benchmark) — requires a benchmark harness; non-blocking
-2. **H** (CI coverage) — GitHub Actions pipeline configuration
-3. **I** (TPC-H perf) — sustained churn + performance tracking
-4. **J** (External suites) — integration with sqllogictest, JOB, Nexmark
-5. **K** (Cross-source consistency) — design needed for multi-source snapshots
-6. **L** (Upgrade migration) — SQL migration scripts + extension upgrade tests
+1. **J** (External suites) — integration with sqllogictest, JOB, Nexmark
+2. **K** (Cross-source consistency) — design needed for multi-source snapshots
+3. **L** (Upgrade migration) — blocked on extension migration SQL infrastructure
 
 ## Notes
 
@@ -1018,3 +1019,11 @@ The remaining items (E, H–L) are infrastructure, benchmarks, and long-term:
 - G tests cover `strip_view_definition_suffix`, `PgTrickleErrorKind::Display`,
   `RetryPolicy::default`, `Frontier::get_snapshot_ts`, `Frontier::is_empty`,
   and the `AlertEvent::Resumed` variant.
+- E (CDC benchmark) compares INSERT/UPDATE/DELETE throughput with and without
+  CDC triggers, reporting per-operation overhead percentage.
+- H (CI coverage) adds an `e2e-coverage` job to `coverage.yml` that builds a
+  coverage-instrumented Docker image, runs E2E tests, merges profdata with unit
+  test coverage, and uploads combined LCOV to Codecov.
+- I (T1-B) records per-query FULL vs DIFFERENTIAL refresh times and outputs a
+  speedup table; (T1-C) runs 50+ churn cycles with periodic correctness checks,
+  asserting zero cumulative drift.
