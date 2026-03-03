@@ -55,6 +55,8 @@ new entries when creating documents.
 | [REPORT_PGWIRE_PROXY.md](infra/REPORT_PGWIRE_PROXY.md) | REPORT | Research | pgwire proxy / intercept analysis |
 | [PLAN_PG_BACKCOMPAT.md](infra/PLAN_PG_BACKCOMPAT.md) | PLAN | Research | Supporting older PostgreSQL versions (13–17) |
 | [PLAN_VERSIONING.md](infra/PLAN_VERSIONING.md) | PLAN | Draft | Semantic versioning & compatibility policy |
+| [REPORT_BLUE_GREEN_DEPLOYMENT.md](infra/REPORT_BLUE_GREEN_DEPLOYMENT.md) | REPORT | Exploration | Blue-green deployment — hot-swap pipelines with zero downtime |
+| [REPORT_DOWNSTREAM_CONSUMERS.md](infra/REPORT_DOWNSTREAM_CONSUMERS.md) | REPORT | Exploration | Downstream consumer patterns — getting changes out of stream tables |
 
 ## performance/
 
