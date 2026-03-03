@@ -108,8 +108,16 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
     // last_attempt[db] = when we last tried to spawn a worker for that DB.
     // Used to avoid hammering databases where pg_trickle is not installed.
     let mut last_attempt: HashMap<String, std::time::Instant> = HashMap::new();
-    // How long to wait before re-probing a DB that has no pg_trickle.
+    // DBs where we have seen a scheduler successfully start at least once this
+    // session. Used to distinguish "never had pg_trickle" (long backoff) from
+    // "had a running scheduler that crashed" (short backoff).
+    let mut had_scheduler: HashSet<String> = HashSet::new();
+    // How long to wait before re-probing a DB that has never had pg_trickle.
     let skip_ttl = std::time::Duration::from_secs(300);
+    // How long to wait before respawning a scheduler that crashed / exited
+    // on a DB where pg_trickle was previously confirmed running.  Kept short
+    // so DROP EXTENSION + CREATE EXTENSION doesn't stall for 5 minutes.
+    let retry_ttl = std::time::Duration::from_secs(15);
 
     loop {
         // ── Collect all connectable, non-template databases  ──────────────
@@ -164,15 +172,26 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
 
         for db in &databases {
             if active.contains(db) {
-                // Worker healthy — reset backoff so a future crash respawns fast.
+                // Worker healthy — record that this DB has had a running
+                // scheduler so we can use the short retry_ttl if it crashes.
+                had_scheduler.insert(db.clone());
                 last_attempt.remove(db);
                 continue;
             }
 
+            // Choose the right backoff: short for DBs that previously ran a
+            // scheduler (crash / DROP EXTENSION scenario), long for DBs that
+            // have never had pg_trickle installed.
+            let ttl = if had_scheduler.contains(db) {
+                retry_ttl
+            } else {
+                skip_ttl
+            };
+
             // Should we (re)try this database?
             let retry = last_attempt
                 .get(db)
-                .map(|t| t.elapsed() >= skip_ttl)
+                .map(|t| t.elapsed() >= ttl)
                 .unwrap_or(true);
             if !retry {
                 continue;
@@ -328,6 +347,29 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
         if !config::pg_trickle_enabled() {
             continue;
+        }
+
+        // Check that pg_trickle is still installed in this database.  It can
+        // be dropped at any time via DROP EXTENSION, which removes the schema
+        // and all catalog tables.  Without this guard the very next SPI query
+        // that references pgtrickle.* would crash the worker with exit code 1,
+        // causing the launcher to apply the full 5-minute skip_ttl backoff.
+        // Exiting cleanly here lets the launcher detect the fresh install
+        // using the shorter retry_ttl for databases that previously had a
+        // running scheduler.
+        let still_installed = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
+            Spi::get_one::<bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_trickle')",
+            )
+            .unwrap_or(Some(false))
+            .unwrap_or(false)
+        }));
+        if !still_installed {
+            log!(
+                "pg_trickle scheduler: pg_trickle was dropped from database '{}', exiting",
+                db_name
+            );
+            return;
         }
 
         let now_ms = current_epoch_ms();
