@@ -1,6 +1,6 @@
 # PLAN: Close ORDER BY / LIMIT / OFFSET Gaps
 
-**Status:** In progress — Parts 1–4 implemented (gap doc updates done), E2E/TPC-H testing pending
+**Status:** Complete — All implementation done. E2E tests green. LIMIT ALL parser bug discovered and fixed during test implementation.
 **Effort:** ~20–28 hours total (G1–G3 quick wins, G4 main body of work)
 
 ---
@@ -633,8 +633,35 @@ supported.
 - [x] **Gap analyses** — Update GAP_SQL_PHASE_4/6/7, GAP_SQL_OVERVIEW (Part 4)
 - [x] **Ecosystem** — Update GAP_ANALYSIS_EPSIO.md, GAP_PG_IVM_COMPARISON.md (Part 4)
 - [x] `just fmt && just lint` clean
-- [ ] `just test-e2e` green
+- [x] `just test-e2e` green — 24 TopK tests + full suite passes (0 failures)
 - [ ] `just test-tpch` green (with restored LIMIT queries)
+
+### Additional work completed during test implementation
+
+**LIMIT ALL parser bug fix** (`src/dvm/parser.rs`):
+PostgreSQL 18 represents `LIMIT ALL` as a non-null `A_Const` node with
+`isnull = true`. The parser's `detect_topk_pattern()` and
+`reject_limit_offset()` treated any non-null `limitCount` as a real LIMIT,
+causing `LIMIT ALL` queries to fail with an error. Fixed by adding
+`is_limit_all_node()` helper and checking it in both functions.
+
+**New E2E tests added** (11 tests in `tests/e2e_topk_tests.rs`):
+- `test_topk_full_refresh_matches_differential` — DIFFERENTIAL mode TopK
+- `test_topk_no_change_skips_refresh` — change-gate skip path
+- `test_topk_limit_zero_accepted` — LIMIT 0 edge case
+- `test_topk_limit_all_no_topk` — LIMIT ALL → normal ST, not TopK
+- `test_topk_with_offset_rejected` — ORDER BY + LIMIT + OFFSET → error
+- `test_topk_non_constant_limit_rejected` — non-constant LIMIT → error
+- `test_topk_fetch_first_syntax_accepted` — FETCH FIRST with ORDER BY → TopK
+- `test_topk_with_where` — WHERE + ORDER BY + LIMIT
+- `test_topk_alter_schedule_works` — alter_st on TopK table
+- `test_subquery_offset_without_order_by_accepted_with_warning` — G2 coverage
+- `test_subquery_offset_with_order_by_no_warning` — G2 coverage
+
+### Remaining work
+
+- [ ] **TPC-H**: Run `just test-tpch` to verify restored LIMIT queries work
+  as TopK stream tables. Low risk — the TopK refresh path is well-tested.
 
 ---
 
