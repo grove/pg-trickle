@@ -10,6 +10,57 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 
 ---
 
+## Status Summary
+
+### Implemented (2026-03-03)
+
+| Cat | Test | File | Status |
+|-----|------|------|--------|
+| B1 | `test_add_column_on_source_st_still_functional` | `e2e_ddl_event_tests.rs` | **Done** |
+| B1 | `test_add_column_unused_st_survives_refresh` | `e2e_ddl_event_tests.rs` | **Done** |
+| B2 | `test_drop_unused_column_st_survives` | `e2e_ddl_event_tests.rs` | **Done** |
+| B3 | `test_alter_column_type_triggers_reinit` | `e2e_ddl_event_tests.rs` | **Done** |
+| B4 | `test_create_index_on_source_is_benign` | `e2e_ddl_event_tests.rs` | **Done** |
+| B5 | `test_drop_source_with_multiple_downstream_sts` | `e2e_ddl_event_tests.rs` | **Done** |
+| B6 | `test_block_source_ddl_guc_prevents_alter` | `e2e_ddl_event_tests.rs` | **Done** |
+| B7 | `test_add_column_on_joined_source_st_survives` | `e2e_ddl_event_tests.rs` | **Done** |
+| C1 | `test_concurrent_refresh_multiple_sts_same_source` | `e2e_concurrent_tests.rs` | **Done** |
+| C2 | `test_concurrent_refresh_same_st_no_corruption` | `e2e_concurrent_tests.rs` | **Done** |
+| C3 | `test_full_refresh_racing_with_dml` | `e2e_concurrent_tests.rs` | **Done** |
+| D2 | `test_resume_stream_table_clears_suspended_status` | `e2e_error_tests.rs` | **Done** |
+| D3 | `test_refresh_rejected_for_suspended_st` | `e2e_error_tests.rs` | **Done** |
+| D  | `test_resume_unknown_stream_table_errors` | `e2e_error_tests.rs` | **Done** |
+| A1 | `test_property_window_function_full` | `e2e_property_tests.rs` | **Done** |
+| A2 | `test_property_cte_nonrecursive_differential` | `e2e_property_tests.rs` | **Done** |
+| A3 | `test_property_lateral_join_differential` | `e2e_property_tests.rs` | **Done** |
+| A4 | `test_property_except_differential` | `e2e_property_tests.rs` | **Done** |
+| A5 | `test_property_having_differential` | `e2e_property_tests.rs` | **Done** |
+| A6 | `test_property_three_table_join_differential` | `e2e_property_tests.rs` | **Done** |
+| F1 | `test_pg_get_viewdef_cte_view` | `catalog_compat_tests.rs` | **Done** |
+| F2 | `test_pg_proc_volatility_column_values` | `catalog_compat_tests.rs` | **Done** |
+| F3 | `test_relkind_for_partitioned_index` | `catalog_compat_tests.rs` | **Done** |
+
+**Total: 23 new tests implemented across 5 files.**
+
+### Remaining (prioritised)
+
+| # | Gap | Description | Effort | Risk |
+|---|-----|-------------|--------|------|
+| 1 | D1 | Transaction abort during `create_stream_table()` → no orphans | 60 min | High |
+| 2 | A7 | INTERSECT property test (DIFFERENTIAL) | 45 min | Medium |
+| 3 | A8 | Composite PK property test (DIFFERENTIAL) | 45 min | Medium |
+| 4 | A9 | Recursive CTE property test (FULL — not differentiable) | 45 min | High |
+| 5 | E  | Write-side CDC trigger overhead benchmark | 90 min | Low |
+| 6 | F4-F5 | 2 more catalog canary tests (advisory lock compat, extension version) | 30 min | Low |
+| 7 | G  | 4 pure functions extractable for unit testing | 120 min | Low |
+| 8 | H  | E2E coverage pipeline in CI | 120 min | Medium |
+| 9 | I  | TPC-H T1-B performance + T1-C sustained churn | 180 min | Medium |
+| 10 | J | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
+| 11 | K | Cross-source snapshot consistency | 240 min | High |
+| 12 | L | Extension upgrade migration SQL + test | 120 min | High |
+
+---
+
 ## Priority 1 — Schema Evolution DDL (Category B)
 
 **Target file:** `tests/e2e_ddl_event_tests.rs`  
@@ -930,27 +981,15 @@ async fn test_resume_unknown_stream_table_errors() {
 
 ## Implementation Order
 
-| # | Tests | File | Effort | Risk |
-|---|-------|------|--------|------|
-| 1 | B4 (CREATE INDEX benign) | `e2e_ddl_event_tests.rs` | 30 min | Low |
-| 2 | B6 (`block_source_ddl` GUC) | `e2e_ddl_event_tests.rs` | 30 min | Low |
-| 3 | D2, D3 (resume, suspended refresh) | `e2e_error_tests.rs` | 45 min | Low |
-| 4 | B1, B2 (ADD COLUMN) | `e2e_ddl_event_tests.rs` | 60 min | Medium |
-| 5 | B3 (ALTER COLUMN TYPE) | `e2e_ddl_event_tests.rs` | 45 min | Medium |
-| 6 | B5 (multi-ST DROP cascade) | `e2e_ddl_event_tests.rs` | 45 min | Medium |
-| 7 | C1, C2, C3 (concurrent) | `e2e_concurrent_tests.rs` | 90 min | Medium |
-| 8 | A5 (HAVING property) | `e2e_property_tests.rs` | 45 min | Low |
-| 9 | A4 (EXCEPT property) | `e2e_property_tests.rs` | 45 min | Low |
-| 10 | A2 (CTE property) | `e2e_property_tests.rs` | 45 min | Medium |
-| 11 | A3 (LATERAL property) | `e2e_property_tests.rs` | 60 min | Medium |
-| 12 | A6 (3-table join property) | `e2e_property_tests.rs` | 60 min | Medium |
-| 13 | A1 (Window function property) | `e2e_property_tests.rs` | 60 min | High |
-| 14 | F1–F3 (catalog canaries) | `catalog_compat_tests.rs` | 60 min | Low |
-| 15 | D1 (txn abort cleanup) | `e2e_error_tests.rs` | 60 min | High |
-| 16 | B7 (NATURAL JOIN drift) | `e2e_ddl_event_tests.rs` | 60 min | High |
+All items from the original Priority 1–6 are now **implemented** (23 tests).
 
-Start with items 1–7 (B4, B6, D2, D3, B1–B5, C1–C3): these have the clearest
-correct behavior and require no new infrastructure.
+The remaining items (Priority 7+) are listed in the Status Summary above.
+Next priorities:
+
+1. **D1** (txn abort cleanup) — requires understanding pgrx transactional semantics
+2. **A7/A8** (INTERSECT, composite PK property tests) — straightforward extensions
+3. **E** (CDC trigger overhead benchmark) — useful but non-blocking
+4. **G–L** — infrastructure and long-term items
 
 ## Notes
 
@@ -958,6 +997,7 @@ correct behavior and require no new infrastructure.
   `just build-e2e-image` before the first run.
 - Property tests use a deterministic PRNG: if a test fails, the seed is
   printed and the test can be re-run with the same seed for reproduction.
+- Seeds `0xCAFE_0020`–`0xCAFE_0025` are now allocated (Tests 12–17).
 - For D1, transactional DDL behavior may depend on whether the Rust/pgrx
   `create_stream_table()` actually runs inside the calling transaction; verify
   with `pg_tables` before writing the assertion.

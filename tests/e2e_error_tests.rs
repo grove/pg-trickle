@@ -764,3 +764,89 @@ async fn test_volatile_operator_allowed_in_full_mode() {
     let count = db.count("public.volop2_st").await;
     assert_eq!(count, 2);
 }
+
+// ── Error Recovery: resume, suspended status ───────────────────────────
+
+/// D2 — resume_stream_table() on a SUSPENDED ST → back to ACTIVE.
+#[tokio::test]
+async fn test_resume_stream_table_clears_suspended_status() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE err_resume_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO err_resume_src VALUES (1, 1)").await;
+
+    db.create_st(
+        "err_resume_st",
+        "SELECT id, val FROM err_resume_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // Suspend via alter_stream_table
+    db.alter_st("err_resume_st", "status => 'SUSPENDED'").await;
+
+    let (status, _, _, _) = db.pgt_status("err_resume_st").await;
+    assert_eq!(status, "SUSPENDED");
+
+    // Resume
+    db.execute("SELECT pgtrickle.resume_stream_table('err_resume_st')")
+        .await;
+
+    let (status_after, _, _, errors_after) = db.pgt_status("err_resume_st").await;
+    assert_eq!(
+        status_after, "ACTIVE",
+        "resume_stream_table() should transition from SUSPENDED to ACTIVE"
+    );
+    assert_eq!(errors_after, 0, "consecutive_errors should be reset to 0");
+}
+
+/// D3 — Refresh is rejected for a SUSPENDED ST.
+#[tokio::test]
+async fn test_refresh_rejected_for_suspended_st() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE err_susp_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO err_susp_src VALUES (1, 1)").await;
+
+    db.create_st(
+        "err_susp_st",
+        "SELECT id, val FROM err_susp_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    // Suspend the ST
+    db.alter_st("err_susp_st", "status => 'SUSPENDED'").await;
+
+    // Refresh should fail while suspended
+    let result = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('err_susp_st')")
+        .await;
+    assert!(
+        result.is_err(),
+        "refresh_stream_table() should be rejected for a SUSPENDED ST"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.to_lowercase().contains("suspended") || msg.to_lowercase().contains("resume"),
+        "Error should mention suspension or resume, got: {msg}"
+    );
+}
+
+/// D — resume_stream_table() on an unknown ST returns error.
+#[tokio::test]
+async fn test_resume_unknown_stream_table_errors() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    let result = db
+        .try_execute("SELECT pgtrickle.resume_stream_table('nonexistent_st')")
+        .await;
+    assert!(
+        result.is_err(),
+        "Resuming unknown ST should return an error"
+    );
+}
