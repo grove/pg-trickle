@@ -948,6 +948,63 @@ SELECT * FROM pgtrickle.explain_st('order_totals');
 
 ---
 
+### pgtrickle.change_buffer_sizes
+
+Show pending change counts and estimated on-disk sizes for all CDC-tracked
+source tables.
+
+Returns one row per `(stream_table, source_table)` pair.
+
+```sql
+pgtrickle.change_buffer_sizes() → SETOF record(
+    stream_table  text,     -- qualified stream table name
+    source_table  text,     -- qualified source table name
+    source_oid    bigint,
+    cdc_mode      text,     -- 'trigger', 'wal', or 'transitioning'
+    pending_rows  bigint,   -- rows in buffer not yet consumed
+    buffer_bytes  bigint    -- estimated buffer table size in bytes
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.change_buffer_sizes()
+ORDER BY pending_rows DESC;
+```
+
+Useful for spotting a source table whose CDC buffer is growing unexpectedly
+(which may indicate a stalled differential refresh or a high-write source that
+has outpaced the schedule).
+
+---
+
+### pgtrickle.list_sources
+
+List the source tables that a stream table depends on.
+
+```sql
+pgtrickle.list_sources(name text) → SETOF record(
+    source_table   text,         -- qualified source table name
+    source_oid     bigint,
+    source_type    text,         -- 'table', 'stream_table', etc.
+    cdc_mode       text,         -- 'trigger', 'wal', or 'transitioning'
+    columns_used   text          -- column-level dependency info (if available)
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.list_sources('order_totals');
+```
+
+Returns the tables tracked by CDC for the given stream table, along with
+how they are being tracked. Useful when diagnosing why a stream table is
+not refreshing or to audit which source tables are being trigger-tracked.
+
+---
+
 ### pgtrickle.pg_trickle_hash
 
 Compute a 64-bit xxHash row ID from a text value.

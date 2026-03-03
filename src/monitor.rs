@@ -871,6 +871,151 @@ pub fn query_temp_file_usage(table_name: &str) -> Option<(i64, i64)> {
     }
 }
 
+/// Show pending change counts and estimated disk sizes for all CDC-tracked
+/// source tables.
+///
+/// Returns one row per `(stream_table, source_table)` pair.
+/// `pending_rows` is the number of CDC rows not yet consumed by a differential
+/// refresh; `buffer_bytes` is the estimated on-disk size of the change buffer.
+///
+/// Exposed as `pgtrickle.change_buffer_sizes()`.
+#[pg_extern(schema = "pgtrickle", name = "change_buffer_sizes")]
+#[allow(clippy::type_complexity)]
+fn change_buffer_sizes() -> TableIterator<
+    'static,
+    (
+        name!(stream_table, String),
+        name!(source_table, String),
+        name!(source_oid, i64),
+        name!(cdc_mode, String),
+        name!(pending_rows, i64),
+        name!(buffer_bytes, i64),
+    ),
+> {
+    let rows: Vec<_> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT
+                    st.pgt_schema || '.' || st.pgt_name        AS stream_table,
+                    n.nspname::text || '.' || c.relname::text  AS source_table,
+                    d.source_relid::bigint,
+                    d.cdc_mode,
+                    COALESCE(s.n_live_tup, 0)::bigint          AS pending_rows,
+                    COALESCE(pg_total_relation_size(cb.oid), 0)::bigint
+                                                               AS buffer_bytes
+                FROM pgtrickle.pgt_dependencies d
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
+                JOIN pg_class c                     ON c.oid = d.source_relid
+                JOIN pg_namespace n                 ON n.oid = c.relnamespace
+                LEFT JOIN pg_class cb
+                    ON  cb.relname = 'changes_' || d.source_relid::text
+                    AND cb.relnamespace = (
+                            SELECT oid FROM pg_namespace
+                            WHERE  nspname = COALESCE(
+                                current_setting('pg_trickle.change_buffer_schema', true),
+                                'pgtrickle_changes'))
+                LEFT JOIN pg_stat_user_tables s ON s.relid = cb.oid
+                ORDER BY stream_table, source_table",
+                None,
+                &[],
+            )
+            .map_err(|e| pgrx::error!("change_buffer_sizes: SPI select failed: {e}"))
+            .expect("unreachable after error!()");
+
+        let mut out = Vec::new();
+        for row in result {
+            let stream_table = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let source_table = row.get::<String>(2).unwrap_or(None).unwrap_or_default();
+            let source_oid = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+            let cdc_mode = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+            let pending_rows = row.get::<i64>(5).unwrap_or(None).unwrap_or(0);
+            let buffer_bytes = row.get::<i64>(6).unwrap_or(None).unwrap_or(0);
+            out.push((
+                stream_table,
+                source_table,
+                source_oid,
+                cdc_mode,
+                pending_rows,
+                buffer_bytes,
+            ));
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
+/// List the source tables that a stream table depends on.
+///
+/// Returns one row per source, including its CDC mode and any column-level
+/// usage metadata recorded at creation time.
+///
+/// Exposed as `pgtrickle.list_sources(name)`.
+#[pg_extern(schema = "pgtrickle", name = "list_sources")]
+#[allow(clippy::type_complexity)]
+fn list_sources(
+    name: &str,
+) -> TableIterator<
+    'static,
+    (
+        name!(source_table, String),
+        name!(source_oid, i64),
+        name!(source_type, String),
+        name!(cdc_mode, String),
+        name!(columns_used, Option<String>),
+    ),
+> {
+    let parts: Vec<&str> = name.splitn(2, '.').collect();
+    let (schema, table_name) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        ("public", parts[0])
+    };
+
+    let rows: Vec<_> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT
+                    n.nspname::text || '.' || c.relname::text AS source_table,
+                    d.source_relid::bigint,
+                    d.source_type,
+                    d.cdc_mode,
+                    d.columns_used::text
+                FROM pgtrickle.pgt_dependencies d
+                JOIN pgtrickle.pgt_stream_tables st
+                    ON  st.pgt_id     = d.pgt_id
+                    AND st.pgt_schema = $1
+                    AND st.pgt_name   = $2
+                JOIN pg_class     c ON c.oid = d.source_relid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                ORDER BY source_table",
+                None,
+                &[schema.into(), table_name.into()],
+            )
+            .map_err(|e| pgrx::error!("list_sources: SPI select failed: {e}"))
+            .expect("unreachable after error!()");
+
+        let mut out = Vec::new();
+        for row in result {
+            let source_table = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let source_oid = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
+            let source_type = row.get::<String>(3).unwrap_or(None).unwrap_or_default();
+            let cdc_mode = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+            let columns_used = row.get::<String>(5).unwrap_or(None);
+            out.push((
+                source_table,
+                source_oid,
+                source_type,
+                cdc_mode,
+                columns_used,
+            ));
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
