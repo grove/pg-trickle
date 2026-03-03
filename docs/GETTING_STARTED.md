@@ -71,6 +71,12 @@ By the end you will have:
 - `shared_preload_libraries = 'pg_trickle'` in `postgresql.conf`
 - `psql` or any SQL client
 
+Connect to the database you want to use and enable the extension:
+
+```sql
+CREATE EXTENSION pg_trickle;
+```
+
 No additional configuration is needed. pg_trickle automatically discovers all databases on the server and starts a scheduler for each one where the extension is installed.
 
 ---
