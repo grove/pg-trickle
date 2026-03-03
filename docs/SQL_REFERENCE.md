@@ -28,8 +28,8 @@ pgtrickle.create_stream_table(
 |---|---|---|---|
 | `name` | `text` | — | Name of the stream table. May be schema-qualified (`myschema.my_st`). Defaults to `public` schema. |
 | `query` | `text` | — | The defining SQL query. Must be a valid SELECT statement using supported operators. |
-| `schedule` | `text` | `'1m'` | Refresh schedule as a Prometheus/GNU-style duration string (e.g., `'30s'`, `'5m'`, `'1h'`, `'1h30m'`, `'1d'`) **or** a cron expression (e.g., `'*/5 * * * *'`, `'@hourly'`). Set to `NULL` for CALCULATED mode (inherits schedule from downstream dependents). |
-| `refresh_mode` | `text` | `'DIFFERENTIAL'` | `'FULL'` (truncate and reload) or `'DIFFERENTIAL'` (apply delta only). |
+| `schedule` | `text` | `'1m'` | Refresh schedule as a Prometheus/GNU-style duration string (e.g., `'30s'`, `'5m'`, `'1h'`, `'1h30m'`, `'1d'`) **or** a cron expression (e.g., `'*/5 * * * *'`, `'@hourly'`). Set to `NULL` for CALCULATED mode (inherits schedule from downstream dependents) or IMMEDIATE mode (no scheduling needed). |
+| `refresh_mode` | `text` | `'DIFFERENTIAL'` | `'FULL'` (truncate and reload), `'DIFFERENTIAL'` (apply delta only), or `'IMMEDIATE'` (synchronous in-transaction maintenance via statement-level triggers). |
 | `initialize` | `bool` | `true` | If `true`, populates the table immediately via a full refresh. If `false`, creates the table empty. |
 | `diamond_consistency` | `text` | `NULL` (GUC default) | Diamond dependency consistency mode: `'none'` (independent refresh) or `'atomic'` (SAVEPOINT-based atomic group refresh). When `NULL`, inherits from the `pg_trickle.diamond_consistency` GUC. See [CONFIGURATION.md](CONFIGURATION.md). |
 | `diamond_schedule_policy` | `text` | `NULL` (GUC default) | Schedule policy for atomic diamond groups: `'fastest'` (fire when any member is due) or `'slowest'` (fire when all are due). Set on the convergence node. When `NULL`, inherits from the `pg_trickle.diamond_schedule_policy` GUC. |
@@ -86,6 +86,15 @@ SELECT pgtrickle.create_stream_table(
     'SELECT region, SUM(revenue) AS total FROM sales GROUP BY region',
     '0 6 * * 1-5',
     'FULL'
+);
+
+-- Immediate mode: maintained synchronously within the same transaction
+-- No schedule needed — updates happen automatically when base table changes
+SELECT pgtrickle.create_stream_table(
+    'live_totals',
+    'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
+    NULL,
+    'IMMEDIATE'
 );
 ```
 
@@ -568,7 +577,7 @@ pgtrickle.alter_stream_table(
 |---|---|---|---|
 | `name` | `text` | — | Name of the stream table (schema-qualified or unqualified). |
 | `schedule` | `text` | `NULL` | New schedule as a duration string (e.g., `'5m'`). Pass `NULL` to leave unchanged. |
-| `refresh_mode` | `text` | `NULL` | New refresh mode (`'FULL'` or `'DIFFERENTIAL'`). Pass `NULL` to leave unchanged. |
+| `refresh_mode` | `text` | `NULL` | New refresh mode (`'FULL'`, `'DIFFERENTIAL'`, or `'IMMEDIATE'`). Pass `NULL` to leave unchanged. Switching to/from `'IMMEDIATE'` migrates trigger infrastructure (IVM triggers ↔ CDC triggers), clears or restores the schedule, and runs a full refresh. |
 | `status` | `text` | `NULL` | New status (`'ACTIVE'`, `'SUSPENDED'`). Pass `NULL` to leave unchanged. Resuming resets consecutive errors to 0. |
 | `diamond_consistency` | `text` | `NULL` | New diamond consistency mode (`'none'` or `'atomic'`). Pass `NULL` to leave unchanged. |
 | `diamond_schedule_policy` | `text` | `NULL` | New schedule policy for atomic diamond groups (`'fastest'` or `'slowest'`). Pass `NULL` to leave unchanged. |
@@ -581,6 +590,13 @@ SELECT pgtrickle.alter_stream_table('order_totals', schedule => '5m');
 
 -- Switch to full refresh mode
 SELECT pgtrickle.alter_stream_table('order_totals', refresh_mode => 'FULL');
+
+-- Switch to immediate (transactional) mode — installs IVM triggers, clears schedule
+SELECT pgtrickle.alter_stream_table('order_totals', refresh_mode => 'IMMEDIATE');
+
+-- Switch from immediate back to differential — re-creates CDC triggers, restores schedule
+SELECT pgtrickle.alter_stream_table('order_totals',
+    refresh_mode => 'DIFFERENTIAL', schedule => '5m');
 
 -- Suspend a stream table
 SELECT pgtrickle.alter_stream_table('order_totals', status => 'SUSPENDED');
@@ -1267,6 +1283,34 @@ SELECT pgtrickle.create_stream_table('order_summary',
 ```
 
 > **Note:** pg_trickle targets PostgreSQL 18. On PostgreSQL 12 or earlier (not supported), parent triggers do **not** fire for partition-routed rows, which would cause silent data loss.
+
+### IMMEDIATE Mode Query Restrictions
+
+The `'IMMEDIATE'` refresh mode supports nearly all SQL constructs supported by `'DIFFERENTIAL'` and `'FULL'` modes. Queries are validated at stream table creation and when switching to IMMEDIATE mode via `alter_stream_table`.
+
+**Supported in IMMEDIATE mode:**
+
+- Simple `SELECT ... FROM table` scans, filters, projections
+- `JOIN` (INNER, LEFT, FULL OUTER)
+- `GROUP BY` with standard aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, etc.)
+- `DISTINCT`
+- Non-recursive `WITH` (CTEs)
+- `UNION ALL`, `INTERSECT`, `EXCEPT`
+- `EXISTS` / `IN` subqueries (`SemiJoin`, `AntiJoin`)
+- Subqueries in `FROM`
+- Window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, etc.)
+- `LATERAL` subqueries
+- `LATERAL` set-returning functions (`unnest()`, `jsonb_array_elements()`, etc.)
+- Scalar subqueries in `SELECT`
+- Cascading IMMEDIATE stream tables (ST depending on another IMMEDIATE ST)
+
+**Not yet supported in IMMEDIATE mode** (use `'DIFFERENTIAL'` instead):
+
+| Construct | Reason |
+|-----------|--------|
+| Recursive CTEs (`WITH RECURSIVE`) | Semi-naive evaluation with fixpoint iteration not yet validated with transition tables |
+
+Attempting to create or switch to IMMEDIATE mode with an unsupported construct produces a clear error message suggesting `'DIFFERENTIAL'` mode.
 
 ### Logical Replication Targets
 
