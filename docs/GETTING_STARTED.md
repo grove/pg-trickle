@@ -163,7 +163,7 @@ SELECT pgtrickle.create_stream_table(
     )
     SELECT id, name, parent_id, path, depth FROM tree
     $$,
-    '30s',
+    '1m',
     'DIFFERENTIAL'
 );
 ```
@@ -177,7 +177,7 @@ That single function call did a lot of work atomically (all in one transaction):
 3. **Installed CDC triggers** on the `departments` table — lightweight `AFTER INSERT OR UPDATE OR DELETE` row-level triggers that will capture every future change
 4. **Created a change buffer table** in the `pgtrickle_changes` schema — this is where the triggers write captured changes
 5. **Ran an initial full refresh** — executed the recursive query against the current data and populated the storage table
-6. **Registered the stream table** in pg_trickle's catalog with a 30-second refresh schedule
+6. **Registered the stream table** in pg_trickle's catalog with a 1-minute refresh schedule
 
 Query it immediately — it's already populated:
 
@@ -201,7 +201,7 @@ Expected output:
 
 This is a **real PostgreSQL table** — you can create indexes on it, join it in other queries, reference it in views, or even use it as a source for other stream tables. pg_trickle keeps it in sync automatically.
 
-> **Key insight:** The recursive query that computes paths and depths would normally need to be re-run manually (or via `REFRESH MATERIALIZED VIEW`). With pg_trickle, it stays fresh — any change to the `departments` table is automatically reflected within the schedule bound (30 seconds here).
+> **Key insight:** The recursive query that computes paths and depths would normally need to be re-run manually (or via `REFRESH MATERIALIZED VIEW`). With pg_trickle, it stays fresh — any change to the `departments` table is automatically reflected within the schedule bound (1 minute here).
 
 ---
 
@@ -227,7 +227,7 @@ SELECT pgtrickle.create_stream_table(
     LEFT JOIN employees e ON e.department_id = t.id
     GROUP BY t.id, t.name, t.path, t.depth
     $$,
-    'CALCULATED',       -- inherit schedule from downstream; see explanation below
+    NULL,               -- inherit schedule from downstream; see explanation below
     'DIFFERENTIAL'
 );
 ```
@@ -236,7 +236,7 @@ SELECT pgtrickle.create_stream_table(
 
 Like before, pg_trickle parsed the query, created a storage table, and set up CDC. But `department_stats` depends on `department_tree`, not a base table — so *no new triggers were installed*. Instead, pg_trickle registered `department_tree` as an upstream dependency in the DAG.
 
-The schedule is `'CALCULATED'`, which means: "don't give this table its own schedule — inherit the tightest schedule of any downstream table that queries it". Since no other stream table has been created yet, PostgreSQL will prompt a full refresh on demand for now.
+The schedule is `NULL` (CALCULATED mode), which means: "don't give this table its own schedule — inherit the tightest schedule of any downstream table that queries it". Since no other stream table has been created yet, PostgreSQL will prompt a full refresh on demand for now.
 
 The query has no recursive CTE, so pg_trickle uses **algebraic differentiation**:
 
@@ -289,7 +289,7 @@ SELECT pgtrickle.create_stream_table(
     WHERE depth >= 1
     GROUP BY 1
     $$,
-    '30s',            -- this is the only explicit schedule; CALCULATED tables above inherit it
+    '1m',             -- this is the only explicit schedule; CALCULATED tables above inherit it
     'DIFFERENTIAL'
 );
 ```
@@ -308,10 +308,10 @@ department_tree ──────────┤
                       │
                       ▼
                department_report
-                  (DIFF, 30s)  ◀── only explicit schedule
+                  (DIFF, 1m)   ◀── only explicit schedule
 ```
 
-`department_report` drives the whole pipeline. Because it has a 30-second schedule, pg_trickle automatically propagates that cadence upstream: `department_stats` and `department_tree` will also be refreshed within 30 seconds of a base table change, in topological order, with no manual configuration.
+`department_report` drives the whole pipeline. Because it has a 1-minute schedule, pg_trickle automatically propagates that cadence upstream: `department_stats` and `department_tree` will also be refreshed within 1 minute of a base table change, in topological order, with no manual configuration.
 
 Query the report:
 
@@ -528,14 +528,14 @@ In the examples above, we called `refresh_stream_table()` manually. In productio
 
 ### How schedules propagate
 
-We gave `department_report` a `'30s'` schedule and the two upstream tables a `'CALCULATED'` schedule. This is the recommended pattern:
+We gave `department_report` a `'1m'` schedule and the two upstream tables `NULL` (CALCULATED) schedule. This is the recommended pattern:
 
 ```
- department_tree    (CALCULATED → inherits 30s from downstream)
+ department_tree    (CALCULATED → inherits 1m from downstream)
        │
- department_stats   (CALCULATED → inherits 30s from downstream)
+ department_stats   (CALCULATED → inherits 1m from downstream)
        │
- department_report  (30s — the only explicit schedule)
+ department_report  (1m — the only explicit schedule)
 ```
 
 `CALCULATED` means: compute the tightest schedule across all downstream dependents. You declare freshness requirements at the tables your application queries — the system figures out how often each upstream table needs to refresh.
@@ -558,9 +558,9 @@ FROM pgtrickle.pgt_status();
 ```
     table_name      | schedule  | last_refresh_at         | stale | refresh_mode
 --------------------+-----------+-------------------------+-------+--------------
- department_tree    | 30s       | 2026-02-26 10:30:00.123 | f     | DIFFERENTIAL
- department_stats   | 30s       | 2026-02-26 10:30:00.456 | f     | DIFFERENTIAL
- department_report  | 30s       | 2026-02-26 10:30:00.789 | f     | DIFFERENTIAL
+ department_tree    | 1m        | 2026-02-26 10:30:00.123 | f     | DIFFERENTIAL
+ department_stats   | 1m        | 2026-02-26 10:30:00.456 | f     | DIFFERENTIAL
+ department_report  | 1m        | 2026-02-26 10:30:00.789 | f     | DIFFERENTIAL
 ```
 
 ```sql
