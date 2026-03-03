@@ -27,6 +27,7 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | C1 | `test_concurrent_refresh_multiple_sts_same_source` | `e2e_concurrent_tests.rs` | **Done** |
 | C2 | `test_concurrent_refresh_same_st_no_corruption` | `e2e_concurrent_tests.rs` | **Done** |
 | C3 | `test_full_refresh_racing_with_dml` | `e2e_concurrent_tests.rs` | **Done** |
+| D1 | `test_create_st_transaction_abort_leaves_no_orphans` | `e2e_error_tests.rs` | **Done** |
 | D2 | `test_resume_stream_table_clears_suspended_status` | `e2e_error_tests.rs` | **Done** |
 | D3 | `test_refresh_rejected_for_suspended_st` | `e2e_error_tests.rs` | **Done** |
 | D  | `test_resume_unknown_stream_table_errors` | `e2e_error_tests.rs` | **Done** |
@@ -36,28 +37,33 @@ All integration tests use the `TestDb` helper from `tests/common/mod.rs`.
 | A4 | `test_property_except_differential` | `e2e_property_tests.rs` | **Done** |
 | A5 | `test_property_having_differential` | `e2e_property_tests.rs` | **Done** |
 | A6 | `test_property_three_table_join_differential` | `e2e_property_tests.rs` | **Done** |
+| A7 | `test_property_intersect_differential` | `e2e_property_tests.rs` | **Done** |
+| A8 | `test_property_composite_pk_differential` | `e2e_property_tests.rs` | **Done** |
+| A9 | `test_property_recursive_cte_full` | `e2e_property_tests.rs` | **Done** |
 | F1 | `test_pg_get_viewdef_cte_view` | `catalog_compat_tests.rs` | **Done** |
 | F2 | `test_pg_proc_volatility_column_values` | `catalog_compat_tests.rs` | **Done** |
 | F3 | `test_relkind_for_partitioned_index` | `catalog_compat_tests.rs` | **Done** |
+| F4 | `test_advisory_lock_roundtrip` | `catalog_compat_tests.rs` | **Done** |
+| F5 | `test_pg_available_extensions_shape` | `catalog_compat_tests.rs` | **Done** |
+| G  | `test_strip_view_definition_suffix_*` (6 tests) | `src/dvm/parser.rs` | **Done** |
+| G  | `test_error_kind_display_all_variants` | `src/error.rs` | **Done** |
+| G  | `test_retry_policy_default_values` | `src/error.rs` | **Done** |
+| G  | `test_frontier_get_snapshot_ts_*` (2 tests) | `src/version.rs` | **Done** |
+| G  | `test_frontier_is_empty_*` (2 tests) | `src/version.rs` | **Done** |
+| G  | `AlertEvent::Resumed` added to existing tests | `src/monitor.rs` | **Done** |
 
-**Total: 23 new tests implemented across 5 files.**
+**Total: 35 new tests (29 E2E/integration + 12 unit — some unit tests grouped above as 6+2+2).**
 
 ### Remaining (prioritised)
 
 | # | Gap | Description | Effort | Risk |
 |---|-----|-------------|--------|------|
-| 1 | D1 | Transaction abort during `create_stream_table()` → no orphans | 60 min | High |
-| 2 | A7 | INTERSECT property test (DIFFERENTIAL) | 45 min | Medium |
-| 3 | A8 | Composite PK property test (DIFFERENTIAL) | 45 min | Medium |
-| 4 | A9 | Recursive CTE property test (FULL — not differentiable) | 45 min | High |
-| 5 | E  | Write-side CDC trigger overhead benchmark | 90 min | Low |
-| 6 | F4-F5 | 2 more catalog canary tests (advisory lock compat, extension version) | 30 min | Low |
-| 7 | G  | 4 pure functions extractable for unit testing | 120 min | Low |
-| 8 | H  | E2E coverage pipeline in CI | 120 min | Medium |
-| 9 | I  | TPC-H T1-B performance + T1-C sustained churn | 180 min | Medium |
-| 10 | J | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
-| 11 | K | Cross-source snapshot consistency | 240 min | High |
-| 12 | L | Extension upgrade migration SQL + test | 120 min | High |
+| 1 | E  | Write-side CDC trigger overhead benchmark | 90 min | Low |
+| 2 | H  | E2E coverage pipeline in CI | 120 min | Medium |
+| 3 | I  | TPC-H T1-B performance + T1-C sustained churn | 180 min | Medium |
+| 4 | J  | External suites (sqllogictest, JOB, Nexmark) | 480 min | Medium |
+| 5 | K  | Cross-source snapshot consistency | 240 min | High |
+| 6 | L  | Extension upgrade migration SQL + test | 120 min | High |
 
 ---
 
@@ -981,15 +987,21 @@ async fn test_resume_unknown_stream_table_errors() {
 
 ## Implementation Order
 
-All items from the original Priority 1–6 are now **implemented** (23 tests).
+All items from the original Priority 1–6 are now **implemented**, plus the
+remaining code-level items (D1, A7–A9, F4–F5, G):
 
-The remaining items (Priority 7+) are listed in the Status Summary above.
-Next priorities:
+- **Round 1 (2026-03-03):** 23 E2E/integration tests across B, C, D, A1–A6, F1–F3
+- **Round 2 (2026-03-03):** 6 more E2E tests (D1, A7, A8, A9, F4, F5) +
+  12 pure-function unit tests (G) across parser, error, version, monitor modules
 
-1. **D1** (txn abort cleanup) — requires understanding pgrx transactional semantics
-2. **A7/A8** (INTERSECT, composite PK property tests) — straightforward extensions
-3. **E** (CDC trigger overhead benchmark) — useful but non-blocking
-4. **G–L** — infrastructure and long-term items
+The remaining items (E, H–L) are infrastructure, benchmarks, and long-term:
+
+1. **E** (CDC benchmark) — requires a benchmark harness; non-blocking
+2. **H** (CI coverage) — GitHub Actions pipeline configuration
+3. **I** (TPC-H perf) — sustained churn + performance tracking
+4. **J** (External suites) — integration with sqllogictest, JOB, Nexmark
+5. **K** (Cross-source consistency) — design needed for multi-source snapshots
+6. **L** (Upgrade migration) — SQL migration scripts + extension upgrade tests
 
 ## Notes
 
@@ -997,10 +1009,12 @@ Next priorities:
   `just build-e2e-image` before the first run.
 - Property tests use a deterministic PRNG: if a test fails, the seed is
   printed and the test can be re-run with the same seed for reproduction.
-- Seeds `0xCAFE_0020`–`0xCAFE_0025` are now allocated (Tests 12–17).
-- For D1, transactional DDL behavior may depend on whether the Rust/pgrx
-  `create_stream_table()` actually runs inside the calling transaction; verify
-  with `pg_tables` before writing the assertion.
-- For B3/B5, the exact reinit trigger depends on `columns_used` snapshot
-  accuracy — check `src/hooks.rs detect_schema_change_kind()` to confirm which
-  classification is expected before asserting `needs_reinit = true`.
+- Seeds `0xCAFE_0020`–`0xCAFE_0028` are now allocated (Tests 12–20).
+- D1 uses `sqlx::PgPool::begin()` / `tx.rollback()` to test transactional
+  cleanup of `create_stream_table()`.
+- A8 (composite PK) tracks unique `(tenant_id, item_id)` pairs via a
+  `HashSet` rather than `TrackedIds` to handle multi-column keys.
+- A9 (recursive CTE) deletes only leaf nodes to avoid orphaned subtrees.
+- G tests cover `strip_view_definition_suffix`, `PgTrickleErrorKind::Display`,
+  `RetryPolicy::default`, `Frontier::get_snapshot_ts`, `Frontier::is_empty`,
+  and the `AlertEvent::Resumed` variant.

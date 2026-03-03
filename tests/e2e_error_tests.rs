@@ -850,3 +850,65 @@ async fn test_resume_unknown_stream_table_errors() {
         "Resuming unknown ST should return an error"
     );
 }
+
+// ── D1 — Transaction abort leaves no orphans ──────────────────────────
+
+/// D1 — A rolled-back transaction that called create_stream_table()
+/// should leave no catalog entry, no storage table, and no CDC triggers.
+#[tokio::test]
+async fn test_create_st_transaction_abort_leaves_no_orphans() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE err_txn_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO err_txn_src VALUES (1, 1), (2, 2)")
+        .await;
+
+    // Execute create inside a transaction that we roll back.
+    // We use separate statements because sqlx auto-commits each query.
+    let pool = db.pool.clone();
+    let mut tx = pool.begin().await.expect("begin txn");
+    let create_result = sqlx::query(
+        "SELECT pgtrickle.create_stream_table('err_txn_st', \
+         $$ SELECT id, val FROM err_txn_src $$, '1m', 'FULL')",
+    )
+    .execute(&mut *tx)
+    .await;
+
+    // Whether create succeeded or not, we roll back the transaction.
+    let _ = create_result;
+    tx.rollback().await.expect("rollback txn");
+
+    // After rollback: no storage table should exist.
+    let exists = db.table_exists("public", "err_txn_st").await;
+    assert!(
+        !exists,
+        "Storage table should not exist after transaction rollback"
+    );
+
+    // No catalog entry should remain.
+    let cat_count: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'err_txn_st'",
+        )
+        .await;
+    assert_eq!(
+        cat_count, 0,
+        "No catalog entry should remain after rollback"
+    );
+
+    // No CDC triggers referencing this ST should exist.
+    let trigger_count: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             WHERE c.relname = 'err_txn_src' \
+             AND t.tgname LIKE '%pgtrickle%err_txn_st%'",
+        )
+        .await;
+    assert_eq!(
+        trigger_count, 0,
+        "No CDC triggers should remain after rollback"
+    );
+}

@@ -1337,3 +1337,244 @@ async fn test_property_three_table_join_differential() {
         assert_invariant(&db, "prop_t3_st", query, seed, cycle).await;
     }
 }
+
+// ── Test 18: INTERSECT (DIFFERENTIAL) ──────────────────────────────────
+
+/// A7 — INTERSECT set operation with differential maintenance.
+#[tokio::test]
+async fn test_property_intersect_differential() {
+    let seed: u64 = 0xCAFE_0026;
+    let mut rng = Rng::new(seed);
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE prop_int_a (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("CREATE TABLE prop_int_b (id INT PRIMARY KEY, val INT)")
+        .await;
+
+    let mut a_ids = TrackedIds::new();
+    let mut b_ids = TrackedIds::new();
+
+    // Insert initial data with overlapping val ranges to ensure non-empty INTERSECT
+    for _ in 0..INITIAL_ROWS {
+        let id = a_ids.alloc();
+        let val = rng.i32_range(1, 8);
+        db.execute(&format!("INSERT INTO prop_int_a VALUES ({id}, {val})"))
+            .await;
+    }
+    for _ in 0..INITIAL_ROWS {
+        let id = b_ids.alloc();
+        let val = rng.i32_range(1, 8);
+        db.execute(&format!("INSERT INTO prop_int_b VALUES ({id}, {val})"))
+            .await;
+    }
+
+    let query = "SELECT val FROM prop_int_a INTERSECT SELECT val FROM prop_int_b";
+    db.create_st("prop_int_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    assert_invariant(&db, "prop_int_st", query, seed, 0).await;
+
+    for cycle in 1..=CYCLES {
+        let id = a_ids.alloc();
+        let val = rng.i32_range(1, 8);
+        db.execute(&format!("INSERT INTO prop_int_a VALUES ({id}, {val})"))
+            .await;
+
+        if rng.gen_bool() {
+            let id = b_ids.alloc();
+            let val = rng.i32_range(1, 8);
+            db.execute(&format!("INSERT INTO prop_int_b VALUES ({id}, {val})"))
+                .await;
+        }
+        if let Some(id) = a_ids.remove_random(&mut rng) {
+            db.execute(&format!("DELETE FROM prop_int_a WHERE id = {id}"))
+                .await;
+        }
+        if let Some(id) = b_ids.remove_random(&mut rng) {
+            db.execute(&format!("DELETE FROM prop_int_b WHERE id = {id}"))
+                .await;
+        }
+
+        db.refresh_st("prop_int_st").await;
+        assert_invariant(&db, "prop_int_st", query, seed, cycle).await;
+    }
+}
+
+// ── Test 19: Composite PK (DIFFERENTIAL) ───────────────────────────────
+
+/// A8 — Multi-column primary key table with differential maintenance.
+#[tokio::test]
+async fn test_property_composite_pk_differential() {
+    let seed: u64 = 0xCAFE_0027;
+    let mut rng = Rng::new(seed);
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE prop_cpk_src (\
+         tenant_id INT, item_id INT, quantity INT, \
+         PRIMARY KEY (tenant_id, item_id))",
+    )
+    .await;
+
+    // Track composite keys as (tenant_id * 10000 + item_id) packed into i64
+    let mut ids = TrackedIds::new();
+    let mut used_keys: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+
+    for _ in 0..INITIAL_ROWS {
+        let _id_unused = ids.alloc();
+        let tenant = rng.i32_range(1, 4);
+        let item = rng.i32_range(1, 20);
+        if used_keys.insert((tenant, item)) {
+            let qty = rng.i32_range(1, 100);
+            db.execute(&format!(
+                "INSERT INTO prop_cpk_src VALUES ({tenant}, {item}, {qty})"
+            ))
+            .await;
+        }
+    }
+
+    let query = "SELECT tenant_id, item_id, quantity FROM prop_cpk_src";
+    db.create_st("prop_cpk_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    assert_invariant(&db, "prop_cpk_st", query, seed, 0).await;
+
+    for cycle in 1..=CYCLES {
+        // Insert new unique composite key rows
+        let n_ins = rng.usize_range(1, 3);
+        for _ in 0..n_ins {
+            let _id_unused = ids.alloc();
+            let tenant = rng.i32_range(1, 4);
+            let item = rng.i32_range(1, 30);
+            if used_keys.insert((tenant, item)) {
+                let qty = rng.i32_range(1, 100);
+                db.execute(&format!(
+                    "INSERT INTO prop_cpk_src VALUES ({tenant}, {item}, {qty})"
+                ))
+                .await;
+            }
+        }
+
+        // Delete a random existing row
+        if !used_keys.is_empty() && rng.gen_bool() {
+            let keys: Vec<(i32, i32)> = used_keys.iter().copied().collect();
+            let idx = rng.usize_range(0, keys.len().saturating_sub(1));
+            let (t, i) = keys[idx];
+            used_keys.remove(&(t, i));
+            db.execute(&format!(
+                "DELETE FROM prop_cpk_src WHERE tenant_id = {t} AND item_id = {i}"
+            ))
+            .await;
+        }
+
+        // Update a random existing row
+        if !used_keys.is_empty() {
+            let keys: Vec<(i32, i32)> = used_keys.iter().copied().collect();
+            let idx = rng.usize_range(0, keys.len().saturating_sub(1));
+            let (t, i) = keys[idx];
+            let new_qty = rng.i32_range(1, 100);
+            db.execute(&format!(
+                "UPDATE prop_cpk_src SET quantity = {new_qty} \
+                 WHERE tenant_id = {t} AND item_id = {i}"
+            ))
+            .await;
+        }
+
+        db.refresh_st("prop_cpk_st").await;
+        assert_invariant(&db, "prop_cpk_st", query, seed, cycle).await;
+    }
+}
+
+// ── Test 20: Recursive CTE (FULL mode) ────────────────────────────────
+
+/// A9 — Recursive CTE is not differentiable; FULL mode must maintain the
+/// invariant across DML cycles.
+#[tokio::test]
+async fn test_property_recursive_cte_full() {
+    let seed: u64 = 0xCAFE_0028;
+    let mut rng = Rng::new(seed);
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Adjacency list for a tree/graph structure
+    db.execute(
+        "CREATE TABLE prop_rcte_nodes (\
+         id INT PRIMARY KEY, parent_id INT, label TEXT)",
+    )
+    .await;
+
+    let mut ids = TrackedIds::new();
+
+    // Build initial tree: root node + children
+    let root_id = ids.alloc();
+    db.execute(&format!(
+        "INSERT INTO prop_rcte_nodes VALUES ({root_id}, NULL, 'root')"
+    ))
+    .await;
+
+    for _ in 0..INITIAL_ROWS {
+        let id = ids.alloc();
+        // Pick a random existing node as parent
+        let parent = if let Some(p) = ids.pick(&mut rng) {
+            p
+        } else {
+            root_id
+        };
+        let label = rng.choose(&["alpha", "beta", "gamma", "delta"]);
+        db.execute(&format!(
+            "INSERT INTO prop_rcte_nodes VALUES ({id}, {parent}, '{label}')"
+        ))
+        .await;
+    }
+
+    let query = "WITH RECURSIVE tree AS ( \
+                   SELECT id, parent_id, label, 1 AS depth \
+                   FROM prop_rcte_nodes WHERE parent_id IS NULL \
+                   UNION ALL \
+                   SELECT n.id, n.parent_id, n.label, t.depth + 1 \
+                   FROM prop_rcte_nodes n JOIN tree t ON n.parent_id = t.id \
+                 ) \
+                 SELECT id, parent_id, label, depth FROM tree";
+    db.create_st("prop_rcte_st", query, "1m", "FULL").await;
+    assert_invariant(&db, "prop_rcte_st", query, seed, 0).await;
+
+    for cycle in 1..=CYCLES {
+        // Add new leaf nodes
+        let n_ins = rng.usize_range(1, 3);
+        for _ in 0..n_ins {
+            let id = ids.alloc();
+            let parent = if let Some(p) = ids.pick(&mut rng) {
+                p
+            } else {
+                root_id
+            };
+            let label = rng.choose(&["alpha", "beta", "gamma", "delta"]);
+            db.execute(&format!(
+                "INSERT INTO prop_rcte_nodes VALUES ({id}, {parent}, '{label}')"
+            ))
+            .await;
+        }
+
+        // Delete a random non-root leaf (avoid cascading orphans by only
+        // deleting nodes that have no children)
+        if rng.gen_bool() {
+            let leaf_opt: Option<i64> = db
+                .query_scalar_opt(
+                    "SELECT n.id FROM prop_rcte_nodes n \
+                     WHERE n.parent_id IS NOT NULL \
+                     AND NOT EXISTS ( \
+                       SELECT 1 FROM prop_rcte_nodes c WHERE c.parent_id = n.id \
+                     ) \
+                     ORDER BY n.id LIMIT 1",
+                )
+                .await;
+            if let Some(leaf_id) = leaf_opt {
+                db.execute(&format!("DELETE FROM prop_rcte_nodes WHERE id = {leaf_id}"))
+                    .await;
+                // Remove from tracked set (best-effort — TrackedIds doesn't support
+                // arbitrary removal by value, but the invariant check doesn't depend on it)
+            }
+        }
+
+        db.refresh_st("prop_rcte_st").await;
+        assert_invariant(&db, "prop_rcte_st", query, seed, cycle).await;
+    }
+}

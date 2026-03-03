@@ -383,3 +383,76 @@ async fn test_relkind_for_partitioned_index() {
         "Index relkind should be 'i' or 'I', got: {parent_kind:?}"
     );
 }
+
+// ── F4 — Advisory lock compatibility ────────────────────────────────
+
+/// F4 — pg_try_advisory_lock / pg_advisory_unlock roundtrip.
+///
+/// pg_trickle uses advisory locks to prevent concurrent refreshes of the
+/// same stream table. This test pins the advisory lock API behaviour.
+#[tokio::test]
+async fn test_advisory_lock_roundtrip() {
+    let db = TestDb::new().await;
+
+    // Acquire an advisory lock (session-level)
+    let acquired: bool = db.query_scalar("SELECT pg_try_advisory_lock(12345)").await;
+    assert!(acquired, "Should acquire advisory lock on first attempt");
+
+    // A second attempt on the same key should still succeed (same session)
+    let acquired_again: bool = db.query_scalar("SELECT pg_try_advisory_lock(12345)").await;
+    assert!(
+        acquired_again,
+        "Same session should re-acquire its own advisory lock"
+    );
+
+    // Release the lock (need to release twice since we acquired twice)
+    let released: bool = db.query_scalar("SELECT pg_advisory_unlock(12345)").await;
+    assert!(released, "Advisory lock release should return true");
+
+    let released2: bool = db.query_scalar("SELECT pg_advisory_unlock(12345)").await;
+    assert!(released2, "Second advisory lock release should return true");
+
+    // Releasing without holding should return false
+    let released3: bool = db.query_scalar("SELECT pg_advisory_unlock(12345)").await;
+    assert!(
+        !released3,
+        "Releasing unowned advisory lock should return false"
+    );
+}
+
+// ── F5 — Extension version discovery via pg_available_extensions ─────
+
+/// F5 — pg_available_extensions reports installed extension versions.
+///
+/// pg_trickle queries pg_available_extensions to detect the installed version
+/// for upgrade migration checks. This test pins the catalog shape.
+#[tokio::test]
+async fn test_pg_available_extensions_shape() {
+    let db = TestDb::new().await;
+
+    // The `plpgsql` extension is always available in PostgreSQL.
+    let plpgsql_version: String = db
+        .query_scalar(
+            "SELECT installed_version::text FROM pg_available_extensions \
+             WHERE name = 'plpgsql'",
+        )
+        .await;
+    assert!(
+        !plpgsql_version.is_empty(),
+        "plpgsql should have a non-empty installed_version"
+    );
+
+    // Verify the expected columns exist in pg_available_extensions
+    let col_count: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM information_schema.columns \
+             WHERE table_schema = 'pg_catalog' \
+             AND table_name = 'pg_available_extensions' \
+             AND column_name IN ('name', 'default_version', 'installed_version', 'comment')",
+        )
+        .await;
+    assert_eq!(
+        col_count, 4,
+        "pg_available_extensions should have name, default_version, installed_version, comment columns"
+    );
+}
