@@ -5,7 +5,8 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Status:** PROPOSED  
+**Last updated:** 2026-03-04  
+**Status:** IN PROGRESS — Stage 1 partial, Stage 2 complete  
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -15,11 +16,11 @@
 Users can silently get wrong results from these bugs today. Nothing else
 ships until all three are resolved and TPC-H regression passes.
 
-| # | Item | Effort | Gate |
-|---|------|--------|------|
-| 1 | **EC-19** — Reject WAL + keyless without REPLICA IDENTITY FULL at creation time | 0.5 day | — |
-| 2 | **EC-06** — Emit WARNING for keyless tables at creation; implement count-based hash delta | 2–3 days | EC-19 done |
-| 3 | **EC-01** — R₀ via EXCEPT ALL: split Part 1 of `diff_inner_join` to use pre-change right state | 4–6 days | EC-06 done |
+| # | Item | Effort | Gate | Status |
+|---|------|--------|------|--------|
+| 1 | **EC-19** — Reject WAL + keyless without REPLICA IDENTITY FULL at creation time | 0.5 day | — | ✅ Done |
+| 2 | **EC-06** — Emit WARNING for keyless tables at creation; implement count-based hash delta | 2–3 days | EC-19 done | ⚠️ Warning done; hash delta TBD |
+| 3 | **EC-01** — R₀ via EXCEPT ALL: split Part 1 of `diff_inner_join` to use pre-change right state | 4–6 days | EC-06 done | ❌ Not started |
 
 **Completion gate:** `just test-all` green + TPC-H Q07 passes with `TPCH_CYCLES=5`.
 
@@ -30,15 +31,15 @@ ships until all three are resolved and TPC-H regression passes.
 Low-effort guard-rail fixes that prevent users from inadvertently
 corrupting state. Ship as a batch before expanding SQL coverage.
 
-| # | Item | Effort |
-|---|------|--------|
-| 4 | **EC-25** — Event trigger blocking TRUNCATE on stream tables | 0.5 day |
-| 5 | **EC-26** — Guard trigger blocking direct DML on stream tables | 1 day |
-| 6 | **EC-15** — WARNING at creation time when defining query contains `SELECT *` | 0.5 day |
-| 7 | **EC-11** — `scheduler_falling_behind` NOTIFY alert (80% threshold, 3 consecutive cycles) | 1 day |
-| 8 | **EC-13** — Default `diamond_consistency` to `'atomic'` for new stream tables | 0.5 day |
-| 9 | **EC-18** — Rate-limited LOG explaining why `auto` CDC mode is stuck in TRIGGER phase | 1 day |
-| 10 | **EC-34** — Auto-detect missing WAL slot; fall back to TRIGGER + WARNING | 1 day |
+| # | Item | Effort | Status |
+|---|------|--------|--------|
+| 4 | **EC-25** — Event trigger blocking TRUNCATE on stream tables | 0.5 day | ✅ Done |
+| 5 | **EC-26** — Guard trigger blocking direct DML on stream tables | 1 day | ✅ Done |
+| 6 | **EC-15** — WARNING at creation time when defining query contains `SELECT *` | 0.5 day | ✅ Done |
+| 7 | **EC-11** — `scheduler_falling_behind` NOTIFY alert (80% threshold) | 1 day | ✅ Done |
+| 8 | **EC-13** — Default `diamond_consistency` to `'atomic'` for new stream tables | 0.5 day | ✅ Done |
+| 9 | **EC-18** — Rate-limited LOG explaining why `auto` CDC mode is stuck in TRIGGER phase | 1 day | ✅ Done |
+| 10 | **EC-34** — Auto-detect missing WAL slot; fall back to TRIGGER + WARNING | 1 day | ✅ Done |
 
 **Completion gate:** `just test-all` green.
 

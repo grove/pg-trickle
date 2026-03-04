@@ -206,6 +206,7 @@ recursion should use FULL mode.
 | **Impact** | Phantom or missed deletes in stream table |
 | **Current mitigation** | Add a primary key; add a synthetic unique column; or use FULL mode |
 | **Documented in** | FAQ § "Keyless Tables"; SQL_REFERENCE § "Row Identity" |
+| **Status** | ⚠️ **PARTIAL** — WARNING at creation time implemented; count-based hash delta TBD |
 
 **Proposed fix:**
 
@@ -316,6 +317,7 @@ the right answer when back-pressure is needed.
 | **Impact** | Perpetual latency spiral; cascading DAG chains fall behind |
 | **Current mitigation** | Widen the interval; use IMMEDIATE mode; or split the DAG |
 | **Documented in** | FAQ § "Performance and Tuning" |
+| **Status** | ✅ **IMPLEMENTED** — `scheduler_falling_behind` NOTIFY alert at 80% threshold |
 
 **Chosen fix: `scheduler_falling_behind` NOTIFY alert (short term):**
 
@@ -357,6 +359,7 @@ call. Low priority — manual `refresh_stream_table()` already covers this.
 | **Impact** | Fan-in node reads inconsistent upstream versions |
 | **Current mitigation** | `diamond_consistency = 'atomic'` |
 | **Documented in** | FAQ § "Diamond Dependencies"; SQL_REFERENCE |
+| **Status** | ✅ **IMPLEMENTED** — default changed from `'none'` to `'atomic'` |
 
 **Proposed fix:** The `atomic` mode already fixes this. Remaining work:
 
@@ -393,6 +396,7 @@ can investigate. **No urgency** — the automatic retry handles recovery.
 | **Impact** | Refresh fails; stream table marked `needs_reinit` |
 | **Current mitigation** | Use explicit column lists in defining queries |
 | **Documented in** | FAQ § "Schema Changes" |
+| **Status** | ✅ **IMPLEMENTED** — WARNING at creation time for `SELECT *` |
 
 **Proposed fix:**
 
@@ -454,6 +458,7 @@ documentation to clarify this is a theoretical edge case.
 | **Impact** | User thinks WAL CDC is active; actually stuck on triggers forever |
 | **Current mitigation** | Default is `TRIGGER` mode; `auto` must be explicitly set |
 | **Documented in** | FAQ § "CDC Architecture" |
+| **Status** | ✅ **IMPLEMENTED** — rate-limited LOG every ~60 scheduler ticks |
 
 **Proposed fix:**
 
@@ -475,6 +480,7 @@ documentation to clarify this is a theoretical edge case.
 | **Impact** | Silent data loss for UPDATEs/DELETEs on keyless tables in WAL mode |
 | **Current mitigation** | Set `REPLICA IDENTITY FULL` before switching to WAL CDC |
 | **Documented in** | FAQ § "CDC Architecture" |
+| **Status** | ✅ **IMPLEMENTED** — `setup_cdc_for_source()` rejects at creation time |
 
 **Proposed fix:**
 
@@ -578,6 +584,7 @@ is acceptable. **No further code fix needed.**
 | **Impact** | Frontier / buffer desync; future refreshes produce incorrect deltas |
 | **Current mitigation** | Use `refresh_stream_table()` to reset |
 | **Documented in** | SQL_REFERENCE § "What Is NOT Allowed" |
+| **Status** | ✅ **IMPLEMENTED** — BEFORE TRUNCATE guard trigger blocks direct TRUNCATE |
 
 **Proposed fix:**
 
@@ -600,6 +607,7 @@ is acceptable. **No further code fix needed.**
 | **Impact** | Data overwritten or duplicated on next refresh |
 | **Current mitigation** | Documentation; never write directly |
 | **Documented in** | SQL_REFERENCE § "What Is NOT Allowed" |
+| **Status** | ✅ **IMPLEMENTED** — BEFORE INSERT/UPDATE/DELETE guard trigger on storage table |
 
 **Proposed fix:**
 
@@ -758,6 +766,7 @@ insufficient for very large groups.
 | **Impact** | CDC stuck; slot-missing error after restore |
 | **Current mitigation** | Set `cdc_mode = 'trigger'` after restore; let auto recreate slots |
 | **Documented in** | FAQ § "Operations" |
+| **Status** | ✅ **IMPLEMENTED** — auto-detect missing slot in health check; fall back to TRIGGER |
 
 **Proposed fix:**
 

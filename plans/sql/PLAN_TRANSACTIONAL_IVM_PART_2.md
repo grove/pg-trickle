@@ -1,8 +1,9 @@
 # Plan: Expanding SQL Coverage in Trigger-Based CDC Mode (Part 2)
 
 **Date:** 2026-03-03  
-**Status:** PROPOSED  
-**Branch:** TBD  
+**Last updated:** 2026-03-04  
+**Status:** PROPOSED — blocked on [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](../PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stages 1-2  
+**Branch:** `edge-cases-and-transactional-ivm`  
 **Scope:** Limitations of `pg_trickle.cdc_mode = 'trigger'` (the default),
 and a phased implementation plan to maximise the SQL surface area supported
 in DIFFERENTIAL mode with trigger-based change capture.  
