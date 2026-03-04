@@ -12,27 +12,30 @@ ARG USER_GID=${USER_UID}
 
 # ── System dependencies ─────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # Build essentials
-        build-essential \
-        pkg-config \
-        ca-certificates \
-        curl \
-        git \
-        gnupg \
-        # PostgreSQL dev headers (pgrx bindgen)
-        postgresql-server-dev-18 \
-        libreadline-dev \
-        zlib1g-dev \
-        libssl-dev \
-        # clang/llvm (pgrx bindgen requirement)
-        libclang-dev \
-        clang \
-        # Useful dev tools
-        sudo \
-        locales \
-        less \
-        procps \
-        lsb-release \
+    # Build essentials
+    build-essential \
+    pkg-config \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    # PostgreSQL dev headers (pgrx bindgen)
+    postgresql-server-dev-18 \
+    libreadline-dev \
+    zlib1g-dev \
+    libssl-dev \
+    libicu-dev \
+    bison \
+    flex \
+    # clang/llvm (pgrx bindgen requirement)
+    libclang-dev \
+    clang \
+    # Useful dev tools
+    sudo \
+    locales \
+    less \
+    procps \
+    lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Locale ───────────────────────────────────────────────────────────────────
@@ -56,6 +59,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="${HOME}/.cargo/bin:${PATH}"
 
 # ── cargo-pgrx ──────────────────────────────────────────────────────────────
+# Keep `cargo pgrx init` out of this Dockerfile: it writes user/runtime state
+# under /home/vscode/.pgrx, which is volume-mounted in the devcontainer.
+# Initialization is performed in .devcontainer/devcontainer.json lifecycle hooks
+# after mounts are attached and ownership is corrected.
 RUN cargo install --locked cargo-pgrx --version 0.17.0
 
 # ── just (command runner) ───────────────────────────────────────────────────
