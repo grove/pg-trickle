@@ -123,7 +123,7 @@ done
 
 echo "Creating pg_trickle extension..."
 docker exec "$CONTAINER_NAME" \
-  psql -U postgres -c "CREATE EXTENSION pg_trickle;"
+  psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_trickle;"
 
 # ── Set up dbt Python environment ─────────────────────────────────────────
 # dbt-core 1.10 requires Python <=3.13 (mashumaro dependency incompatible with 3.14).
