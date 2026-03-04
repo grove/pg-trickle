@@ -127,12 +127,31 @@ default 64) so power users can raise it when they accept the memory cost.
 | **Current mitigation** | Keep window functions as top-level SELECT columns |
 | **Documented in** | FAQ § "Window Functions" |
 
-**Proposed fix:** Automatically rewrite `CASE WHEN ROW_NUMBER() OVER (…) = 1
-THEN …` into a CTE that projects the window as a standalone column, then
-wrap the CASE expression in the outer query. This is a parser-level
-transformation in `src/dvm/parser.rs`. Complex cases (nested window calls
-inside arithmetic) may remain unsupported, but the most common pattern
-(CASE/IF around a single window) covers ~80% of user demand.
+**Chosen fix: nested-subquery lift (see PLAN_TRANSACTIONAL_IVM_PART_2.md Task 1.3):**
+
+Add a new auto-rewrite pass (`rewrite_nested_window_exprs`) that lifts
+window functions out of expressions into a synthetic column in an inner
+subquery, then applies the outer expression against that column:
+
+```sql
+-- Before (rejected):
+SELECT id, ABS(ROW_NUMBER() OVER (ORDER BY score) - 5) AS adjusted_rank
+FROM players
+
+-- After rewrite (supported):
+SELECT id, ABS(__pgt_wf_1 - 5) AS adjusted_rank
+FROM (
+    SELECT id, score,
+           ROW_NUMBER() OVER (ORDER BY score) AS __pgt_wf_1
+    FROM players
+) __pgt_wf_inner
+```
+
+The subquery approach is preferred over the earlier CTE approach because a
+`WITH` clause produces a `WithQuery` node in the OpTree, requiring the DVM
+engine to handle CTEs wrapping window functions — an untested path. The
+subquery produces a nested `Scan → Window → Project` chain that the existing
+DVM path already handles correctly.
 
 ---
 
@@ -253,12 +272,21 @@ affected rows.
 | **Current mitigation** | Use DIFFERENTIAL mode |
 | **Documented in** | FAQ § "What SQL features are NOT supported in IMMEDIATE mode?" |
 
-**Proposed fix:** The main gap is recursive CTEs. TopK fundamentally
-requires scheduled recomputation. Materialised view sources require event
-trigger support that PostgreSQL does not provide for mat-view refreshes.
-**No code fix for recursive CTEs / TopK.** For mat-view sources, consider
-a polling-change-detection wrapper (same approach as EC-05 for foreign
-tables).
+**Proposed fix (recursive CTEs + TopK): deferred to PLAN_TRANSACTIONAL_IVM_PART_2.md Phase 5.**
+
+Implementation plans for both constructs now exist in Part 2:
+
+- **Recursive CTEs (G10 / Task 5.1):** Validate that the existing semi-naive
+  evaluation works correctly with `DeltaSource::TransitionTable`; remove the
+  `RecursiveCte` rejection from `check_immediate_support()` once validated.
+  A `max_stack_depth` guard is added before fixpoint iteration.
+- **TopK (G11 / Task 5.2):** Implement statement-level micro-refresh: compute
+  the new top K, diff against current stream table contents, apply
+  DELETE + INSERT. Guarded by a `pg_trickle.ivm_topk_max_limit` GUC
+  (default 1000) to prevent inline recomputation latency spikes for large K.
+
+For materialised view sources: use a polling-change-detection wrapper (same
+approach as EC-05 for foreign tables). No code fix proposed for this case.
 
 ---
 
@@ -695,14 +723,29 @@ differentiation path without a new delta template.
 | **Current mitigation** | Use FULL mode; or pre-aggregate in DIFFERENTIAL and compute in a view |
 | **Documented in** | FAQ § "Unsupported Aggregates" |
 
-**Chosen fix: auxiliary accumulator columns (long term):**
+**Chosen fix: group-rescan (see PLAN_TRANSACTIONAL_IVM_PART_2.md Task 4.1):**
 
-Add `CORR`/`COVAR_POP`/`COVAR_SAMP`/`REGR_*` support by maintaining
-auxiliary accumulator columns (`sum_x`, `sum_y`, `sum_xy`, `sum_x2`,
-`count`) in the stream table and generating SQL delta templates that update
-them incrementally. The algebra follows Welford's online algorithm adapted
-to SQL set differences. Accepted as a long-term deliverable; FULL mode
-and the pre-aggregate workaround remain the supported path until then.
+Implement `CORR`/`COVAR_POP`/`COVAR_SAMP`/`REGR_*` using the proven
+group-rescan strategy already used for `BOOL_AND`, `STRING_AGG`, etc.:
+
+1. Detect affected groups from the delta (groups where any row was
+   inserted, updated, or deleted).
+2. For each affected group, re-aggregate from source:
+   `SELECT group_key, CORR(y, x) FROM source GROUP BY group_key`
+3. Apply the result as an UPDATE to the stream table.
+
+This requires no stream table schema changes and no new OpTree variants.
+
+**Deferred — Welford auxiliary accumulator columns:**
+
+The earlier proposal of maintaining `sum_x`, `sum_y`, `sum_xy`, `sum_x2`,
+`count` accumulator columns in the stream table using Welford's online
+algorithm adapted to SQL EXCEPT/UNION was explored but is deferred.
+Rationale: it requires a breaking schema change to existing stream tables,
+the SQL delta-algebra correctness of the Welford adaptation is non-trivial
+to verify, and group-rescan is already correct and benchmarked for
+analogue aggregates. Revisit for v2.0 if group-rescan performance is
+insufficient for very large groups.
 
 ---
 

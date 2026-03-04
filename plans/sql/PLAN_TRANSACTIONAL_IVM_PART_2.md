@@ -282,6 +282,14 @@ careful handling of aliases, ORDER BY, and frame specifications.
 (...))` is rejected because `expr_contains_window_function()` detects the
 nested window function and errors.
 
+**Note:** EC-03 in PLAN_EDGE_CASES.md originally proposed lifting via a CTE
+(`WITH __pgt_wf AS (...)`). That approach is superseded by this subquery
+lift. The CTE approach produces a `WithQuery` node in the OpTree requiring
+the DVM engine to handle CTEs wrapping window functions — an untested path.
+The subquery approach produces a nested `Scan → Window → Project` chain that
+the existing DVM path already handles correctly. EC-03 has been updated
+accordingly.
+
 **Proposed fix:** Add a new auto-rewrite pass (`rewrite_nested_window_exprs`)
 that lifts window functions out of expressions into separate columns, then
 wraps the result in an outer SELECT that applies the expression:
@@ -345,12 +353,30 @@ for every row returned by the subquery." This is the negation of `EXISTS
 3. Construct an `AntiJoin` OpTree node with the negated condition — this
    emits "rows from the left that have NO match in the right where the
    negated condition holds," which is equivalent to ALL.
-4. Alternatively, rewrite to `NOT EXISTS (SELECT 1 FROM subquery WHERE NOT
-   (col op subquery_col))` at the SQL level before parsing.
+4. Alternatively, rewrite to a SQL-level `NOT EXISTS (… EXCEPT …)` pattern
+   at the SQL level before parsing (see EC-32 in PLAN_EDGE_CASES.md).
 
-**Recommended approach:** SQL-level rewrite (new `rewrite_all_sublink()`
-pass) is simpler and leverages the existing AntiJoin operator without new
-OpTree variants or diff operators.
+**Recommended approach:** SQL-level rewrite to `NOT EXISTS (… EXCEPT …)` —
+aligned with EC-32:
+
+```sql
+-- col > ALL (SELECT x FROM t)
+-- rewrites to:
+NOT EXISTS (SELECT col EXCEPT SELECT x FROM t WHERE col > x)
+-- generalised NULL-safe form:
+NOT EXISTS (
+    SELECT 1 FROM subquery
+    WHERE col IS NOT DISTINCT FROM subquery_col
+      OR NOT (col op subquery_col)
+)
+```
+
+The `EXCEPT`-based pattern is preferred over `WHERE NOT (col op
+subquery_col)` because it is NULL-safe: PostgreSQL's `EXCEPT` uses
+`IS NOT DISTINCT FROM` equality, so a NULL in the subquery correctly
+prevents the predicate from holding — matching the SQL standard semantics
+for `ALL`. The `WHERE NOT` form silently drops NULL-containing rows,
+producing wrong results for `= ALL (...)` when the subquery contains NULLs.
 
 **Files changed:**
 - `src/dvm/parser.rs` — new `rewrite_all_sublink()` or extend
