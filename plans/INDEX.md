@@ -86,6 +86,8 @@ new entries when creating documents.
 | [PLAN_HYBRID_CDC.md](sql/PLAN_HYBRID_CDC.md) | PLAN | Complete | Hybrid CDC — trigger bootstrap → logical replication |
 | [PLAN_WATERMARK_GATING.md](sql/PLAN_WATERMARK_GATING.md) | PLAN | Exploration | User-provided watermarks for cross-source gating of externally-loaded data |
 | [PLAN_NATIVE_SYNTAX.md](sql/PLAN_NATIVE_SYNTAX.md) | PLAN | Proposed | Native PostgreSQL syntax for stream tables |
+| [PLAN_ALTER_QUERY.md](sql/PLAN_ALTER_QUERY.md) | PLAN | Draft | Allow alter_stream_table to change the defining query in place |
+| [PLAN_REFRESH_MODE_DEFAULT.md](sql/PLAN_REFRESH_MODE_DEFAULT.md) | PLAN | Draft | Make refresh mode selection optional with adaptive default behavior |
 | [PLAN_TRANSACTIONAL_IVM.md](sql/PLAN_TRANSACTIONAL_IVM.md) | PLAN | Proposed | Transactionally updated views (immediate IVM) |
 | [PLAN_UPGRADE_MIGRATIONS.md](sql/PLAN_UPGRADE_MIGRATIONS.md) | PLAN | Draft | Extension upgrade migrations |
 | [PLAN_USER_TRIGGERS_EXPLICIT_DML.md](sql/PLAN_USER_TRIGGERS_EXPLICIT_DML.md) | PLAN | Implemented | User triggers on stream tables via explicit DML |
