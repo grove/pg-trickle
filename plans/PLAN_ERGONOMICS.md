@@ -250,6 +250,320 @@ SHOW pg_trickle.diamond_schedule_policy;    -- ERROR: unrecognized configuration
 
 ---
 
+---
+
+## Proposals (not yet decided)
+
+The following improvements were identified during an ergonomics review. Each is
+described with enough context to make a decision. None are committed to
+implementation yet.
+
+---
+
+### Proposal A — Return a record from `create_stream_table` and `refresh_stream_table`
+
+**Priority:** High  
+**Complexity:** Low  
+**Type:** API addition (non-breaking if done as overload; breaking if current void signature changes)
+
+Currently both functions return `VOID`. To check the outcome, callers must
+issue a follow-up `SELECT` on the catalog. This pattern is repeated everywhere
+in the test suite and will be repeated in every operator script.
+
+Proposed return shapes:
+
+```sql
+-- create_stream_table
+(pgt_id bigint, status text, created_at timestamptz)
+
+-- refresh_stream_table
+(status text, rows_inserted bigint, rows_deleted bigint, duration_ms float8)
+```
+
+**Decision factors:**
+- Does changing the return type break existing callers? Yes, if they use
+  `SELECT pgtrickle.create_stream_table(...)` in a script that ignores the
+  result — PostgreSQL will still succeed, but any code using `PERFORM` would
+  need to be unchanged.
+- Should these be new overloaded functions or replace the existing ones?
+- Should `status` use a fixed enum (`'created'`, `'already_exists'`,
+  `'skipped'`, `'error'`) or a free-form string?
+
+---
+
+### Proposal B — Warn at init if `cdc_mode = 'auto'` but `wal_level != 'logical'`
+
+**Priority:** High  
+**Complexity:** Low  
+**Type:** Safety / UX
+
+`pg_trickle.cdc_mode = 'auto'` is designed to automatically upgrade from TRIGGER
+to WAL-based CDC once PostgreSQL's `wal_level` is set to `logical`. On a
+standard PostgreSQL install, `wal_level` defaults to `replica`. In this
+state, `auto` silently stays in TRIGGER mode indefinitely — producing no
+error, no warning, and no visible status change.
+
+FAQ documentation acknowledges this but it is easy to miss.
+
+**Proposal:** At extension load (`_PG_init`), check:
+```rust
+if cdc_mode == "auto" && wal_level != "logical" {
+    pgrx::warning!("pg_trickle: cdc_mode='auto' but wal_level is '{}', not 'logical'. \
+        WAL CDC will not activate until wal_level is changed and PostgreSQL restarted.", wal_level);
+}
+```
+
+**Decision factors:**
+- Is it acceptable to emit a WARNING at every backend startup if this condition
+  is true? Could be noisy in shared environments.
+- Alternative: emit the warning only via a dedicated health check function, not
+  at init time.
+
+---
+
+### Proposal C — Warn on `create_stream_table` if source table has no PRIMARY KEY
+
+**Priority:** High  
+**Complexity:** Low  
+**Type:** Proactive safety check
+
+Stream tables over keyless sources silently mishandle duplicate rows: identical
+rows share the same internal `__pgt_row_id` and a duplicate INSERT may be
+treated as a no-op. This is documented as a known limitation under
+"Keyless Table Duplicate Row Limitation (G7.1)" in the FAQ, but users hit it
+without warning.
+
+**Proposal:** During `create_stream_table`, query `pg_constraint` for the source
+table(s). If none of the sources referenced in the query have a PRIMARY KEY,
+emit:
+```
+WARNING: source table "foo" has no PRIMARY KEY — duplicate rows will not be
+tracked correctly. Add a primary key or use a unique column as a row identity.
+```
+
+**Decision factors:**
+- Should this be a WARNING (non-fatal) or an ERROR (require explicit opt-in
+  with `allow_keyless => true` parameter)?
+- The check only applies to the directly named source tables, not to derived
+  sources (e.g., subqueries, CTEs). That limitation should be noted.
+- Cost: requires a catalog lookup per source table at creation time (cheap).
+
+---
+
+### Proposal D — Record manual `refresh_stream_table` calls in `pgt_refresh_history`
+
+**Priority:** Medium  
+**Complexity:** Medium  
+**Type:** Observability / consistency
+
+`pgt_refresh_history` only contains rows inserted by the background scheduler
+worker (`initiated_by = 'SCHEDULER'`). Manual calls to
+`pgtrickle.refresh_stream_table()` are not recorded. This means:
+
+- Operators auditing history miss manual refreshes entirely.
+- Graphs of refresh frequency are inaccurate.
+- Test assertions that check "were there N refreshes?" reach around the history
+  table and read `data_timestamp` instead.
+
+**Proposal:** At the end of a successful `refresh_stream_table` call, insert a
+history row with `initiated_by = 'MANUAL'` and the same `duration_ms`,
+`rows_affected`, and `status` fields the scheduler already writes.
+
+**Decision factors:**
+- History table is currently append-only and retention is controlled by
+  `pg_trickle.history_retention_days`. Manual records would share that policy
+  and clean up automatically — no special handling needed.
+- Should error outcomes (failed refreshes) also be recorded? Currently even
+  scheduler failures are recorded; consistency suggests yes.
+- Volume concern: a hot path calling `refresh_stream_table` in a loop would
+  create many history rows. Acceptable for now given the append-only design.
+
+---
+
+### Proposal E — `pgtrickle.quick_health` convenience view
+
+**Priority:** Medium  
+**Complexity:** Low  
+**Type:** Monitoring / new SQL object
+
+The extension exposes 15+ monitoring functions with overlapping scopes. New
+operators have no obvious starting point for "is everything OK right now?".
+The closest existing function is `pgtrickle.health_check()`, but it returns
+multiple rows with varying structure and requires understanding which columns
+to focus on.
+
+**Proposed view:**
+
+```sql
+CREATE VIEW pgtrickle.quick_health AS
+SELECT
+    (SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables) AS total_stream_tables,
+    (SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables WHERE consecutive_errors > 0) AS error_tables,
+    (SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables WHERE data_timestamp < now() - make_interval(secs => schedule_secs * 3)) AS stale_tables,
+    pg_trickle_scheduler_running() AS scheduler_running,
+    -- ... cdc health summary ...
+    CASE WHEN error_tables = 0 AND scheduler_running THEN 'OK' ELSE 'DEGRADED' END AS status;
+```
+
+One row, one glance. If `status = 'OK'`, stop reading.
+
+**Decision factors:**
+- Should this be a VIEW (no parameters, always computes) or a function
+  `quick_health()` returning a record?
+- A VIEW requires thinking about column stability across versions — harder to
+  evolve. A function is easier to change.
+- Should it be in schema `pgtrickle` (user-facing) or `pgtrickle_internal`?
+- The "staleness" heuristic (3× schedule interval) needs a defined policy.
+
+---
+
+### Proposal F — Emit WARNING when `alter_stream_table` triggers a full refresh
+
+**Priority:** Medium  
+**Complexity:** Low  
+**Type:** Transparency / silent expensive operation
+
+When `alter_stream_table` changes the `refresh_mode`, definition query, or
+certain parameters that invalidate the current materialization, it
+automatically executes a full refresh (equivalent to truncating and repopulating
+the stream table). This can be expensive on large tables and currently only
+emits a `pgrx::info!()` log, which is suppressed at most log levels and never
+surfaced to the calling client.
+
+**Proposal:** Upgrade the message to `pgrx::warning!()` so it appears at the
+client's session regardless of server `log_min_messages`:
+```
+WARNING: pg_trickle: stream table "foo" refresh mode changed from INCREMENTAL to FULL;
+a full refresh was applied (N rows). This may take time on large tables.
+```
+
+Optionally also send a `NOTIFY pgtrickle_events, '{"event":"full_refresh","table":"foo"}'`
+for monitoring automation.
+
+**Decision factors:**
+- Is WARNING the right severity, or should it be NOTICE? NOTICE is always shown
+  to the client; WARNING implies something requires attention.
+- Should a full NOTIFY channel be introduced (could be useful for Proposal E
+  as well), or is the log message sufficient?
+- Are there cases where the full refresh is expected and the warning would be
+  spurious (e.g., during initial setup scripts)?
+
+---
+
+### Proposal G — "Which monitoring function?" decision tree in docs
+
+**Priority:** Medium  
+**Complexity:** Very Low  
+**Type:** Documentation
+
+With 15+ monitoring functions in `pgtrickle`, new operators don't know which
+to call. Common questions and their current answers:
+
+| Question | Function needed |
+|---|---|
+| Is my stream table up to date? | `pgtrickle.get_staleness('name')` |
+| What failed and why? | `pgtrickle.get_refresh_history('name')` |
+| Is CDC capturing changes? | `pgtrickle.check_cdc_health()` |
+| Are triggers installed correctly? | `pgtrickle.trigger_inventory()` |
+| Is the scheduler running? | `pgtrickle.pg_stat_stream_tables` |
+| Overall system health? | `pgtrickle.health_check()` |
+
+**Proposal:** Add a "Monitoring Quick Reference" section near the top of
+[docs/SQL_REFERENCE.md](../docs/SQL_REFERENCE.md) (or as a dedicated
+`docs/MONITORING.md`) mapping common operational questions to the right
+function, with a one-line example for each.
+
+**Decision factors:**
+- Where should it live: a new `MONITORING.md`, a section in `SQL_REFERENCE.md`,
+  or a separate `GETTING_STARTED` sub-section?
+- Should it be a prose decision tree, a table, or a flowchart (Mermaid)?
+
+---
+
+### Proposal H — "Special Cases & Known Limitations" section in SQL_REFERENCE.md
+
+**Priority:** Medium  
+**Complexity:** Very Low  
+**Type:** Documentation
+
+Several important behavioral edge cases are currently scattered through
+different documents:
+
+| Case | Currently documented in |
+|---|---|
+| TopK (ORDER BY + LIMIT rewrite) | FAQ + buried note in SQL_REFERENCE |
+| Keyless table duplicate rows | FAQ "Known Delta Computation Limitations" |
+| SELECT \* schema drift | GETTING_STARTED + FAQ |
+| JOIN key-change + delete edge case | Footnote deep in SQL_REFERENCE |
+| Direct DML blocked on stream tables | On-demand error only |
+
+Users who hit one of these problems must search across multiple documents. A
+dedicated section consolidating all special cases and limitations would reduce
+support burden.
+
+**Decision factors:**
+- Should this be a new top-level `## Special Cases` section within
+  `SQL_REFERENCE.md`, or a standalone `docs/EDGE_CASES.md`?
+- Should existing references in FAQ/GETTING_STARTED be replaced or kept
+  with cross-links?
+
+---
+
+### Proposal I — Improve cycle-detection error messages
+
+**Priority:** Low  
+**Complexity:** Low  
+**Type:** Error quality
+
+The current cycle detection error shows the cycle path but doesn't guide the
+user on how to resolve it:
+```
+ERROR: dependency cycle detected: foo → bar → foo
+```
+
+Users unfamiliar with DAG concepts won't know what to do. A better message:
+```
+ERROR: dependency cycle detected: foo → bar → foo
+HINT: Stream tables cannot form circular dependencies. To fix this, ensure
+each stream table only reads from base tables or stream tables that do not
+(directly or transitively) read from it.
+```
+
+**Decision factors:**
+- Should the HINT be added inline in the error string, or via a separate
+  `pgrx::hint!()` call (which PostgreSQL displays as a "HINT:" line)?
+
+---
+
+### Proposal J — Emit NOTICE when a query is auto-rewritten
+
+**Priority:** Low  
+**Complexity:** Medium  
+**Type:** Transparency
+
+pg_trickle rewrites user queries in up to five passes (view inlining, CTE
+flattening, alias stripping, etc.) before storing them in the catalog. Users
+who query `pgt_stream_tables.definition` after creating a stream table see a
+different query from the one they wrote, with no explanation.
+
+**Proposal:** After the rewrite passes, if the stored definition differs from
+the input, emit a NOTICE:
+```
+NOTICE: query was rewritten for incremental maintenance.
+Original:  SELECT v.x FROM my_view v WHERE v.y > 0
+Stored:    SELECT base.x FROM base_table base WHERE base.y > 0
+```
+
+**Decision factors:**
+- How verbose should the notice be? Full before/after, or just "query was
+  simplified"?
+- Rewriting is always intentional; would this notice confuse users into
+  thinking something is wrong?
+- The rewrite is currently undone if refresh fails — the NOTICE should only
+  fire after the definition is successfully committed.
+
+---
+
 ## CHANGELOG entries (to add under unreleased)
 
 - **Breaking**: `create_stream_table` now defaults `schedule` to `'calculated'`
