@@ -351,6 +351,13 @@ fn create_stream_table_impl(
     let pgt_relid = get_table_oid(&schema, &table_name)?;
 
     // Create unique index on __pgt_row_id
+    //
+    // EC-06 TODO: For keyless sources with duplicate rows, the UNIQUE
+    // constraint prevents storing multiple identical rows (they have the
+    // same content hash → same __pgt_row_id). The full EC-06 fix should
+    // either: (a) use a non-unique index for keyless sources, or
+    // (b) disambiguate row_ids using ROW_NUMBER() during full refresh.
+    // See PLAN_EDGE_CASES.md § EC-06 for the design.
     let index_sql = format!(
         "CREATE UNIQUE INDEX ON {}.{} (__pgt_row_id)",
         quote_identifier(&schema),

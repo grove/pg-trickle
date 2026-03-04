@@ -5,8 +5,8 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Last updated:** 2026-03-04  
-**Status:** IN PROGRESS — Stage 1 partial, Stage 2 complete  
+**Last updated:** 2026-03-05  
+**Status:** IN PROGRESS — Stage 1 mostly complete (EC-01 done, EC-06 partial), Stage 2 complete  
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -19,8 +19,8 @@ ships until all three are resolved and TPC-H regression passes.
 | # | Item | Effort | Gate | Status |
 |---|------|--------|------|--------|
 | 1 | **EC-19** — Reject WAL + keyless without REPLICA IDENTITY FULL at creation time | 0.5 day | — | ✅ Done |
-| 2 | **EC-06** — Emit WARNING for keyless tables at creation; implement count-based hash delta | 2–3 days | EC-19 done | ⚠️ Warning done; hash delta TBD |
-| 3 | **EC-01** — R₀ via EXCEPT ALL: split Part 1 of `diff_inner_join` to use pre-change right state | 4–6 days | EC-06 done | ❌ Not started |
+| 2 | **EC-06** — Emit WARNING for keyless tables at creation; implement count-based hash delta | 2–3 days | EC-19 done | ⚠️ Warning done; design documented (TODO comments in scan.rs, ivm.rs, refresh.rs, api.rs); full row_id disambiguation TBD |
+| 3 | **EC-01** — R₀ via EXCEPT ALL: split Part 1 of `diff_inner_join` to use pre-change right state | 4–6 days | EC-06 done | ✅ Done — Part 1 split into 1a (inserts ⋈ R₁) + 1b (deletes ⋈ R₀); 5 new unit tests |
 
 **Completion gate:** `just test-all` green + TPC-H Q07 passes with `TPCH_CYCLES=5`.
 

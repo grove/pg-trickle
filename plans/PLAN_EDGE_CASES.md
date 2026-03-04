@@ -40,6 +40,7 @@ others are fixable engineering gaps. This document:
 | **Impact** | Stale row remains in stream table until next full refresh |
 | **Current mitigation** | Adaptive FULL fallback (`pg_trickle.adaptive_full_threshold`) |
 | **Documented in** | FAQ § "Known edge cases"; SQL_REFERENCE § "Known Delta Computation Limitations" |
+| **Status** | ✅ **IMPLEMENTED** — Part 1 split (R₀ via EXCEPT ALL) in `diff_inner_join` |
 
 **Root cause:** The delta query reads `current_right` after all changes are
 applied. When the old join partner is deleted before the delta runs, the
@@ -206,7 +207,7 @@ recursion should use FULL mode.
 | **Impact** | Phantom or missed deletes in stream table |
 | **Current mitigation** | Add a primary key; add a synthetic unique column; or use FULL mode |
 | **Documented in** | FAQ § "Keyless Tables"; SQL_REFERENCE § "Row Identity" |
-| **Status** | ⚠️ **PARTIAL** — WARNING at creation time implemented; count-based hash delta TBD |
+| **Status** | ⚠️ **PARTIAL** — WARNING at creation time implemented; count-based hash delta designed (TODO comments in scan.rs, ivm.rs, refresh.rs, api.rs); implementation requires UNIQUE index removal + row_id disambiguation |
 
 **Proposed fix:**
 

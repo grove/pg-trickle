@@ -530,6 +530,12 @@ fn pgt_ivm_apply_delta(
             .join(", ");
 
         // DELETE: remove rows that were deleted or updated (action = 'D').
+        //
+        // EC-06 TODO: For keyless sources with duplicate rows, this
+        // DELETE removes ALL stream table rows matching the row_id,
+        // even when only one duplicate should be removed. The fix
+        // should use counted DELETE (delete exactly N rows per hash
+        // using ctid + ROW_NUMBER). See PLAN_EDGE_CASES.md § EC-06.
         let delete_sql = format!(
             "DELETE FROM {st_qualified} AS t
              USING {delta_table} AS d

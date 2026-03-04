@@ -206,6 +206,37 @@ fn diff_scan_change_buffer(
 
     let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
 
+    // EC-06: Keyless table duplicate row tracking
+    //
+    // When pk_columns is empty, the source table has no primary key.
+    // The pk_hash is an all-column content hash. Identical rows produce
+    // identical pk_hash values, causing three related bugs:
+    //
+    // 1. **Delta SQL:** pk_stats groups by pk_hash, merging independent
+    //    events for distinct-but-identical rows. Two inserts of the same
+    //    row are collapsed to one INSERT delta (should be two).
+    //
+    // 2. **Stream table:** __pgt_row_id has a UNIQUE index, so duplicate
+    //    rows cannot coexist. Full refresh silently loses all but the
+    //    first duplicate to a unique violation.
+    //
+    // 3. **MERGE apply:** DELETE matching on __pgt_row_id removes ALL
+    //    rows with that hash, not just the intended count.
+    //
+    // The full EC-06 fix requires:
+    //   a) Remove UNIQUE constraint on __pgt_row_id for keyless sources
+    //      (or add a disambiguation suffix).
+    //   b) Full refresh: assign unique row_ids using ROW_NUMBER() OVER
+    //      (PARTITION BY content_hash ORDER BY ctid).
+    //   c) Delta SQL: include change_id or dup_seq in the effective
+    //      pk_hash so each change is processed independently.
+    //   d) Apply logic: use counted DELETE (delete exactly N rows
+    //      per hash, not all) and skip ON CONFLICT for INSERTs.
+    //
+    // This is tracked as EC-06 in PLAN_EDGE_CASES.md.
+    // WARNING at creation time is already implemented.
+    let _is_keyless = pk_columns.is_empty();
+
     // pk_hash is always pre-computed in the change buffer (from PK columns
     // or all-column content hash for keyless tables — S10).
     // Always use the pre-computed pk_hash from the trigger (G-J1 optimization).

@@ -617,6 +617,11 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
 
     // Build the USING clause — skip DISTINCT ON when the delta is already
     // deduplicated (G-M1 optimization for scan-chain queries).
+    //
+    // EC-06 TODO: For keyless sources with duplicate rows, DISTINCT ON
+    // __pgt_row_id collapses multiple independent events into one.
+    // The full EC-06 fix should skip DISTINCT ON for keyless sources
+    // and use counted DELETE in the MERGE/apply logic instead.
     let using_clause = if delta_result.is_deduplicated {
         format!("({delta_sql_template})")
     } else {
