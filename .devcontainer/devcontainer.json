@@ -15,13 +15,17 @@
   "features": {
     // Docker-in-Docker for testcontainers (integration tests) and E2E image builds
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
-      "dockerDashComposeVersion": "v2"
+      "dockerDashComposeVersion": "v2",
+      "moby": false
     }
   },
 
   // ── Lifecycle Commands ────────────────────────────────────────────────────
-  // Initialize pgrx with the system pg_config (runs once after container create)
-  "postCreateCommand": "cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config",
+  // Ensure mounted volumes are writable by vscode, then initialize pgrx (runs once after container create)
+  "postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.pgrx ${containerWorkspaceFolder}/target && cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config",
+
+  // Re-assert ownership on each start in case prior commands created root-owned files
+  "postStartCommand": "sudo chown -R vscode:vscode /home/vscode/.pgrx ${containerWorkspaceFolder}/target",
 
   // ── Persistent Volumes ────────────────────────────────────────────────────
   "mounts": [
