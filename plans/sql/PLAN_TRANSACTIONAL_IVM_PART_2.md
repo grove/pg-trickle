@@ -1,8 +1,8 @@
 # Plan: Expanding SQL Coverage in Trigger-Based CDC Mode (Part 2)
 
 **Date:** 2026-03-03  
-**Last updated:** 2026-03-06  
-**Status:** PROPOSED — blocked on [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](../PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 1 (EC-06 partial); EC-01 complete for all join types; Stage 2 complete  
+**Last updated:** 2026-03-04  
+**Status:** READY — Stages 1 and 2 of [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](../PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) are complete (EC-06 fully fixed incl. post-impl bug fixes, EC-01 complete for all join types, all Stage 2 safety items done). This plan is unblocked.  
 **Branch:** `edge-cases-and-transactional-ivm`  
 **Scope:** Limitations of `pg_trickle.cdc_mode = 'trigger'` (the default),
 and a phased implementation plan to maximise the SQL surface area supported
@@ -44,16 +44,18 @@ architecture vs DVM engine vs auto-rewrite gap), and proposes a phased
 implementation plan to close as many gaps as possible **without** requiring
 users to switch to WAL-based CDC.
 
-**Current state (ground truth):**
+**Current state (ground truth as of 2026-03-04):**
 
-- 872 unit tests, 22 E2E test suites passing
+- 1032 unit tests, 22+ E2E test suites passing
 - 25 aggregate functions in DIFFERENTIAL mode
 - 21 OpTree variants, 20 diff operators
 - 5 auto-rewrite passes (view inlining, DISTINCT ON, GROUPING SETS, scalar
   subquery in WHERE, SubLinks in OR)
 - NATURAL JOIN fully resolved at parse time
-- TRUNCATE detected via statement-level trigger → automatic FULL refresh
-  fallback
+- TRUNCATE on source table: statement-level trigger → automatic FULL refresh fallback
+- TRUNCATE on stream table: blocked by BEFORE TRUNCATE guard trigger (EC-25)
+- Direct DML on stream table: blocked by BEFORE I/U/D guard trigger (EC-26)
+- Keyless tables (no PK): fully supported via net-counting delta (EC-06)
 
 **After this plan (target):**
 
