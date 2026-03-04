@@ -1,7 +1,7 @@
 # Plan: Expanding SQL Coverage in Trigger-Based CDC Mode (Part 2)
 
 **Date:** 2026-03-03  
-**Last updated:** 2026-05-30  
+**Last updated:** 2026-03-04  
 **Status:** READY — Stages 1 and 2 of [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](../PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) are complete (EC-06 fully fixed incl. post-impl bug fixes, EC-01 complete for all join types, all Stage 2 safety items done). This plan is unblocked.  
 **Branch:** `edge-cases-and-transactional-ivm`  
 **Scope:** Limitations of `pg_trickle.cdc_mode = 'trigger'` (the default),
@@ -44,13 +44,15 @@ architecture vs DVM engine vs auto-rewrite gap), and proposes a phased
 implementation plan to close as many gaps as possible **without** requiring
 users to switch to WAL-based CDC.
 
-**Current state (ground truth as of 2026-05-30):**
+**Current state (ground truth as of 2026-03-04):**
 
 - 1032 unit tests, 22+ E2E test suites passing
 - 25 aggregate functions in DIFFERENTIAL mode
 - 21 OpTree variants, 20 diff operators
-- 7 auto-rewrite passes (view inlining, nested window expressions, DISTINCT ON,
-  GROUPING SETS, scalar subquery in WHERE, SubLinks in OR, SubLinks in AND+OR)
+- 8 auto-rewrite passes (view inlining, nested window expressions, DISTINCT ON,
+  GROUPING SETS, scalar subquery in WHERE, SubLinks in OR, SubLinks in AND+OR,
+  SubLinks in deeply nested AND chains)
+- ALL (subquery) → NULL-safe AntiJoin via `parse_all_sublink()` (G3 closed)
 - NATURAL JOIN fully resolved at parse time
 - TRUNCATE on source table: statement-level trigger → automatic FULL refresh fallback
 - TRUNCATE on stream table: blocked by BEFORE TRUNCATE guard trigger (EC-25)
@@ -67,7 +69,8 @@ users to switch to WAL-based CDC.
 - ✅ Multiple PARTITION BY resolved via query-level rewrite (done natively)
 - ✅ Mixed UNION / UNION ALL handled natively
 - ✅ Nested window expressions: `rewrite_nested_window_exprs()` subquery lift
-- ALL (subquery) operator (remaining)
+- ✅ ALL (subquery): `parse_all_sublink()` NULL-safe AntiJoin (G3 closed)
+- ✅ Deeply nested SubLinks in OR: `flatten_and_conjuncts()` handles AND(AND(OR(EXISTS))) (G4 closed)
 - Column-level change compression reducing trigger overhead by 30–60% for
   UPDATE-heavy workloads on wide tables
 - Batched trigger writes for bulk DML
@@ -157,8 +160,8 @@ area available to trigger-mode users.
 |----|-----------|----------------|------------|-------------|-------|
 | **G1** | Mixed UNION / UNION ALL | ✅ **Works natively** | — | `collect_union_children` + `Distinct`/`UnionAll` OpTree handle mixed arms | 1 |
 | **G2** | Multiple PARTITION BY in one query | ✅ **Works natively** | — | Full recomputation approach; no SQL rewrite needed | 1 |
-| **G3** | ALL (subquery) | Rejected | Not implemented | New AntiJoin variant with universal quantification | 2 |
-| **G4** | SubLinks inside deeply nested OR | ⚠️ Partial | Auto-rewrite handles simple cases and AND+OR; triple-nested AND(AND(OR)) not handled | Extend `rewrite_sublinks_in_or` to handle nested boolean trees | 2 |
+| **G3** | ALL (subquery) | ✅ **DONE** — NULL-safe AntiJoin | `parse_all_sublink()` builds `(col IS NULL OR NOT (x op col))` condition; full AntiJoin diff pipeline already wired | EC-32 closed | 1 |
+| **G4** | SubLinks inside deeply nested OR | ✅ **DONE** — handles `AND(AND(OR(EXISTS)))` | `flatten_and_conjuncts()` helper + updated `and_contains_or_with_sublink()` + `rewrite_and_with_or_sublinks()` flattens AND tree recursively | — | 2 |
 | **G5** | ROWS FROM() with multiple functions | Rejected | Parser only handles single SRF | Extend `LateralFunction` to zip multiple SRFs | 2 |
 | **G6** | LATERAL with RIGHT/FULL JOIN | Rejected (PostgreSQL constraint) | PostgreSQL itself rejects RIGHT/FULL JOIN LATERAL | Error message updated to explain PostgreSQL-level constraint (**message improved**) | — |
 | **G7** | Regression aggregates (11 functions) | Rejected | Not implemented | Group-rescan (same pattern as existing aggregates) | 4 |
@@ -264,103 +267,72 @@ be resolved by auto-rewriting to existing operators.
 
 **Estimated effort:** 3–4 sessions (18–24 hours)
 
-### Task 2.1: ALL (Subquery) Operator (G3)
+### Task 2.1: ALL (Subquery) Operator (G3) — ✅ DONE
 
-**Current behaviour:** `WHERE col > ALL (SELECT x FROM t)` is rejected with
-a suggestion to use `NOT EXISTS`.
+**Status:** **IMPLEMENTED** — `parse_all_sublink()` in `src/dvm/parser.rs` now
+uses a NULL-safe anti-join condition. The full pipeline was already wired:
+- `parse_sublink_to_wrapper()` routes `ALL_SUBLINK` → `parse_all_sublink()`
+- `parse_all_sublink()` builds an `AntiJoin` `SublinkWrapper`
+- `diff_anti_join()` in `operators/anti_join.rs` generates the delta SQL
 
-**Proposed fix:** Implement via rewrite to NOT EXISTS at the OpTree level
-(not SQL rewrite). `ALL (SELECT ...)` is semantically: "the predicate holds
-for every row returned by the subquery." This is the negation of `EXISTS
-(SELECT ... WHERE NOT predicate)`.
+**Bug fixed (NULL-safety):** The previous condition `NOT (x op col)` was not
+NULL-safe: when `col IS NULL`, `NOT (x op NULL)` evaluates to NULL (not TRUE),
+so the EXISTS clause did not fire for NULL rows, incorrectly including outer
+rows that should have been excluded.
 
-**Implementation:**
-1. In `extract_where_sublinks()` (parser.rs), detect `ALL_SUBLINK` nodes.
-2. Negate the comparison operator (e.g., `>` → `<=`).
-3. Construct an `AntiJoin` OpTree node with the negated condition — this
-   emits "rows from the left that have NO match in the right where the
-   negated condition holds," which is equivalent to ALL.
-4. Alternatively, rewrite to a SQL-level `NOT EXISTS (… EXCEPT …)` pattern
-   at the SQL level before parsing (see EC-32 in PLAN_EDGE_CASES.md).
-
-**Recommended approach:** SQL-level rewrite to `NOT EXISTS (… EXCEPT …)` —
-aligned with EC-32:
-
-```sql
--- col > ALL (SELECT x FROM t)
--- rewrites to:
-NOT EXISTS (SELECT col EXCEPT SELECT x FROM t WHERE col > x)
--- generalised NULL-safe form:
-NOT EXISTS (
-    SELECT 1 FROM subquery
-    WHERE col IS NOT DISTINCT FROM subquery_col
-      OR NOT (col op subquery_col)
-)
-```
-
-The `EXCEPT`-based pattern is preferred over `WHERE NOT (col op
-subquery_col)` because it is NULL-safe: PostgreSQL's `EXCEPT` uses
-`IS NOT DISTINCT FROM` equality, so a NULL in the subquery correctly
-prevents the predicate from holding — matching the SQL standard semantics
-for `ALL`. The `WHERE NOT` form silently drops NULL-containing rows,
-producing wrong results for `= ALL (...)` when the subquery contains NULLs.
-
-**Files changed:**
-- `src/dvm/parser.rs` — new `rewrite_all_sublink()` or extend
-  `extract_where_sublinks()` to handle `ALL_SUBLINK`
-- `src/dvm/mod.rs` — export if SQL-level rewrite
-- `src/api.rs` — wire into pipeline if SQL-level rewrite
-
-**Tests:**
-- Unit tests: 3 cases (ALL with `>`, `=`, `<>` operators)
-- E2E test: stream table with `WHERE price > ALL (SELECT ...)`, verify
-  delta correctness for INSERT/DELETE in both outer and inner tables
-
-### Task 2.2: Deeply Nested SubLinks in OR (G4)
-
-**Current behaviour:** The `rewrite_sublinks_in_or()` pass handles
-`WHERE a OR EXISTS (...)` at the top level. Deeply nested patterns like
-`WHERE x AND (y OR EXISTS (...))` survive the rewrite and are rejected.
-
-**Proposed fix:** Extend `rewrite_sublinks_in_or()` to recursively walk
-the boolean expression tree:
-
-1. **Base case:** If the node is not a BoolExpr, return unchanged.
-2. **AND node:** Recurse into each argument. If any argument becomes a
-   UNION after rewriting, the AND condition must be applied as a WHERE
-   filter on that UNION branch.
-3. **OR node (current):** Already decomposes into UNION branches. No change.
-4. **OR node (nested):** An OR inside an AND is handled by step 2 — the
-   AND's other arms become WHERE filters on the decomposed UNION.
+**New condition:** `(col IS NULL OR NOT (x op col))`
+- Correctly excludes the outer row when any inner row has `col IS NULL`
+- Correctly excludes the outer row when any inner row has `NOT (x op col)`
+- Correctly includes the outer row when all inner rows satisfy `x op col`
 
 **Example:**
 ```sql
--- Before (rejected):
-SELECT * FROM t WHERE x = 1 AND (y = 2 OR EXISTS (SELECT 1 FROM s WHERE s.id = t.id))
-
--- After rewrite (supported):
-SELECT * FROM t WHERE x = 1 AND y = 2
-UNION ALL
-SELECT * FROM t WHERE x = 1 AND EXISTS (SELECT 1 FROM s WHERE s.id = t.id)
+SELECT * FROM orders WHERE price > ALL (SELECT threshold FROM limits);
+-- AntiJoin condition: (threshold IS NULL OR NOT (price > threshold))
+-- i.e. exclude order if any limit row has NULL threshold or price <= threshold
 ```
 
-The key insight: the AND conjuncts that are NOT part of the OR are
-duplicated into each UNION branch. The OR arms become separate branches.
+**Files changed:**
+- `src/dvm/parser.rs` — `parse_all_sublink()`: updated condition to NULL-safe form
 
-**Complexity:** Medium-High — the recursive tree rewriting is conceptually
-clean but requires careful handling of NOT, double negation, and mixed
-AND/OR/NOT nesting.
+### Task 2.2: Deeply Nested SubLinks in OR (G4) — ✅ DONE
+
+**Status:** **IMPLEMENTED** — the SubLinks-in-OR rewrite pipeline now handles
+arbitrarily deep `AND(AND(... OR(EXISTS(...))))` nesting.
+
+**Root cause of the gap:** `rewrite_and_with_or_sublinks()` previously iterated
+only the direct children of the top-level AND node. `AND(a, AND(b, OR(EXISTS)))`
+has only two direct children (`a` and `AND(b, OR(EXISTS))`), so the inner
+`AND(b, OR(EXISTS))` was never recognized as "an OR-with-sublinks arm" —
+causing the rewrite to silently skip the query, which then failed downstream.
+
+**What was added:**
+1. **`flatten_and_conjuncts(node, result)`** — new recursive helper that
+   flattens `AND(a, AND(b, c))` → `[a, b, c]` at any nesting depth.
+2. **`and_contains_or_with_sublink()`** updated to use `flatten_and_conjuncts`
+   so it detects an OR-with-sublinks anywhere in a nested AND chain (not just
+   one level deep).
+3. **`rewrite_and_with_or_sublinks()`** signature changed from taking
+   `and_expr: &BoolExpr` to `where_node: *mut Node`; body now calls
+   `flatten_and_conjuncts` first, then finds the first OR-with-sublinks in the
+   flat list.
+
+**Before/after:**
+```sql
+-- Before (rejected — AND nesting was not flattened):
+SELECT * FROM t WHERE x = 1 AND (y = 2 AND (z = 3 OR EXISTS (SELECT 1 FROM s WHERE s.id = t.id)))
+
+-- After rewrite (supported):
+SELECT * FROM t WHERE x = 1 AND y = 2 AND z = 3
+UNION
+SELECT * FROM t WHERE x = 1 AND y = 2 AND EXISTS (SELECT 1 FROM s WHERE s.id = t.id)
+```
 
 **Files changed:**
-- `src/dvm/parser.rs` — extend `rewrite_sublinks_in_or()` or split into
-  `rewrite_sublinks_in_bool_tree()`
-- `src/dvm/mod.rs` — export
-- `src/api.rs` — replace existing call
-
-**Tests:**
-- Unit tests: 5–6 cases (nested AND(OR(EXISTS)), double nested,
-  NOT(OR(EXISTS)), mixed AND/OR/NOT, already-clean query unchanged)
-- E2E test: stream table with nested OR + EXISTS, verify delta
+- `src/dvm/parser.rs`:
+  - `flatten_and_conjuncts()` — new helper
+  - `and_contains_or_with_sublink()` — uses `flatten_and_conjuncts`
+  - `rewrite_and_with_or_sublinks()` — new signature + flattened body
 
 ### Task 2.3: ROWS FROM() with Multiple Functions (G5)
 

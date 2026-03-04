@@ -5,10 +5,10 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Last updated:** 2026-05-30  
+**Last updated:** 2026-03-04  
 **Status:** Stages 1–2 COMPLETE (incl. bug fixes + test coverage).
-Stage 3 Phase 1 (Tasks 1.1–1.3) and Task 2.4 COMPLETE.
-Next up: Stage 3 Phase 2 remaining tasks (2.1 ALL subquery, 2.2 nested OR SubLinks, 2.3 ROWS FROM).  
+Stage 3 Phase 1 (Tasks 1.1–1.3) COMPLETE. Stage 3 Phase 2 Tasks 2.1–2.4 COMPLETE.
+Only Task 2.3 (ROWS FROM) remains — deferred (very low demand).
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -85,25 +85,19 @@ the DVM operator set — no CDC or scheduler changes.
 
 | # | Item | Effort | Status |
 |---|------|--------|--------|
-| 14 | **Part 2 Task 2.1 / EC-32** — `ALL (subquery)` → `NOT EXISTS (… EXCEPT …)` rewrite | 2–3 days | ❌ Not started |
-| 15 | **Part 2 Task 2.2** — Deeply nested SubLinks in OR: extend `rewrite_sublinks_in_bool_tree()` | 2–3 days | ⚠️ Partial — simple OR and AND+OR handled; triple-nesting AND(AND(OR(EXISTS))) not yet handled |
-| 16 | **Part 2 Task 2.3** — `ROWS FROM()` with multiple functions: rewrite to `unnest` / LATERAL zip | 1–2 days | ❌ Not started (deferred, low demand) |
-| 17 | **Part 2 Task 2.4** — LATERAL with RIGHT/FULL JOIN: error message clarification | 0.5 day | ✅ **DONE** — error messages in `src/dvm/parser.rs` updated to explain this is a PostgreSQL-level constraint |
+| 14 | **Part 2 Task 2.1 / EC-32** — `ALL (subquery)` NULL-safe AntiJoin | 2–3 days | ✅ **DONE** — `parse_all_sublink()` in `src/dvm/parser.rs` updated to NULL-safe condition `(col IS NULL OR NOT (x op col))`; full AntiJoin pipeline was already wired |
+| 15 | **Part 2 Task 2.2** — Deeply nested SubLinks in OR | 2–3 days | ✅ **DONE** — `flatten_and_conjuncts()` helper added; `and_contains_or_with_sublink()` now recurses through nested AND layers; `rewrite_and_with_or_sublinks()` uses flattened conjunct list — handles `AND(AND(OR(EXISTS(...))))` |
+| 16 | **Part 2 Task 2.3** — `ROWS FROM()` with multiple functions | 1–2 days | ❌ Not started (deferred, very low demand) |
+| 17 | **Part 2 Task 2.4** — LATERAL with RIGHT/FULL JOIN: error message clarification | 0.5 day | ✅ **DONE** — error messages updated to explain PostgreSQL-level constraint |
 
 **Completion gate:** `just test-all` green + new E2E tests from each task passing.
 
 ### Stage 3 Phase 2 — Prioritized Remaining Work
 
-1. **Task 2.1 / EC-32 — ALL (subquery)** *(HIGH PRIORITY)*
-   - SQL-level rewrite: `col > ALL (SELECT x FROM t)` → `NOT EXISTS (SELECT 1 FROM t WHERE col <= x)` with the NULL-safe `EXCEPT`-based form.
-   - Files: `src/dvm/parser.rs` (new `rewrite_all_sublink()`), `src/dvm/mod.rs`, `src/api.rs`
-
-2. **Task 2.2 — Deeply nested SubLinks in OR** *(MEDIUM PRIORITY)*
-   - Extend `rewrite_sublinks_in_or` to handle `AND(AND(OR(EXISTS)))` trees.
-   - Already partial: `rewrite_and_with_or_sublinks` handles one level of AND wrapping.
-
-3. **Task 2.3 — ROWS FROM()** *(LOW PRIORITY, deferred)*
-   - Very niche. Defer until after Tasks 2.1 and 2.2.
+1. **Task 2.3 — ROWS FROM()** *(LOW PRIORITY, deferred)*
+   - Very niche. Defer to Stage 4 or later.
+   - Would need `rewrite_rows_from()` pass: detect `ROWS FROM(f1(), f2())` nodes and
+     rewrite to multi-arg `unnest()` (common case) or explicit LATERAL zip.
 
 ---
 

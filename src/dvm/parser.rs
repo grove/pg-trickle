@@ -5046,7 +5046,7 @@ pub fn rewrite_sublinks_in_or(query: &str) -> Result<String, PgTrickleError> {
         if boolexpr.boolop == pg_sys::BoolExprType::AND_EXPR
             && unsafe { and_contains_or_with_sublink(select.whereClause) }
         {
-            return rewrite_and_with_or_sublinks(select, boolexpr);
+            return rewrite_and_with_or_sublinks(select, select.whereClause);
         }
         return Ok(query.to_string());
     }
@@ -5127,31 +5127,45 @@ pub fn rewrite_sublinks_in_or(query: &str) -> Result<String, PgTrickleError> {
     Ok(rewritten)
 }
 
-/// Handle AND conjunction where one arm is an OR containing sublinks.
+/// Handle AND conjunction (at any nesting depth) where one arm is an OR
+/// containing sublinks.
 ///
 /// ```sql
-/// -- Input:
+/// -- Input (one-level AND):
 /// SELECT * FROM t WHERE a > 10 AND (status = 'active' OR EXISTS (...))
+/// -- Input (two-level AND):
+/// SELECT * FROM t WHERE a > 10 AND b = 1 AND (status = 'active' OR EXISTS (...))
 /// -- Rewrite to:
-/// SELECT * FROM t WHERE a > 10 AND status = 'active'
+/// SELECT * FROM t WHERE a > 10 AND ... AND status = 'active'
 /// UNION
-/// SELECT * FROM t WHERE a > 10 AND EXISTS (...)
+/// SELECT * FROM t WHERE a > 10 AND ... AND EXISTS (...)
 /// ```
+///
+/// The `where_node` argument is the entire WHERE clause node (typically a
+/// BoolExpr AND chain). The function flattens all nested AND layers before
+/// searching for the OR arm, so arbitrarily deep `AND(AND(OR(...)))` nesting
+/// is handled correctly.
 fn rewrite_and_with_or_sublinks(
     select: &pg_sys::SelectStmt,
-    and_expr: &pg_sys::BoolExpr,
+    where_node: *mut pg_sys::Node,
 ) -> Result<String, PgTrickleError> {
-    let args = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(and_expr.args) };
+    // Flatten the entire AND chain into a list of atomic conjuncts.
+    // AND(a, AND(b, OR(...))) → [a, b, OR(...)]
+    let mut conjuncts: Vec<*mut pg_sys::Node> = Vec::new();
+    unsafe { flatten_and_conjuncts(where_node, &mut conjuncts) };
 
-    // Find the OR arm with sublinks and collect non-OR conjuncts
+    // Find the first OR arm with sublinks; accumulate the rest as plain
+    // conjuncts. If there are multiple OR-with-sublinks, only the first
+    // is decomposed — subsequent ones are left as regular predicates
+    // (the downstream parser will handle or reject them).
     let mut or_arm: Option<*mut pg_sys::Node> = None;
     let mut other_conjuncts: Vec<String> = Vec::new();
 
-    for arg_ptr in args.iter_ptr() {
+    for arg_ptr in conjuncts {
         if arg_ptr.is_null() {
             continue;
         }
-        if unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_BoolExpr) } {
+        if or_arm.is_none() && unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_BoolExpr) } {
             let inner_bool = unsafe { &*(arg_ptr as *const pg_sys::BoolExpr) };
             if inner_bool.boolop == pg_sys::BoolExprType::OR_EXPR
                 && unsafe { node_tree_contains_sublink(arg_ptr) }
@@ -6892,8 +6906,34 @@ unsafe fn node_tree_contains_sublink(node: *mut pg_sys::Node) -> bool {
     false
 }
 
-/// Check if an AND expression contains at least one OR conjunct that itself
-/// contains SubLink nodes. This is stricter than `node_tree_contains_sublink`
+/// Recursively flatten a boolean AND tree into a flat list of conjunct nodes.
+///
+/// `AND(a, AND(b, c))` → \[a, b, c\]; non-AND nodes are pushed directly.
+///
+/// # Safety
+/// Caller must ensure `node` points to a valid parse-tree Node.
+unsafe fn flatten_and_conjuncts(node: *mut pg_sys::Node, result: &mut Vec<*mut pg_sys::Node>) {
+    if node.is_null() {
+        return;
+    }
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_BoolExpr) } {
+        let be = unsafe { &*(node as *const pg_sys::BoolExpr) };
+        if be.boolop == pg_sys::BoolExprType::AND_EXPR && !be.args.is_null() {
+            let args = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(be.args) };
+            for arg_ptr in args.iter_ptr() {
+                unsafe { flatten_and_conjuncts(arg_ptr, result) };
+            }
+            return;
+        }
+    }
+    result.push(node);
+}
+
+/// Check if an AND expression (at any depth) contains at least one OR
+/// conjunct that itself contains SubLink nodes.
+///
+/// Recurses into nested AND layers so that `AND(p, AND(q, OR(EXISTS(...))))`
+/// is detected correctly. This is stricter than `node_tree_contains_sublink`
 /// which returns true for AND + EXISTS (no OR), causing unnecessary deparsing.
 ///
 /// # Safety
@@ -6909,19 +6949,15 @@ unsafe fn and_contains_or_with_sublink(node: *mut pg_sys::Node) -> bool {
     if boolexpr.boolop != pg_sys::BoolExprType::AND_EXPR {
         return false;
     }
-    if boolexpr.args.is_null() {
-        return false;
-    }
-    let args = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(boolexpr.args) };
-    for arg_ptr in args.iter_ptr() {
-        if arg_ptr.is_null() {
-            continue;
-        }
-        // We're looking for an OR conjunct that contains SubLink nodes
-        if unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_BoolExpr) } {
-            let inner = unsafe { &*(arg_ptr as *const pg_sys::BoolExpr) };
+    // Flatten the whole AND tree then check whether any conjunct is
+    // an OR containing SubLink nodes.
+    let mut conjuncts: Vec<*mut pg_sys::Node> = Vec::new();
+    unsafe { flatten_and_conjuncts(node, &mut conjuncts) };
+    for conj in conjuncts {
+        if !conj.is_null() && unsafe { pgrx::is_a(conj, pg_sys::NodeTag::T_BoolExpr) } {
+            let inner = unsafe { &*(conj as *const pg_sys::BoolExpr) };
             if inner.boolop == pg_sys::BoolExprType::OR_EXPR
-                && unsafe { node_tree_contains_sublink(arg_ptr) }
+                && unsafe { node_tree_contains_sublink(conj) }
             {
                 return true;
             }
@@ -7542,13 +7578,19 @@ unsafe fn parse_all_sublink(
         unsafe { extract_func_name(sublink.operName) }.unwrap_or_else(|_| "=".to_string())
     };
 
-    // Build negated condition: NOT (test_expr op inner_col)
-    // The negation is expressed as raw SQL to avoid complex operator inversion.
+    // Build NULL-safe anti-join condition:
+    // (inner_col IS NULL OR NOT (test_expr op inner_col))
+    //
+    // Using just `NOT (test_expr op inner_col)` is not NULL-safe: when
+    // inner_col is NULL, `NOT (x op NULL)` evaluates to NULL (not TRUE),
+    // so the EXISTS does not fire for that row, and the outer row is
+    // incorrectly included. SQL semantics for ALL require that a NULL
+    // in the subquery makes the whole ALL expression indeterminate (hence
+    // the outer row should be excluded).
+    let inner_col_sql = inner_col_expr.to_sql();
     let negated_cond = Expr::Raw(format!(
-        "NOT ({} {} {})",
-        test_expr.to_sql(),
-        op_name,
-        inner_col_expr.to_sql()
+        "(({inner_col_sql}) IS NULL OR NOT ({} {op_name} {inner_col_sql}))",
+        test_expr.to_sql()
     ));
 
     // Combine with inner WHERE clause if present

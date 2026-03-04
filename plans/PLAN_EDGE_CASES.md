@@ -755,14 +755,18 @@ defining queries. **No code fix.** The error message is clear.
 | **Tier** | **P2** |
 | **Impact** | Creation error |
 | **Documented in** | FAQ § "Why Are These SQL Features Not Supported?" |
+| **Status** | ✅ **IMPLEMENTED** — `parse_all_sublink()` in `src/dvm/parser.rs` updated with NULL-safe anti-join condition `(col IS NULL OR NOT (x op col))`; full AntiJoin pipeline was already wired (`parse_sublink_to_wrapper` → `parse_all_sublink` → `AntiJoin SublinkWrapper` → `diff_anti_join`) |
 
-**Chosen fix: rewrite to `NOT EXISTS (… EXCEPT …)` at parse time:**
+**Fix applied:** NULL-safe anti-join condition.
 
 `ALL (subquery)` is mathematically a conjunction of per-row comparisons.
-Implement via rewrite to `NOT EXISTS (SELECT … EXCEPT SELECT val)` pattern
-at parse time in `src/dvm/parser.rs`, similar to how `ANY (subquery)` is
-already handled. This folds the `ALL` semantics into the existing subquery
-differentiation path without a new delta template.
+The full pipeline through `parse_all_sublink()` → `AntiJoin` OpTree →
+`diff_anti_join` was already wired. The outstanding issue was NULL-safety:
+the previous condition `NOT (x op col)` evaluated to NULL (not TRUE) when
+`col IS NULL`, so NULL rows in the subquery were silently ignored, giving
+wrong results. Fixed by changing the condition to
+`(col IS NULL OR NOT (x op col))`, which correctly excludes the outer row
+whenever any subquery row is NULL or fails the comparison.
 
 ---
 
