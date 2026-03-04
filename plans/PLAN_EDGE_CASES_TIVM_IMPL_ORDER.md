@@ -5,8 +5,9 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Last updated:** 2026-03-07  
-**Status:** Stages 1–2 COMPLETE. Next up: Stage 3 (SQL Coverage Expansion).  
+**Last updated:** 2026-03-04  
+**Status:** Stages 1–2 COMPLETE (incl. bug fixes + test coverage).
+Next up: Stage 3 (SQL Coverage Expansion).  
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -19,7 +20,7 @@ ships until all three are resolved and TPC-H regression passes.
 | # | Item | Effort | Gate | Status |
 |---|------|--------|------|--------|
 | 1 | **EC-19** — Reject WAL + keyless without REPLICA IDENTITY FULL at creation time | 0.5 day | — | ✅ Done |
-| 2 | **EC-06** — Keyless tables: net-counting delta + counted DELETE + non-unique index | 2–3 days | EC-19 done | ✅ Done |
+| 2 | **EC-06** — Keyless tables: net-counting delta + counted DELETE + non-unique index | 2–3 days | EC-19 done | ✅ Done + 2 bug fixes |
 | 3 | **EC-01** — R₀ via EXCEPT ALL: split Part 1 of `diff_inner_join`, `diff_left_join`, `diff_full_join` to use pre-change right state | 4–6 days | EC-06 done | ✅ Done — Part 1 split into 1a (inserts ⋈ R₁) + 1b (deletes ⋈ R₀); Part 3 split for outer/full joins; 8 unit tests |
 
 **Completion gate:** `just test-all` green + TPC-H Q07 passes with `TPCH_CYCLES=5`.
@@ -29,6 +30,11 @@ ships until all three are resolved and TPC-H regression passes.
 - EC-06: Full keyless support via `has_keyless_source` catalog flag, non-unique
   index, net-counting delta SQL (decompose → SUM → generate_series), counted
   DELETE (ROW_NUMBER matching), plain INSERT, forced explicit DML path.
+  **Post-impl bug fixes:** (a) Guard trigger `RETURN NEW` → `RETURN OLD` for
+  DELETE ops (NULL return silently cancelled managed-refresh DELETEs);
+  (b) Keyless UPDATE template changed from no-op to real UPDATE (no-op broke
+  aggregate queries on keyless sources where 'I'-action rows update groups).
+  **Test coverage:** 7 E2E tests in `e2e_keyless_duplicate_tests.rs` (all passing).
 - EC-01: R₀ via EXCEPT ALL for inner/left/full joins.
 
 ---
@@ -40,15 +46,24 @@ corrupting state. Ship as a batch before expanding SQL coverage.
 
 | # | Item | Effort | Status |
 |---|------|--------|--------|
-| 4 | **EC-25** — Event trigger blocking TRUNCATE on stream tables | 0.5 day | ✅ Done |
-| 5 | **EC-26** — Guard trigger blocking direct DML on stream tables | 1 day | ✅ Done |
-| 6 | **EC-15** — WARNING at creation time when defining query contains `SELECT *` | 0.5 day | ✅ Done |
-| 7 | **EC-11** — `scheduler_falling_behind` NOTIFY alert (80% threshold) | 1 day | ✅ Done |
-| 8 | **EC-13** — Default `diamond_consistency` to `'atomic'` for new stream tables | 0.5 day | ✅ Done |
-| 9 | **EC-18** — Rate-limited LOG explaining why `auto` CDC mode is stuck in TRIGGER phase | 1 day | ✅ Done |
-| 10 | **EC-34** — Auto-detect missing WAL slot; fall back to TRIGGER + WARNING | 1 day | ✅ Done |
+| 4 | **EC-25** — BEFORE TRUNCATE guard trigger on stream tables | 0.5 day | ✅ Done (1 E2E test) |
+| 5 | **EC-26** — BEFORE I/U/D guard trigger on stream tables | 1 day | ✅ Done (4 E2E tests) |
+| 6 | **EC-15** — WARNING at creation time for `SELECT *` | 0.5 day | ✅ Done (10 unit tests) |
+| 7 | **EC-11** — `scheduler_falling_behind` NOTIFY alert (80%) | 1 day | ✅ Done (monitor unit tests) |
+| 8 | **EC-13** — Default `diamond_consistency` to `'atomic'` | 0.5 day | ✅ Done (9+ E2E tests) |
+| 9 | **EC-18** — Rate-limited LOG for `auto` CDC stuck in TRIGGER | 1 day | ✅ Done |
+| 10 | **EC-34** — Auto-detect missing WAL slot; fallback to TRIGGER | 1 day | ✅ Done |
 
 **Completion gate:** `just test-all` green.
+
+**Stage 2 hardening (post-impl):**
+- `internal_refresh` GUC flag now set in ALL refresh code paths:
+  `execute_manual_refresh`, `execute_manual_full_refresh`,
+  `execute_full_refresh`, `execute_topk_refresh`, `pgt_ivm_handle_truncate`.
+  Prevents guard triggers from blocking any managed refresh operation.
+- Guard trigger returns `OLD` for DELETE (not `NEW` which is NULL).
+- EC-15 detection logic extracted to pure `detect_select_star()` function
+  for unit testability (10 tests covering all patterns).
 
 ---
 

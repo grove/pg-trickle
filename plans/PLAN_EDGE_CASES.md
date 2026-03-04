@@ -230,6 +230,23 @@ recursion should use FULL mode.
    - **Apply (ivm.rs):** Same counted DELETE + plain INSERT for IMMEDIATE mode.
    - **Upgrade SQL:** `ALTER TABLE ... ADD COLUMN IF NOT EXISTS has_keyless_source`
 
+**Bug fixes (post-implementation):**
+
+- **Guard trigger DELETE cancel:** The DML guard trigger (EC-26) used
+  `RETURN NEW` which is NULL for DELETE operations, silently cancelling
+  managed-refresh DELETEs on the stream table. Fixed to use
+  `IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;`.
+- **Keyless aggregate UPDATE no-op:** The keyless UPDATE template was a
+  no-op (`SELECT 1 WHERE false`), which is correct for keyless scans but
+  wrong for aggregate queries on keyless sources (where `'I'`-action rows
+  update existing groups). Fixed to use the normal UPDATE template, which
+  naturally matches 0 rows for scan-level keyless deltas.
+
+**Test coverage:** 7 E2E tests (`e2e_keyless_duplicate_tests.rs`) — all
+passing. Covers: duplicate rows basic, delete-one-of-duplicates,
+update-one-of-duplicates, unique content multi-cycle DML, delete-all-
+then-reinsert, mixed DML stress, aggregate with duplicates.
+
 ---
 
 ### EC-07 — IMMEDIATE mode write serialization
@@ -326,6 +343,10 @@ the right answer when back-pressure is needed.
 | **Documented in** | FAQ § "Performance and Tuning" |
 | **Status** | ✅ **IMPLEMENTED** — `scheduler_falling_behind` NOTIFY alert at 80% threshold |
 
+**Test coverage:** `SchedulerFallingBehind` variant covered in
+`test_alert_event_as_str` and `test_alert_event_all_variants_unique`
+(monitor.rs unit tests).
+
 **Chosen fix: `scheduler_falling_behind` NOTIFY alert (short term):**
 
 When the refresh duration exceeds 80% of the schedule interval for 3
@@ -405,11 +426,16 @@ can investigate. **No urgency** — the automatic retry handles recovery.
 | **Documented in** | FAQ § "Schema Changes" |
 | **Status** | ✅ **IMPLEMENTED** — WARNING at creation time for `SELECT *` |
 
+**Test coverage:** 10 unit tests for `detect_select_star()` pure function
+(api.rs): bare `*`, table-qualified `t.*`, explicit columns, `count(*)`,
+`sum(*)`, mixed agg+bare star, no asterisk, subquery star, case
+insensitivity, no-FROM clause.
+
 **Proposed fix:**
 
-1. **Short term (P1):** Emit a `WARNING` at `create_stream_table()` time
-   when the defining query contains `SELECT *`. Suggest using explicit
-   column lists.
+1. **Short term (P1):** ✅ Done — Emits `WARNING` at `create_stream_table()`
+   time when the defining query contains `SELECT *`. Detection logic
+   extracted to pure `detect_select_star()` function for unit testability.
 2. **Medium term:** When `needs_reinit` is triggered by a column-count
    mismatch, attempt an automatic reinitialisation: re-parse the query,
    verify the new column set is compatible, and refresh. If compatible,
@@ -593,11 +619,17 @@ is acceptable. **No further code fix needed.**
 | **Documented in** | SQL_REFERENCE § "What Is NOT Allowed" |
 | **Status** | ✅ **IMPLEMENTED** — BEFORE TRUNCATE guard trigger blocks direct TRUNCATE |
 
+**Test coverage:** `test_guard_trigger_blocks_truncate` E2E test
+(`e2e_guard_trigger_tests.rs`).
+
 **Proposed fix:**
 
-1. **Short term (P1):** Add an event trigger that intercepts `TRUNCATE` on
-   any table in the `pgtrickle` schema and raises an ERROR with a message
-   suggesting `refresh_stream_table()` instead.
+1. **Short term (P1):** ✅ Done — BEFORE TRUNCATE trigger installed on
+   storage tables at creation time. Checks `pg_trickle.internal_refresh`
+   session variable to allow managed refreshes. The `internal_refresh`
+   flag is set in all refresh code paths: `execute_manual_refresh`,
+   `execute_manual_full_refresh`, `execute_full_refresh`,
+   `execute_topk_refresh`, and `pgt_ivm_handle_truncate`.
 2. **Medium term:** Instead of blocking, intercept TRUNCATE and
    automatically perform a full refresh (same approach as IMMEDIATE mode
    TRUNCATE handling). This is friendlier but may surprise users who expect
@@ -616,12 +648,18 @@ is acceptable. **No further code fix needed.**
 | **Documented in** | SQL_REFERENCE § "What Is NOT Allowed" |
 | **Status** | ✅ **IMPLEMENTED** — BEFORE INSERT/UPDATE/DELETE guard trigger on storage table |
 
+**Test coverage:** 4 E2E tests (`e2e_guard_trigger_tests.rs`) —
+`test_guard_trigger_blocks_direct_insert`, `_update`, `_delete` +
+`test_guard_trigger_allows_managed_refresh`.
+
 **Proposed fix:**
 
-1. **Short term (P1):** Add a statement-level trigger on stream tables that
-   raises an ERROR for any INSERT/UPDATE/DELETE not originating from the
-   refresh engine (check for a session variable or advisory lock flag set by
-   the refresh transaction). This prevents accidental writes.
+1. **Short term (P1):** ✅ Done — Row-level BEFORE trigger installed on
+   storage tables at creation time. Uses `pg_trickle.internal_refresh`
+   session variable (checked via `current_setting(..., true)`) to allow
+   managed refreshes. Returns OLD for DELETE operations (returning NEW
+   would be NULL, silently cancelling the DELETE). The `internal_refresh`
+   flag is set across all refresh code paths.
 2. **Medium term:** Use a PostgreSQL row-level security policy or a
    `pg_trickle.allow_direct_dml` session variable as an escape hatch for
    power users.
