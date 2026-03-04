@@ -51,6 +51,10 @@ pub struct StreamTableMeta {
     /// When true, the storage table uses a non-unique index on __pgt_row_id
     /// and the apply logic uses counted DELETE instead of MERGE.
     pub has_keyless_source: bool,
+    /// Serialized JSON map of function-name → SHA-256 hash for EC-16 polling.
+    /// None means no hashes have been recorded yet (baseline will be taken on
+    /// the next differential refresh).
+    pub function_hashes: Option<String>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses

@@ -1,8 +1,8 @@
 # Plan: Expanding SQL Coverage in Trigger-Based CDC Mode (Part 2)
 
 **Date:** 2026-03-03  
-**Last updated:** 2026-03-05  
-**Status:** Stage 3 (Tasks 1.1–2.4) complete. Stage 4 (EC-16 + Task 3.5) partially complete. Stage 5 (Tasks 4.1–4.3) complete.  
+**Last updated:** 2026-03-06  
+**Status:** Stage 3 (Tasks 1.1–2.4) complete. Stage 4 (EC-16, Task 3.1, Task 3.2, Task 3.5) complete; Tasks 3.3 and 3.4 deferred. Stage 5 (Tasks 4.1–4.3) complete.  
 **Branch:** `edge-cases-and-transactional-ivm`  
 **Scope:** Limitations of `pg_trickle.cdc_mode = 'trigger'` (the default),
 and a phased implementation plan to maximise the SQL surface area supported
@@ -412,7 +412,22 @@ trigger functions — they do not affect the DVM engine or SQL coverage.
 
 ### Task 3.1: Column-Level Change Detection for UPDATE
 
-**Current behaviour:** The UPDATE trigger writes all NEW and OLD column
+**Status:** ✅ **DONE** —
+`changed_cols BIGINT` column added to all new change buffer tables
+(`create_change_buffer_table()`). `build_changed_cols_bitmask_expr()` generates
+a per-column `IS DISTINCT FROM` bitmask expression. Both
+`create_change_trigger()` and `rebuild_cdc_trigger_function()` write the bitmask
+for UPDATE rows. `sync_change_buffer_columns()` recognises `changed_cols` as a
+system column (not dropped on schema changes). `alter_change_buffer_add_columns()`
+migrates existing buffer tables via `ADD COLUMN IF NOT EXISTS changed_cols BIGINT`.
+All column values are still written (scan-layer optimisation is Task 3.4, deferred).
+
+Deferred (Task 3.4 dependency): using the bitmask in `diff_scan_change_buffer()` to
+skip unchanged columns requires a demand-propagation pass to prune `Scan.columns`
+to only referenced columns. `resolve_columns()` currently returns ALL source columns;
+this pass is deferred.
+
+**Original behaviour:** The UPDATE trigger writes all NEW and OLD column
 values to the buffer table, regardless of which columns changed.
 
 **Proposed fix:** Modify the generated PL/pgSQL trigger function to compare
@@ -478,7 +493,16 @@ during the next DDL event trigger rebuild or via an explicit upgrade function.
 
 ### Task 3.2: Incremental TRUNCATE Handling
 
-**Current behaviour:** TRUNCATE on a source table writes a 'T' marker →
+**Status:** ✅ **DONE** —
+`execute_incremental_truncate_delete()` added to `src/refresh.rs`. The
+TRUNCATE detection block now checks: if the ST has exactly one source AND the
+current window contains no post-TRUNCATE rows (action `!= 'T'`), it calls
+`execute_incremental_truncate_delete()` which issues a direct
+`DELETE FROM stream_table` (O(ST rows) — no defining-query re-execution).
+For multi-source STs or windows with post-TRUNCATE inserts, it falls back to
+`execute_full_refresh()` unchanged.
+
+**Original behaviour:** TRUNCATE on a source table writes a 'T' marker →
 the refresh engine falls back to FULL refresh (TRUNCATE stream table +
 repopulate from defining query).
 

@@ -5,10 +5,10 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Last updated:** 2026-03-05  
+**Last updated:** 2026-03-06  
 **Status:** Stages 1–3 COMPLETE (incl. bug fixes + test coverage).
 Task 2.3 (ROWS FROM) deferred.
-Stage 4 partially complete: EC-16 ✅ Done, Task 3.5 ✅ Done; Tasks 3.1–3.4 not started.
+Stage 4 partially complete: EC-16 ✅ Done, Task 3.1 ✅ Done, Task 3.2 ✅ Done, Task 3.5 ✅ Done; Tasks 3.3–3.4 deferred.
 Stage 5 COMPLETE: Tasks 4.1, 4.2, 4.3 all done.
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
@@ -117,10 +117,10 @@ touches `src/refresh.rs`; Part 2 Phase 3 touches `src/cdc.rs`).
 
 | # | Item | Effort | Status |
 |---|------|--------|--------|
-| 19 | **Part 2 Task 3.1** — Column-level change detection for UPDATE: `changed_cols` bitmask in buffer | 3–4 days | ❌ Not started |
-| 20 | **Part 2 Task 3.2** — Incremental TRUNCATE: negation delta for simple single-source stream tables | 2–3 days | ❌ Not started |
-| 21 | **Part 2 Task 3.3** — Buffer table partitioning by LSN range: `pg_trickle.buffer_partitioning` GUC | 3–4 days | ❌ Not started |
-| 22 | **Part 2 Task 3.4** — Skip-unchanged-column scanning in delta SQL | 1–2 days | ❌ Not started (depends on Task 3.1) |
+| 19 | **Part 2 Task 3.1** — Column-level change detection for UPDATE: `changed_cols` bitmask in buffer | 3–4 days | ✅ Done — `changed_cols BIGINT` added to all new change buffer tables; `build_changed_cols_bitmask_expr()` generates per-column `IS DISTINCT FROM` bitmask; `create_change_trigger()` + `rebuild_cdc_trigger_function()` updated; `sync_change_buffer_columns()` preserves column; `alter_change_buffer_add_columns()` migrates existing buffers; all column values still written (scan unchanged) |
+| 20 | **Part 2 Task 3.2** — Incremental TRUNCATE: negation delta for simple single-source stream tables | 2–3 days | ✅ Done — `execute_incremental_truncate_delete()` fast-path: single-source ST with no post-TRUNCATE rows in window → `DELETE FROM stream_table` directly, skipping full defining-query re-execution; falls back to `execute_full_refresh()` for multi-source or post-TRUNCATE-insert cases |
+| 21 | **Part 2 Task 3.3** — Buffer table partitioning by LSN range: `pg_trickle.buffer_partitioning` GUC | 3–4 days | ❌ Deferred — per-cycle DDL overhead + partition management complexity; defer to Stage 6 or later |
+| 22 | **Part 2 Task 3.4** — Skip-unchanged-column scanning in delta SQL | 1–2 days | ❌ Deferred — requires column-usage demand-propagation pass in parser to prune Scan.columns to referenced-only; `resolve_columns()` currently returns ALL columns; defer until pruning pass is implemented |
 | 23 | **Part 2 Task 3.5** — Online ADD COLUMN without full reinit | 2–3 days | ✅ Done — `SchemaChangeKind::AddColumnOnly`; `alter_change_buffer_add_columns()` in `cdc.rs` extends buffer + rebuilds trigger + refreshes snapshot in-place |
 
 **Note on ordering within Phase 3:** Task 3.1 must land before 3.4 (3.4

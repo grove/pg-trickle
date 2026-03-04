@@ -2296,6 +2296,11 @@ fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleError> {
                     | AggFunc::RegrSxx
                     | AggFunc::RegrSxy
                     | AggFunc::RegrSyy
+                    | AggFunc::XmlAgg
+                    | AggFunc::HypRank
+                    | AggFunc::HypDenseRank
+                    | AggFunc::HypPercentRank
+                    | AggFunc::HypCumeDist
                     | AggFunc::ComplexExpression(_) => {}
                 }
             }

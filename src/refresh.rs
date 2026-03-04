@@ -1181,6 +1181,42 @@ fn check_proc_hashes_changed(st: &StreamTableMeta) -> bool {
     changed
 }
 
+/// Task 3.2: Fast-path DELETE for a single-source ST whose window contains a
+/// TRUNCATE marker with no subsequent INSERT/UPDATE/DELETE rows in scope.
+///
+/// Instead of running the full defining query, we simply DELETE all rows from
+/// the stream table.  This is O(ST rows) rather than O(source rows) and avoids
+/// re-executing an arbitrarily-expensive query when the result is always empty.
+fn execute_incremental_truncate_delete(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
+    // Suppress the CDC trigger on the ST itself during the operation.
+    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    let schema = &st.pgt_schema;
+    let name = &st.pgt_name;
+    let quoted_table = format!(
+        "\"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        name.replace('"', "\"\"")
+    );
+
+    let rows_deleted = Spi::connect_mut(|client| {
+        let result = client
+            .update(&format!("DELETE FROM {quoted_table}"), None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        Ok::<i64, PgTrickleError>(result.len() as i64)
+    })?;
+
+    pgrx::notice!(
+        "[pg_trickle] Incremental TRUNCATE: deleted {} row(s) from {}.{} \
+         (pure TRUNCATE window — skipping full query re-execution)",
+        rows_deleted,
+        schema,
+        name,
+    );
+    Ok((0, rows_deleted))
+}
+
 pub fn execute_differential_refresh(
     st: &StreamTableMeta,
     prev_frontier: &Frontier,
@@ -1339,6 +1375,32 @@ pub fn execute_differential_refresh(
     });
 
     if has_truncate {
+        // Task 3.2: Fast path for single-source STs where the current window
+        // contains a TRUNCATE marker but no subsequent INSERT/UPDATE/DELETE rows.
+        // In that case the post-TRUNCATE result is always empty, so we can DELETE
+        // all ST rows directly instead of re-running the full defining query.
+        let is_single_source = catalog_source_oids.len() == 1;
+        let is_pure_truncate = is_single_source && {
+            let oid = catalog_source_oids[0];
+            let prev_lsn = prev_frontier.get_lsn(oid);
+            let new_lsn = new_frontier.get_lsn(oid);
+            !Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   AND action != 'T' \
+                   LIMIT 1\
+                 )",
+            ))
+            .unwrap_or(Some(false))
+            .unwrap_or(false)
+        };
+
+        if is_pure_truncate {
+            return execute_incremental_truncate_delete(st);
+        }
+
         pgrx::info!(
             "[pg_trickle] Source table TRUNCATE detected — falling back to FULL refresh for {}.{}",
             schema,
