@@ -289,19 +289,17 @@ the right answer when back-pressure is needed.
 | **Current mitigation** | Widen the interval; use IMMEDIATE mode; or split the DAG |
 | **Documented in** | FAQ § "Performance and Tuning" |
 
-**Proposed fix:**
+**Chosen fix: `scheduler_falling_behind` NOTIFY alert (short term):**
 
-1. **Short term (P1):** Add a `scheduler_falling_behind` NOTIFY alert when
-   the refresh duration exceeds 80% of the schedule interval for 3
-   consecutive cycles. Include the stream table name, average duration, and
-   configured interval in the payload.
-2. **Medium term:** Implement an `auto_backoff` GUC (default: `on`). When
-   enabled, the scheduler automatically doubles the effective interval
-   (capped at 10× configured) when falling behind, and recovers when
-   headroom returns. Log/NOTIFY on every backoff step.
-3. **Long term:** Add a `pgtrickle.explain_st(name)` recommendation that
-   flags "refresh takes longer than schedule" when it detects the pattern
-   in `pgt_refresh_history`.
+When the refresh duration exceeds 80% of the schedule interval for 3
+consecutive cycles, emit a NOTIFY on the channel `pgtrickle_alerts` with a
+JSON payload containing the stream table name, average duration, and
+configured interval. Operators can LISTEN on the channel and wire it into
+their alerting stack.
+
+**Deferred:**
+- `auto_backoff` GUC (double effective interval when falling behind) — medium term, schedule for a later sprint.
+- `explain_st(name)` recommendation from `pgt_refresh_history` — long term.
 
 ---
 
@@ -677,12 +675,13 @@ defining queries. **No code fix.** The error message is clear.
 | **Impact** | Creation error |
 | **Documented in** | FAQ § "Why Are These SQL Features Not Supported?" |
 
-**Proposed fix:** `ALL (subquery)` is mathematically a conjunction of
-per-row comparisons — differentiating it requires tracking the min/max of
-the subquery result and recomputing the predicate when the subquery changes.
-This is feasible but complex. **Medium term:** implement via rewrite to
-`NOT EXISTS (… EXCEPT …)` pattern at parse time in `src/dvm/parser.rs`,
-similar to how `ANY (subquery)` is handled.
+**Chosen fix: rewrite to `NOT EXISTS (… EXCEPT …)` at parse time:**
+
+`ALL (subquery)` is mathematically a conjunction of per-row comparisons.
+Implement via rewrite to `NOT EXISTS (SELECT … EXCEPT SELECT val)` pattern
+at parse time in `src/dvm/parser.rs`, similar to how `ANY (subquery)` is
+already handled. This folds the `ALL` semantics into the existing subquery
+differentiation path without a new delta template.
 
 ---
 
@@ -696,12 +695,14 @@ similar to how `ANY (subquery)` is handled.
 | **Current mitigation** | Use FULL mode; or pre-aggregate in DIFFERENTIAL and compute in a view |
 | **Documented in** | FAQ § "Unsupported Aggregates" |
 
-**Proposed fix:** These aggregates require maintaining running sums of
-squares and cross-products. The algebra is well-known (Welford's online
-algorithm), but implementing it in SQL delta templates is non-trivial.
-**Long term:** add `CORR`/`COVAR_POP`/`COVAR_SAMP` support by maintaining
-auxiliary accumulators (`sum_x`, `sum_y`, `sum_xy`, `sum_x2`, `count`) in
-the stream table.
+**Chosen fix: auxiliary accumulator columns (long term):**
+
+Add `CORR`/`COVAR_POP`/`COVAR_SAMP`/`REGR_*` support by maintaining
+auxiliary accumulator columns (`sum_x`, `sum_y`, `sum_xy`, `sum_x2`,
+`count`) in the stream table and generating SQL delta templates that update
+them incrementally. The algebra follows Welford's online algorithm adapted
+to SQL set differences. Accepted as a long-term deliverable; FULL mode
+and the pre-aggregate workaround remain the supported path until then.
 
 ---
 
@@ -766,7 +767,7 @@ study. **Long term (v2.0+).**
 
 | # | Edge Case | Action | Estimated Effort |
 |---|-----------|--------|------------------|
-| 1 | EC-01: JOIN key change + right-side DELETE | Two-phase delta prototype; lower adaptive threshold default | 3–5 days |
+| 1 | EC-01: JOIN key change + right-side DELETE | R₀ via EXCEPT ALL — split Part 1 of `diff_inner_join` | 4–6 days |
 | 2 | EC-06: Keyless table duplicate rows | Emit WARNING at creation; implement count-based hash | 2–3 days |
 | 3 | EC-19: WAL + keyless without REPLICA IDENTITY FULL | Reject at creation time with clear error | 0.5 day |
 
@@ -798,11 +799,17 @@ study. **Long term (v2.0+).**
 ### P3 — Accepted trade-offs (document, no code change)
 
 EC-02, EC-04, EC-07, EC-08, EC-10, EC-12, EC-14, EC-21, EC-22, EC-23,
-EC-24, EC-27, EC-29, EC-30, EC-31, EC-33, EC-35, EC-36.
+EC-24, EC-27, EC-29, EC-30, EC-31, EC-35, EC-36.
 
 These are either fundamental design trade-offs or have adequate existing
 mitigations. Keep documentation current and revisit if user demand
 surfaces.
+
+### P3 — Committed long-term implementation
+
+| # | Edge Case | Action | Estimated Effort |
+|---|-----------|--------|------------------|
+| 19 | EC-33: CORR, COVAR_*, REGR_* | Auxiliary accumulator columns; Welford-based SQL delta templates | 5–8 days |
 
 ---
 
@@ -828,9 +835,10 @@ surfaces.
 - EC-16: pg_proc hash polling for function changes (2 days)
 - EC-03: Window function CTE extraction (3–5 days)
 
-**Sprint 4+ — P2 usability:**
-- EC-05, EC-32: Foreign table change detection; ALL (subquery) rewrite
-- Documentation sweep for all P3 items
+**Sprint 4+ — P2 + P3 long-term:**
+- EC-05, EC-32: Foreign table change detection; `ALL (subquery)` → `NOT EXISTS (… EXCEPT …)` rewrite
+- EC-33: Statistical aggregates via auxiliary accumulator columns
+- Documentation sweep for all remaining P3 items
 
 ---
 
