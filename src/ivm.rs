@@ -485,6 +485,11 @@ fn pgt_ivm_apply_delta(
 ) -> Result<(), PgTrickleError> {
     use crate::catalog::StreamTableMeta;
 
+    // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
+    // allow the IVM delta application to modify the storage table.
+    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
     let source_oid_u32 = source_oid as u32;
 
     // Load stream table metadata.
