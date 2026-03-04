@@ -1,6 +1,6 @@
 # PLAN: OFFSET Support (ORDER BY + LIMIT + OFFSET)
 
-**Status:** Draft — Analysis complete, awaiting review.
+**Status:** In progress — Core implementation complete. Pending: clippy, E2E tests, upgrade migration SQL.
 **Effort:** ~4–8 hours (leverages existing TopK infrastructure)
 
 ---
@@ -294,19 +294,34 @@ to `strip_order_by_limit_offset()` or extend the existing implementation.
 
 ## Task Checklist
 
-- [ ] Parser: accept OFFSET in `detect_topk_pattern()` (Step 1)
-- [ ] Parser: update `reject_limit_offset()` flow (Step 1)
-- [ ] Parser: extend `strip_order_by_and_limit()` to strip OFFSET (Step 5)
-- [ ] Parser: extend `TopKInfo` with `offset_value` field (Step 1)
-- [ ] Catalog: add `topk_offset` column + migration SQL (Step 2)
-- [ ] Catalog: update `StreamTableMeta` struct + CRUD (Step 2)
-- [ ] Refresh: include OFFSET in query reconstruction (Step 3)
-- [ ] API: pass offset through to catalog insert (Step 4)
-- [ ] E2E tests: ~10 new tests (Step 6)
-- [ ] Unit tests: parser tests for OFFSET handling (Step 6)
-- [ ] Documentation updates (Step 7)
-- [ ] `just fmt && just lint` clean
-- [ ] `just test-e2e` green
+- [x] Parser: accept OFFSET in `detect_topk_pattern()` (Step 1)
+- [x] Parser: update `reject_limit_offset()` flow (Step 1)
+- [x] Parser: extend `strip_order_by_and_limit()` to strip OFFSET (Step 5)
+- [x] Parser: extend `TopKInfo` with `offset_value` field (Step 1)
+- [x] Catalog: add `topk_offset` column to schema DDL in `lib.rs` (Step 2)
+- [x] Catalog: update `StreamTableMeta` struct + CRUD (Step 2)
+- [x] Refresh: include OFFSET in query reconstruction (Step 3)
+- [x] API: pass offset through to catalog insert (Step 4)
+- [x] E2E tests: 8 new tests + 2 updated rejection tests (Step 6)
+- [x] Documentation: FAQ, SQL_REFERENCE, DVM_OPERATORS, README (Step 7)
+- [x] `cargo fmt -- --check` clean
+- [ ] `just lint` (clippy) — blocked by pgrx build env on dev machine; CI will validate
+- [ ] `just test-e2e` — requires Docker E2E image build
+- [ ] Upgrade migration SQL (`sql/pg_trickle--0.2.1--0.2.2.sql`) — add `topk_offset` column
+- [ ] Unit tests: parser tests for OFFSET handling in `parser.rs` `#[cfg(test)]`
+- [ ] CHANGELOG entry
+
+---
+
+## What Remains (Prioritized)
+
+| # | Item | Priority | Notes |
+|---|------|----------|-------|
+| 1 | **clippy validation** | P0 | Blocked locally (no pgrx env); CI will catch issues |
+| 2 | **E2E test run** | P0 | `just build-e2e-image && just test-e2e` to validate all 8 new OFFSET tests |
+| 3 | **Upgrade migration SQL** | P1 | `ALTER TABLE pgtrickle.pgt_stream_tables ADD COLUMN topk_offset INT;` in the next version migration file |
+| 4 | **CHANGELOG entry** | P1 | Add under next release version |
+| 5 | **Unit tests** | P2 | Parser-level tests for `detect_topk_pattern` with OFFSET; nice-to-have since E2E covers the full path |
 
 ---
 
