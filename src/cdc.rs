@@ -343,6 +343,96 @@ pub fn create_change_buffer_table(
     Ok(())
 }
 
+/// Task 3.5: Extend an existing change buffer table after ADD COLUMN DDL on the
+/// source table, and rebuild the CDC trigger function in-place — without a full
+/// ST reinitialize.
+///
+/// For each source column that does **not** yet have a corresponding `new_<col>`
+/// column in the change buffer:
+/// - `ALTER TABLE changes_{oid} ADD COLUMN IF NOT EXISTS "new_<col>" <type>`
+/// - `ALTER TABLE changes_{oid} ADD COLUMN IF NOT EXISTS "old_<col>" <type>`
+///
+/// After the buffer is extended the CDC trigger function is recreated via
+/// `rebuild_cdc_trigger_function`, and the stored column snapshot is refreshed
+/// so that the next DDL event picks up the new baseline correctly.
+pub fn alter_change_buffer_add_columns(
+    source_oid: pg_sys::Oid,
+    change_schema: &str,
+    pgt_id: i64,
+) -> Result<(), PgTrickleError> {
+    // Resolve current source columns.
+    let source_cols = resolve_source_column_defs(source_oid)?;
+
+    // Query existing columns in the change buffer.
+    let buffer_table = format!("{}.changes_{}", change_schema, source_oid.to_u32());
+    let existing_sql = format!(
+        "SELECT attname::text FROM pg_attribute \
+         WHERE attrelid = '{}'::regclass AND attnum > 0 AND NOT attisdropped",
+        buffer_table.replace('\'', "''"),
+    );
+    let existing_set: std::collections::HashSet<String> = Spi::connect(|client| {
+        let rows = client
+            .select(&existing_sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut s = std::collections::HashSet::new();
+        for row in rows {
+            let name: String = row
+                .get(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            s.insert(name);
+        }
+        Ok(s)
+    })?;
+
+    // For each source column missing from the buffer, add both new_ and old_ variants.
+    for (col_name, col_type) in &source_cols {
+        let new_col = format!("new_{}", col_name);
+        if !existing_set.contains(&new_col) {
+            let qcol = col_name.replace('"', "\"\"");
+            let qtype = col_type.as_str();
+            let add_new = format!(
+                "ALTER TABLE {schema}.changes_{oid} \
+                 ADD COLUMN IF NOT EXISTS \"new_{qcol}\" {qtype}",
+                schema = change_schema,
+                oid = source_oid.to_u32(),
+            );
+            let add_old = format!(
+                "ALTER TABLE {schema}.changes_{oid} \
+                 ADD COLUMN IF NOT EXISTS \"old_{qcol}\" {qtype}",
+                schema = change_schema,
+                oid = source_oid.to_u32(),
+            );
+            Spi::run(&add_new).map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "Failed to add new_{} column to change buffer: {}",
+                    col_name, e
+                ))
+            })?;
+            Spi::run(&add_old).map_err(|e| {
+                PgTrickleError::SpiError(format!(
+                    "Failed to add old_{} column to change buffer: {}",
+                    col_name, e
+                ))
+            })?;
+        }
+    }
+
+    // Rebuild CDC trigger function to capture the new columns.
+    rebuild_cdc_trigger_function(source_oid, change_schema)?;
+
+    // Refresh stored column snapshot so the next DDL event uses the updated baseline.
+    if let Err(e) = crate::catalog::store_column_snapshot_for_pgt_id(pgt_id, source_oid) {
+        pgrx::debug1!(
+            "[pg_trickle] alter_change_buffer_add_columns: failed to refresh snapshot for ST {}: {}",
+            pgt_id,
+            e
+        );
+    }
+
+    Ok(())
+}
+
 // ── PK hash helpers ─────────────────────────────────────────────────
 
 /// Resolve all user column definitions for a source table.
