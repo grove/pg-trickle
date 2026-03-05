@@ -1,12 +1,46 @@
 # PLAN: Test Pyramid Rebalance
 
-**Status:** Proposed  
+**Status:** In Progress  
 **Date:** 2026-03-05  
-**Branch:** `main`  
+**Branch:** `test-pyramid-rebalance-p1-p2`  
 **Scope:** Shift test coverage down the pyramid — extract pure-logic unit tests
 from SPI-heavy modules, introduce a light-E2E tier to eliminate the 20-minute
 Docker build for most tests, and promote validation/error-path tests to unit
 level.
+
+---
+
+## Progress Summary
+
+| Phase | Status | New Unit Tests | Notes |
+|-------|--------|:--------------:|-------|
+| P1 — Test already-pure functions | **Done** | 27 | ivm, cdc |
+| P2-A — IVM SQL builders | **Done** | 10 | Extracted `build_ivm_delete_sql`, `build_ivm_insert_sql`, `build_column_lists` |
+| P2-B — Monitor tree renderer | **Done** | 8 | Extracted `render_dependency_tree` + `dfs` |
+| P2-C — DDL event classification | **Done** | 12 | Extracted `classify_ddl_event` enum + `compare_snapshot_with_current` |
+| P2-D — Scheduler decisions | **Done** | 11 | Extracted `is_group_due_pure` + `is_falling_behind` |
+| P2-E — Alert payloads | **Done** | 4 | Extracted `build_alert_payload` |
+| P2-F — CDC column lists | **Done** | 4 | Extracted `build_typed_col_defs` |
+| P3 — Light-E2E tier | Not started | — | Harness + migration |
+| P4 — Validation tests to unit | Not started | — | Factor validation into pure fns |
+
+**Total new unit tests: 69** (1,040 → 1,109)
+
+### What Remains (prioritized)
+
+1. **P3 — Light-E2E tier** (~6-8 hrs): Build `LightE2eDb` harness using
+   testcontainers + stock PG image with mounted extension artifacts. Migrate
+   ~580 E2E tests that don't need `shared_preload_libraries`. Add
+   `just test-light-e2e` target and CI job.
+
+2. **P4 — Promote validation tests to unit level** (~2-3 hrs): Factor
+   LIMIT/OFFSET rejection, FOR UPDATE rejection, self-reference detection,
+   TABLESAMPLE rejection, volatile function detection, and recursive CTE
+   depth guard into pure `validate_*()` functions with unit tests.
+
+3. **P2-A4 — IVM trigger name generation** (optional): Extract
+   `ivm_trigger_names()` struct from `setup_ivm_triggers` for cleaner code.
+   Low priority since the trigger names are simple format strings.
 
 ---
 

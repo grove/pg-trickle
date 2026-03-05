@@ -531,54 +531,12 @@ fn pgt_ivm_apply_delta(
         .unwrap_or(0);
 
     if delta_count > 0 {
-        // Build column list for the merge/apply.
-        let col_list = user_columns
-            .iter()
-            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
         // DELETE: remove rows that were deleted or updated (action = 'D').
         //
         // EC-06: For keyless sources, use counted DELETE (ROW_NUMBER
         // matching) to avoid deleting ALL duplicates when only a subset
         // should be removed.
-        let delete_sql = if st.has_keyless_source {
-            format!(
-                "DELETE FROM {st_qualified} \
-                 WHERE ctid IN (\
-                   SELECT numbered_st.st_ctid \
-                   FROM (\
-                     SELECT st2.ctid AS st_ctid, \
-                            st2.__pgt_row_id, \
-                            ROW_NUMBER() OVER (\
-                              PARTITION BY st2.__pgt_row_id ORDER BY st2.ctid\
-                            ) AS st_rn \
-                     FROM {st_qualified} st2 \
-                     WHERE st2.__pgt_row_id IN (\
-                       SELECT DISTINCT __pgt_row_id \
-                       FROM {delta_table} \
-                       WHERE __pgt_action = 'D'\
-                     )\
-                   ) numbered_st \
-                   JOIN (\
-                     SELECT __pgt_row_id, \
-                            COUNT(*)::INT AS del_count \
-                     FROM {delta_table} \
-                     WHERE __pgt_action = 'D' \
-                     GROUP BY __pgt_row_id\
-                   ) dc ON numbered_st.__pgt_row_id = dc.__pgt_row_id \
-                   WHERE numbered_st.st_rn <= dc.del_count\
-                 )"
-            )
-        } else {
-            format!(
-                "DELETE FROM {st_qualified} AS t
-                 USING {delta_table} AS d
-                 WHERE d.__pgt_action = 'D'
-                   AND t.__pgt_row_id = d.__pgt_row_id"
-            )
-        };
+        let delete_sql = build_ivm_delete_sql(&st_qualified, &delta_table, st.has_keyless_source);
         Spi::run(&delete_sql)
             .map_err(|e| PgTrickleError::SpiError(format!("IVM delta DELETE failed: {e}")))?;
 
@@ -586,40 +544,12 @@ fn pgt_ivm_apply_delta(
         //
         // EC-06: For keyless sources, use plain INSERT (no ON CONFLICT)
         // since duplicate __pgt_row_id values are expected.
-        let insert_sql = if st.has_keyless_source {
-            format!(
-                "INSERT INTO {st_qualified} (__pgt_row_id, {col_list})
-                 SELECT d.__pgt_row_id, {d_col_list}
-                 FROM {delta_table} d
-                 WHERE d.__pgt_action = 'I'",
-                d_col_list = user_columns
-                    .iter()
-                    .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        } else {
-            format!(
-                "INSERT INTO {st_qualified} (__pgt_row_id, {col_list})
-                 SELECT d.__pgt_row_id, {d_col_list}
-                 FROM {delta_table} d
-                 WHERE d.__pgt_action = 'I'
-                 ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}",
-                d_col_list = user_columns
-                    .iter()
-                    .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                update_set = user_columns
-                    .iter()
-                    .map(|c| {
-                        let quoted = format!("\"{}\"", c.replace('"', "\"\""));
-                        format!("{quoted} = EXCLUDED.{quoted}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        };
+        let insert_sql = build_ivm_insert_sql(
+            &st_qualified,
+            &delta_table,
+            &user_columns,
+            st.has_keyless_source,
+        );
         Spi::run(&insert_sql)
             .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT failed: {e}")))?;
     }
@@ -928,4 +858,399 @@ fn pgt_ivm_handle_truncate(pgt_id: i64) -> Result<(), PgTrickleError> {
     pgrx::log!("[pg_trickle] IVM TRUNCATE handled for pgt_id={}", pgt_id,);
 
     Ok(())
+}
+
+// ── Extracted SQL Builders (unit-testable) ──────────────────────────────────
+
+/// Build the DELETE SQL for IVM delta application.
+///
+/// Keyless sources use counted-DELETE (ROW_NUMBER matching) to avoid
+/// deleting ALL duplicates when only a subset should be removed.
+fn build_ivm_delete_sql(st_qualified: &str, delta_table: &str, has_keyless_source: bool) -> String {
+    if has_keyless_source {
+        format!(
+            "DELETE FROM {st_qualified} \
+             WHERE ctid IN (\
+               SELECT numbered_st.st_ctid \
+               FROM (\
+                 SELECT st2.ctid AS st_ctid, \
+                        st2.__pgt_row_id, \
+                        ROW_NUMBER() OVER (\
+                          PARTITION BY st2.__pgt_row_id ORDER BY st2.ctid\
+                        ) AS st_rn \
+                 FROM {st_qualified} st2 \
+                 WHERE st2.__pgt_row_id IN (\
+                   SELECT DISTINCT __pgt_row_id \
+                   FROM {delta_table} \
+                   WHERE __pgt_action = 'D'\
+                 )\
+               ) numbered_st \
+               JOIN (\
+                 SELECT __pgt_row_id, \
+                        COUNT(*)::INT AS del_count \
+                 FROM {delta_table} \
+                 WHERE __pgt_action = 'D' \
+                 GROUP BY __pgt_row_id\
+               ) dc ON numbered_st.__pgt_row_id = dc.__pgt_row_id \
+               WHERE numbered_st.st_rn <= dc.del_count\
+             )"
+        )
+    } else {
+        format!(
+            "DELETE FROM {st_qualified} AS t
+                 USING {delta_table} AS d
+                 WHERE d.__pgt_action = 'D'
+                   AND t.__pgt_row_id = d.__pgt_row_id"
+        )
+    }
+}
+
+/// Build the INSERT SQL for IVM delta application.
+///
+/// Keyless sources use plain INSERT (no ON CONFLICT) since duplicate
+/// `__pgt_row_id` values are expected.
+fn build_ivm_insert_sql(
+    st_qualified: &str,
+    delta_table: &str,
+    user_columns: &[String],
+    has_keyless_source: bool,
+) -> String {
+    let col_list = user_columns
+        .iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let d_col_list = user_columns
+        .iter()
+        .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if has_keyless_source {
+        format!(
+            "INSERT INTO {st_qualified} (__pgt_row_id, {col_list})
+                 SELECT d.__pgt_row_id, {d_col_list}
+                 FROM {delta_table} d
+                 WHERE d.__pgt_action = 'I'"
+        )
+    } else {
+        let update_set = user_columns
+            .iter()
+            .map(|c| {
+                let quoted = format!("\"{}\"", c.replace('"', "\"\""));
+                format!("{quoted} = EXCLUDED.{quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "INSERT INTO {st_qualified} (__pgt_row_id, {col_list})
+                 SELECT d.__pgt_row_id, {d_col_list}
+                 FROM {delta_table} d
+                 WHERE d.__pgt_action = 'I'
+                 ON CONFLICT (__pgt_row_id) DO UPDATE SET {update_set}"
+        )
+    }
+}
+
+/// Build the three column-list fragments used in IVM delta application:
+/// `(col_list, d_col_list, update_set)`.
+fn build_column_lists(user_columns: &[String]) -> (String, String, String) {
+    let col_list = user_columns
+        .iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let d_col_list = user_columns
+        .iter()
+        .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let update_set = user_columns
+        .iter()
+        .map(|c| {
+            let quoted = format!("\"{}\"", c.replace('"', "\"\""));
+            format!("{quoted} = EXCLUDED.{quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    (col_list, d_col_list, update_set)
+}
+
+// ── Unit Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── hash_str tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_hash_str_deterministic() {
+        let h1 = hash_str("SELECT * FROM t");
+        let h2 = hash_str("SELECT * FROM t");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_str_different_inputs() {
+        let h1 = hash_str("SELECT * FROM t");
+        let h2 = hash_str("SELECT * FROM u");
+        assert_ne!(h1, h2);
+    }
+
+    // ── is_simple_scan_chain tests ──────────────────────────────────
+
+    #[test]
+    fn test_scan_is_simple_chain() {
+        use crate::dvm::parser::{Column, OpTree};
+        let tree = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec!["id".into()],
+            alias: "t".into(),
+        };
+        assert!(IvmLockMode::is_simple_scan_chain(&tree));
+    }
+
+    #[test]
+    fn test_filter_over_scan_is_simple_chain() {
+        use crate::dvm::parser::{Column, Expr, OpTree};
+        let tree = OpTree::Filter {
+            predicate: Expr::Literal("true".into()),
+            child: Box::new(OpTree::Scan {
+                table_oid: 1,
+                table_name: "t".into(),
+                schema: "public".into(),
+                columns: vec![Column {
+                    name: "id".into(),
+                    type_oid: 23,
+                    is_nullable: false,
+                }],
+                pk_columns: vec![],
+                alias: "t".into(),
+            }),
+        };
+        assert!(IvmLockMode::is_simple_scan_chain(&tree));
+    }
+
+    #[test]
+    fn test_project_over_filter_over_scan_is_simple_chain() {
+        use crate::dvm::parser::{Column, Expr, OpTree};
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec![],
+            alias: "t".into(),
+        };
+        let filter = OpTree::Filter {
+            predicate: Expr::Literal("true".into()),
+            child: Box::new(scan),
+        };
+        let project = OpTree::Project {
+            expressions: vec![],
+            aliases: vec![],
+            child: Box::new(filter),
+        };
+        assert!(IvmLockMode::is_simple_scan_chain(&project));
+    }
+
+    #[test]
+    fn test_aggregate_is_not_simple_chain() {
+        use crate::dvm::parser::{Column, OpTree};
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec![],
+            alias: "t".into(),
+        };
+        let agg = OpTree::Aggregate {
+            group_by: vec![],
+            aggregates: vec![],
+            child: Box::new(scan),
+        };
+        assert!(!IvmLockMode::is_simple_scan_chain(&agg));
+    }
+
+    #[test]
+    fn test_join_is_not_simple_chain() {
+        use crate::dvm::parser::{Column, Expr, OpTree};
+        let scan_a = OpTree::Scan {
+            table_oid: 1,
+            table_name: "a".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec![],
+            alias: "a".into(),
+        };
+        let scan_b = OpTree::Scan {
+            table_oid: 2,
+            table_name: "b".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec![],
+            alias: "b".into(),
+        };
+        let join = OpTree::InnerJoin {
+            condition: Expr::Literal("true".into()),
+            left: Box::new(scan_a),
+            right: Box::new(scan_b),
+        };
+        assert!(!IvmLockMode::is_simple_scan_chain(&join));
+    }
+
+    #[test]
+    fn test_distinct_is_not_simple_chain() {
+        use crate::dvm::parser::{Column, OpTree};
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".into(),
+            schema: "public".into(),
+            columns: vec![Column {
+                name: "id".into(),
+                type_oid: 23,
+                is_nullable: false,
+            }],
+            pk_columns: vec![],
+            alias: "t".into(),
+        };
+        let distinct = OpTree::Distinct {
+            child: Box::new(scan),
+        };
+        assert!(!IvmLockMode::is_simple_scan_chain(&distinct));
+    }
+
+    // ── build_ivm_delete_sql tests ──────────────────────────────────
+
+    #[test]
+    fn test_keyed_delete_uses_simple_join() {
+        let sql = build_ivm_delete_sql(r#""public"."my_st""#, "__delta_1", false);
+        assert!(sql.contains("USING"), "keyed DELETE should use USING");
+        assert!(
+            sql.contains("__pgt_action = 'D'"),
+            "should filter on action D"
+        );
+        assert!(
+            !sql.contains("ROW_NUMBER"),
+            "keyed DELETE should NOT use ROW_NUMBER"
+        );
+    }
+
+    #[test]
+    fn test_keyless_delete_uses_row_number() {
+        let sql = build_ivm_delete_sql(r#""public"."my_st""#, "__delta_1", true);
+        assert!(
+            sql.contains("ROW_NUMBER"),
+            "keyless DELETE should use ROW_NUMBER"
+        );
+        assert!(
+            sql.contains("st_rn <= dc.del_count"),
+            "should limit deletes by count"
+        );
+        assert!(
+            sql.contains("__pgt_action = 'D'"),
+            "should filter on action D"
+        );
+    }
+
+    #[test]
+    fn test_delete_sql_includes_table_names() {
+        let sql = build_ivm_delete_sql(r#""myschema"."orders_st""#, "__delta_42", false);
+        assert!(sql.contains(r#""myschema"."orders_st""#));
+        assert!(sql.contains("__delta_42"));
+    }
+
+    // ── build_ivm_insert_sql tests ──────────────────────────────────
+
+    #[test]
+    fn test_keyed_insert_uses_on_conflict() {
+        let cols = vec!["id".to_string(), "val".to_string()];
+        let sql = build_ivm_insert_sql(r#""public"."st""#, "__delta", &cols, false);
+        assert!(
+            sql.contains("ON CONFLICT (__pgt_row_id) DO UPDATE SET"),
+            "keyed INSERT should use ON CONFLICT"
+        );
+        assert!(sql.contains(r#""id""#));
+        assert!(sql.contains(r#""val""#));
+        assert!(sql.contains(r#""id" = EXCLUDED."id""#));
+    }
+
+    #[test]
+    fn test_keyless_insert_no_on_conflict() {
+        let cols = vec!["name".to_string()];
+        let sql = build_ivm_insert_sql(r#""public"."st""#, "__delta", &cols, true);
+        assert!(
+            !sql.contains("ON CONFLICT"),
+            "keyless INSERT should NOT have ON CONFLICT"
+        );
+        assert!(sql.contains("__pgt_action = 'I'"));
+    }
+
+    #[test]
+    fn test_insert_sql_quotes_special_chars() {
+        let cols = vec![r#"col"name"#.to_string()];
+        let sql = build_ivm_insert_sql(r#""public"."st""#, "__delta", &cols, false);
+        assert!(
+            sql.contains(r#""col""name""#),
+            "should double-quote embedded quotes: {sql}"
+        );
+    }
+
+    // ── build_column_lists tests ────────────────────────────────────
+
+    #[test]
+    fn test_column_lists_basic() {
+        let cols = vec!["id".to_string(), "val".to_string()];
+        let (col_list, d_col_list, update_set) = build_column_lists(&cols);
+        assert_eq!(col_list, r#""id", "val""#);
+        assert_eq!(d_col_list, r#"d."id", d."val""#);
+        assert!(update_set.contains(r#""id" = EXCLUDED."id""#));
+        assert!(update_set.contains(r#""val" = EXCLUDED."val""#));
+    }
+
+    #[test]
+    fn test_column_lists_empty() {
+        let (col_list, d_col_list, update_set) = build_column_lists(&[]);
+        assert_eq!(col_list, "");
+        assert_eq!(d_col_list, "");
+        assert_eq!(update_set, "");
+    }
+
+    #[test]
+    fn test_column_lists_special_chars() {
+        let cols = vec![r#"my"col"#.to_string()];
+        let (col_list, d_col_list, _) = build_column_lists(&cols);
+        assert_eq!(col_list, r#""my""col""#);
+        assert_eq!(d_col_list, r#"d."my""col""#);
+    }
 }
