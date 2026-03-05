@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2025-06-18
+> **Last updated:** 2026-03-05
 > **Current version:** 0.2.1
 
 For a concise description of what pg_trickle is and why it exists, read
@@ -221,6 +221,39 @@ GitHub Pages book grew from 14 to 20 pages:
 
 ---
 
+## v0.2.2 — OFFSET Support & Upgrade Tooling
+
+**Goal:** Complete the `ORDER BY + LIMIT + OFFSET` (Paged TopK) implementation
+started in v0.2.1 — the core Rust changes are in tree; this release validates
+and ships them. Also closes two small upgrade tooling gaps.
+
+### ORDER BY + LIMIT + OFFSET (Paged TopK) — Finalization
+
+Core implementation is complete (parser, catalog, refresh path, docs). This
+release validates E2E and adds the upgrade migration SQL.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| OS1 | Run `just build-e2e-image && just test-e2e` — validate all 8 new OFFSET tests | ~1h | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 6 |
+| OS2 | `sql/pg_trickle--0.2.1--0.2.2.sql`: `ALTER TABLE pgtrickle.pgt_stream_tables ADD COLUMN topk_offset INT` | 30min | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 2 |
+
+### Upgrade Tooling
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| UG1 | Version mismatch check at extension load — warn if `.so` version ≠ SQL version | 2h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.2 |
+| UG2 | Add upgrade section to `docs/FAQ.md` (content exists in UPGRADING.md; cross-link) | 1h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.4 |
+
+> **v0.2.2 total: ~5 hours**
+
+**Exit criteria:**
+- [ ] `ORDER BY + LIMIT + OFFSET` defining queries accepted, refreshed, and E2E-tested
+- [ ] `sql/pg_trickle--0.2.1--0.2.2.sql` covers `topk_offset` column
+- [ ] Upgrade completeness check passes for 0.2.1→0.2.2
+- [ ] Version check fires at extension load if `.so`/SQL versions diverge
+
+---
+
 ## v0.3.0 — Correctness, Security & Operations
 
 **Goal:** Fix correctness gaps, harden security (RLS), validate partitioned
@@ -298,6 +331,43 @@ partitioned storage tables are deferred to a future release.
 | O4 | ~~SPI SQLSTATE error classification for retry~~ | ✅ Done in v0.1.3 (F29) | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G8.6 |
 | O5 | Slot lag alerting thresholds (configurable) | 2–3h | [SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) G10 |
 | O6 | Simplify `pg_trickle.user_triggers` GUC (remove redundant `on` value) | 1h | [PLAN_FEATURE_CLEANUP.md](plans/PLAN_FEATURE_CLEANUP.md) C5 |
+| O7 | `pg_trickle_dump`: SQL export tool for manual backup before upgrade | 3–4h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.3 |
+
+### IMMEDIATE Mode Parity (Stage 6)
+
+Close the gap between DIFFERENTIAL and IMMEDIATE mode SQL coverage for the
+two remaining high-risk patterns — recursive CTEs and TopK queries.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| IM1 | Validate recursive CTE semi-naive in IMMEDIATE mode; add stack-depth guard for deeply recursive defining queries | 2–3d | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 6 §5.1 |
+| IM2 | TopK in IMMEDIATE mode: statement-level micro-refresh + `ivm_topk_max_limit` GUC | 2–3d | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 6 §5.2 |
+
+> **IMMEDIATE parity subtotal: ~4–6 days** (IM1 must land before IM2)
+
+### Edge Case Hardening
+
+Self-contained items from Stage 7 of the edge-cases/TIVM implementation plan.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| EC1 | `pg_trickle.max_grouping_set_branches` GUC — cap CUBE/ROLLUP branch-count explosion | 4h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-02 |
+| EC2 | Post-restart CDC `TRANSITIONING` health check — detect stuck CDC transitions after crash or restart | 1d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-20 |
+| EC3 | Foreign table support: polling-based change detection via periodic re-execution | 2–3d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-05 |
+
+> **Edge-case hardening subtotal: ~3–5 days**
+
+### Documentation Sweep
+
+Remaining documentation gaps identified in Stage 7 of the gap analysis.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DS1 | DDL-during-refresh behaviour: document safe patterns and races | 2h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-17 |
+| DS2 | Replication/standby limitations: document in FAQ and Architecture | 3h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-21/22/23 |
+| DS3 | PgBouncer configuration guide: session-mode requirements and known incompatibilities | 2h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-28 |
+
+> **Documentation sweep subtotal: ~1 day**
 
 ### WAL CDC Hardening
 
@@ -308,7 +378,7 @@ partitioned storage tables are deferred to a future release.
 | W3 | WAL→trigger automatic fallback hardening | 4–6h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 | W4 | Promote `pg_trickle.cdc_mode = 'auto'` to recommended | Documentation | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 
-> **v0.3.0 total: ~55–85 hours**
+> **v0.3.0 total: ~120–170 hours**
 
 **Exit criteria:**
 - [ ] Volatile functions rejected in DIFFERENTIAL mode; stable functions warned
@@ -316,6 +386,10 @@ partitioned storage tables are deferred to a future release.
 - [ ] RLS on stream table E2E-tested (DIFFERENTIAL + IMMEDIATE)
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
 - [ ] WAL CDC mode passes full E2E suite
+- [ ] IMMEDIATE mode: recursive CTE semi-naive validated; TopK micro-refresh implemented
+- [ ] `max_grouping_set_branches` GUC guards CUBE/ROLLUP explosion
+- [ ] Post-restart CDC TRANSITIONING health check in place
+- [ ] DDL-during-refresh and standby/replication limitations documented
 - [ ] Extension upgrade path tested (`0.2.x → 0.3.0`)
 - [ ] Zero P0/P1 gaps remaining
 
@@ -351,13 +425,43 @@ PG 14–15 support can follow in a later release.
 | P2 | DAG level extraction (`topological_levels()`) | 2–4h | [REPORT_PARALLELIZATION.md §B](plans/performance/REPORT_PARALLELIZATION.md) |
 | P3 | Dynamic background worker dispatch per level | 12–16h | [REPORT_PARALLELIZATION.md §A+B](plans/performance/REPORT_PARALLELIZATION.md) |
 
-> **v0.4.0 total: ~52–76 hours**
+### Connection Pooler Compatibility
+
+PgBouncer transaction-mode pooling is the default at many cloud providers
+(RDS Proxy, Supabase, Neon). pg_trickle uses session-level advisory locks and
+`PREPARE` statements that are incompatible with transaction-mode pooling.
+This section replaces all session-scoped state with transaction-scoped
+equivalents to enable cloud-native deployments.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PB1 | Replace `pg_advisory_lock()` with `pg_advisory_xact_lock()` across refresh, CDC, and scheduler coordination | 3–4d | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G8.4 |
+| PB2 | Eliminate `PREPARE __pgt_merge_*` prepared statements (replace with inline or per-transaction SQL) | 3–4d | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G8.4 |
+| PB3 | E2E validation against PgBouncer transaction-mode (Docker Compose with pooler sidecar) | 1–2d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-28 |
+
+> **PgBouncer compatibility subtotal: ~7–10 days**
+
+### External Test Suite Integration
+
+Validate correctness against independent query corpora beyond TPC-H.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TS1 | sqllogictest: run PostgreSQL sqllogic suite through pg_trickle DIFFERENTIAL mode | 2–3d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
+| TS2 | JOB (Join Order Benchmark): correctness baseline and refresh latency profiling | 1–2d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
+| TS3 | Nexmark streaming benchmark: sustained high-frequency DML correctness | 1–2d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
+
+> **External test suites subtotal: ~4–7 days**
+
+> **v0.4.0 total: ~200–280 hours**
 
 **Exit criteria:**
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
 - [ ] `max_concurrent_refreshes` drives real parallel refresh via DAG levels
 - [ ] WAL decoder validated against PG 16–17 `pgoutput` format
 - [ ] CI matrix covers PG 16, 17, 18
+- [ ] pg_trickle works correctly under PgBouncer transaction-mode pooling
+- [ ] At least one external test corpus (sqllogictest, JOB, or Nexmark) passes
 
 ---
 
@@ -448,6 +552,9 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | A3 | PostgreSQL 19 forward-compatibility | TBD | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 | A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
+| A6 | Buffer table partitioning by LSN range (`pg_trickle.buffer_partitioning` GUC) | ~3–4d | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.3 |
+| A7 | Skip-unchanged-column scanning in delta SQL (requires column-usage demand-propagation pass in DVM parser) | ~1–2d | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.4 |
+| A8 | `ROWS FROM()` with multiple SRF functions — very low demand, deferred | ~1–2d | [PLAN_TRANSACTIONAL_IVM_PART_2.md](plans/sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) Task 2.3 |
 
 ---
 
@@ -458,11 +565,12 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
 | v0.2.0 — TopK, Diamond & Transactional IVM | ✔️ Complete | 62–78h | ✅ Released |
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
-| v0.3.0 — Correctness, Security & Operations | 55–85h | 125–171h | |
-| v0.4.0 — Backward Compat & Parallel Refresh | 52–76h | 177–247h | |
-| v0.5.0 — Observability & Integration | 14–21h | 191–268h | |
-| v1.0.0 — Stable release | 18–27h | 209–295h | |
-| Post-1.0 (ecosystem) | 88–134h | 297–429h | |
+| v0.2.2 — OFFSET Support & Upgrade Tooling | ~5h | 75–91h | |
+| v0.3.0 — Correctness, Security & Operations | 120–170h | 195–261h | |
+| v0.4.0 — Backward Compat, Pooler & External Suites | 200–280h | 395–541h | |
+| v0.5.0 — Observability & Integration | 14–21h | 409–562h | |
+| v1.0.0 — Stable release | 18–27h | 427–589h | |
+| Post-1.0 (ecosystem) | 88–134h | 515–723h | |
 | Post-1.0 (scale) | 6+ months | — | |
 
 ---
