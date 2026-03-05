@@ -184,15 +184,18 @@ recursion should use FULL mode.
 | **Impact** | Creation error |
 | **Current mitigation** | Use FULL mode |
 | **Documented in** | SQL_REFERENCE § "Source Tables" |
-| **Status** | ✅ **Partial** — error message improved; polling CDC deferred |
+| **Status** | ✅ **IMPLEMENTED** — error message improved + polling CDC implemented |
 
 **Proposed fix:**
 
 1. ✅ **Short term (Done):** Improved the error message to suggest `FULL` mode
    explicitly and mention the `postgres_fdw` + `IMPORT FOREIGN SCHEMA`
    pattern.
-2. **Medium term (Deferred):** Investigate a polling-based CDC fallback for foreign
-   tables.
+2. ✅ **Medium term (Done):** Polling-based CDC for foreign tables. Enabled via
+   `pg_trickle.foreign_table_polling = on` GUC. Creates a snapshot table per
+   foreign table source; before each differential refresh, computes EXCEPT ALL
+   deltas and populates the standard change buffer. Snapshot is refreshed each
+   cycle. Cleanup path drops snapshot tables when STs are removed.
 
 ---
 
@@ -901,7 +904,7 @@ study. **Long term (v2.0+).**
 | # | Edge Case | Action | Estimated Effort |
 |---|-----------|--------|------------------|
 | 12 | EC-03: Window functions in expressions | CTE extraction in parser | 3–5 days |
-| 13 | EC-05: Foreign tables | ✅ Error msg improved; polling CDC deferred | 2–3 days (remaining) |
+| 13 | EC-05: Foreign tables | ✅ IMPLEMENTED — error msg + polling CDC | — |
 | 14 | ✅ EC-09: IMMEDIATE unsupported constructs | Done — recursive CTEs + TopK now supported | Done |
 | 15 | ✅ EC-17: DDL during active refresh | FAQ documentation added | Done |
 | 16 | ✅ EC-20: CDC TRANSITIONING complexity | `check_cdc_transition_health()` in scheduler.rs | Done |

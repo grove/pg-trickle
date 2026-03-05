@@ -350,7 +350,7 @@ fn create_stream_table_impl(
     // and the apply logic uses counted DELETE instead of MERGE, because
     // identical duplicate rows produce the same content hash → same row_id.
     let has_keyless_source = source_relids.iter().any(|(oid, source_type)| {
-        if source_type != "TABLE" {
+        if source_type != "TABLE" && source_type != "FOREIGN_TABLE" {
             return false;
         }
         cdc::resolve_pk_columns(*oid)
@@ -478,7 +478,7 @@ fn create_stream_table_impl(
         // Build column snapshot + fingerprint for TABLE sources.
         // Views and stream tables don't need snapshots since their schema
         // is derived from their own defining queries.
-        let (snapshot, fingerprint) = if source_type == "TABLE" {
+        let (snapshot, fingerprint) = if source_type == "TABLE" || source_type == "FOREIGN_TABLE" {
             match crate::catalog::build_column_snapshot(*source_oid) {
                 Ok((s, f)) => (Some(s), Some(f)),
                 Err(e) => {
@@ -519,6 +519,8 @@ fn create_stream_table_impl(
         for (source_oid, source_type) in &source_relids {
             if source_type == "TABLE" {
                 setup_cdc_for_source(*source_oid, pgt_id, &change_schema)?;
+            } else if source_type == "FOREIGN_TABLE" {
+                cdc::setup_foreign_table_polling(*source_oid, pgt_id, &change_schema)?;
             }
         }
     }
@@ -1643,6 +1645,14 @@ fn cleanup_cdc_for_source(
             source_oid.to_u32(),
         );
         let _ = Spi::run(&drop_buf_sql);
+
+        // EC-05: Drop the snapshot table (only exists for foreign table sources).
+        let drop_snap_sql = format!(
+            "DROP TABLE IF EXISTS {}.snapshot_{} CASCADE",
+            quote_identifier(&change_schema),
+            source_oid.to_u32(),
+        );
+        let _ = Spi::run(&drop_snap_sql);
 
         // Delete tracking record
         let _ = Spi::run_with_args(

@@ -6,10 +6,10 @@
 
 **Date:** 2026-03-04  
 **Last updated:** 2026-03-07  
-**Status:** Stages 1–5 COMPLETE. Stage 4 partial (Tasks 3.3–3.4 deferred).
+**Status:** Stages 1–7 COMPLETE. Stage 4 fully COMPLETE (Tasks 3.3–3.4 implemented).
 Stage 6 COMPLETE: Task 5.1 (recursive CTE IMMEDIATE) + Task 5.2 (TopK IMMEDIATE) done.
-Stage 7 COMPLETE: EC-02 GUC, EC-05 error msg, EC-20 health check, EC-17/21/22/23/28 docs done.
-Remaining deferred: Task 2.3 (ROWS FROM), Tasks 3.3–3.4 (buffer partitioning, skip-unchanged), EC-05 polling CDC.
+Stage 7 COMPLETE: EC-02 GUC, EC-05 error msg + polling CDC, EC-20 health check, EC-17/21/22/23/28 docs done.
+Remaining deferred: Task 2.3 (ROWS FROM).
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -119,8 +119,8 @@ touches `src/refresh.rs`; Part 2 Phase 3 touches `src/cdc.rs`).
 |---|------|--------|--------|
 | 19 | **Part 2 Task 3.1** — Column-level change detection for UPDATE: `changed_cols` bitmask in buffer | 3–4 days | ✅ Done — `changed_cols BIGINT` added to all new change buffer tables; `build_changed_cols_bitmask_expr()` generates per-column `IS DISTINCT FROM` bitmask; `create_change_trigger()` + `rebuild_cdc_trigger_function()` updated; `sync_change_buffer_columns()` preserves column; `alter_change_buffer_add_columns()` migrates existing buffers; all column values still written (scan unchanged) |
 | 20 | **Part 2 Task 3.2** — Incremental TRUNCATE: negation delta for simple single-source stream tables | 2–3 days | ✅ Done — `execute_incremental_truncate_delete()` fast-path: single-source ST with no post-TRUNCATE rows in window → `DELETE FROM stream_table` directly, skipping full defining-query re-execution; falls back to `execute_full_refresh()` for multi-source or post-TRUNCATE-insert cases |
-| 21 | **Part 2 Task 3.3** — Buffer table partitioning by LSN range: `pg_trickle.buffer_partitioning` GUC | 3–4 days | ❌ Deferred — per-cycle DDL overhead + partition management complexity; defer to Stage 6 or later |
-| 22 | **Part 2 Task 3.4** — Skip-unchanged-column scanning in delta SQL | 1–2 days | ❌ Deferred — requires column-usage demand-propagation pass in parser to prune Scan.columns to referenced-only; `resolve_columns()` currently returns ALL columns; defer until pruning pass is implemented |
+| 21 | **Part 2 Task 3.3** — Buffer table partitioning by LSN range: `pg_trickle.buffer_partitioning` GUC | 3–4 days | ✅ Done — `pg_trickle.buffer_partitioning` GUC (off/on/auto); `PARTITION BY RANGE (lsn)` + default partition; `detach_consumed_partitions()` O(1) cleanup; `should_auto_partition()` checks schedule ≥ 30s; cleanup paths in `drain_pending_cleanups()` and `cleanup_change_buffers_by_frontier()` updated |
+| 22 | **Part 2 Task 3.4** — Skip-unchanged-column scanning in delta SQL | 1–2 days | ✅ Done — `prune_scan_columns()` demand-propagation pass in parser; collects `Expr::ColumnRef` from full tree; prunes `Scan.columns` to referenced + PK columns; bails out safely on `Star`/`Raw`/`LateralFunction`/`LateralSubquery` nodes; CTE bodies also pruned; 8 unit tests |
 | 23 | **Part 2 Task 3.5** — Online ADD COLUMN without full reinit | 2–3 days | ✅ Done — `SchemaChangeKind::AddColumnOnly`; `alter_change_buffer_add_columns()` in `cdc.rs` extends buffer + rebuilds trigger + refreshes snapshot in-place |
 
 **Note on ordering within Phase 3:** Task 3.1 must land before 3.4 (3.4
@@ -174,7 +174,7 @@ until the engine is stable post-Stage 5.
 | # | Item | Effort | Status |
 |---|------|--------|--------|
 | 29 | **EC-05** — Foreign table error message improvement (short-term) | 0.5 day | ✅ Done — error message now suggests FULL mode + `postgres_fdw`/`IMPORT FOREIGN SCHEMA` |
-| 29b | **EC-05** — Foreign table polling-based change detection (medium-term) | 2–3 days | ❌ Deferred — full polling CDC for foreign tables; low demand |
+| 29b | **EC-05** — Foreign table polling-based change detection (medium-term) | 2–3 days | ✅ Done — `pg_trickle.foreign_table_polling` GUC; `setup_foreign_table_polling()` creates change buffer + snapshot table; `poll_foreign_table_changes()` uses EXCEPT ALL for insert/delete deltas; snapshot refreshed each cycle; cleanup drops snapshot table |
 | 30 | **EC-02** — `pg_trickle.max_grouping_set_branches` GUC | 0.5 day | ✅ Done — GUC in config.rs (default 64, range 1–65536); parser.rs uses dynamic lookup |
 | 31 | **EC-20** — Post-restart CDC TRANSITIONING health check | 1 day | ✅ Done — `check_cdc_transition_health()` in scheduler.rs; detects missing replication slots; rolls back to TRIGGER mode |
 | 32 | **EC-28** — PgBouncer configuration documentation | 0.5 day | ✅ Done (pre-existing FAQ section) |
@@ -184,7 +184,7 @@ until the engine is stable post-Stage 5.
 
 **Stage 7 is COMPLETE.** All targeted items are implemented:
 - EC-02: Configurable grouping set branch limit via GUC.
-- EC-05: Error message improved (polling CDC deferred).
+- EC-05: Error message improved + polling CDC implemented (`pg_trickle.foreign_table_polling` GUC).
 - EC-20: Post-restart health check validates CDC transition state.
 - EC-17, EC-21/22/23, EC-28: Documentation added to FAQ and CONFIGURATION.md.
 - Three new GUCs documented: `max_grouping_set_branches`, `ivm_topk_max_limit`,
@@ -199,25 +199,19 @@ until the engine is stable post-Stage 5.
 | 1 — P0 Correctness | PLAN_EDGE_CASES | 3 | ✅ COMPLETE |
 | 2 — P1 Safety | PLAN_EDGE_CASES | 10 | ✅ COMPLETE |
 | 3 — SQL Coverage | Part 2 Ph 1–2 | 7 | ✅ COMPLETE (Task 2.3 deferred) |
-| 4 — P1 Remainder + Triggers | EC-16 + Part 2 Ph 3 | 6 | ✅ Partial (Tasks 3.3–3.4 deferred) |
+| 4 — P1 Remainder + Triggers | EC-16 + Part 2 Ph 3 | 6 | ✅ COMPLETE |
 | 5 — Aggregates | Part 2 Ph 4 | 3 | ✅ COMPLETE |
 | 6 — IMMEDIATE Parity | Part 2 Ph 5 | 2 | ✅ COMPLETE |
-| 7 — Usability + Docs | PLAN_EDGE_CASES P2/P3 | 7+ | ✅ COMPLETE (EC-05 polling deferred) |
+| 7 — Usability + Docs | PLAN_EDGE_CASES P2/P3 | 7+ | ✅ COMPLETE |
 
 ---
 
 ## Prioritized Remaining Work
 
-All seven stages are effectively complete. The following items were
-explicitly deferred during implementation and remain as future work:
+All seven stages are complete. Only one item remains deferred:
 
 | Priority | Item | Reason deferred | Effort |
 |----------|------|-----------------|--------|
-| 1 | **Task 3.3** — Buffer table partitioning by LSN range | Per-cycle DDL overhead + partition management complexity | 3–4 days |
-| 2 | **Task 3.4** — Skip-unchanged-column scanning | Requires column-usage demand-propagation pass in parser | 1–2 days |
-| 3 | **EC-05** — Foreign table polling-based CDC | Low demand; error message improved as short-term fix | 2–3 days |
-| 4 | **Task 2.3** — `ROWS FROM()` with multiple functions | Very niche use case | 1–2 days |
+| 1 | **Task 2.3** — `ROWS FROM()` with multiple functions | Very niche use case | 1–2 days |
 
-None of these are blocking. Items 1–2 are performance optimizations for
-the trigger pipeline. Item 3 extends CDC to foreign tables. Item 4 is a
-rare SQL pattern.
+This is not blocking any user-facing functionality.

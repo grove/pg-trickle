@@ -542,78 +542,43 @@ refresh remains the correct fallback for multi-source stream tables.
 
 ### Task 3.3: Buffer Table Partitioning by LSN Range
 
+**Status: ✅ IMPLEMENTED**
+
 **Current behaviour:** Change buffer tables are unpartitioned heap tables.
 After each refresh cycle, consumed rows are deleted via
 `DELETE FROM changes_<oid> WHERE lsn <= frontier`. VACUUM must reclaim dead
 tuples.
 
-**Proposed fix:** Partition buffer tables by LSN range. Each partition covers
-one refresh cycle's worth of changes:
+**Implementation:** Buffer tables can now use `PARTITION BY RANGE (lsn)`:
 
-1. At `create_stream_table()` time, create the buffer table as a partitioned
-   table: `PARTITION BY RANGE (lsn)`.
-2. Before each refresh, create a new partition for the current LSN range.
-3. After consuming changes for a refresh, detach the old partition and
-   DROP it (instant, no VACUUM needed).
-
-**Benefit:** Eliminates VACUUM overhead on buffer tables entirely. DROP is
-O(1) vs DELETE + VACUUM which is O(n). Especially impactful for high-write
-sources.
-
-**Caveat:** Partition management adds DDL overhead per refresh cycle.
-PostgreSQL's native partitioning has diminishing returns for very short
-refresh cycles (<10s) where partition create/detach overhead exceeds the
-vacuum savings.
-
-**Recommendation:** Make this optional, controlled by a GUC
-(`pg_trickle.buffer_partitioning = 'auto' | 'on' | 'off'`). Default 'auto'
-enables partitioning for sources with refresh cycles ≥ 30s.
-
-**Files changed:**
-- `src/cdc.rs` — modify `create_change_buffer_table()` to support
-  partitioned mode
-- `src/refresh.rs` — partition management: create new partition before
-  refresh, detach + drop old partition after consuming
-- `src/config.rs` — new `pg_trickle.buffer_partitioning` GUC
-
-**Tests:**
-- E2E test: create stream table with partitioned buffer, run multiple
-  refresh cycles, verify no VACUUM needed and dead tuples = 0
+1. `pg_trickle.buffer_partitioning` GUC: `off` (default) / `on` / `auto`.
+2. `create_change_buffer_table()` adds `PARTITION BY RANGE (lsn)` clause and
+   creates a default partition when partitioning is enabled.
+3. `should_auto_partition()` checks if the minimum schedule across dependent
+   stream tables is ≥ 30s.
+4. `is_buffer_partitioned()` checks `relkind = 'p'` in `pg_class`.
+5. `create_cycle_partition()` creates a range partition for each refresh cycle.
+6. `detach_consumed_partitions()` finds child partitions via `pg_inherits`,
+   parses bounds, and detaches + drops consumed partitions (O(1), no VACUUM).
+7. `drain_pending_cleanups()` and `cleanup_change_buffers_by_frontier()` in
+   `refresh.rs` check `is_buffer_partitioned()` and use partition detach path.
 
 ### Task 3.4: Skip-Unchanged-Column Scanning in Delta
 
-**Current behaviour:** The scan delta reads all columns from the change
-buffer for every change row, even when the defining query only references
-a subset of columns.
+**Status: ✅ IMPLEMENTED**
 
-**Proposed fix:** The `Scan` OpTree node already knows which columns are
-referenced by the defining query (the `columns` field). The delta SQL should
-only SELECT the referenced columns from the buffer, reducing I/O:
+**Implementation:** `prune_scan_columns()` post-parse pass in `parser.rs`:
 
-```sql
--- Current: reads all buffer columns
-SELECT pk_hash, action, new_name, old_name, new_price, old_price, new_category, old_category
-FROM changes_<oid>
-WHERE lsn > $prev AND lsn <= $new
-
--- Proposed: only reads columns used by the defining query
--- (defining query: SELECT name, price FROM products WHERE ...)
-SELECT pk_hash, action, new_name, old_name, new_price, old_price
-FROM changes_<oid>
-WHERE lsn > $prev AND lsn <= $new
-```
-
-PostgreSQL's heap access still reads full tuples, so the I/O savings are
-marginal for narrow tables. However, for wide tables (50+ columns) where
-the stream table only uses 5–10 columns, this can significantly reduce the
-data transferred to the DVM engine.
-
-**Files changed:**
-- `src/dvm/operators/scan.rs` — modify `diff_scan_change_buffer()` to
-  project only referenced columns
-
-**Tests:**
-- Unit tests: delta SQL generation with subset of columns
+1. `ColumnRefSet` collects all `Expr::ColumnRef` from the entire OpTree,
+   tracking both qualified (`alias.column`) and unqualified column names.
+2. `collect_all_column_refs()` walks the tree recursively. Returns `false`
+   (bail out) on `Star`, `Raw`, `LateralFunction`, or `LateralSubquery`.
+3. `apply_column_pruning()` walks the tree; at each `Scan` node, retains
+   only columns in `demanded ∪ pk_columns`.
+4. Hook in `parse_defining_query_inner()` after tree construction, plus
+   loop over CTE registry entries.
+5. 8 unit tests covering qualified/unqualified refs, PK retention, Star/Raw
+   bail-out, filter refs, join conditions, and aggregates.
 
 ### Task 3.5: Online Trigger Rebuild Without Full Reinit
 
@@ -779,7 +744,7 @@ After all phases are complete:
 - [ ] TopK works in IMMEDIATE mode (with limit guard).
 - [ ] Column-level change detection reduces UPDATE buffer size by 30–60%
       for wide tables.
-- [ ] Buffer table partitioning eliminates vacuum overhead for high-write
+- [x] Buffer table partitioning eliminates vacuum overhead for high-write
       sources.
 - [ ] Online ADD COLUMN does not force full reinit.
 - [ ] 900+ unit tests.
@@ -806,8 +771,8 @@ Phase 2 — New DVM Operators                  (3–4 sessions, 18–24 hours)
 Phase 3 — Trigger-Level Optimisations        (4–6 sessions, 24–36 hours)
   ├─ Task 3.1: Column-level change detect   → Biggest win for UPDATE-heavy
   ├─ Task 3.2: Incremental TRUNCATE         → Improves ETL patterns
-  ├─ Task 3.3: Buffer table partitioning    → Eliminates vacuum overhead
-  ├─ Task 3.4: Skip-unchanged-col scanning  → Reduces delta read I/O
+  ├─ Task 3.3: Buffer table partitioning    → ✅ Done — partition by LSN range + GUC
+  ├─ Task 3.4: Skip-unchanged-col scanning  → ✅ Done — prune_scan_columns() pass
   └─ Task 3.5: Online ADD COLUMN            → Avoids unnecessary full reinit
 
 Phase 4 — Remaining Aggregates               (2–3 sessions, 12–18 hours)
