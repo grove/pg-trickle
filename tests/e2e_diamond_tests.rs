@@ -48,7 +48,7 @@ async fn setup_diamond(db: &E2eDb, dc: &str) {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 /// Verify that the `diamond_consistency` column defaults to the GUC value
-/// ('none') when not specified.
+/// ('atomic' since EC-13) when not specified.
 #[tokio::test]
 async fn test_diamond_consistency_default() {
     let db = E2eDb::new().await.with_extension().await;
@@ -65,8 +65,8 @@ async fn test_diamond_consistency_default() {
         )
         .await;
     assert_eq!(
-        dc, "none",
-        "expected default diamond_consistency to be 'none'"
+        dc, "atomic",
+        "expected default diamond_consistency to be 'atomic' (EC-13 changed GUC default)"
     );
 }
 
@@ -103,19 +103,7 @@ async fn test_diamond_consistency_alter() {
     db.create_st("test_alter_dc", "SELECT * FROM src", "1m", "FULL")
         .await;
 
-    // Should start as 'none'
-    let dc: String = db
-        .query_scalar(
-            "SELECT diamond_consistency FROM pgtrickle.pgt_stream_tables \
-             WHERE pgt_name = 'test_alter_dc'",
-        )
-        .await;
-    assert_eq!(dc, "none");
-
-    // Alter to 'atomic'
-    db.alter_st("test_alter_dc", "diamond_consistency => 'atomic'")
-        .await;
-
+    // EC-13: default is now 'atomic'
     let dc: String = db
         .query_scalar(
             "SELECT diamond_consistency FROM pgtrickle.pgt_stream_tables \
@@ -123,6 +111,18 @@ async fn test_diamond_consistency_alter() {
         )
         .await;
     assert_eq!(dc, "atomic");
+
+    // Alter to 'none'
+    db.alter_st("test_alter_dc", "diamond_consistency => 'none'")
+        .await;
+
+    let dc: String = db
+        .query_scalar(
+            "SELECT diamond_consistency FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'test_alter_dc'",
+        )
+        .await;
+    assert_eq!(dc, "none");
 }
 
 /// Verify that a diamond topology with diamond_consistency='atomic' detects

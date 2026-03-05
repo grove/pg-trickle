@@ -687,6 +687,17 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                 );
             }
             SchemaChangeKind::AddColumnOnly => {
+                // S8: When block_source_ddl GUC is enabled, ERROR instead of
+                // extending in-place — ADD COLUMN is still a column-affecting DDL.
+                if config::pg_trickle_block_source_ddl() {
+                    pgrx::error!(
+                        "pg_trickle: ALTER TABLE on {} blocked — column-affecting DDL is not \
+                         allowed on source tables tracked by stream tables when \
+                         pg_trickle.block_source_ddl = true. Set pg_trickle.block_source_ddl = \
+                         false to allow schema changes.",
+                        identity,
+                    );
+                }
                 // Task 3.5: Only new columns were added — extend the change buffer
                 // and rebuild the CDC trigger in-place without a full reinit.
                 pgrx::notice!(
