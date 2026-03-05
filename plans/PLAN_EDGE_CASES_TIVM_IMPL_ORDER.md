@@ -5,11 +5,8 @@
 - [sql/PLAN_TRANSACTIONAL_IVM_PART_2.md](sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) (Part 2)
 
 **Date:** 2026-03-04  
-**Last updated:** 2026-03-07  
-**Status:** Stages 1–7 COMPLETE. Stage 4 fully COMPLETE (Tasks 3.3–3.4 implemented).
-Stage 6 COMPLETE: Task 5.1 (recursive CTE IMMEDIATE) + Task 5.2 (TopK IMMEDIATE) done.
-Stage 7 COMPLETE: EC-02 GUC, EC-05 error msg + polling CDC, EC-20 health check, EC-17/21/22/23/28 docs done.
-Remaining deferred: Task 2.3 (ROWS FROM).
+**Last updated:** 2026-03-08  
+**Status:** ALL STAGES COMPLETE. All deferred items resolved (Task 2.3 ROWS FROM implemented).
 **Principle:** No SQL-surface expansion while P0 correctness bugs are open.
 
 ---
@@ -88,17 +85,17 @@ the DVM operator set — no CDC or scheduler changes.
 |---|------|--------|--------|
 | 14 | **Part 2 Task 2.1 / EC-32** — `ALL (subquery)` NULL-safe AntiJoin | 2–3 days | ✅ **DONE** — `parse_all_sublink()` in `src/dvm/parser.rs` updated to NULL-safe condition `(col IS NULL OR NOT (x op col))`; full AntiJoin pipeline was already wired |
 | 15 | **Part 2 Task 2.2** — Deeply nested SubLinks in OR | 2–3 days | ✅ **DONE** — `flatten_and_conjuncts()` helper added; `and_contains_or_with_sublink()` now recurses through nested AND layers; `rewrite_and_with_or_sublinks()` uses flattened conjunct list — handles `AND(AND(OR(EXISTS(...))))` |
-| 16 | **Part 2 Task 2.3** — `ROWS FROM()` with multiple functions | 1–2 days | ❌ Not started (deferred, very low demand) |
+| 16 | **Part 2 Task 2.3** — `ROWS FROM()` with multiple functions | 1–2 days | ✅ **DONE** — `rewrite_rows_from()` auto-rewrite pass |
 | 17 | **Part 2 Task 2.4** — LATERAL with RIGHT/FULL JOIN: error message clarification | 0.5 day | ✅ **DONE** — error messages updated to explain PostgreSQL-level constraint |
 
 **Completion gate:** `just test-all` green + new E2E tests from each task passing.
 
-### Stage 3 Phase 2 — Prioritized Remaining Work
+### Stage 3 Phase 2 — Complete
 
-1. **Task 2.3 — ROWS FROM()** *(LOW PRIORITY, deferred)*
-   - Very niche. Defer to Stage 4 or later.
-   - Would need `rewrite_rows_from()` pass: detect `ROWS FROM(f1(), f2())` nodes and
-     rewrite to multi-arg `unnest()` (common case) or explicit LATERAL zip.
+All Phase 2 items are implemented, including the previously deferred Task 2.3
+(ROWS FROM). The `rewrite_rows_from()` pass detects multi-function `ROWS FROM()`
+nodes and rewrites to multi-arg `unnest()` (all-unnest case) or an ordinal-based
+LEFT JOIN LATERAL chain (general case).
 
 ---
 
@@ -198,7 +195,7 @@ until the engine is stable post-Stage 5.
 |-------|--------|-------|--------|
 | 1 — P0 Correctness | PLAN_EDGE_CASES | 3 | ✅ COMPLETE |
 | 2 — P1 Safety | PLAN_EDGE_CASES | 10 | ✅ COMPLETE |
-| 3 — SQL Coverage | Part 2 Ph 1–2 | 7 | ✅ COMPLETE (Task 2.3 deferred) |
+| 3 — SQL Coverage | Part 2 Ph 1–2 | 7 | ✅ COMPLETE |
 | 4 — P1 Remainder + Triggers | EC-16 + Part 2 Ph 3 | 6 | ✅ COMPLETE |
 | 5 — Aggregates | Part 2 Ph 4 | 3 | ✅ COMPLETE |
 | 6 — IMMEDIATE Parity | Part 2 Ph 5 | 2 | ✅ COMPLETE |
@@ -208,10 +205,11 @@ until the engine is stable post-Stage 5.
 
 ## Prioritized Remaining Work
 
-All seven stages are complete. Only one item remains deferred:
+All seven stages are complete. No items remain.
 
-| Priority | Item | Reason deferred | Effort |
-|----------|------|-----------------|--------|
-| 1 | **Task 2.3** — `ROWS FROM()` with multiple functions | Very niche use case | 1–2 days |
-
-This is not blocking any user-facing functionality.
+**Task 2.3 — ROWS FROM()** was the last deferred item and is now implemented:
+- `rewrite_rows_from()` in `src/dvm/parser.rs` (auto-rewrite pass)
+- All-unnest optimisation: `ROWS FROM(unnest(A), unnest(B))` → `unnest(A, B)`
+- General case: ordinal-based LEFT JOIN LATERAL chain with `generate_series` +
+  `row_number() OVER ()`
+- 7 E2E tests in `tests/e2e_rows_from_tests.rs`

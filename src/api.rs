@@ -157,6 +157,12 @@ fn create_stream_table_impl(
     // per OR arm, so the DVM parser only sees non-OR sublinks.
     let query = &crate::dvm::rewrite_sublinks_in_or(query)?;
 
+    // ── ROWS FROM() multi-function rewrite ─────────────────────────
+    // ROWS FROM(f1(), f2(), ...) with multiple SRFs is rewritten to
+    // a single multi-arg unnest() (all-unnest case) or an ordinal-based
+    // LEFT JOIN LATERAL chain (general case).
+    let query = &crate::dvm::rewrite_rows_from(query)?;
+
     // ── Multiple PARTITION BY → handled natively ────────────────────
     // Window functions with different PARTITION BY clauses are now
     // handled by the parser as un-partitioned (full recomputation).

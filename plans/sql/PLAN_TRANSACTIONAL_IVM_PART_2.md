@@ -1,8 +1,8 @@
 # Plan: Expanding SQL Coverage in Trigger-Based CDC Mode (Part 2)
 
 **Date:** 2026-03-03  
-**Last updated:** 2026-03-06  
-**Status:** Stage 3 (Tasks 1.1–2.4) complete. Stage 4 (EC-16, Task 3.1, Task 3.2, Task 3.5) complete; Tasks 3.3 and 3.4 deferred. Stage 5 (Tasks 4.1–4.3) complete.  
+**Last updated:** 2026-03-08  
+**Status:** ALL phases complete. Stage 3 (Tasks 1.1–2.4) complete. Stage 4 (EC-16, Tasks 3.1–3.5) complete. Stage 5 (Tasks 4.1–4.3) complete. Task 2.3 (ROWS FROM) implemented.  
 **Branch:** `edge-cases-and-transactional-ivm`  
 **Scope:** Limitations of `pg_trickle.cdc_mode = 'trigger'` (the default),
 and a phased implementation plan to maximise the SQL surface area supported
@@ -162,7 +162,7 @@ area available to trigger-mode users.
 | **G2** | Multiple PARTITION BY in one query | ✅ **Works natively** | — | Full recomputation approach; no SQL rewrite needed | 1 |
 | **G3** | ALL (subquery) | ✅ **DONE** — NULL-safe AntiJoin | `parse_all_sublink()` builds `(col IS NULL OR NOT (x op col))` condition; full AntiJoin diff pipeline already wired | EC-32 closed | 1 |
 | **G4** | SubLinks inside deeply nested OR | ✅ **DONE** — handles `AND(AND(OR(EXISTS)))` | `flatten_and_conjuncts()` helper + updated `and_contains_or_with_sublink()` + `rewrite_and_with_or_sublinks()` flattens AND tree recursively | — | 2 |
-| **G5** | ROWS FROM() with multiple functions | Rejected | Parser only handles single SRF | Extend `LateralFunction` to zip multiple SRFs | 2 |
+| **G5** | ROWS FROM() with multiple functions | ✅ **DONE** — `rewrite_rows_from()` auto-rewrite | All-unnest optimisation merges to multi-arg `unnest()`; general case uses ordinal LEFT JOIN LATERAL chain | 2 |
 | **G6** | LATERAL with RIGHT/FULL JOIN | Rejected (PostgreSQL constraint) | PostgreSQL itself rejects RIGHT/FULL JOIN LATERAL | Error message updated to explain PostgreSQL-level constraint (**message improved**) | — |
 | **G7** | Regression aggregates (11 functions) | ✅ **DONE** — group-rescan | Already fully wired in prior session (`AggFunc::Corr`, `CovarPop`, `RegrAvgx` etc. + match arms + `is_group_rescan`) | — | 4 |
 | **G8** | Hypothetical-set aggregates (4 funcs) | ✅ **DONE** — group-rescan | `HypRank/HypDenseRank/HypPercentRank/HypCumeDist` variants; `is_ordered_set` updated in `agg_to_rescan_sql` | — | 4 |
@@ -334,55 +334,30 @@ SELECT * FROM t WHERE x = 1 AND y = 2 AND EXISTS (SELECT 1 FROM s WHERE s.id = t
   - `and_contains_or_with_sublink()` — uses `flatten_and_conjuncts`
   - `rewrite_and_with_or_sublinks()` — new signature + flattened body
 
-### Task 2.3: ROWS FROM() with Multiple Functions (G5)
+### Task 2.3: ROWS FROM() with Multiple Functions (G5) — ✅ IMPLEMENTED
 
-**Current behaviour:** `SELECT * FROM ROWS FROM(unnest(a), unnest(b))` is
-rejected.
+**Status:** **IMPLEMENTED** — `rewrite_rows_from()` in `src/dvm/parser.rs` detects
+multi-function `ROWS FROM()` nodes in the raw parse tree and rewrites them.
 
-**Proposed fix:** Rewrite to `LATERAL` with explicit zip logic. PostgreSQL's
-`ROWS FROM()` zips multiple SRF outputs column-by-column, padding shorter
-results with NULL. This can be expressed as:
+Two strategies:
+1. **All-unnest optimisation:** `ROWS FROM(unnest(A), unnest(B))` → `unnest(A, B) AS alias(cols)`.
+   PostgreSQL's multi-arg `unnest()` natively does zip semantics.
+2. **General case:** Ordinal-based LEFT JOIN LATERAL chain with
+   `generate_series(1, 2147483647)` as index source + `row_number() OVER ()` for
+   ordinal matching. Produces correct NULL-padding for shorter result sets.
 
-```sql
--- Before (rejected):
-SELECT * FROM ROWS FROM(unnest(ARRAY[1,2,3]), unnest(ARRAY['a','b']))
-
--- After rewrite (supported):
-SELECT f1.unnest AS col1, f2.unnest AS col2
-FROM generate_series(1, GREATEST(
-       array_length(ARRAY[1,2,3], 1),
-       array_length(ARRAY['a','b'], 1)
-     )) __pgt_idx
-LEFT JOIN LATERAL unnest(ARRAY[1,2,3]) WITH ORDINALITY AS f1(unnest, ord)
-  ON f1.ord = __pgt_idx
-LEFT JOIN LATERAL unnest(ARRAY['a','b']) WITH ORDINALITY AS f2(unnest, ord)
-  ON f2.ord = __pgt_idx
-```
-
-This is correct but complex to auto-generate for arbitrary SRFs. A simpler
-approach for the common case (all SRFs are `unnest`):
-
-```sql
--- Simplified for unnest-of-arrays:
-SELECT u1, u2
-FROM unnest(ARRAY[1,2,3], ARRAY['a','b']) AS t(u1, u2)
-```
-
-PostgreSQL's multi-argument `unnest()` already does zip semantics.
-
-**Recommendation:** Implement as SQL-level rewrite. Detect `ROWS FROM()`
-nodes in the raw parse tree, extract the function calls, and rewrite to
-multi-argument `unnest()` (when all are `unnest`) or to the explicit LATERAL
-with `generate_series` (general case).
+Handles JoinExpr recursion (ROWS FROM inside JOIN trees), set operations (UNION
+branches), aliases, column aliases, and WITH ORDINALITY.
 
 **Files changed:**
-- `src/dvm/parser.rs` — new `rewrite_rows_from()` function
+- `src/dvm/parser.rs` — `rewrite_rows_from()` (public entry), `has_multi_rows_from()`,
+  `rewrite_from_item_rows_from()`, `rewrite_rows_from_in_set_op()`
 - `src/dvm/mod.rs` — export
-- `src/api.rs` — wire into pipeline
+- `src/api.rs` — wired into rewrite pipeline after `rewrite_sublinks_in_or`
 
 **Tests:**
-- Unit tests: 3 cases (dual unnest, triple unnest, mixed SRFs)
-- E2E test: stream table over `ROWS FROM()`, verify delta
+- 7 E2E tests in `tests/e2e_rows_from_tests.rs`: dual unnest, triple unnest,
+  mixed SRFs, differential insert/delete, single-function passthrough
 
 ### Task 2.4: LATERAL with RIGHT/FULL JOIN (G6) — ✅ ERROR MESSAGE UPDATED
 
