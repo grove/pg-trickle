@@ -117,6 +117,16 @@ pub static PGS_BLOCK_SOURCE_DDL: GucSetting<bool> = GucSetting::<bool>::new(fals
 /// both high-throughput workloads (raise) and small tables (lower).
 pub static PGS_BUFFER_ALERT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
 
+/// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
+pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
+
+/// Maximum LIMIT value for TopK stream tables in IMMEDIATE mode.
+///
+/// TopK queries with `LIMIT > threshold` are rejected in IMMEDIATE mode
+/// because inline recomputation of large result sets adds unacceptable
+/// latency to the trigger path. Set to 0 to disable TopK in IMMEDIATE mode.
+pub static PGS_IVM_TOPK_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -301,6 +311,30 @@ pub fn register_gucs() {
         &PGS_BUFFER_ALERT_THRESHOLD,
         1_000,       // min: 1000 rows
         100_000_000, // max: 100M rows
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.max_grouping_set_branches",
+        c"Maximum allowed grouping set branches in CUBE/ROLLUP queries.",
+        c"Prevents parsing memory exhaustion during combinatorial expansion. \
+           Raise if you need more than 64 grouping set branches.",
+        &PGS_MAX_GROUPING_SET_BRANCHES,
+        1,
+        65536,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.ivm_topk_max_limit",
+        c"Maximum LIMIT for TopK stream tables in IMMEDIATE mode.",
+        c"TopK queries exceeding this LIMIT are rejected in IMMEDIATE mode. \
+           Set to 0 to disable TopK in IMMEDIATE mode entirely.",
+        &PGS_IVM_TOPK_MAX_LIMIT,
+        0,
+        1_000_000,
         GucContext::Suset,
         GucFlags::default(),
     );

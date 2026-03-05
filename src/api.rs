@@ -227,16 +227,27 @@ fn create_stream_table_impl(
         crate::dvm::reject_materialized_views(query)?;
     }
 
-    // ── IMMEDIATE mode: reject TopK ─────────────────────────────────
-    // TopK tables rely on scoped recomputation, which is a deferred/full
-    // pattern incompatible with within-transaction trigger-based IVM.
-    if refresh_mode.is_immediate() && topk_info.is_some() {
-        return Err(PgTrickleError::UnsupportedOperator(
-            "ORDER BY + LIMIT (TopK) is not supported in IMMEDIATE mode. \
-             TopK tables use scoped recomputation which requires a scheduled \
-             refresh. Use 'DIFFERENTIAL' or 'FULL' mode for TopK queries."
-                .into(),
-        ));
+    // ── IMMEDIATE mode: TopK with limit threshold (Task 5.2) ────────
+    // TopK in IMMEDIATE mode uses inline micro-refresh (recompute top K
+    // rows and diff against current storage). Gated by ivm_topk_max_limit GUC.
+    if let (true, Some(info)) = (refresh_mode.is_immediate(), &topk_info) {
+        let topk_limit = info.limit_value;
+        let max_limit = crate::config::PGS_IVM_TOPK_MAX_LIMIT.get() as i64;
+        if max_limit == 0 || topk_limit > max_limit {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "ORDER BY + LIMIT {topk_limit} (TopK) exceeds the IMMEDIATE mode threshold \
+                 (pg_trickle.ivm_topk_max_limit = {max_limit}). TopK tables in IMMEDIATE mode \
+                 recompute the top-K rows on every DML statement. Reduce LIMIT, raise the \
+                 threshold, or use 'DIFFERENTIAL' mode for large TopK queries."
+            )));
+        }
+        pgrx::warning!(
+            "pg_trickle: TopK (LIMIT {}) in IMMEDIATE mode uses micro-refresh — \
+             the top-{} rows are recomputed on every DML statement. \
+             This adds latency proportional to the defining query cost.",
+            topk_limit,
+            topk_limit
+        );
     }
 
     // ── IMMEDIATE mode: validate query restrictions ─────────────────
@@ -641,14 +652,17 @@ fn alter_stream_table_impl(
 
         if new_mode != old_mode {
             // ── Validate mode switch ────────────────────────────────
-            // TopK tables cannot switch to IMMEDIATE mode.
-            if new_mode.is_immediate() && st.topk_limit.is_some() {
-                return Err(PgTrickleError::UnsupportedOperator(
-                    "Cannot switch TopK stream table to IMMEDIATE mode. \
-                     TopK tables use scoped recomputation which requires a \
-                     scheduled refresh."
-                        .into(),
-                ));
+            // TopK tables: check limit threshold for IMMEDIATE mode.
+            if let (true, Some(topk_limit)) = (new_mode.is_immediate(), st.topk_limit) {
+                let topk_limit = topk_limit as i64;
+                let max_limit = crate::config::PGS_IVM_TOPK_MAX_LIMIT.get() as i64;
+                if max_limit == 0 || topk_limit > max_limit {
+                    return Err(PgTrickleError::UnsupportedOperator(format!(
+                        "Cannot switch TopK stream table (LIMIT {topk_limit}) to IMMEDIATE mode. \
+                         Exceeds pg_trickle.ivm_topk_max_limit = {max_limit}. Raise the threshold \
+                         or keep using DIFFERENTIAL/FULL mode."
+                    )));
+                }
             }
 
             // Validate query restrictions for IMMEDIATE mode.

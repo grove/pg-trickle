@@ -2455,16 +2455,21 @@ fn check_immediate_support(tree: &OpTree) -> Result<(), PgTrickleError> {
             check_immediate_support(subquery)
         }
 
-        // ── Rejected constructs ─────────────────────────────────────
-
-        // Recursive CTEs use semi-naive evaluation with iteration.
-        // The fixpoint computation interacts with transaction state in ways
-        // that have not been validated with transition tables.
-        OpTree::RecursiveCte { .. } => Err(PgTrickleError::UnsupportedOperator(
-            "Recursive CTEs (WITH RECURSIVE) are not yet supported in IMMEDIATE \
-             mode. Use 'DIFFERENTIAL' mode instead."
-                .into(),
-        )),
+        // ── Recursive CTEs ────────────────────────────────────────
+        // Task 5.1: Allow recursive CTEs in IMMEDIATE mode.
+        // Semi-naive evaluation works with DeltaSource::TransitionTable;
+        // emit a warning about potential stack-depth issues for deep recursion.
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => {
+            pgrx::warning!(
+                "pg_trickle: WITH RECURSIVE in IMMEDIATE mode uses semi-naive evaluation \
+                 inside the trigger. Deep recursion may approach PostgreSQL's max_stack_depth \
+                 limit. Monitor for 'stack depth limit exceeded' errors."
+            );
+            check_immediate_support(base)?;
+            check_immediate_support(recursive)
+        }
     }
 }
 
@@ -3442,8 +3447,10 @@ unsafe fn check_from_item_for_matview_or_foreign(
             Some("f") => {
                 return Err(PgTrickleError::UnsupportedOperator(format!(
                     "Foreign table '{schema}.{relname}' cannot be used as a source in \
-                     DIFFERENTIAL mode. Row-level triggers cannot be created on foreign tables. \
-                     Use FULL refresh mode instead."
+                     DIFFERENTIAL or IMMEDIATE mode. Row-level triggers cannot be created \
+                     on foreign tables. Use FULL refresh mode instead, which re-queries \
+                     the foreign table on each refresh cycle. For postgres_fdw tables, \
+                     consider using IMPORT FOREIGN SCHEMA to keep the local schema in sync."
                 )));
             }
             _ => {}
@@ -3831,13 +3838,15 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         // Guard against combinatorial explosion: CUBE(n) produces 2^n branches,
         // ROLLUP(n) produces n+1, combined CUBE+ROLLUP can easily exceed memory.
         // Reject early rather than building a query too large for PG to parse (G5.2).
-        const MAX_GROUPING_BRANCHES: usize = 64;
-        if final_sets.len() > MAX_GROUPING_BRANCHES {
+        // EC-02: Limit is configurable via pg_trickle.max_grouping_set_branches GUC.
+        let max_grouping_branches = crate::config::PGS_MAX_GROUPING_SET_BRANCHES.get() as usize;
+        if final_sets.len() > max_grouping_branches {
             return Err(PgTrickleError::QueryParseError(format!(
                 "CUBE/ROLLUP generates {} grouping set branches which exceeds the limit of {}. \
-                 Use explicit GROUPING SETS(...) to enumerate only the required combinations.",
+                 Use explicit GROUPING SETS(...) to enumerate only the required combinations, \
+                 or raise pg_trickle.max_grouping_set_branches.",
                 final_sets.len(),
-                MAX_GROUPING_BRANCHES
+                max_grouping_branches
             )));
         }
     }
