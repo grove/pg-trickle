@@ -1258,6 +1258,45 @@ fn execute_manual_differential_refresh(
         }
     }
 
+    // Mixed-dependency guard: if ANY upstream is a STREAM_TABLE, the DVM
+    // delta SQL will reference change buffers that don't exist for stream
+    // tables (they have no CDC triggers). Fall back to FULL refresh,
+    // consistent with how the scheduler handles these (scheduler.rs:1077).
+    {
+        let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+        let has_st_source = deps.iter().any(|dep| dep.source_type == "STREAM_TABLE");
+        if has_st_source {
+            let any_st_upstream_newer = has_upstream_stream_table_changes(st.pgt_id)?;
+
+            // Check TABLE source change buffers for pending rows.
+            let change_schema =
+                crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+            let any_table_changes = deps
+                .iter()
+                .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
+                .any(|dep| {
+                    Spi::get_one::<bool>(&format!(
+                        "SELECT EXISTS(SELECT 1 FROM \"{}\".changes_{} LIMIT 1)",
+                        change_schema,
+                        dep.source_relid.to_u32(),
+                    ))
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false)
+                });
+
+            if any_st_upstream_newer || any_table_changes {
+                return execute_manual_full_refresh(st, schema, table_name, source_oids);
+            } else {
+                pgrx::info!(
+                    "Stream table {}.{} refreshed (no-op: upstream unchanged)",
+                    schema,
+                    table_name,
+                );
+                return Ok(());
+            }
+        }
+    }
+
     // Get current WAL positions (reuses source_oids from caller — G-N3)
     let slot_positions = cdc::get_slot_positions(source_oids)?;
     let data_ts = get_data_timestamp_str();
