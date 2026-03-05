@@ -1151,7 +1151,7 @@ fn check_proc_hashes_changed(st: &StreamTableMeta) -> bool {
     };
 
     // Compare against stored hashes.
-    let changed = match &st.function_hashes {
+    match &st.function_hashes {
         None => {
             // First-time baseline: store and report no change.
             if let Err(e) = crate::catalog::StreamTableMeta::update_function_hashes(
@@ -1176,9 +1176,7 @@ fn check_proc_hashes_changed(st: &StreamTableMeta) -> bool {
                 true
             }
         }
-    };
-
-    changed
+    }
 }
 
 /// Task 3.2: Fast-path DELETE for a single-source ST whose window contains a
