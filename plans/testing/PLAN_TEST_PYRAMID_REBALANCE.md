@@ -1,6 +1,6 @@
 # PLAN: Test Pyramid Rebalance
 
-**Status:** In Progress  
+**Status:** Complete  
 **Date:** 2026-03-05  
 **Branch:** `plan-test-pyramid-rebalance`  
 **Scope:** Shift test coverage down the pyramid — extract pure-logic unit tests
@@ -21,10 +21,11 @@ level.
 | P2-D — Scheduler decisions | **Done** | 11 | Extracted `is_group_due_pure` + `is_falling_behind` |
 | P2-E — Alert payloads | **Done** | 4 | Extracted `build_alert_payload` |
 | P2-F — CDC column lists | **Done** | 4 | Extracted `build_typed_col_defs` |
+| P2-A4 — IVM trigger names | **Done** | 9 | Extracted `IvmTriggerNames` struct |
 | P3 — Light-E2E tier | **Done** | — | Harness + CI + justfile targets |
 | P4 — Validation tests to unit | **Done** | 55 | Revised scope (see below) |
 
-**Total new unit tests: 124** (1,040 → 1,164)
+**Total new unit tests: 133** (1,040 → 1,173)
 
 ### P3 Implementation
 
@@ -49,11 +50,9 @@ Files delivered:
 42 test files (~570 tests) are light-eligible. 10 files (~90 tests) require
 full E2E (bgworker, scheduler, bench tuning, upgrade, GUC variation).
 
-### What Remains (prioritized)
+### What Remains
 
-1. **P2-A4 — IVM trigger name generation** (optional): Extract
-   `ivm_trigger_names()` struct from `setup_ivm_triggers` for cleaner code.
-   Low priority since the trigger names are simple format strings.
+All phases are complete. No remaining work items.
 
 ### P4 Scope Revision
 
