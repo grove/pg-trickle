@@ -1,13 +1,14 @@
 //! E2E test harness that boots a PostgreSQL 18.1 container with
 //! the pg_trickle extension pre-installed.
 //!
-//! # Prerequisites
+//! # Harness Selection
 //!
-//! The Docker image must be built before running E2E tests:
-//!
-//! ```bash
-//! ./tests/build_e2e_image.sh
-//! ```
+//! - **Full (default)**: Custom Docker image with `shared_preload_libraries`,
+//!   background worker, and shared memory.  Requires
+//!   `./tests/build_e2e_image.sh`.
+//! - **Light** (`--features light-e2e`): Stock `postgres:18.1` container with
+//!   bind-mounted extension artifacts.  No background worker or scheduler.
+//!   Much faster to build — only needs `cargo pgrx package`.
 //!
 //! # Usage
 //!
@@ -22,21 +23,30 @@
 //! }
 //! ```
 
+// ── Light-E2E feature gate ─────────────────────────────────────────────
+// When the `light-e2e` feature is active, use the lightweight harness that
+// bind-mounts `cargo pgrx package` output into a stock PostgreSQL container.
+#[cfg(feature = "light-e2e")]
+mod light;
+#[cfg(feature = "light-e2e")]
+pub use light::E2eDb;
+
+// ── Full E2E harness (default) ─────────────────────────────────────────
+#[cfg(not(feature = "light-e2e"))]
 use sqlx::PgPool;
+#[cfg(not(feature = "light-e2e"))]
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{IntoContainerPort, Mount, WaitFor},
     runners::AsyncRunner,
 };
 
+#[cfg(not(feature = "light-e2e"))]
 const IMAGE_NAME: &str = "pg_trickle_e2e";
+#[cfg(not(feature = "light-e2e"))]
 const IMAGE_TAG: &str = "latest";
 
-/// Return the Docker image name to use for E2E containers.
-///
-/// Reads `PGS_E2E_IMAGE` env var. If set, it is expected to be in
-/// `name:tag` form (e.g. `pg_trickle_e2e_cov:latest`).
-/// Falls back to `IMAGE_NAME:IMAGE_TAG`.
+#[cfg(not(feature = "light-e2e"))]
 fn e2e_image() -> (String, String) {
     match std::env::var("PGS_E2E_IMAGE") {
         Ok(val) if !val.is_empty() => {
@@ -51,8 +61,7 @@ fn e2e_image() -> (String, String) {
     }
 }
 
-/// If `PGS_E2E_COVERAGE_DIR` is set, return a bind mount that maps
-/// that host directory to `/coverage` inside the container.
+#[cfg(not(feature = "light-e2e"))]
 fn coverage_mount() -> Option<Mount> {
     match std::env::var("PGS_E2E_COVERAGE_DIR") {
         Ok(dir) if !dir.is_empty() => Some(Mount::bind_mount(dir, "/coverage")),
@@ -60,6 +69,7 @@ fn coverage_mount() -> Option<Mount> {
     }
 }
 
+#[cfg(not(feature = "light-e2e"))]
 /// Verify an image exists locally before attempting to start a container.
 ///
 /// testcontainers falls back to a Docker Hub pull when the image is not
@@ -89,11 +99,13 @@ async fn assert_docker_image_exists(name: &str, tag: &str) {
 /// `shared_preload_libraries` configured.
 ///
 /// The container is automatically cleaned up when `E2eDb` is dropped.
+#[cfg(not(feature = "light-e2e"))]
 pub struct E2eDb {
     pub pool: PgPool,
     _container: ContainerAsync<GenericImage>,
 }
 
+#[cfg(not(feature = "light-e2e"))]
 #[allow(dead_code)]
 impl E2eDb {
     /// Start a fresh PostgreSQL 18.1 container with the extension installed.
