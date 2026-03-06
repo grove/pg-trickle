@@ -281,17 +281,17 @@ two remaining high-risk patterns — recursive CTEs and TopK queries.
 
 > **IMMEDIATE parity subtotal: ✅ Complete (IM1 + IM2)**
 
-### Edge Case Hardening
+### Edge Case Hardening ✅
 
 Self-contained items from Stage 7 of the edge-cases/TIVM implementation plan.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| EC1 | `pg_trickle.max_grouping_set_branches` GUC — cap CUBE/ROLLUP branch-count explosion | 4h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-02 |
-| EC2 | Post-restart CDC `TRANSITIONING` health check — detect stuck CDC transitions after crash or restart | 1d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-20 |
-| EC3 | Foreign table support: polling-based change detection via periodic re-execution | 2–3d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-05 |
+| EC1 | `pg_trickle.max_grouping_set_branches` GUC — cap CUBE/ROLLUP branch-count explosion | 4h | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-02 | ✅ Done — GUC in config.rs (default 64, range 1–65536); parser.rs rejects when branch count exceeds limit; 3 E2E tests (rejection, within-limit, raised limit) |
+| EC2 | Post-restart CDC `TRANSITIONING` health check — detect stuck CDC transitions after crash or restart | 1d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-20 | ✅ Done — `check_cdc_transition_health()` in scheduler.rs; detects missing replication slots; rolls back to TRIGGER mode |
+| EC3 | Foreign table support: polling-based change detection via periodic re-execution | 2–3d | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-05 | ✅ Done — `pg_trickle.foreign_table_polling` GUC; `setup_foreign_table_polling()` creates snapshot table; `poll_foreign_table_changes()` uses EXCEPT ALL deltas; 3 E2E tests (rejection, FULL mode, polling correctness) |
 
-> **Edge-case hardening subtotal: ~3–5 days**
+> **Edge-case hardening subtotal: ✅ Complete (EC1 + EC2 + EC3)**
 
 ### Documentation Sweep
 
@@ -324,8 +324,9 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 - [x] Version check fires at scheduler startup if `.so`/SQL versions diverge
 - [x] IMMEDIATE mode: recursive CTE semi-naive validated; `ivm_recursive_max_depth` depth guard added
 - [x] IMMEDIATE mode: TopK micro-refresh fully tested end-to-end (10 E2E tests)
-- [ ] `max_grouping_set_branches` GUC guards CUBE/ROLLUP explosion
+- [x] `max_grouping_set_branches` GUC guards CUBE/ROLLUP explosion (3 E2E tests)
 - [x] Post-restart CDC TRANSITIONING health check in place
+- [x] Foreign table polling-based CDC implemented (3 E2E tests)
 - [x] DDL-during-refresh and standby/replication limitations documented
 - [x] WAL CDC mode passes full E2E suite
 - [ ] E2E tests pass (`just build-e2e-image && just test-e2e`)
