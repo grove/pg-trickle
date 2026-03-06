@@ -1,15 +1,15 @@
 # Plan: Allow `alter_stream_table` to Change the Defining Query
 
-**Status:** In Progress  
+**Status:** Complete  
 **Author:** Copilot  
 **Date:** 2026-03-04  
-**Last Updated:** 2026-03-06
+**Last Updated:** 2026-03-07
 
 ---
 
 ## Progress Summary
 
-### Completed (Steps 1–6)
+### Completed (Steps 1–9)
 - [x] **Step 1: Refactor `create_stream_table_impl`** — Extracted reusable
   functions: `run_query_rewrite_pipeline()`, `validate_and_parse_query()`,
   `setup_storage_table()`, `insert_catalog_and_deps()`,
@@ -28,17 +28,25 @@
   repopulate).
 - [x] **Step 6: SQL signature** — Added `query` parameter to
   `alter_stream_table` / `alter_stream_table_impl`.
-
-### Remaining (prioritized)
-1. **Step 6b: Upgrade migration script** — Write
-   `sql/pg_trickle--0.2.1--0.3.0.sql` that `DROP FUNCTION` the old
-   `alter_stream_table` signature and creates the new one with the `query`
-   parameter via pgrx's generated SQL.
-2. **Step 9: E2E tests** — Create `tests/e2e_alter_query_tests.rs` covering
-   all test scenarios from §5 Step 9 table.
-3. **Step 7: dbt materialization** — Update the dbt adapter macros to use
-   `ALTER ... query =>` instead of drop+recreate for query changes.
-4. **Step 8: Docs** — Update SQL_REFERENCE.md, FAQ.md, ARCHITECTURE.md.
+- [x] **Step 6b: Upgrade migration script** — Created
+  `sql/pg_trickle--0.2.1--0.3.0.sql` that DROPs the old 6-parameter
+  `alter_stream_table` signature and CREATEs the new 7-parameter version
+  with the `query` parameter.
+- [x] **Step 7: dbt materialization** — Updated
+  `dbt-pgtrickle/macros/materializations/stream_table.sql` to use
+  `ALTER ... query =>` instead of drop+recreate for query changes.
+  Updated `dbt-pgtrickle/macros/adapters/alter_stream_table.sql` to accept
+  and pass the `query` parameter.
+- [x] **Step 8: Docs** — Updated `docs/SQL_REFERENCE.md` with new `query`
+  parameter documentation, examples, and schema migration behavior notes.
+  Updated `docs/FAQ.md` to replace "must drop and recreate" guidance with
+  the new ALTER QUERY approach. Updated `docs/ARCHITECTURE.md` description.
+- [x] **Step 9: E2E tests** — Created `tests/e2e_alter_query_tests.rs` with
+  14 tests covering same-schema, compatible-schema (add/remove column, type
+  change), incompatible-schema (type change with full rebuild), dependency
+  changes (add/remove sources), aggregate transitions, query+mode change,
+  error handling (invalid query, cycle detection), view inlining, OID
+  stability, and catalog update verification.
 
 ---
 
