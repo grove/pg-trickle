@@ -1,4 +1,4 @@
--- pg_trickle 0.2.1 → 0.3.0 upgrade script
+-- pg_trickle 0.2.1 → 0.2.2 upgrade script
 --
 -- ALTER QUERY: Add `query` parameter to alter_stream_table().
 -- The function signature changes from 6 to 7 parameters (adding `query`

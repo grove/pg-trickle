@@ -308,7 +308,7 @@ refresh_mode: default!(&str, "'AUTO'"),
 Existing callers passing `'DIFFERENTIAL'` explicitly are unaffected.
 
 ### Step 4: Update SQL upgrade script
-**File:** `sql/pg_trickle--0.2.1--0.3.0.sql` (or current version)  
+**File:** `sql/pg_trickle--0.2.1--0.2.2.sql` (or current version)  
 **Effort:** ~15 min
 
 The `CREATE OR REPLACE FUNCTION` with the new default. No catalog migration

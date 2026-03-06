@@ -29,7 +29,7 @@
 - [x] **Step 6: SQL signature** — Added `query` parameter to
   `alter_stream_table` / `alter_stream_table_impl`.
 - [x] **Step 6b: Upgrade migration script** — Created
-  `sql/pg_trickle--0.2.1--0.3.0.sql` that DROPs the old 6-parameter
+  `sql/pg_trickle--0.2.1--0.2.2.sql` that DROPs the old 6-parameter
   `alter_stream_table` signature and CREATEs the new 7-parameter version
   with the `query` parameter.
 - [x] **Step 7: dbt materialization** — Updated
@@ -423,7 +423,7 @@ The core logic, called from `alter_stream_table_impl` when `query` is
 `Some(...)`. Orchestrates Phases 0–5, using the utilities from Steps 1–4.
 
 ### Step 6: Update SQL signature & upgrade script
-**Files:** `src/api.rs` (pgrx attribute), `sql/pg_trickle--0.2.1--0.3.0.sql`  
+**Files:** `src/api.rs` (pgrx attribute), `sql/pg_trickle--0.2.1--0.2.2.sql`  
 **Effort:** ~1 hour
 
 Add the `query` parameter to the `#[pg_extern]` function signature with
