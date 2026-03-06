@@ -30,8 +30,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXTRA_ARGS="${*:-}"
 
 # ── Auto-detect build platform ───────────────────────────────────────────────
-# Supports linux/amd64 (x86_64) and linux/arm64 (Apple Silicon / aarch64).
-# Override by setting DOCKER_PLATFORM in the environment.
+# Used only for comparison: if the existing builder image was built for a
+# different architecture (e.g. a stale linux/amd64 image on Apple Silicon)
+# we force a rebuild.  The build itself has NO --platform flag so Docker
+# defaults to the native OS/arch and stores images in the Docker daemon's
+# classic image store (required by docker run and testcontainers via bollard).
+# Passing --platform on Docker Desktop 4.60+ with the containerd image store
+# causes images to land in the containerd namespace, invisible to docker run.
+# Override this detection by setting DOCKER_PLATFORM in the environment.
 PLATFORM="${DOCKER_PLATFORM:-linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')}"
 
 # ── Ensure the builder base image is available ───────────────────────────────
@@ -52,7 +58,6 @@ if [[ "${EXTRA_ARGS}" != *"--no-cache"* ]]; then
         echo "  Building it now (one-time, ~7 min) …"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         docker build \
-            --platform "${PLATFORM}" \
             -t "${BUILDER_IMAGE}" \
             -f "${SCRIPT_DIR}/Dockerfile.builder" \
             "${PROJECT_ROOT}"
@@ -69,7 +74,6 @@ echo "  Builder image: ${BUILDER_IMAGE}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 docker build \
-    --platform "${PLATFORM}" \
     -t "${IMAGE_NAME}:${IMAGE_TAG}" \
     -f "${SCRIPT_DIR}/Dockerfile.e2e" \
     --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}" \
