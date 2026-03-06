@@ -227,10 +227,11 @@ GitHub Pages book grew from 14 to 20 pages:
 
 ---
 
-## v0.2.2 — OFFSET Support, AUTO Mode & Upgrade Tooling
+## v0.2.2 — OFFSET Support, AUTO Mode, ALTER QUERY & Upgrade Tooling
 
 **Goal:** Ship the `ORDER BY + LIMIT + OFFSET` (Paged TopK) feature started
-in v0.2.1, make AUTO the default refresh mode, and close upgrade tooling gaps.
+in v0.2.1, make AUTO the default refresh mode, add ALTER QUERY support, and
+close upgrade tooling gaps.
 
 ### ORDER BY + LIMIT + OFFSET (Paged TopK) — Finalization ✅
 
@@ -249,6 +250,16 @@ tests). The `topk_offset` catalog column was pre-provisioned in v0.2.1.
 | AM1 | `RefreshMode::Auto` — uses DIFFERENTIAL when supported, falls back to FULL | ✅ Done | [PLAN_REFRESH_MODE_DEFAULT.md](plans/sql/PLAN_REFRESH_MODE_DEFAULT.md) |
 | AM2 | `create_stream_table` default changed from `'DIFFERENTIAL'` to `'AUTO'` | ✅ Done | — |
 | AM3 | `create_stream_table` schedule default changed from `'1m'` to `'calculated'` | ✅ Done | — |
+
+### ALTER QUERY ✅
+
+| Item | Description | Status | Ref |
+|------|-------------|--------|-----|
+| AQ1 | `alter_stream_table(query => ...)` — validate, classify schema change, migrate storage | ✅ Done | [PLAN_ALTER_QUERY.md](plans/PLAN_ALTER_QUERY.md) |
+| AQ2 | Schema classification: same, compatible (ADD/DROP COLUMN), incompatible (full rebuild) | ✅ Done | — |
+| AQ3 | ALTER-aware cycle detection (`check_for_cycles_alter`) | ✅ Done | — |
+| AQ4 | CDC dependency migration (add/remove triggers for changed sources) | ✅ Done | — |
+| AQ5 | SQL Reference & CHANGELOG documentation | ✅ Done | — |
 
 ### Upgrade Tooling ✅
 
@@ -578,7 +589,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
 | v0.2.0 — TopK, Diamond & Transactional IVM | ✔️ Complete | 62–78h | ✅ Released |
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
-| v0.2.2 — OFFSET Support & Upgrade Tooling | ~5h | 75–91h | |
+| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~5h | 75–91h | |
 | v0.3.0 — Correctness, Security & Operations | 120–170h | 195–261h | |
 | v0.4.0 — Backward Compatibility, Cloud & Scale | 200–280h | 395–541h | |
 | v0.5.0 — Observability & Integration | 14–21h | 409–562h | |
