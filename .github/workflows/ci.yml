@@ -86,6 +86,23 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Restore Docker image cache (postgres:18.1-alpine)
+        uses: actions/cache@v4
+        id: cache-docker-postgres-alpine
+        with:
+          path: /tmp/docker-images/postgres-18.1-alpine.tar
+          key: docker-postgres-18.1-alpine
+
+      - name: Load or pull postgres:18.1-alpine
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.1-alpine.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.1-alpine.tar
+          else
+            docker pull postgres:18.1-alpine
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.1-alpine --output /tmp/docker-images/postgres-18.1-alpine.tar
+          fi
+
       - name: Run integration tests
         run: |
           cargo test \
@@ -112,6 +129,23 @@ jobs:
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
+
+      - name: Restore Docker image cache (postgres:18.1)
+        uses: actions/cache@v4
+        id: cache-docker-postgres-e2e
+        with:
+          path: /tmp/docker-images/postgres-18.1.tar
+          key: docker-postgres-18.1
+
+      - name: Load or pull postgres:18.1
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.1.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.1.tar
+          else
+            docker pull postgres:18.1
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.1 --output /tmp/docker-images/postgres-18.1.tar
+          fi
 
       - name: Build E2E Docker image
         run: ./tests/build_e2e_image.sh
