@@ -88,6 +88,67 @@ test-e2e: build-e2e-image
 test-e2e-fast:
     cargo test --test 'e2e_*' -- --test-threads=1
 
+# Package the extension for light-E2E tests (cargo pgrx package)
+[group: "test"]
+package-extension:
+    cargo pgrx package --pg-config "$(pg_config --bindir)/pg_config"
+
+# Run light-E2E tests (stock postgres container, no custom Docker image)
+# Only works on Linux — macOS produces .dylib that can't run in a Linux container.
+[group: "test"]
+test-light-e2e: package-extension
+    cargo test --features light-e2e \
+        --test e2e_aggregate_coverage_tests \
+        --test e2e_alter_tests \
+        --test e2e_cdc_tests \
+        --test e2e_concurrent_tests \
+        --test e2e_coverage_error_tests \
+        --test e2e_coverage_parser_tests \
+        --test e2e_create_tests \
+        --test e2e_cte_tests \
+        --test e2e_dag_concurrent_tests \
+        --test e2e_dag_error_tests \
+        --test e2e_dag_immediate_tests \
+        --test e2e_dag_operations_tests \
+        --test e2e_dag_topology_tests \
+        --test e2e_diamond_tests \
+        --test e2e_drop_tests \
+        --test e2e_error_tests \
+        --test e2e_expression_tests \
+        --test e2e_full_join_tests \
+        --test e2e_getting_started_tests \
+        --test e2e_guard_trigger_tests \
+        --test e2e_having_transition_tests \
+        --test e2e_ivm_tests \
+        --test e2e_keyless_duplicate_tests \
+        --test e2e_lateral_subquery_tests \
+        --test e2e_lateral_tests \
+        --test e2e_lifecycle_tests \
+        --test e2e_mixed_mode_dag_tests \
+        --test e2e_monitoring_tests \
+        --test e2e_multi_cycle_dag_tests \
+        --test e2e_multi_window_tests \
+        --test e2e_pipeline_dag_tests \
+        --test e2e_property_tests \
+        --test e2e_refresh_tests \
+        --test e2e_rows_from_tests \
+        --test e2e_scalar_subquery_tests \
+        --test e2e_set_operation_tests \
+        --test e2e_smoke_tests \
+        --test e2e_snapshot_consistency_tests \
+        --test e2e_sublink_or_tests \
+        --test e2e_topk_tests \
+        --test e2e_view_tests \
+        --test e2e_window_tests \
+        -- --test-threads=1
+
+# Run light-E2E tests, skip extension packaging
+[group: "test"]
+test-light-e2e-fast:
+    cargo test --features light-e2e \
+        --test 'e2e_*' \
+        -- --test-threads=1
+
 # Run tests via pgrx against a pgrx-managed postgres
 [group: "test"]
 test-pgrx:
