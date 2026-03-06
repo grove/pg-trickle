@@ -378,11 +378,11 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 
 > WAL decoder F2–F3 fixes (keyless pk_hash, `old_*` columns for UPDATE) landed in v0.1.3.
 
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| W1 | WAL mode E2E test suite (parallel to trigger suite) | 8–12h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
-| W2 | WAL→trigger automatic fallback hardening | 4–6h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
-| W3 | Promote `pg_trickle.cdc_mode = 'auto'` to recommended | ~1h | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
+| Item | Description | Effort | Status | Ref |
+|------|-------------|--------|--------|-----|
+| W1 | WAL mode E2E test suite (parallel to trigger suite) | 8–12h | ✅ Done | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
+| W2 | WAL→trigger automatic fallback hardening | 4–6h | ✅ Done | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
+| W3 | Promote `pg_trickle.cdc_mode = 'auto'` to default | ~1h | ✅ Done | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) |
 
 > **WAL CDC subtotal: ~13–19 hours**
 
@@ -393,11 +393,11 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 - [ ] RLS semantics documented; change buffers RLS-hardened; IVM triggers SECURITY DEFINER
 - [ ] RLS on stream table E2E-tested (DIFFERENTIAL + IMMEDIATE)
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
-- [ ] WAL CDC mode passes full E2E suite
+- [x] WAL CDC mode passes full E2E suite
 - [x] IMMEDIATE mode: recursive CTE semi-naive validated; `ivm_recursive_max_depth` depth guard added
 - [ ] IMMEDIATE mode: TopK micro-refresh fully tested end-to-end
 - [ ] `max_grouping_set_branches` GUC guards CUBE/ROLLUP explosion
-- [ ] Post-restart CDC TRANSITIONING health check in place
+- [x] Post-restart CDC TRANSITIONING health check in place
 - [ ] DDL-during-refresh and standby/replication limitations documented
 - [ ] Extension upgrade path tested (`0.2.x → 0.3.0`)
 - [ ] Zero P0/P1 gaps remaining
