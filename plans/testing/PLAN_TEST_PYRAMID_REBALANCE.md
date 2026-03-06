@@ -2,7 +2,7 @@
 
 **Status:** In Progress  
 **Date:** 2026-03-05  
-**Branch:** `test-pyramid-rebalance-p1-p2`  
+**Branch:** `plan-test-pyramid-rebalance`  
 **Scope:** Shift test coverage down the pyramid — extract pure-logic unit tests
 from SPI-heavy modules, introduce a light-E2E tier to eliminate the 20-minute
 Docker build for most tests, and promote validation/error-path tests to unit
@@ -21,19 +21,37 @@ level.
 | P2-D — Scheduler decisions | **Done** | 11 | Extracted `is_group_due_pure` + `is_falling_behind` |
 | P2-E — Alert payloads | **Done** | 4 | Extracted `build_alert_payload` |
 | P2-F — CDC column lists | **Done** | 4 | Extracted `build_typed_col_defs` |
-| P3 — Light-E2E tier | Not started | — | Harness + migration |
+| P3 — Light-E2E tier | **Done** | — | Harness + CI + justfile targets |
 | P4 — Validation tests to unit | **Done** | 55 | Revised scope (see below) |
 
 **Total new unit tests: 124** (1,040 → 1,164)
 
+### P3 Implementation
+
+The light-E2E tier uses a **bind-mount + exec** approach:
+
+1. `cargo pgrx package` produces compiled extension artifacts in
+   `target/release/pg_trickle-pg18/`.
+2. A stock `postgres:18.1` container starts with the artifacts bind-mounted
+   to `/tmp/pg_ext`.
+3. An `exec` copies the files to the PostgreSQL extension directories.
+4. `CREATE EXTENSION pg_trickle` loads the extension on-demand.
+
+**No custom Docker image, no `shared_preload_libraries`, no background worker.**
+
+Files delivered:
+- `tests/e2e/light.rs` — `LightE2eDb` harness (exported as `E2eDb` via feature gate)
+- `tests/e2e/mod.rs` — Conditional compilation: `#[cfg(feature = "light-e2e")]`
+- `Cargo.toml` — `light-e2e = []` feature
+- `justfile` — `package-extension`, `test-light-e2e`, `test-light-e2e-fast`
+- `.github/workflows/ci.yml` — `light-e2e-tests` job (runs on every PR)
+
+42 test files (~570 tests) are light-eligible. 10 files (~90 tests) require
+full E2E (bgworker, scheduler, bench tuning, upgrade, GUC variation).
+
 ### What Remains (prioritized)
 
-1. **P3 — Light-E2E tier** (~6-8 hrs): Build `LightE2eDb` harness using
-   testcontainers + stock PG image with mounted extension artifacts. Migrate
-   ~580 E2E tests that don't need `shared_preload_libraries`. Add
-   `just test-light-e2e` target and CI job.
-
-2. **P2-A4 — IVM trigger name generation** (optional): Extract
+1. **P2-A4 — IVM trigger name generation** (optional): Extract
    `ivm_trigger_names()` struct from `setup_ivm_triggers` for cleaner code.
    Low priority since the trigger names are simple format strings.
 
@@ -343,31 +361,34 @@ call the extension API but never exercise the background worker/scheduler.
 Yet they all require a custom Docker image that takes ~20 min to build,
 meaning they are **skipped on every PR**.
 
-### Solution
+### Solution — Bind-Mount + Exec (Implemented)
 
-Introduce a `LightE2eDb` harness that uses testcontainers with a stock
-`postgres:18-alpine` image and bind-mounts the compiled extension artifacts
-(`pg_trickle.so`, `pg_trickle.control`, `pg_trickle--*.sql`) from the
-`cargo pgrx package` output directory.
+Instead of building a custom Docker image, the light-E2E harness:
+
+1. Runs `cargo pgrx package` to produce compiled extension artifacts.
+2. Starts a stock `postgres:18.1` container with the artifacts bind-mounted
+   to `/tmp/pg_ext`.
+3. Uses `container.exec()` to copy files to the PostgreSQL extension dirs.
+4. Runs `CREATE EXTENSION pg_trickle` which loads the `.so` on-demand.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                   Current                            │
+│                   Before                             │
 │                                                      │
-│   Unit (1,040)  ──────► runs on PR ✓                 │
+│   Unit (1,164)  ──────► runs on PR ✓                 │
 │   Integration (81)  ──► runs on PR ✓                 │
 │   E2E (660)  ────────► skipped on PR ✗               │
 │                        (20 min Docker build)         │
 └──────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────┐
-│                   Proposed                           │
+│                   After                              │
 │                                                      │
-│   Unit (~1,120)  ─────► runs on PR ✓                 │
+│   Unit (1,164)  ──────► runs on PR ✓                 │
 │   Integration (81)  ──► runs on PR ✓                 │
-│   Light E2E (~580) ──► runs on PR ✓  ← NEW          │
-│                        (stock PG + mounted .so)      │
-│   Full E2E (~51)  ───► push-to-main + daily only     │
+│   Light E2E (~570) ──► runs on PR ✓  ← NEW          │
+│                        (stock PG + bind-mount)       │
+│   Full E2E (~90)  ───► push-to-main + daily only     │
 │                        (bgworker, bench, upgrade)    │
 └──────────────────────────────────────────────────────┘
 ```
@@ -375,27 +396,30 @@ Introduce a `LightE2eDb` harness that uses testcontainers with a stock
 ### Architecture
 
 ```rust
-// tests/light_e2e/mod.rs
+// tests/e2e/light.rs (exported as E2eDb via #[cfg(feature = "light-e2e")])
 
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+pub struct E2eDb {
+    pub pool: PgPool,
+    _container: ContainerAsync<GenericImage>,
+}
 
-pub struct LightE2eDb { /* ... */ }
-
-impl LightE2eDb {
+impl E2eDb {
     pub async fn new() -> Self {
-        let extension_dir = std::env::var("PGT_EXTENSION_DIR")
-            .unwrap_or_else(|_| find_pgrx_package_output());
+        let ext_dir = find_extension_dir(); // PGT_EXTENSION_DIR or default
 
-        let container = GenericImage::new("postgres", "18-alpine")
-            .with_env_var("POSTGRES_PASSWORD", "test")
-            // Mount the compiled extension into the container
-            .with_mount(bind_mount(&extension_dir, "/usr/share/postgresql/18/"))
-            .start()
-            .await
-            .unwrap();
+        let container = GenericImage::new("postgres", "18.1")
+            .with_mount(Mount::bind_mount(ext_dir, "/tmp/pg_ext"))
+            .start().await;
 
-        // CREATE EXTENSION pg_trickle; (no shared_preload_libraries needed)
+        // Copy extension files from staging to system dirs
+        container.exec(ExecCommand::new(vec!["sh", "-c",
+            "cp /tmp/pg_ext/usr/share/postgresql/18/extension/pg_trickle* \
+                /usr/share/postgresql/18/extension/ && \
+             cp /tmp/pg_ext/usr/lib/postgresql/18/lib/pg_trickle* \
+                /usr/lib/postgresql/18/lib/"
+        ])).await;
+
+        // Connect + CREATE EXTENSION
         // ...
     }
 }
@@ -403,35 +427,37 @@ impl LightE2eDb {
 
 ### Files That Must Stay in Full E2E
 
-These 5 files (51 tests) require `shared_preload_libraries` for the
-background worker or custom image layering:
+These 10 files (~90 tests) require `shared_preload_libraries`, the background
+worker, `SET pg_trickle.*` GUCs, or custom image layering:
 
 | File | Tests | Reason |
 |------|------:|--------|
-| `e2e_bgworker_tests.rs` | 9 | Tests scheduler/bgworker lifecycle |
 | `e2e_bench_tests.rs` | 18 | Uses `new_bench()` with shmem tuning |
+| `e2e_bgworker_tests.rs` | 9 | Tests scheduler/bgworker lifecycle |
+| `e2e_cascade_regression_tests.rs` | 8 | Uses `SET pg_trickle.*` GUCs |
 | `e2e_dag_autorefresh_tests.rs` | 5 | `wait_for_auto_refresh` requires scheduler |
+| `e2e_ddl_event_tests.rs` | 14 | Uses `SET pg_trickle.*` GUCs |
+| `e2e_guc_variation_tests.rs` | 7 | Entirely about GUC variations |
+| `e2e_multi_cycle_tests.rs` | 5 | Uses `wait_for_auto_refresh` |
 | `e2e_tpch_tests.rs` | 6 | Heavy benchmarks, custom setup |
 | `e2e_upgrade_tests.rs` | 13 | Tests version upgrade path, image layering |
+| `e2e_user_trigger_tests.rs` | 10 | Uses `SET pg_trickle.*` for trigger control |
 
-### Migration Path
+### Limitations
 
-1. Build `LightE2eDb` harness with the same public API as `E2eDb`.
-2. Add a feature flag: `#[cfg(feature = "light-e2e")]` to select the harness.
-3. Migrate test files in batches (start with `e2e_smoke_tests.rs` as proof of
-   concept, then error/create/alter/drop, then the operator test files).
-4. Add a `just test-light-e2e` target and CI job that runs on PRs.
-5. Keep the full E2E tier for push-to-main and daily schedule.
-
-**Effort:** ~4-6 hours for harness + proof of concept; ~2-3 hours for full
-migration  
-**Yield:** ~580 tests gain PR-level feedback
+- **No background worker / scheduler** — `shared_preload_libraries` is not set.
+- **No auto-refresh** — `wait_for_auto_refresh()` always returns `false`.
+- **GUCs may be unavailable** — `SET pg_trickle.*` only works after the `.so`
+  is loaded, and only in the same session.
+- **macOS only works in CI** — `cargo pgrx package` on macOS produces `.dylib`
+  files that can't run inside a Linux container. Local macOS development uses
+  `just test-e2e-fast` instead.
 
 ### CI Impact
 
-| Job | Current | Proposed |
-|-----|---------|----------|
-| PR | Unit + Integration (81+1040 tests) | Unit + Integration + Light E2E (~1,700 tests) |
+| Job | Before | After |
+|-----|--------|-------|
+| PR | Unit + Integration (1,164 + 81 tests) | Unit + Integration + Light E2E (~1,815 tests) |
 | Push to main | Unit + Integration + E2E | Unit + Integration + Light E2E + Full E2E |
 | Daily | All | All (unchanged) |
 
