@@ -238,20 +238,15 @@ pass — IMMEDIATE mode + `WITH RECURSIVE` — has been fully resolved:
 
 ### Prioritized Remaining Work (v0.2.2)
 
-All IMMEDIATE mode parity items are complete. The remaining v0.2.2 roadmap
-items, in priority order:
+All IMMEDIATE mode parity and Edge Case Hardening items are complete. The
+remaining v0.2.2 roadmap items, in priority order:
 
-1. **Edge Case Hardening**
-   - EC1: `max_grouping_set_branches` GUC — cap CUBE/ROLLUP branch explosion (4h)
-   - EC2: Post-restart CDC TRANSITIONING health check (1d)
-   - EC3: Foreign table polling-based change detection (2–3d)
-
-2. **Documentation Sweep**
+1. **Documentation Sweep**
    - DS1: DDL-during-refresh behaviour documentation (2h)
    - DS2: Replication/standby limitations (3h)
    - DS3: PgBouncer configuration guide (2h)
 
-3. **WAL CDC Hardening**
+2. **WAL CDC Hardening**
    - W1: WAL mode E2E test suite (8–12h)
    - W2: WAL→trigger automatic fallback hardening (4–6h)
    - W3: Promote `cdc_mode = 'auto'` to recommended (~1h)
