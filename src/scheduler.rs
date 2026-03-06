@@ -296,6 +296,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         return;
     }
 
+    // UG1: Version mismatch check — warn if the compiled .so version differs
+    // from the SQL-installed extension version (stale install).
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        check_extension_version_match();
+    }));
+
     // F16 (G8.2): Detect read replicas — the scheduler cannot write on a
     // standby. Skip all work and sleep until promotion.
     let is_replica = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
@@ -620,6 +626,29 @@ enum RefreshOutcome {
 }
 
 // ── Crash Recovery ─────────────────────────────────────────────────────────
+
+/// Check that the compiled shared library version matches the SQL-installed
+/// extension version. Warns loudly if they differ (stale install).
+///
+/// Must be called inside a `BackgroundWorker::transaction()` block.
+fn check_extension_version_match() {
+    let compiled_version = env!("CARGO_PKG_VERSION");
+    let installed_version: Option<String> =
+        Spi::get_one("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+            .unwrap_or(None);
+
+    if let Some(ref installed) = installed_version
+        && installed != compiled_version
+    {
+        warning!(
+            "pg_trickle: version mismatch — shared library is {} but installed SQL extension \
+             is {}. Run 'ALTER EXTENSION pg_trickle UPDATE;' to update the SQL objects, \
+             or reinstall the matching shared library.",
+            compiled_version,
+            installed
+        );
+    }
+}
 
 /// Recover from a crash or unclean scheduler shutdown.
 ///
