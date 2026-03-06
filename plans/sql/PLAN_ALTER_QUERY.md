@@ -1,8 +1,44 @@
 # Plan: Allow `alter_stream_table` to Change the Defining Query
 
-**Status:** Draft  
+**Status:** In Progress  
 **Author:** Copilot  
-**Date:** 2026-03-04
+**Date:** 2026-03-04  
+**Last Updated:** 2026-03-06
+
+---
+
+## Progress Summary
+
+### Completed (Steps 1–6)
+- [x] **Step 1: Refactor `create_stream_table_impl`** — Extracted reusable
+  functions: `run_query_rewrite_pipeline()`, `validate_and_parse_query()`,
+  `setup_storage_table()`, `insert_catalog_and_deps()`,
+  `setup_trigger_infrastructure()`. `create_stream_table_impl` now calls these.
+- [x] **Step 2: Schema comparison** — Added `SchemaChange` enum and
+  `classify_schema_change()` (Same / Compatible / Incompatible with `pg_cast`
+  implicit cast check).
+- [x] **Step 3: Storage table migration** — Added
+  `migrate_storage_table_compatible()` (ALTER TABLE ADD/DROP COLUMN),
+  `migrate_aux_columns()` (__pgt_count transitions), and full rebuild path
+  for incompatible changes.
+- [x] **Step 4: Dependency diffing** — Added `DependencyDiff` struct,
+  `diff_dependencies()`, and `StDependency::delete_for_st()`.
+- [x] **Step 5: Core ALTER QUERY** — Implemented `alter_stream_table_query()`
+  with Phases 0–5 (validate, suspend, teardown, migrate, catalog update,
+  repopulate).
+- [x] **Step 6: SQL signature** — Added `query` parameter to
+  `alter_stream_table` / `alter_stream_table_impl`.
+
+### Remaining (prioritized)
+1. **Step 6b: Upgrade migration script** — Write
+   `sql/pg_trickle--0.2.1--0.3.0.sql` that `DROP FUNCTION` the old
+   `alter_stream_table` signature and creates the new one with the `query`
+   parameter via pgrx's generated SQL.
+2. **Step 9: E2E tests** — Create `tests/e2e_alter_query_tests.rs` covering
+   all test scenarios from §5 Step 9 table.
+3. **Step 7: dbt materialization** — Update the dbt adapter macros to use
+   `ALTER ... query =>` instead of drop+recreate for query changes.
+4. **Step 8: Docs** — Update SQL_REFERENCE.md, FAQ.md, ARCHITECTURE.md.
 
 ---
 
