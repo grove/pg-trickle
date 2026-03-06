@@ -16,13 +16,12 @@ CREATE TABLE orders (
 );
 
 SELECT pgtrickle.create_stream_table(
-    name         => 'customer_totals',
-    query        => $$
+    name     => 'customer_totals',
+    query    => $$
       SELECT customer, SUM(amount) AS total, COUNT(*) AS order_count
       FROM orders GROUP BY customer
     $$,
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Seed some data
@@ -178,8 +177,7 @@ SELECT pgtrickle.create_stream_table(
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
     $$,
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 

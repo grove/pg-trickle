@@ -748,3 +748,198 @@ async fn test_cross_join_with_where_clause() {
         "CROSS JOIN with WHERE should filter the cartesian product"
     );
 }
+
+// ── AUTO Mode Tests ────────────────────────────────────────────────────
+
+/// AUTO + differentiable query: mode stored as DIFFERENTIAL, table populated.
+#[tokio::test]
+async fn test_create_auto_mode_differentiable() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE auto_diff_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO auto_diff_src VALUES (1, 10), (2, 20), (3, 5)")
+        .await;
+
+    db.create_st(
+        "auto_diff_st",
+        "SELECT id, val FROM auto_diff_src WHERE val > 5",
+        "1m",
+        "AUTO",
+    )
+    .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("auto_diff_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(
+        mode, "DIFFERENTIAL",
+        "AUTO with differentiable query should resolve to DIFFERENTIAL"
+    );
+    assert!(populated, "ST should be populated after creation");
+    assert_eq!(errors, 0);
+
+    // Only rows with val > 5 should be materialized
+    assert_eq!(db.count("public.auto_diff_st").await, 2);
+}
+
+/// AUTO + non-differentiable source (materialized view): mode stored as FULL.
+///
+/// Materialized views cannot be CDC tracked in DIFFERENTIAL mode.
+/// AUTO should silently downgrade to FULL and still create the ST.
+#[tokio::test]
+async fn test_create_auto_mode_not_differentiable() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE auto_nd_base (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO auto_nd_base VALUES (1, 10), (2, 20), (3, 30)")
+        .await;
+
+    // A materialized view cannot be a CDC source for DIFFERENTIAL mode.
+    db.execute("CREATE MATERIALIZED VIEW auto_nd_mv AS SELECT id, val FROM auto_nd_base")
+        .await;
+
+    // AUTO mode should downgrade to FULL and succeed.
+    db.create_st("auto_nd_st", "SELECT id, val FROM auto_nd_mv", "1m", "AUTO")
+        .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("auto_nd_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(
+        mode, "FULL",
+        "AUTO with matview source should downgrade to FULL"
+    );
+    assert!(
+        populated,
+        "ST should be populated after auto-downgrade to FULL"
+    );
+    assert_eq!(errors, 0);
+    assert_eq!(db.count("public.auto_nd_st").await, 3);
+}
+
+/// Explicit DIFFERENTIAL + non-differentiable source → error.
+///
+/// When the user explicitly requests DIFFERENTIAL, no silent downgrade
+/// occurs — the creation is rejected with an informative error.
+#[tokio::test]
+async fn test_create_explicit_differential_not_differentiable() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE expldf_base (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO expldf_base VALUES (1, 42)").await;
+
+    db.execute("CREATE MATERIALIZED VIEW expldf_mv AS SELECT id, val FROM expldf_base")
+        .await;
+
+    // Explicit DIFFERENTIAL with a matview source must error — no silent downgrade.
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('expldf_st', \
+             $$ SELECT id, val FROM expldf_mv $$, '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Explicit DIFFERENTIAL with matview source should be rejected, not silently downgraded"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.to_lowercase().contains("materialized view")
+            || err.to_lowercase().contains("differential"),
+        "Error should mention materialized view or DIFFERENTIAL mode, got: {err}"
+    );
+}
+
+/// Omit refresh_mode entirely → defaults to AUTO behavior.
+///
+/// When called with only name + query + schedule, the default 'AUTO'
+/// takes effect: a differentiable query is stored as DIFFERENTIAL.
+#[tokio::test]
+async fn test_create_no_mode_specified() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE no_mode_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO no_mode_src VALUES (1, 10), (2, 20)")
+        .await;
+
+    // Call with only 3 positional args — refresh_mode defaults to 'AUTO'.
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('no_mode_st', \
+         $$ SELECT id, val FROM no_mode_src $$, '1m')",
+    )
+    .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("no_mode_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(
+        mode, "DIFFERENTIAL",
+        "Omitting refresh_mode should default to AUTO, resolving to DIFFERENTIAL"
+    );
+    assert!(populated);
+    assert_eq!(errors, 0);
+    assert_eq!(db.count("public.no_mode_st").await, 2);
+}
+
+/// Explicit 'DIFFERENTIAL' still works identically to before the AUTO change.
+#[tokio::test]
+async fn test_backward_compat_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE bkcomp_diff_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO bkcomp_diff_src VALUES (1, 100)")
+        .await;
+
+    db.create_st(
+        "bkcomp_diff_st",
+        "SELECT id, val FROM bkcomp_diff_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("bkcomp_diff_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(mode, "DIFFERENTIAL");
+    assert!(populated);
+    assert_eq!(errors, 0);
+
+    // Verify differential refresh applies only the delta.
+    db.execute("INSERT INTO bkcomp_diff_src VALUES (2, 200)")
+        .await;
+    db.refresh_st("bkcomp_diff_st").await;
+    assert_eq!(db.count("public.bkcomp_diff_st").await, 2);
+}
+
+/// Explicit 'FULL' still works identically to before the AUTO change.
+#[tokio::test]
+async fn test_backward_compat_full() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE bkcomp_full_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO bkcomp_full_src VALUES (1, 'hello')")
+        .await;
+
+    db.create_st(
+        "bkcomp_full_st",
+        "SELECT id, val FROM bkcomp_full_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+
+    let (status, mode, populated, errors) = db.pgt_status("bkcomp_full_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(mode, "FULL");
+    assert!(populated);
+    assert_eq!(errors, 0);
+
+    // Verify full refresh works correctly.
+    db.execute("INSERT INTO bkcomp_full_src VALUES (2, 'world')")
+        .await;
+    db.refresh_st("bkcomp_full_st").await;
+    assert_eq!(db.count("public.bkcomp_full_st").await, 2);
+}
