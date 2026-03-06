@@ -716,8 +716,9 @@ fn alter_stream_table_query(
     // Validate and parse the new query
     let vq = validate_and_parse_query(&rewritten_query, refresh_mode)?;
 
-    // Cycle detection on the new dependency set
-    check_for_cycles(&vq.source_relids)?;
+    // Cycle detection on the new dependency set (ALTER-aware: replaces
+    // the existing ST's edges rather than creating a sentinel node)
+    check_for_cycles_alter(st.pgt_id, &vq.source_relids)?;
 
     // Get the current storage table columns (excluding internal __pgt_* columns)
     let old_columns = get_storage_table_columns(schema, table_name)?;
@@ -792,6 +793,16 @@ fn alter_stream_table_query(
                  The storage table OID will change.",
                 reason
             );
+
+            // Detach pgt_relid before DROP so the sql_drop event trigger
+            // does not recognise the table as ST storage and delete the
+            // catalog row.
+            Spi::run_with_args(
+                "UPDATE pgtrickle.pgt_stream_tables \
+                 SET pgt_relid = 0 WHERE pgt_id = $1",
+                &[st.pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
             // Drop existing storage table
             let drop_sql = format!(
@@ -3072,6 +3083,53 @@ fn check_for_cycles(source_relids: &[(pg_sys::Oid, String)]) -> Result<(), PgTri
     }
 
     // Run cycle detection
+    dag.detect_cycles()
+}
+
+/// Cycle detection variant for ALTER QUERY.
+///
+/// Instead of creating a sentinel node (as `check_for_cycles` does for CREATE),
+/// this function re-uses the existing ST's node in the DAG and replaces its
+/// incoming edges with the proposed new source dependencies. This correctly
+/// detects cycles like A → B → A that a sentinel node would miss.
+fn check_for_cycles_alter(
+    pgt_id: i64,
+    source_relids: &[(pg_sys::Oid, String)],
+) -> Result<(), PgTrickleError> {
+    if source_relids.is_empty() {
+        return Ok(());
+    }
+
+    let has_st_source = source_relids
+        .iter()
+        .any(|(_, stype)| stype == "STREAM_TABLE");
+
+    if !has_st_source {
+        return Ok(());
+    }
+
+    let mut dag = StDag::build_from_catalog(config::pg_trickle_default_schedule_seconds())?;
+
+    let target_node = NodeId::StreamTable(pgt_id);
+
+    // Resolve new source node IDs
+    let new_sources: Vec<NodeId> = source_relids
+        .iter()
+        .map(|(source_oid, source_type)| {
+            if source_type == "STREAM_TABLE" {
+                match crate::catalog::StreamTableMeta::get_by_relid(*source_oid) {
+                    Ok(meta) => NodeId::StreamTable(meta.pgt_id),
+                    Err(_) => NodeId::BaseTable(source_oid.to_u32()),
+                }
+            } else {
+                NodeId::BaseTable(source_oid.to_u32())
+            }
+        })
+        .collect();
+
+    // Replace the ST's incoming edges with the proposed new ones
+    dag.replace_incoming_edges(target_node, new_sources);
+
     dag.detect_cycles()
 }
 

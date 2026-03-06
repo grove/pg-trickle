@@ -3,7 +3,7 @@
 **Status:** Complete  
 **Author:** Copilot  
 **Date:** 2026-03-04  
-**Last Updated:** 2026-03-07
+**Last Updated:** 2026-03-06
 
 ---
 
@@ -42,11 +42,24 @@
   Updated `docs/FAQ.md` to replace "must drop and recreate" guidance with
   the new ALTER QUERY approach. Updated `docs/ARCHITECTURE.md` description.
 - [x] **Step 9: E2E tests** — Created `tests/e2e_alter_query_tests.rs` with
-  14 tests covering same-schema, compatible-schema (add/remove column, type
+  15 tests covering same-schema, compatible-schema (add/remove column, type
   change), incompatible-schema (type change with full rebuild), dependency
   changes (add/remove sources), aggregate transitions, query+mode change,
   error handling (invalid query, cycle detection), view inlining, OID
   stability, and catalog update verification.
+
+### Bugs Found & Fixed During E2E Testing
+- **Incompatible schema FK violation** — `DROP TABLE ... CASCADE` on the
+  storage table triggered the `sql_drop` event trigger, which detected the
+  table as ST storage and deleted the `pgt_stream_tables` catalog row. Fix:
+  set `pgt_relid = 0` before the DROP so `is_st_storage_table()` returns
+  false, then the event trigger skips cleanup.
+- **Cycle detection missed ALTER cycles** — `check_for_cycles()` created a
+  sentinel node (`pgt_id = MAX`) for CREATE, but for ALTER the existing ST
+  already has edges in the DAG. A sentinel can't detect A → B → A cycles.
+  Fix: added `check_for_cycles_alter()` that re-uses the existing ST node
+  and calls `StDag::replace_incoming_edges()` to swap in proposed sources
+  before running cycle detection.
 
 ---
 
