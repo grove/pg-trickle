@@ -27,6 +27,11 @@ TO_VERSION="${2:-0.2.1}"
 shift 2 2>/dev/null || true
 EXTRA_ARGS="${*:-}"
 
+# ── Auto-detect build platform ───────────────────────────────────────────────
+# Supports linux/amd64 (x86_64) and linux/arm64 (Apple Silicon / aarch64).
+# Override by setting DOCKER_PLATFORM in the environment.
+PLATFORM="${DOCKER_PLATFORM:-linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')}"
+
 IMAGE_NAME="pg_trickle_upgrade_e2e"
 IMAGE_TAG="latest"
 BASE_IMAGE="${PGS_E2E_BASE_IMAGE:-pg_trickle_e2e:latest}"
@@ -77,6 +82,7 @@ echo "  Dockerfile:   ${SCRIPT_DIR}/Dockerfile.e2e-upgrade"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 docker build \
+    --platform "${PLATFORM}" \
     -t "${IMAGE_NAME}:${IMAGE_TAG}" \
     --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
     --build-arg "FROM_VERSION=${FROM_VERSION}" \
