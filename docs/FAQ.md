@@ -1920,7 +1920,7 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```sql
    ALTER EXTENSION pg_trickle UPDATE;
    ```
-   This applies migration scripts (e.g., `pg_trickle--0.1.3--0.2.0.sql`) that update catalog tables, add new functions, and migrate data as needed.
+   This applies migration scripts (e.g., `pg_trickle--0.2.1--0.2.2.sql`) that update catalog tables, add new functions, and migrate data as needed.
 3. **Restart PostgreSQL** if the shared library changed (required for `shared_preload_libraries` changes).
 4. **Verify:**
    ```sql
@@ -1928,6 +1928,35 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```
 
 **Zero-downtime upgrades** are possible for minor versions (patch releases) that don't change the shared library. Just run `ALTER EXTENSION pg_trickle UPDATE` — no restart needed.
+
+For detailed instructions, version-specific notes, rollback procedures, and troubleshooting, see the full [Upgrading Guide](UPGRADING.md).
+
+### How do I know if my shared library and SQL extension versions match?
+
+The background worker checks for version mismatches at startup and logs a
+WARNING if the compiled `.so` version differs from the installed SQL extension
+version. You can also check manually:
+
+```sql
+-- Compiled .so version:
+SELECT pgtrickle.version();
+
+-- Installed SQL extension version:
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+```
+
+If these differ, run `ALTER EXTENSION pg_trickle UPDATE;` and restart
+PostgreSQL if prompted.
+
+### Are stream tables preserved during an upgrade?
+
+Yes. `ALTER EXTENSION pg_trickle UPDATE` applies only additive schema
+migrations (new columns, updated function signatures). Existing stream tables,
+their data, refresh history, and CDC infrastructure are preserved. The
+scheduler resumes normal operation after the upgrade completes.
+
+For version-specific migration notes, see the
+[Upgrading Guide — Version-Specific Notes](UPGRADING.md#version-specific-notes).
 
 ### What happens to stream tables during a PostgreSQL restart?
 

@@ -1,7 +1,7 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-03-05
-> **Current version:** 0.2.1
+> **Last updated:** 2026-03-06
+> **Current version:** 0.2.2
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -227,36 +227,42 @@ GitHub Pages book grew from 14 to 20 pages:
 
 ---
 
-## v0.2.2 — OFFSET Support & Upgrade Tooling
+## v0.2.2 — OFFSET Support, AUTO Mode & Upgrade Tooling
 
-**Goal:** Complete the `ORDER BY + LIMIT + OFFSET` (Paged TopK) implementation
-started in v0.2.1 — the core Rust changes are in tree; this release validates
-and ships them. Also closes two small upgrade tooling gaps.
+**Goal:** Ship the `ORDER BY + LIMIT + OFFSET` (Paged TopK) feature started
+in v0.2.1, make AUTO the default refresh mode, and close upgrade tooling gaps.
 
-### ORDER BY + LIMIT + OFFSET (Paged TopK) — Finalization
+### ORDER BY + LIMIT + OFFSET (Paged TopK) — Finalization ✅
 
-Core implementation is complete (parser, catalog, refresh path, docs). This
-release validates E2E and adds the upgrade migration SQL.
+Core implementation is complete (parser, catalog, refresh path, docs, 9 E2E
+tests). The `topk_offset` catalog column was pre-provisioned in v0.2.1.
 
-| Item | Description | Effort | Ref |
+| Item | Description | Status | Ref |
 |------|-------------|--------|-----|
-| OS1 | Run `just build-e2e-image && just test-e2e` — validate all 8 new OFFSET tests | ~1h | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 6 |
-| OS2 | `sql/pg_trickle--0.2.1--0.2.2.sql`: no schema change needed — `topk_offset` column was pre-provisioned in 0.2.1; this migration only adds function/view updates if any | 30min | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 2 |
+| OS1 | 9 OFFSET E2E tests in `e2e_topk_tests.rs` | ✅ Done | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 6 |
+| OS2 | `sql/pg_trickle--0.2.1--0.2.2.sql` — function signature updates (no schema DDL needed) | ✅ Done | [PLAN_OFFSET_SUPPORT.md](plans/sql/PLAN_OFFSET_SUPPORT.md) §Step 2 |
 
-### Upgrade Tooling
+### AUTO Refresh Mode ✅
 
-| Item | Description | Effort | Ref |
+| Item | Description | Status | Ref |
 |------|-------------|--------|-----|
-| UG1 | Version mismatch check at extension load — warn if `.so` version ≠ SQL version | 2h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.2 |
-| UG2 | Add upgrade section to `docs/FAQ.md` (content exists in UPGRADING.md; cross-link) | 1h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.4 |
+| AM1 | `RefreshMode::Auto` — uses DIFFERENTIAL when supported, falls back to FULL | ✅ Done | [PLAN_REFRESH_MODE_DEFAULT.md](plans/sql/PLAN_REFRESH_MODE_DEFAULT.md) |
+| AM2 | `create_stream_table` default changed from `'DIFFERENTIAL'` to `'AUTO'` | ✅ Done | — |
+| AM3 | `create_stream_table` schedule default changed from `'1m'` to `'calculated'` | ✅ Done | — |
 
-> **v0.2.2 total: ~5 hours**
+### Upgrade Tooling ✅
+
+| Item | Description | Status | Ref |
+|------|-------------|--------|-----|
+| UG1 | Version mismatch check — scheduler warns if `.so` version ≠ SQL version | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.2 |
+| UG2 | FAQ upgrade section — 3 new entries with UPGRADING.md cross-links | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.4 |
 
 **Exit criteria:**
-- [ ] `ORDER BY + LIMIT + OFFSET` defining queries accepted, refreshed, and E2E-tested
-- [ ] `sql/pg_trickle--0.2.1--0.2.2.sql` exists (column pre-provisioned in 0.2.1; only function/view updates if any)
+- [x] `ORDER BY + LIMIT + OFFSET` defining queries accepted, refreshed, and E2E-tested
+- [x] `sql/pg_trickle--0.2.1--0.2.2.sql` exists (column pre-provisioned in 0.2.1; function signature updates)
 - [ ] Upgrade completeness check passes for 0.2.1→0.2.2
-- [ ] Version check fires at extension load if `.so`/SQL versions diverge
+- [x] Version check fires at scheduler startup if `.so`/SQL versions diverge
+- [ ] E2E tests pass (`just build-e2e-image && just test-e2e`)
 
 ---
 
