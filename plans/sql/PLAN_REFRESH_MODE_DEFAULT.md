@@ -1,8 +1,9 @@
 # Plan: Make Refresh Mode Selection Optional with Sensible Default
 
-**Status:** Draft  
+**Status:** Complete  
 **Author:** Copilot  
-**Date:** 2026-03-04
+**Date:** 2026-03-04  
+**Updated:** 2026-03-07
 
 ---
 
@@ -256,98 +257,111 @@ refresh mode to an "Advanced: Refresh Modes" section.
 
 ## 5. Implementation Steps
 
-### Step 1: Add AUTO mode parsing
+### Step 1: Add AUTO mode parsing ✅
 **File:** `src/dag.rs`  
-**Effort:** ~30 min
+**Status:** Complete (2026-03-06)
 
-Add `Auto` variant handling in `RefreshMode::from_str`. AUTO is resolved
-during creation, never stored — so no new enum variant needed. Instead,
-`create_stream_table_impl` receives a flag indicating "auto" mode.
+Added `"AUTO"` branch in `RefreshMode::from_str()` that resolves to
+`RefreshMode::Differential`. Added `RefreshMode::is_auto_str()` helper
+to detect when the user passed AUTO vs an explicit mode. Unit tests added
+for both.
 
-```rust
-// In create_stream_table_impl:
-let (refresh_mode, is_auto) = match mode_str.to_uppercase().as_str() {
-    "AUTO" => (RefreshMode::Differential, true),
-    other => (RefreshMode::from_str(other)?, false),
-};
-```
-
-### Step 2: Auto-downgrade in create_stream_table_impl
+### Step 2: Auto-downgrade in create_stream_table_impl ✅
 **File:** `src/api.rs`  
-**Effort:** ~1 hour
+**Status:** Complete (2026-03-06)
 
-When `is_auto` is true and DVM validation/parsing fails, catch the error,
-emit `pgrx::info!()`, and downgrade to `RefreshMode::Full` instead of
-returning the error.
+Three auto-downgrade points in `create_stream_table_impl`:
+1. `reject_unsupported_constructs()` failure → downgrade to FULL with INFO
+2. `reject_materialized_views()` failure → downgrade to FULL with INFO
+3. `parse_defining_query_full()` failure → downgrade to FULL with INFO
 
-```rust
-if is_auto && matches!(refresh_mode, RefreshMode::Differential) {
-    match dvm::parse_defining_query(&rewritten_query) {
-        Ok(parsed) => { /* proceed with DIFFERENTIAL */ }
-        Err(e) => {
-            pgrx::info!(
-                "Query cannot use differential maintenance ({}); using FULL mode. \
-                 See docs/DVM_OPERATORS.md for supported operators.",
-                e
-            );
-            refresh_mode = RefreshMode::Full;
-            // Skip DVM-specific setup (no delta template, no IVM triggers)
-        }
-    }
-}
-```
+When `is_auto` is false (user explicitly passed DIFFERENTIAL), errors
+propagate as before.
 
-### Step 3: Change default parameter value
+### Step 3: Change default parameter value ✅
 **File:** `src/api.rs`  
-**Effort:** ~15 min
+**Status:** Complete (2026-03-06)
 
-```rust
-refresh_mode: default!(&str, "'AUTO'"),
-```
-
-Existing callers passing `'DIFFERENTIAL'` explicitly are unaffected.
+Changed `default!(&str, "'DIFFERENTIAL'")` to `default!(&str, "'AUTO'")`.
 
 ### Step 4: Update SQL upgrade script
 **File:** `sql/pg_trickle--0.2.1--0.2.2.sql` (or current version)  
-**Effort:** ~15 min
+**Status:** Deferred — no catalog migration needed since AUTO is never
+persisted. The new default only affects the pgrx-generated function
+signature, which is recreated on `CREATE EXTENSION` / `ALTER EXTENSION
+UPDATE`.
 
-The `CREATE OR REPLACE FUNCTION` with the new default. No catalog migration
-needed since AUTO is never persisted.
+### Step 5: Update documentation ✅
+**Files:** `docs/SQL_REFERENCE.md`, `docs/GETTING_STARTED.md`, `docs/FAQ.md`  
+**Status:** Complete (2026-03-06)
 
-### Step 5: Update documentation
-**Files:** `docs/SQL_REFERENCE.md`, `docs/GETTING_STARTED.md`, `docs/FAQ.md`,
-`docs/tutorials/*.md`  
-**Effort:** ~2 hours
+- SQL_REFERENCE.md: updated signature default and parameter table.
+- GETTING_STARTED.md: removed explicit `refresh_mode =>` from examples,
+  updated refresh modes table to include AUTO.
+- FAQ.md: added "Do I need to choose a refresh mode?" entry.
 
-- Change default in parameter table from `'DIFFERENTIAL'` to `'AUTO'`.
-- Rewrite examples per §4 above.
-- Add FAQ entry.
-- Simplify Getting Started.
-
-### Step 6: Update dbt materialization
+### Step 6: Update dbt materialization ✅
 **File:** `dbt-pgtrickle/macros/materializations/stream_table.sql`  
-**Effort:** ~30 min
+**Status:** Complete (2026-03-06)
 
-Stop passing `refresh_mode` unless the user explicitly configures it in
-their dbt model config. Let the SQL default handle it.
+Changed default from `'DIFFERENTIAL'` to `'AUTO'`.
 
-### Step 7: Tests
-**Files:** `tests/e2e_*_tests.rs`, `src/api.rs` (unit tests)  
-**Effort:** ~2 hours
+### Step 7: E2E Tests ✅
+**Files:** `tests/e2e_create_tests.rs`  
+**Status:** Complete (2026-03-06)
 
-| Test | Scenario |
-|---|---|
-| `test_create_auto_mode_differentiable` | AUTO + differentiable query → stored as DIFFERENTIAL |
-| `test_create_auto_mode_not_differentiable` | AUTO + non-differentiable query → stored as FULL, INFO emitted |
-| `test_create_explicit_differential_not_differentiable` | Explicit DIFFERENTIAL + non-differentiable → error |
-| `test_create_no_mode_specified` | Omit refresh_mode entirely → defaults to AUTO behavior |
-| `test_alter_query_auto_downgrade` | ALTER changes query to non-differentiable → downgrade to FULL |
-| `test_backward_compat_differential` | Explicit `'DIFFERENTIAL'` still works identically |
-| `test_backward_compat_full` | Explicit `'FULL'` still works identically |
+Six tests added in a new `// ── AUTO Mode Tests ──` section:
+
+| Test | Scenario | Priority |
+|---|---|---|
+| `test_create_auto_mode_differentiable` | AUTO + differentiable query → stored as DIFFERENTIAL | P1 ✅ |
+| `test_create_auto_mode_not_differentiable` | AUTO + matview source → stored as FULL, INFO emitted | P1 ✅ |
+| `test_create_explicit_differential_not_differentiable` | Explicit DIFFERENTIAL + matview → error | P1 ✅ |
+| `test_create_no_mode_specified` | Omit refresh_mode entirely → defaults to AUTO behavior | P2 ✅ |
+| `test_backward_compat_differential` | Explicit `'DIFFERENTIAL'` still works identically | P2 ✅ |
+| `test_backward_compat_full` | Explicit `'FULL'` still works identically | P2 ✅ |
+
+`test_alter_query_auto_downgrade` deferred: `alter_stream_table` does not
+yet accept a `query` parameter (tracked in PLAN_ALTER_QUERY.md).
 
 ---
 
-## 6. Backward Compatibility
+## 6. Remaining Work (Prioritized)
+
+| Priority | Task | Effort | Status |
+|---|---|---|---|
+| P3 | Tutorial docs update (`docs/tutorials/*.md`) | ~30min | ✅ Complete (2026-03-07) |
+| P3 | SQL Reference examples — reduce `refresh_mode =>` repetition in advanced examples | ~30min | ✅ Complete (2026-03-07) |
+| P4 | `test_alter_query_auto_downgrade` — implement once `alter_stream_table` supports query changes (PLAN_ALTER_QUERY.md) | ~30min | Deferred |
+
+All P1, P2, and P3 tasks are complete. The feature is fully implemented, tested, and documented.
+
+### P3 — Docs cleanup details (2026-03-07)
+
+**Tutorials (`docs/tutorials/`):**
+- Removed `refresh_mode => 'DIFFERENTIAL'` from the Setup section in all
+  four tutorials (INSERT, UPDATE, DELETE, TRUNCATE). Each now shows the
+  minimal 3-argument form.
+- Updated prose in `WHAT_HAPPENS_ON_INSERT.md` to reference the default
+  "AUTO mode" instead of "DIFFERENTIAL mode — the default".
+
+**SQL Reference (`docs/SQL_REFERENCE.md`):**
+- Simplified first scheduling quick-example to omit redundant mode.
+- Added note above the Aggregate Examples block explaining that `refresh_mode`
+  is omitted where AUTO applies.
+- Stripped `refresh_mode => 'DIFFERENTIAL'` from ~30 showcase examples
+  across: aggregate functions, CTEs (non-recursive), set operations
+  (INTERSECT, EXCEPT, UNION), LATERAL SRF, LATERAL subquery, WHERE subquery,
+  HAVING, keyless tables, referencing other STs, COLLATE, IS JSON,
+  SQL/JSON constructors, JSON_TABLE, partitioned tables, Views as Sources,
+  and CUBE/ROLLUP.
+- Retained explicit modes where mode selection is the point: recursive CTE
+  mode comparison, `alter_stream_table` mode-switch example, and known
+  limitations sections.
+
+---
+
+## 7. Backward Compatibility
 
 | Scenario | Impact |
 |---|---|
@@ -385,11 +399,11 @@ slow). FULL remains useful as an escape hatch.
 
 ---
 
-## 8. Milestones
+## 9. Milestones
 
-| Milestone | Steps | Est. Effort |
+| Milestone | Steps | Status |
 |---|---|---|
-| M1: Core implementation | Steps 1–4 | ~2h |
-| M2: Documentation | Step 5 | ~2h |
-| M3: dbt + tests | Steps 6–7 | ~2.5h |
-| **Total** | | **~6.5h** |
+| M1: Core implementation | Steps 1–3 | ✅ Complete |
+| M2: Documentation | Steps 5–6 | ✅ Complete |
+| M3: E2E tests | Step 7 | ✅ Complete |
+| M4: Docs cleanup | P3 tutorial + SQL Reference | ✅ Complete |

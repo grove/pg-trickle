@@ -77,7 +77,7 @@ pgtrickle.create_stream_table(
     name                  text,
     query                 text,
     schedule              text      DEFAULT 'calculated',
-    refresh_mode          text      DEFAULT 'DIFFERENTIAL',
+    refresh_mode          text      DEFAULT 'AUTO',
     initialize            bool      DEFAULT true,
     diamond_consistency   text      DEFAULT NULL,
     diamond_schedule_policy text    DEFAULT NULL
@@ -91,7 +91,7 @@ pgtrickle.create_stream_table(
 | `name` | `text` | — | Name of the stream table. May be schema-qualified (`myschema.my_st`). Defaults to `public` schema. |
 | `query` | `text` | — | The defining SQL query. Must be a valid SELECT statement using supported operators. |
 | `schedule` | `text` | `'calculated'` | Refresh schedule as a Prometheus/GNU-style duration string (e.g., `'30s'`, `'5m'`, `'1h'`, `'1h30m'`, `'1d'`) **or** a cron expression (e.g., `'*/5 * * * *'`, `'@hourly'`). Use `'calculated'` for CALCULATED mode (inherits schedule from downstream dependents). |
-| `refresh_mode` | `text` | `'DIFFERENTIAL'` | `'FULL'` (truncate and reload), `'DIFFERENTIAL'` (apply delta only), or `'IMMEDIATE'` (synchronous in-transaction maintenance via statement-level triggers). |
+| `refresh_mode` | `text` | `'AUTO'` | `'AUTO'` (adaptive — uses DIFFERENTIAL when possible, falls back to FULL if the query is not differentiable), `'FULL'` (truncate and reload), `'DIFFERENTIAL'` (apply delta only — errors if the query is not differentiable), or `'IMMEDIATE'` (synchronous in-transaction maintenance via statement-level triggers). |
 | `initialize` | `bool` | `true` | If `true`, populates the table immediately via a full refresh. If `false`, creates the table empty. |
 | `diamond_consistency` | `text` | `NULL` (defaults to `'none'`) | Diamond dependency consistency mode: `'none'` (independent refresh) or `'atomic'` (SAVEPOINT-based atomic group refresh). |
 | `diamond_schedule_policy` | `text` | `NULL` (defaults to `'fastest'`) | Schedule policy for atomic diamond groups: `'fastest'` (fire when any member is due) or `'slowest'` (fire when all are due). Set on the convergence node. |
@@ -126,12 +126,11 @@ pgtrickle.create_stream_table(
 **Example:**
 
 ```sql
--- Duration-based: refresh when data is staler than 2 minutes
+-- Duration-based: refresh when data is staler than 2 minutes (refresh_mode defaults to 'AUTO')
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_totals',
+    query    => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
+    schedule => '2m'
 );
 
 -- Cron-based: refresh every hour
@@ -161,25 +160,25 @@ SELECT pgtrickle.create_stream_table(
 
 **Aggregate Examples:**
 
-All supported aggregate functions work in both FULL and DIFFERENTIAL modes:
+All supported aggregate functions work in AUTO mode (and all other modes).
+Examples below omit `refresh_mode` — the default `'AUTO'` selects DIFFERENTIAL automatically.
+Explicit modes are shown only when the mode itself is being demonstrated.
 
 ```sql
 -- Algebraic aggregates (fully differential — no rescan needed)
 SELECT pgtrickle.create_stream_table(
-    name         => 'sales_summary',
-    query        => 'SELECT region, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amount
+    name     => 'sales_summary',
+    query    => 'SELECT region, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amount
      FROM orders GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Semi-algebraic aggregates (MIN/MAX)
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_ranges',
-    query        => 'SELECT department, MIN(salary) AS min_sal, MAX(salary) AS max_sal
+    name     => 'salary_ranges',
+    query    => 'SELECT department, MIN(salary) AS min_sal, MAX(salary) AS max_sal
      FROM employees GROUP BY department',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Group-rescan aggregates (BOOL_AND/OR, STRING_AGG, ARRAY_AGG, JSON_AGG, JSONB_AGG,
@@ -190,74 +189,69 @@ SELECT pgtrickle.create_stream_table(
 --                          REGR_COUNT, REGR_INTERCEPT, REGR_R2, REGR_SLOPE,
 --                          REGR_SXX, REGR_SXY, REGR_SYY, ANY_VALUE)
 SELECT pgtrickle.create_stream_table(
-    name         => 'team_members',
-    query        => 'SELECT department,
+    name     => 'team_members',
+    query    => 'SELECT department,
             STRING_AGG(name, '', '' ORDER BY name) AS members,
             ARRAY_AGG(employee_id) AS member_ids,
             BOOL_AND(active) AS all_active,
             JSON_AGG(name) AS members_json
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Bitwise aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'permission_summary',
-    query        => 'SELECT department,
+    name     => 'permission_summary',
+    query    => 'SELECT department,
             BIT_OR(permissions) AS combined_perms,
             BIT_AND(permissions) AS common_perms,
             BIT_XOR(flags) AS xor_flags
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- JSON object aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'config_map',
-    query        => 'SELECT department,
+    name     => 'config_map',
+    query    => 'SELECT department,
             JSON_OBJECT_AGG(setting_name, setting_value) AS settings,
             JSONB_OBJECT_AGG(key, value) AS metadata
      FROM config
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Statistical aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_stats',
-    query        => 'SELECT department,
+    name     => 'salary_stats',
+    query    => 'SELECT department,
             STDDEV_POP(salary) AS sd_pop,
             STDDEV_SAMP(salary) AS sd_samp,
             VAR_POP(salary) AS var_pop,
             VAR_SAMP(salary) AS var_samp
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Ordered-set aggregates (MODE, PERCENTILE_CONT, PERCENTILE_DISC)
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_percentiles',
-    query        => 'SELECT department,
+    name     => 'salary_percentiles',
+    query    => 'SELECT department,
             MODE() WITHIN GROUP (ORDER BY grade) AS most_common_grade,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY salary) AS median_salary,
             PERCENTILE_DISC(0.9) WITHIN GROUP (ORDER BY salary) AS p90_salary
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Regression / correlation aggregates (CORR, COVAR_*, REGR_*)
 SELECT pgtrickle.create_stream_table(
-    name         => 'regression_stats',
-    query        => 'SELECT department,
+    name     => 'regression_stats',
+    query    => 'SELECT department,
             CORR(salary, experience) AS sal_exp_corr,
             COVAR_POP(salary, experience) AS covar_pop,
             COVAR_SAMP(salary, experience) AS covar_samp,
@@ -267,30 +261,27 @@ SELECT pgtrickle.create_stream_table(
             REGR_COUNT(salary, experience) AS regr_n
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- ANY_VALUE aggregate (PostgreSQL 16+)
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_sample',
-    query        => 'SELECT department, ANY_VALUE(office_location) AS sample_office
+    name     => 'dept_sample',
+    query    => 'SELECT department, ANY_VALUE(office_location) AS sample_office
      FROM employees GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- FILTER clause on aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_metrics',
-    query        => 'SELECT region,
+    name     => 'order_metrics',
+    query    => 'SELECT region,
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE status = ''active'') AS active_count,
             SUM(amount) FILTER (WHERE status = ''shipped'') AS shipped_total
      FROM orders
      GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -301,43 +292,40 @@ Non-recursive CTEs are fully supported in both FULL and DIFFERENTIAL modes:
 ```sql
 -- Simple CTE
 SELECT pgtrickle.create_stream_table(
-    name         => 'active_order_totals',
-    query        => 'WITH active_users AS (
+    name     => 'active_order_totals',
+    query    => 'WITH active_users AS (
         SELECT id, name FROM users WHERE active = true
     )
     SELECT a.id, a.name, SUM(o.amount) AS total
     FROM active_users a
     JOIN orders o ON o.user_id = a.id
     GROUP BY a.id, a.name',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Chained CTEs (CTE referencing another CTE)
 SELECT pgtrickle.create_stream_table(
-    name         => 'top_regions',
-    query        => 'WITH regional AS (
+    name     => 'top_regions',
+    query    => 'WITH regional AS (
         SELECT region, SUM(amount) AS total FROM orders GROUP BY region
     ),
     ranked AS (
         SELECT region, total FROM regional WHERE total > 1000
     )
     SELECT * FROM ranked',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Multi-reference CTE (referenced twice in FROM — shared delta optimization)
 SELECT pgtrickle.create_stream_table(
-    name         => 'self_compare',
-    query        => 'WITH totals AS (
+    name     => 'self_compare',
+    query    => 'WITH totals AS (
         SELECT user_id, SUM(amount) AS total FROM orders GROUP BY user_id
     )
     SELECT t1.user_id, t1.total, t2.total AS next_total
     FROM totals t1
     JOIN totals t2 ON t1.user_id = t2.user_id + 1',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -388,52 +376,47 @@ SELECT pgtrickle.create_stream_table(
 ```sql
 -- INTERSECT: customers who placed orders in BOTH regions
 SELECT pgtrickle.create_stream_table(
-    name         => 'bi_region_customers',
-    query        => 'SELECT customer_id FROM orders_east
+    name     => 'bi_region_customers',
+    query    => 'SELECT customer_id FROM orders_east
      INTERSECT
      SELECT customer_id FROM orders_west',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- INTERSECT ALL: preserves duplicates (bag semantics)
 SELECT pgtrickle.create_stream_table(
-    name         => 'common_items',
-    query        => 'SELECT item_name FROM warehouse_a
+    name     => 'common_items',
+    query    => 'SELECT item_name FROM warehouse_a
      INTERSECT ALL
      SELECT item_name FROM warehouse_b',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- EXCEPT: orders not yet shipped
 SELECT pgtrickle.create_stream_table(
-    name         => 'unshipped_orders',
-    query        => 'SELECT order_id FROM orders
+    name     => 'unshipped_orders',
+    query    => 'SELECT order_id FROM orders
      EXCEPT
      SELECT order_id FROM shipments',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- EXCEPT ALL: preserves duplicate counts (bag subtraction)
 SELECT pgtrickle.create_stream_table(
-    name         => 'excess_inventory',
-    query        => 'SELECT sku FROM stock_received
+    name     => 'excess_inventory',
+    query    => 'SELECT sku FROM stock_received
      EXCEPT ALL
      SELECT sku FROM stock_shipped',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 
 -- UNION: deduplicated merge of two sources
 SELECT pgtrickle.create_stream_table(
-    name         => 'all_contacts',
-    query        => 'SELECT email FROM customers
+    name     => 'all_contacts',
+    query    => 'SELECT email FROM customers
      UNION
      SELECT email FROM newsletter_subscribers',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 
@@ -444,43 +427,39 @@ Set-returning functions (SRFs) in the FROM clause are supported in both FULL and
 ```sql
 -- Flatten JSONB arrays into rows
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_children',
-    query        => 'SELECT p.id, child.value AS val
+    name     => 'flat_children',
+    query    => 'SELECT p.id, child.value AS val
      FROM parent_data p,
      jsonb_array_elements(p.data->''children'') AS child',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Expand JSONB key-value pairs (multi-column SRF)
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_properties',
-    query        => 'SELECT d.id, kv.key, kv.value
+    name     => 'flat_properties',
+    query    => 'SELECT d.id, kv.key, kv.value
      FROM documents d,
      jsonb_each(d.metadata) AS kv',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Unnest arrays
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_tags',
-    query        => 'SELECT t.id, tag.tag
+    name     => 'flat_tags',
+    query    => 'SELECT t.id, tag.tag
      FROM tagged_items t,
      unnest(t.tags) AS tag(tag)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- SRF with WHERE filter
 SELECT pgtrickle.create_stream_table(
-    name         => 'high_value_items',
-    query        => 'SELECT p.id, (e.value)::int AS amount
+    name     => 'high_value_items',
+    query    => 'SELECT p.id, (e.value)::int AS amount
      FROM products p,
      jsonb_array_elements(p.prices) AS e
      WHERE (e.value)::int > 100',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 
 -- SRF combined with aggregation
@@ -502,8 +481,8 @@ LATERAL subqueries in the FROM clause are supported in both FULL and DIFFERENTIA
 ```sql
 -- Top-N per group: latest item per order
 SELECT pgtrickle.create_stream_table(
-    name         => 'latest_items',
-    query        => 'SELECT o.id, o.customer, latest.amount
+    name     => 'latest_items',
+    query    => 'SELECT o.id, o.customer, latest.amount
      FROM orders o,
      LATERAL (
          SELECT li.amount
@@ -512,36 +491,33 @@ SELECT pgtrickle.create_stream_table(
          ORDER BY li.created_at DESC
          LIMIT 1
      ) AS latest',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Correlated aggregate
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_summaries',
-    query        => 'SELECT d.id, d.name, stats.total, stats.cnt
+    name     => 'dept_summaries',
+    query    => 'SELECT d.id, d.name, stats.total, stats.cnt
      FROM departments d,
      LATERAL (
          SELECT SUM(e.salary) AS total, COUNT(*) AS cnt
          FROM employees e
          WHERE e.dept_id = d.id
      ) AS stats',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- LEFT JOIN LATERAL: preserve outer rows with NULLs when subquery returns no rows
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_stats_all',
-    query        => 'SELECT d.id, d.name, stats.total
+    name     => 'dept_stats_all',
+    query    => 'SELECT d.id, d.name, stats.total
      FROM departments d
      LEFT JOIN LATERAL (
          SELECT SUM(e.salary) AS total
          FROM employees e
          WHERE e.dept_id = d.id
      ) AS stats ON true',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -552,51 +528,46 @@ Subqueries in the `WHERE` clause are automatically transformed into semi-join, a
 ```sql
 -- EXISTS subquery: customers who have placed orders
 SELECT pgtrickle.create_stream_table(
-    name         => 'active_customers',
-    query        => 'SELECT c.id, c.name
+    name     => 'active_customers',
+    query    => 'SELECT c.id, c.name
      FROM customers c
      WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- NOT EXISTS: customers with no orders
 SELECT pgtrickle.create_stream_table(
-    name         => 'inactive_customers',
-    query        => 'SELECT c.id, c.name
+    name     => 'inactive_customers',
+    query    => 'SELECT c.id, c.name
      FROM customers c
      WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- IN subquery: products that have been ordered
 SELECT pgtrickle.create_stream_table(
-    name         => 'ordered_products',
-    query        => 'SELECT p.id, p.name
+    name     => 'ordered_products',
+    query    => 'SELECT p.id, p.name
      FROM products p
      WHERE p.id IN (SELECT product_id FROM order_items)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- NOT IN subquery: products never ordered
 SELECT pgtrickle.create_stream_table(
-    name         => 'unordered_products',
-    query        => 'SELECT p.id, p.name
+    name     => 'unordered_products',
+    query    => 'SELECT p.id, p.name
      FROM products p
      WHERE p.id NOT IN (SELECT product_id FROM order_items)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Scalar subquery in SELECT list
 SELECT pgtrickle.create_stream_table(
-    name         => 'products_with_max_price',
-    query        => 'SELECT p.id, p.name, (SELECT max(price) FROM products) AS max_price
+    name     => 'products_with_max_price',
+    query    => 'SELECT p.id, p.name, (SELECT max(price) FROM products) AS max_price
      FROM products p',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -1349,10 +1320,9 @@ pg_trickle transparently rewrites certain SQL constructs before parsing. These r
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    name         => 'big_departments',
-    query        => 'SELECT department, COUNT(*) AS cnt FROM employees GROUP BY department HAVING COUNT(*) > 10',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'big_departments',
+    query    => 'SELECT department, COUNT(*) AS cnt FROM employees GROUP BY department HAVING COUNT(*) > 10',
+    schedule => '1m'
 );
 ```
 
@@ -1366,10 +1336,9 @@ though at the cost of being unable to distinguish truly duplicate rows (rows wit
 -- No primary key — pg_trickle uses content hashing for row identity
 CREATE TABLE events (ts TIMESTAMPTZ, payload JSONB);
 SELECT pgtrickle.create_stream_table(
-    name         => 'event_summary',
-    query        => 'SELECT payload->>''type'' AS event_type, COUNT(*) FROM events GROUP BY 1',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'event_summary',
+    query    => 'SELECT payload->>''type'' AS event_type, COUNT(*) FROM events GROUP BY 1',
+    schedule => '1m'
 );
 ```
 
@@ -1403,10 +1372,9 @@ FULL mode accepts all volatility classes since it re-evaluates the entire query 
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    name         => 'sorted_names',
-    query        => 'SELECT name COLLATE "C" AS c_name FROM users',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'sorted_names',
+    query    => 'SELECT name COLLATE "C" AS c_name FROM users',
+    schedule => '1m'
 );
 ```
 
@@ -1417,10 +1385,9 @@ The `IS JSON` predicate validates whether a value is valid JSON. All variants ar
 ```sql
 -- Filter rows with valid JSON
 SELECT pgtrickle.create_stream_table(
-    name         => 'valid_json_events',
-    query        => 'SELECT id, payload FROM events WHERE payload::text IS JSON',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'valid_json_events',
+    query    => 'SELECT id, payload FROM events WHERE payload::text IS JSON',
+    schedule => '1m'
 );
 
 -- Type-specific checks
@@ -1444,10 +1411,9 @@ SQL-standard JSON constructor functions are supported in both FULL and DIFFERENT
 ```sql
 -- JSON_OBJECT: construct a JSON object from key-value pairs
 SELECT pgtrickle.create_stream_table(
-    name         => 'user_json',
-    query        => 'SELECT id, JSON_OBJECT(''name'' : name, ''age'' : age) AS data FROM users',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'user_json',
+    query    => 'SELECT id, JSON_OBJECT(''name'' : name, ''age'' : age) AS data FROM users',
+    schedule => '1m'
 );
 
 -- JSON_ARRAY: construct a JSON array from values
@@ -1472,8 +1438,8 @@ SELECT pgtrickle.create_stream_table(
 ```sql
 -- Extract structured data from a JSON column
 SELECT pgtrickle.create_stream_table(
-    name         => 'user_phones',
-    query        => $$SELECT u.id, j.phone_type, j.phone_number
+    name     => 'user_phones',
+    query    => $$SELECT u.id, j.phone_type, j.phone_number
     FROM users u,
          JSON_TABLE(u.contact_info, '$.phones[*]'
            COLUMNS (
@@ -1481,8 +1447,7 @@ SELECT pgtrickle.create_stream_table(
              phone_number TEXT PATH '$.number'
            )
          ) AS j$$,
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -1518,18 +1483,16 @@ Stream tables **can** reference other stream tables in their defining query. Thi
 ```sql
 -- ST1 reads from a base table
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_totals',
+    query    => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
+    schedule => '1m'
 );
 
 -- ST2 reads from ST1
 SELECT pgtrickle.create_stream_table(
-    name         => 'big_customers',
-    query        => 'SELECT customer_id, total FROM pgtrickle.order_totals WHERE total > 1000',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'big_customers',
+    query    => 'SELECT customer_id, total FROM pgtrickle.order_totals WHERE total > 1000',
+    schedule => '1m'
 );
 ```
 
@@ -1541,12 +1504,11 @@ PostgreSQL views **can** be used as source tables in a stream table's defining q
 CREATE VIEW active_orders AS
   SELECT * FROM orders WHERE status = 'active';
 
--- This works in DIFFERENTIAL mode:
+-- This works (views are auto-inlined):
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_summary',
-    query        => 'SELECT customer_id, COUNT(*) FROM active_orders GROUP BY customer_id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_summary',
+    query    => 'SELECT customer_id, COUNT(*) FROM active_orders GROUP BY customer_id',
+    schedule => '1m'
 );
 -- Internally, 'active_orders' is replaced with:
 --   (SELECT ... FROM orders WHERE status = 'active') AS active_orders
@@ -1575,10 +1537,9 @@ CREATE TABLE orders_eu PARTITION OF orders FOR VALUES IN ('EU');
 
 -- Works — inserts into any partition are captured:
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_summary',
-    query        => 'SELECT region, SUM(amount) FROM orders GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_summary',
+    query    => 'SELECT region, SUM(amount) FROM orders GROUP BY region',
+    schedule => '1m'
 );
 ```
 
@@ -1672,10 +1633,9 @@ the delta query may fail to emit the required DELETE from the stream table:
 ```sql
 -- Stream table joining orders with customers
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_details',
-    query        => 'SELECT o.id, c.name FROM orders o JOIN customers c ON o.cust_id = c.id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_details',
+    query    => 'SELECT o.id, c.name FROM orders o JOIN customers c ON o.cust_id = c.id',
+    schedule => '1m'
 );
 
 -- Scenario that exposes the limitation:
@@ -1710,11 +1670,10 @@ memory usage during query generation. Use explicit `GROUPING SETS(...)` instead:
 -- Rejected: CUBE(a, b, c, d, e, f, g) would generate 128 branches
 -- Use instead:
 SELECT pgtrickle.create_stream_table(
-    name         => 'multi_dim',
-    query        => 'SELECT a, b, c, SUM(v) FROM t
+    name     => 'multi_dim',
+    query    => 'SELECT a, b, c, SUM(v) FROM t
    GROUP BY GROUPING SETS ((a, b, c), (a, b), (a), ())',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 

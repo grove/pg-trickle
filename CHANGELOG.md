@@ -7,6 +7,49 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
+## [0.2.2] — Unreleased
+
+### Added
+
+- **ALTER QUERY** — `alter_stream_table` now accepts a `query` parameter to
+  change the defining query of an existing stream table. The function validates
+  the new query, classifies schema changes (same, compatible, or incompatible),
+  migrates the storage table accordingly, updates catalog entries and
+  dependencies, performs ALTER-aware cycle detection, and runs a full refresh.
+  Compatible schema changes preserve the storage table OID (views, policies,
+  and publications remain valid).
+
+- **ORDER BY + LIMIT + OFFSET (Paged TopK)** — `OFFSET` is now supported in
+  defining queries with `ORDER BY ... LIMIT N OFFSET M`. Nine E2E tests
+  validate paging, catalog metadata storage, aggregate queries, and rejection
+  of invalid patterns (OFFSET without LIMIT, dynamic OFFSET, negative OFFSET).
+  The `topk_offset` catalog column was pre-provisioned in v0.2.1.
+
+- **AUTO refresh mode** — New default refresh mode for `create_stream_table`.
+  AUTO uses differential maintenance when the query supports it and
+  automatically falls back to FULL when it doesn't (unsupported constructs,
+  materialized views, or DVM parse failures). Explicit `'DIFFERENTIAL'`
+  retains strict error behavior.
+
+- **Version mismatch check** — The background scheduler now compares the
+  compiled shared library version against the SQL-installed extension version
+  at startup. A WARNING is logged if they differ, helping users detect stale
+  `.so` installs after `ALTER EXTENSION pg_trickle UPDATE`.
+
+- **FAQ upgrade section** — Expanded the Deployment & Operations section of
+  the FAQ with upgrade instructions, version mismatch detection, and stream
+  table preservation guidance. Cross-links to the full
+  [Upgrading Guide](docs/UPGRADING.md).
+
+### Changed
+
+- `create_stream_table` default `refresh_mode` changed from `'DIFFERENTIAL'`
+  to `'AUTO'`.
+- `create_stream_table` default `schedule` changed from `'1m'` to
+  `'calculated'`.
+
+---
+
 ## [0.2.1] — 2026-03-05
 
 ### Added

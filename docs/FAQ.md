@@ -235,15 +235,37 @@ Check your provider's documentation for custom extension support. Services that 
 
 ## Creating & Managing Stream Tables
 
+### Do I need to choose a refresh mode?
+
+No. The default mode (`'AUTO'`) is adaptive: it uses differential (delta-only)
+maintenance when efficient, and automatically falls back to full
+recomputation when the change volume is high or the query cannot be
+differentiated. This works well for the vast majority of queries.
+
+You only need to specify a mode explicitly when:
+- You want **FULL** mode to force recomputation every time (rare).
+- You want **IMMEDIATE** mode for sub-second, in-transaction updates
+  (adds overhead to every write on source tables).
+- You want strict **DIFFERENTIAL** mode and prefer an error over silent
+  fallback when the query isn't differentiable.
+
 ### How do I create a stream table?
 
 ```sql
+-- Minimal: just name and query. Refreshes on a calculated schedule
+-- using adaptive differential maintenance.
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT customer_id, SUM(amount) AS total
+    'order_totals',
+    'SELECT customer_id, SUM(amount) AS total
+     FROM orders GROUP BY customer_id'
+);
+
+-- With custom schedule:
+SELECT pgtrickle.create_stream_table(
+    name     => 'order_totals',
+    query    => 'SELECT customer_id, SUM(amount) AS total
      FROM orders GROUP BY customer_id',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 
@@ -1901,7 +1923,7 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```sql
    ALTER EXTENSION pg_trickle UPDATE;
    ```
-   This applies migration scripts (e.g., `pg_trickle--0.1.3--0.2.0.sql`) that update catalog tables, add new functions, and migrate data as needed.
+   This applies migration scripts (e.g., `pg_trickle--0.2.1--0.2.2.sql`) that update catalog tables, add new functions, and migrate data as needed.
 3. **Restart PostgreSQL** if the shared library changed (required for `shared_preload_libraries` changes).
 4. **Verify:**
    ```sql
@@ -1909,6 +1931,35 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```
 
 **Zero-downtime upgrades** are possible for minor versions (patch releases) that don't change the shared library. Just run `ALTER EXTENSION pg_trickle UPDATE` — no restart needed.
+
+For detailed instructions, version-specific notes, rollback procedures, and troubleshooting, see the full [Upgrading Guide](UPGRADING.md).
+
+### How do I know if my shared library and SQL extension versions match?
+
+The background worker checks for version mismatches at startup and logs a
+WARNING if the compiled `.so` version differs from the installed SQL extension
+version. You can also check manually:
+
+```sql
+-- Compiled .so version:
+SELECT pgtrickle.version();
+
+-- Installed SQL extension version:
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+```
+
+If these differ, run `ALTER EXTENSION pg_trickle UPDATE;` and restart
+PostgreSQL if prompted.
+
+### Are stream tables preserved during an upgrade?
+
+Yes. `ALTER EXTENSION pg_trickle UPDATE` applies only additive schema
+migrations (new columns, updated function signatures). Existing stream tables,
+their data, refresh history, and CDC infrastructure are preserved. The
+scheduler resumes normal operation after the upgrade completes.
+
+For version-specific migration notes, see the
+[Upgrading Guide — Version-Specific Notes](UPGRADING.md#version-specific-notes).
 
 ### What happens to stream tables during a PostgreSQL restart?
 

@@ -24,7 +24,8 @@ use crate::wal_decoder;
 /// - `name`: Schema-qualified name (`'schema.table'`) or unqualified (`'table'`).
 /// - `query`: The defining SELECT query.
 /// - `schedule`: Desired maximum schedule. `'calculated'` for CALCULATED mode (inherits schedule from downstream dependents).
-/// - `refresh_mode`: `'FULL'` or `'DIFFERENTIAL'`.
+/// - `refresh_mode`: `'AUTO'` (default — DIFFERENTIAL with FULL fallback),
+///   `'FULL'`, `'DIFFERENTIAL'`, or `'IMMEDIATE'`.
 /// - `initialize`: Whether to populate the table immediately.
 /// - `diamond_consistency`: `'none'` (default) or `'atomic'`.
 /// - `diamond_schedule_policy`: `'fastest'` (default) or `'slowest'`.
@@ -33,7 +34,7 @@ fn create_stream_table(
     name: &str,
     query: &str,
     schedule: default!(Option<&str>, "'calculated'"),
-    refresh_mode: default!(&str, "'DIFFERENTIAL'"),
+    refresh_mode: default!(&str, "'AUTO'"),
     initialize: default!(bool, true),
     diamond_consistency: default!(Option<&str>, "NULL"),
     diamond_schedule_policy: default!(Option<&str>, "NULL"),
@@ -102,9 +103,14 @@ struct ValidatedQuery {
 /// Validate a rewritten query and parse it for DVM. This runs the LIMIT 0
 /// check, TopK detection, unsupported construct rejection, DVM parsing,
 /// volatility checks, and source relation extraction.
+///
+/// When `is_auto` is true and the query cannot be maintained incrementally,
+/// `refresh_mode` is downgraded to `RefreshMode::Full` instead of returning
+/// an error.
 fn validate_and_parse_query(
     query: &str,
-    refresh_mode: RefreshMode,
+    refresh_mode: &mut RefreshMode,
+    is_auto: bool,
 ) -> Result<ValidatedQuery, PgTrickleError> {
     // Validate the defining query by running LIMIT 0
     let columns = validate_defining_query(query)?;
@@ -146,11 +152,37 @@ fn validate_and_parse_query(
     // Reject LIMIT / OFFSET (TopK already handled above).
     crate::dvm::reject_limit_offset(q)?;
     crate::dvm::warn_limit_without_order_in_subqueries(q);
-    crate::dvm::reject_unsupported_constructs(q)?;
 
-    // Reject matviews/foreign tables in DIFFERENTIAL/IMMEDIATE
-    if refresh_mode == RefreshMode::Differential || refresh_mode == RefreshMode::Immediate {
-        crate::dvm::reject_materialized_views(q)?;
+    // Reject unsupported constructs (NATURAL JOIN, subquery expressions).
+    // AUTO mode: downgrade to FULL instead of erroring.
+    if let Err(e) = crate::dvm::reject_unsupported_constructs(q) {
+        if is_auto {
+            pgrx::info!(
+                "Query uses constructs not supported by differential maintenance ({}); \
+                 using FULL refresh mode. See docs/DVM_OPERATORS.md for supported operators.",
+                e
+            );
+            *refresh_mode = RefreshMode::Full;
+        } else {
+            return Err(e);
+        }
+    }
+
+    // Reject matviews/foreign tables in DIFFERENTIAL/IMMEDIATE.
+    // AUTO mode: downgrade to FULL if matviews/foreign tables are present.
+    if (*refresh_mode == RefreshMode::Differential || *refresh_mode == RefreshMode::Immediate)
+        && let Err(e) = crate::dvm::reject_materialized_views(q)
+    {
+        if is_auto && *refresh_mode == RefreshMode::Differential {
+            pgrx::info!(
+                "Query references materialized views or foreign tables ({}); \
+                 using FULL refresh mode.",
+                e
+            );
+            *refresh_mode = RefreshMode::Full;
+        } else {
+            return Err(e);
+        }
     }
 
     // IMMEDIATE mode: TopK limit threshold check
@@ -179,12 +211,25 @@ fn validate_and_parse_query(
         crate::dvm::validate_immediate_mode_support(q)?;
     }
 
-    // DVM parse for DIFFERENTIAL/IMMEDIATE (non-TopK)
-    let parsed_tree = if (refresh_mode == RefreshMode::Differential
-        || refresh_mode == RefreshMode::Immediate)
+    // DVM parse for DIFFERENTIAL/IMMEDIATE (non-TopK).
+    // AUTO mode: if DVM parsing fails, downgrade to FULL instead of erroring.
+    let parsed_tree = if (*refresh_mode == RefreshMode::Differential
+        || *refresh_mode == RefreshMode::Immediate)
         && topk_info.is_none()
     {
-        Some(crate::dvm::parse_defining_query_full(q)?)
+        match crate::dvm::parse_defining_query_full(q) {
+            Ok(tree) => Some(tree),
+            Err(e) if is_auto && *refresh_mode == RefreshMode::Differential => {
+                pgrx::info!(
+                    "Query cannot use differential maintenance ({}); \
+                     using FULL refresh mode. See docs/DVM_OPERATORS.md for supported operators.",
+                    e
+                );
+                *refresh_mode = RefreshMode::Full;
+                None
+            }
+            Err(e) => return Err(e),
+        }
     } else {
         None
     };
@@ -711,10 +756,10 @@ fn alter_stream_table_query(
     let rewritten_query = run_query_rewrite_pipeline(new_query)?;
 
     // Determine the effective refresh mode — use the ST's current mode
-    let refresh_mode = st.refresh_mode;
+    let mut refresh_mode = st.refresh_mode;
 
     // Validate and parse the new query
-    let vq = validate_and_parse_query(&rewritten_query, refresh_mode)?;
+    let vq = validate_and_parse_query(&rewritten_query, &mut refresh_mode, false)?;
 
     // Cycle detection on the new dependency set (ALTER-aware: replaces
     // the existing ST's edges rather than creating a sentinel node)
@@ -1051,7 +1096,8 @@ fn create_stream_table_impl(
     diamond_consistency: Option<&str>,
     diamond_schedule_policy: Option<&str>,
 ) -> Result<(), PgTrickleError> {
-    let refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
+    let is_auto = RefreshMode::is_auto_str(refresh_mode_str);
+    let mut refresh_mode = RefreshMode::from_str(refresh_mode_str)?;
 
     // Parse diamond consistency — default to 'none' when not specified
     let dc = match diamond_consistency {
@@ -1110,8 +1156,7 @@ fn create_stream_table_impl(
     let query = &run_query_rewrite_pipeline(query)?;
 
     // ── Validate & parse ───────────────────────────────────────────
-    let vq = validate_and_parse_query(query, refresh_mode)?;
-
+    let vq = validate_and_parse_query(query, &mut refresh_mode, is_auto)?;
     // Warnings
     warn_source_table_properties(&vq.source_relids);
     warn_select_star(query);
