@@ -77,6 +77,7 @@ void  errfinish(const char *filename, int lineno, const char *funcname) {
 
 /* ── Transaction / type helpers ───────────────────────────────────────── */
 int      GetDatabaseEncoding(void)             { return 0; }
+uint32_t GetCurrentTransactionId(void)          { return 0; }
 uint32_t GetCurrentTransactionIdIfAny(void)     { return 0; }
 int16_t  get_typlen(uint32_t typid)            { (void)typid; return -1; }
 _Bool    get_typbyval(uint32_t typid)          { (void)typid; return 0; }
