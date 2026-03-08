@@ -9,6 +9,23 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Non-deterministic function handling (partial)** — defining queries are now
+  scanned for function and operator volatility before stream table creation.
+  VOLATILE functions and custom operators are rejected in `DIFFERENTIAL` and
+  `IMMEDIATE` modes, while STABLE functions continue with a warning. Initial
+  E2E coverage now verifies volatile rejection, immutable-function acceptance,
+  and nested volatile detection inside `WHERE` expressions.
+
+### Documentation
+
+- Clarified volatility semantics across the SQL reference, DVM operator docs,
+  README support matrix, roadmap, and implementation plan. The docs now match
+  PostgreSQL volatility categories: `now()` / `current_timestamp` are treated
+  as STABLE, while `random()` / `clock_timestamp()` / `gen_random_uuid()` are
+  treated as VOLATILE.
+
 ## [0.2.2] — 2026-03-08
 
 ### Added
