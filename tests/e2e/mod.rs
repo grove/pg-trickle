@@ -293,6 +293,10 @@ impl E2eDb {
         &self.container_id
     }
 
+    pub fn connection_string(&self) -> &str {
+        &self.connection_string
+    }
+
     /// Execute SQL on a dedicated connection and collect PostgreSQL notices.
     pub async fn try_execute_with_notices(
         &self,

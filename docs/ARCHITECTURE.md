@@ -420,7 +420,7 @@ The scheduler background worker and user sessions share a `PgTrickleSharedState`
 
 A separate `PgAtomic<AtomicU64>` named `DAG_REBUILD_SIGNAL` is incremented by API functions (`create`, `alter`, `drop`) after catalog mutations. The scheduler compares its local copy against the atomic counter to detect when to rebuild its in-memory DAG without holding a lock.
 
-A second `PgAtomic<AtomicU64>` named `CACHE_GENERATION` tracks DDL events that may invalidate cached delta or MERGE templates across backends. When DDL hooks fire (view change, ALTER TABLE, function change) or API functions mutate the catalog, `CACHE_GENERATION` is bumped. Each backend maintains a thread-local generation counter; on the next refresh, if the shared generation has advanced, the backend flushes its delta template cache, MERGE template cache, and prepared statements.
+A second `PgAtomic<AtomicU64>` named `CACHE_GENERATION` tracks DDL events that may invalidate cached delta or MERGE templates across backends. When DDL hooks fire (view change, ALTER TABLE, function change) or API functions mutate the catalog, `CACHE_GENERATION` is bumped. Each backend maintains a thread-local generation counter; on the next refresh, if the shared generation has advanced, the backend flushes its delta template cache, MERGE template cache, and explicitly `DEALLOCATE`s tracked `__pgt_merge_*` prepared statements before rebuilding local state.
 
 ### 9. DDL Tracking (`src/hooks.rs`)
 
@@ -546,7 +546,7 @@ Runtime behavior is controlled by a growing set of GUC (Grand Unified Configurat
 | `pg_trickle.max_concurrent_refreshes` | `4` | Maximum parallel refresh workers |
 | `pg_trickle.differential_max_change_ratio` | `0.15` | Change-to-table-size ratio above which DIFFERENTIAL falls back to FULL |
 | `pg_trickle.cleanup_use_truncate` | `true` | Use `TRUNCATE` instead of `DELETE` for change buffer cleanup when the entire buffer is consumed |
-| `pg_trickle.user_triggers` | `'auto'` | User-defined trigger handling: `auto` / `on` / `off` |
+| `pg_trickle.user_triggers` | `'auto'` | User-defined trigger handling: `auto` / `off` (`on` accepted as deprecated alias for `auto`) |
 | `pg_trickle.block_source_ddl` | `false` | Block column-affecting DDL on tracked source tables instead of reinit |
 | `pg_trickle.cdc_mode` | `'auto'` | CDC mechanism: `auto` / `trigger` / `wal` |
 | `pg_trickle.wal_transition_timeout` | `300` | Max seconds to wait for WAL decoder catch-up during transition |

@@ -444,7 +444,7 @@ Control how user-defined triggers on stream tables are handled during refresh.
 |---|---|
 | Type | `text` |
 | Default | `'auto'` |
-| Values | `'auto'`, `'on'`, `'off'` |
+| Values | `'auto'`, `'off'` (`'on'` accepted as deprecated alias for `'auto'`) |
 | Context | `SUSET` |
 | Restart Required | No |
 
@@ -452,8 +452,8 @@ When a stream table has user-defined row-level triggers, the refresh engine can 
 
 **Values:**
 - **`auto`** (default): Automatically detect user triggers on the stream table. If present, use the explicit DML path; otherwise use `MERGE`.
-- **`on`**: Always use the explicit DML path, even without user triggers. Useful for testing.
 - **`off`**: Always use `MERGE`. User triggers are suppressed during refresh. This is the escape hatch if explicit DML causes issues.
+- **`on`**: Deprecated compatibility alias for `auto`. Existing configs continue to work, but new configs should use `auto`.
 
 **Notes:**
 - Row-level triggers do **not** fire during FULL refresh regardless of this setting. FULL refresh uses `DISABLE TRIGGER USER` / `ENABLE TRIGGER USER` to suppress them.
@@ -464,11 +464,11 @@ When a stream table has user-defined row-level triggers, the refresh engine can 
 -- Auto-detect (default)
 SET pg_trickle.user_triggers = 'auto';
 
--- Always use explicit DML (for testing)
-SET pg_trickle.user_triggers = 'on';
-
 -- Suppress triggers, use MERGE
 SET pg_trickle.user_triggers = 'off';
+
+-- Backward-compatible legacy setting (treated the same as 'auto')
+SET pg_trickle.user_triggers = 'on';
 ```
 
 ---

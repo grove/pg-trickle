@@ -82,10 +82,25 @@ pub static PGS_USE_PREPARED_STATEMENTS: GucSetting<bool> = GucSetting::<bool>::n
 /// - `"auto"` (default): Detect user-defined row-level triggers on the
 ///   stream table and automatically use explicit DML (DELETE + UPDATE +
 ///   INSERT) so triggers fire with correct `TG_OP`, `OLD`, and `NEW`.
-/// - `"on"`: Always use explicit DML, even if no user triggers exist.
 /// - `"off"`: Always use MERGE; user triggers will NOT fire correctly.
+/// - `"on"`: Deprecated compatibility alias for `"auto"`.
 pub static PGS_USER_TRIGGERS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserTriggersMode {
+    Auto,
+    Off,
+}
+
+impl UserTriggersMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserTriggersMode::Auto => "auto",
+            UserTriggersMode::Off => "off",
+        }
+    }
+}
 
 /// CDC mechanism selection.
 ///
@@ -304,10 +319,10 @@ pub fn register_gucs() {
 
     GucRegistry::define_string_guc(
         c"pg_trickle.user_triggers",
-        c"User-trigger handling: auto, on, or off.",
-        c"'auto' detects row-level user triggers and switches to explicit DML so they fire correctly. \
-           'on' forces explicit DML even without triggers. \
-           'off' always uses MERGE (triggers will NOT fire correctly).",
+          c"User-trigger handling: auto or off.",
+          c"'auto' detects row-level user triggers and switches to explicit DML so they fire correctly. \
+              'off' always uses MERGE (triggers will NOT fire correctly). \
+              'on' is accepted as a deprecated alias for 'auto'.",
         &PGS_USER_TRIGGERS,
         GucContext::Suset,
         GucFlags::default(),
@@ -513,12 +528,24 @@ pub fn pg_trickle_use_prepared_statements() -> bool {
     PGS_USE_PREPARED_STATEMENTS.get()
 }
 
-/// Returns the user-trigger handling mode: `"auto"`, `"on"`, or `"off"`.
-pub fn pg_trickle_user_triggers() -> String {
-    PGS_USER_TRIGGERS
+/// Returns the canonical user-trigger handling mode.
+///
+/// `on` is preserved as a deprecated input alias for backward compatibility
+/// but is normalized to `auto` at runtime.
+pub fn pg_trickle_user_triggers_mode() -> UserTriggersMode {
+    match PGS_USER_TRIGGERS
         .get()
-        .map(|cs| cs.to_str().unwrap_or("auto").to_string())
-        .unwrap_or_else(|| "auto".to_string())
+        .and_then(|cs| cs.to_str().ok().map(str::to_ascii_lowercase))
+        .as_deref()
+    {
+        Some("off") => UserTriggersMode::Off,
+        _ => UserTriggersMode::Auto,
+    }
+}
+
+/// Returns the canonical user-trigger handling mode as a string.
+pub fn pg_trickle_user_triggers() -> String {
+    pg_trickle_user_triggers_mode().as_str().to_string()
 }
 
 /// Returns the CDC mode: `"auto"`, `"trigger"`, or `"wal"`.

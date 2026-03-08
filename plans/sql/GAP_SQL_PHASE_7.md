@@ -584,12 +584,13 @@ to exclude `attgenerated != ''` columns.
 | Field | Value |
 |-------|-------|
 | **Location** | `refresh.rs` prepared statements, DDL hooks |
-| **Problem** | When `pg_trickle.use_prepared_statements = true`, the extension creates `PREPARE __pgt_merge_{id}`. On DDL events (e.g., adding an index to the stream table), the delta template cache is invalidated, but the PostgreSQL-side prepared statement plan is not `DEALLOCATE`-d. The cached plan may become suboptimal. |
+| **Problem** | When `pg_trickle.use_prepared_statements = true`, the extension creates `PREPARE __pgt_merge_{id}`. Local invalidation already handled `DEALLOCATE`, but the shared cache-generation path only cleared Rust-side bookkeeping. After DDL or stream-table metadata changes in another backend, the PostgreSQL-side prepared statement could remain allocated until session end. |
 | **Severity** | **P3** |
 | **Effort** | 1–2 hours |
 
-**Recommendation:** On DDL-triggered cache invalidation, also execute
-`DEALLOCATE __pgt_merge_{id}` via SPI.
+**Resolution:** On shared cache-generation invalidation, execute
+`DEALLOCATE __pgt_merge_{id}` for every tracked prepared MERGE statement
+before clearing the local cache.
 
 ---
 
@@ -1194,7 +1195,7 @@ verification tests pass.
 | Step | Gap | Description | Effort | Status |
 |------|-----|-------------|--------|--------|
 | **F27** | G4.3 | Expose adaptive threshold | 2–3h | ✅ Done (stream_tables_info view includes auto_threshold via SELECT st.*) |
-| **F28** | G4.4 | DEALLOCATE prepared statements on DDL | 1–2h | ✅ Already done (invalidate_merge_cache handles DEALLOCATE) |
+| **F28** | G4.4 | DEALLOCATE prepared statements on DDL | 1–2h | ✅ Done (local invalidation and shared cache-generation invalidation both DEALLOCATE tracked statements) |
 | **F29** | G8.6 | Parse SPI SQLSTATE for retry classification | 3–4h | ✅ Done (classify_spi_error_retryable in error.rs) |
 | **F30** | G9.1 | Add delta_row_count to refresh history | 3–4h | ✅ Done (3 new columns + RefreshRecord API + scheduler integration) |
 | **F31** | G9.4 | Emit StaleData NOTIFY consistently | 2–3h | ✅ Done (emit_stale_alert_if_needed in scheduler.rs) |

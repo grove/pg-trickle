@@ -200,10 +200,16 @@ scripts in sequence.
 PostgreSQL does not support automatic extension downgrades. To roll back:
 
 1. **Export stream table definitions** (if you want to recreate them later):
-   ```sql
-   SELECT pgt_name, original_query, schedule, refresh_mode
-   FROM pgtrickle.pgt_stream_tables;
-   ```
+  ```bash
+  cargo run --bin pg_trickle_dump -- --output backup.sql
+  ```
+  Or, if the binary is already installed in your PATH:
+  ```bash
+  pg_trickle_dump --output backup.sql
+  ```
+  Use `--dsn '<connection string>'` or standard `PG*` / `DATABASE_URL`
+  environment variables when the default local connection parameters are not
+  sufficient.
 
 2. **Drop the extension** (destroys all stream tables):
    ```sql

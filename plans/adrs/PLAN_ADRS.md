@@ -204,7 +204,7 @@ keep the fast single-MERGE path.
 **Key points:**
 - `has_user_triggers()` detection at refresh time
 - `CachedMergeTemplate` extended with explicit DML templates
-- `pg_trickle.user_triggers` GUC (auto/on/off)
+- `pg_trickle.user_triggers` GUC (canonical `auto` / `off`, deprecated `on` alias)
 - FULL refresh: triggers suppressed via `DISABLE TRIGGER USER` + `NOTIFY`
 
 ---

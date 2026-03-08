@@ -27,6 +27,13 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `pgtrickle.check_cdc_health()` uses the critical threshold instead of
   hard-coded values.
 
+- **`pg_trickle_dump` backup tool** — Added a standalone `pg_trickle_dump`
+  CLI that connects over pgwire, topologically orders stream tables by
+  dependency, and emits replayable SQL using
+  `pgtrickle.create_stream_table(...)` plus follow-up status restoration.
+  This gives operators a concrete pre-upgrade / pre-rollback export path
+  instead of relying on manual catalog queries.
+
 ### Documentation
 
 - Clarified volatility semantics across the SQL reference, DVM operator docs,
@@ -44,6 +51,17 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   statement-level IVM triggers and does not install CDC triggers or create WAL
   replication slots. Unit tests and E2E coverage now lock in that behavior for
   both create and alter flows.
+
+- **Prepared statement invalidation completed** — backends now explicitly
+  `DEALLOCATE` tracked `__pgt_merge_*` prepared statements when the shared
+  cache generation advances, closing the remaining path where cross-backend
+  invalidation cleared local bookkeeping without releasing the PostgreSQL-side
+  prepared plan.
+
+- **`pg_trickle.user_triggers` simplified** — the canonical modes are now
+  `auto` and `off`. The legacy `on` value remains accepted as a deprecated
+  compatibility alias for `auto`, so existing configs keep working without
+  preserving the redundant runtime branch.
 
 - **CI test pyramid rebalanced** — PRs now run a faster three-tier gate:
   Linux unit tests, integration tests, and a curated Light E2E tier split
