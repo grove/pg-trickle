@@ -4,6 +4,11 @@ Date: 2026-03-07
 Status: IN PROGRESS
 Last Updated: 2026-03-08
 
+> **G3, G4, G5 implemented** — WAL slot advancement, change-buffer flush after
+> FULL/adaptive-fallback, `pgt_cdc_status` view, and `cdc_modes` monitoring
+> column all shipped into `Unreleased`. G1 (per-table cdc_mode override) and
+> G2 phase 2 remain open.
+
 ---
 
 ## 1. Problem Statement
@@ -275,6 +280,15 @@ This causes:
      check `pg_replication_slots.confirmed_flush_lsn` has advanced.
    - Integration test: verify change buffer is empty after FULL refresh.
 
+**Progress (2026-03-08).** Implemented in `Unreleased`. `advance_slot_to_current(slot_name)`
+added to `src/wal_decoder.rs`; uses `pg_replication_slot_advance($1, pg_current_wal_lsn())`
+and silently skips if the slot does not exist. The shared
+`post_full_refresh_cleanup()` helper in `src/refresh.rs` iterates all
+WAL/TRANSITIONING `StDependency` entries, calls `advance_slot_to_current()` for
+each, then calls `cleanup_change_buffers_by_frontier()`. It is invoked from
+`scheduler.rs` after `store_frontier()` in the `Full`, `Reinitialize`, and
+empty-prev `Differential` arms.
+
 ---
 
 ### G4: AUTO→FULL Adaptive Fallback — Change Buffer Cleanup
@@ -324,6 +338,13 @@ ratio over threshold).
      change buffer is empty after refresh.
    - Integration test: after fallback FULL, insert one row → next cycle should
      succeed as DIFFERENTIAL without hitting the ratio threshold.
+
+**Progress (2026-03-08).** Implemented in `Unreleased`. G3 and G4 share the
+`post_full_refresh_cleanup()` helper in `src/refresh.rs`. In the adaptive
+fallback path inside `execute_differential_refresh()`, the helper is called
+after a successful adaptive FULL (TRUNCATE-needed path and ratio-threshold
+path). This prevents stale change-buffer rows from pushing the ratio over the
+threshold again on the next scheduler tick, eliminating the ping-pong cycle.
 
 ---
 
@@ -383,6 +404,14 @@ This makes it difficult to debug slow transitions or stuck states.
    - Integration test: create ST with `auto` mode on a `wal_level = logical`
      cluster → verify `pgt_cdc_status` shows `TRANSITIONING` then `WAL`.
    - Integration test: verify NOTIFY payload is emitted.
+
+**Progress (2026-03-08).** Implemented in `Unreleased`. `pgtrickle.pgt_cdc_status`
+view added to `src/lib.rs` (the `pg_trickle_monitoring_views` extension_sql!
+block) alongside a `cdc_modes` text-array column in `pg_stat_stream_tables`.
+NOTIFY on transitions (TRIGGER → TRANSITIONING via `finish_wal_transition()`
+and TRANSITIONING → WAL via `complete_wal_transition()`) was already
+implemented by `emit_cdc_transition_notify()` in `src/wal_decoder.rs` in
+prior work.
 
 ---
 

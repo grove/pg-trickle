@@ -19,6 +19,18 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   immutable-function acceptance, and nested volatile detection inside `WHERE`
   expressions.
 
+- **`pgtrickle.pgt_cdc_status` view (G5)** — new convenience view that joins
+  `pgt_dependencies`, `pgt_stream_tables`, `pg_class`, and `pg_namespace` to
+  expose per-source CDC state in one place. Columns: `pgt_schema`, `pgt_name`,
+  `source_relid`, `source_name`, `source_schema`, `cdc_mode`, `slot_name`,
+  `decoder_confirmed_lsn`, `transition_started_at`. Useful for tracking
+  in-progress TRIGGER→WAL transitions.
+
+- **`cdc_modes` column in `pgtrickle.pg_stat_stream_tables` (G5)** — text
+  array of distinct CDC modes across all TABLE-type sources of each stream
+  table (e.g. `{wal}`, `{trigger,wal}`, `{transitioning,wal}`). Populated via
+  a correlated subquery on `pgt_dependencies`.
+
 ### Documentation
 
 - Clarified volatility semantics across the SQL reference, DVM operator docs,
@@ -28,6 +40,22 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   treated as VOLATILE.
 
 ### Changed
+
+- **WAL slot advancement after FULL refresh (G3)** — `wal_decoder.rs` gains a
+  new `advance_slot_to_current()` helper that calls
+  `pg_replication_slot_advance($1, pg_current_wal_lsn())` (skips gracefully if
+  the slot does not exist). The shared `post_full_refresh_cleanup()` helper in
+  `refresh.rs` calls it for every WAL/TRANSITIONING dependency after each FULL
+  refresh, preventing WAL segment bloat and replication-lag false alarms.
+
+- **Change buffer flush after adaptive FULL fallback (G4)** — the
+  `post_full_refresh_cleanup()` helper (see G3 above) also calls
+  `cleanup_change_buffers_by_frontier()` after every FULL refresh. This
+  eliminates the change-ratio ping-pong cycle where bulk-loaded tables caused
+  the AUTO scheduler to alternate between DIFFERENTIAL and FULL indefinitely.
+  The helper is invoked from `scheduler.rs` after `store_frontier()` in the
+  `Full`, `Reinitialize`, and empty-prev-frontier `Differential` arms, and from
+  the adaptive fallback path inside `execute_differential_refresh()`.
 
 - **Differential refresh now rejects missing baselines defensively** —
   `execute_differential_refresh()` now returns a user error if it is invoked

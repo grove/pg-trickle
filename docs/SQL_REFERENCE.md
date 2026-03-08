@@ -63,6 +63,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 - [Views](#views)
   - [pgtrickle.stream\_tables\_info](#pgtricklestream_tables_info)
   - [pgtrickle.pg\_stat\_stream\_tables](#pgtricklepg_stat_stream_tables)
+  - [pgtrickle.pgt\_cdc\_status](#pgtricklepgt_cdc_status)
 - [Catalog Tables](#catalog-tables)
   - [pgtrickle.pgt\_stream\_tables](#pgtricklepgt_stream_tables)
   - [pgtrickle.pgt\_dependencies](#pgtricklepgt_dependencies)
@@ -1803,6 +1804,35 @@ Key columns:
 | `failed_refreshes` | `bigint` | Failed refresh count |
 | `avg_duration_ms` | `float8` | Average refresh duration |
 | `consecutive_errors` | `int` | Current error streak |
+| `cdc_modes` | `text[]` | Distinct CDC modes across TABLE-type sources (e.g. `{wal}`, `{trigger,wal}`, `{transitioning,wal}`) |
+
+---
+
+### pgtrickle.pgt_cdc_status
+
+Convenience view for inspecting the CDC mode and WAL slot state of every
+TABLE-type source for all stream tables. Useful for monitoring in-progress
+TRIGGER→WAL transitions.
+
+```sql
+SELECT * FROM pgtrickle.pgt_cdc_status;
+```
+
+| Column | Type | Description |
+|---|---|---|
+| `pgt_schema` | `text` | Schema of the stream table |
+| `pgt_name` | `text` | Name of the stream table |
+| `source_relid` | `oid` | OID of the source table |
+| `source_name` | `text` | Name of the source table |
+| `source_schema` | `text` | Schema of the source table |
+| `cdc_mode` | `text` | Current CDC mode: `trigger`, `transitioning`, or `wal` |
+| `slot_name` | `text` | Replication slot name (`NULL` for trigger mode) |
+| `decoder_confirmed_lsn` | `pg_lsn` | Last WAL position decoded (`NULL` for trigger mode) |
+| `transition_started_at` | `timestamptz` | When the trigger→WAL transition began (`NULL` if not transitioning) |
+
+Subscribe to the `pgtrickle_cdc_transition` NOTIFY channel to receive real-time
+events when a source moves between CDC modes (payload is a JSON object with
+`source_oid`, `from`, and `to` fields).
 
 ---
 
