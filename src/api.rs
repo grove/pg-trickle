@@ -1188,7 +1188,15 @@ fn create_stream_table_impl(
     )?;
 
     // Insert catalog entry + dependency edges
-    let original_query_opt = if original_query != *query {
+    // For TopK, store the base query (ORDER BY/LIMIT stripped) as defining_query.
+    // The ORDER BY, LIMIT, and OFFSET are stored separately as topk_order_by,
+    // topk_limit, and topk_offset.
+    let catalog_defining_query = if vq.topk_info.is_some() {
+        &vq.effective_query
+    } else {
+        query
+    };
+    let original_query_opt = if original_query != *catalog_defining_query {
         Some(original_query.as_str())
     } else {
         None
@@ -1197,7 +1205,7 @@ fn create_stream_table_impl(
         pgt_relid,
         &schema,
         &table_name,
-        query,
+        catalog_defining_query,
         original_query_opt,
         schedule_str,
         refresh_mode,
