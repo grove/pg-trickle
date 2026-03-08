@@ -52,7 +52,7 @@ tokio-postgres = "0.7"
 serde_json = "1"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 proptest = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "refresh_bench"
