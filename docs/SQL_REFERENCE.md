@@ -836,7 +836,8 @@ WHERE severity != 'OK';
 ```
 
 Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
-`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag` (> 100 MB).
+`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag`
+(retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB).
 
 ---
 
@@ -991,6 +992,9 @@ SELECT * FROM pgtrickle.slot_health();
 ### pgtrickle.check_cdc_health
 
 Check CDC health for all tracked source tables. Returns per-source health status including the current CDC mode, replication slot details, estimated lag, and any alerts.
+
+The `alert` column uses the critical threshold configured by
+`pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB).
 
 ```sql
 pgtrickle.check_cdc_health() → SETOF record(

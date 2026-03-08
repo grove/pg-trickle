@@ -100,6 +100,20 @@ pub static PGS_CDC_MODE: GucSetting<Option<std::ffi::CString>> =
 /// transition from triggers to WAL-based CDC before falling back to triggers.
 pub static PGS_WAL_TRANSITION_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(300);
 
+/// Warning threshold (in MB) for retained WAL on pg_trickle replication slots.
+///
+/// When a WAL-mode source retains more than this amount of WAL, pg_trickle:
+/// - emits a `slot_lag_warning` NOTIFY event from the scheduler, and
+/// - reports a WARN row in `pgtrickle.health_check()`.
+pub static PGS_SLOT_LAG_WARNING_THRESHOLD_MB: GucSetting<i32> = GucSetting::<i32>::new(100);
+
+/// Critical threshold (in MB) for retained WAL on pg_trickle replication slots.
+///
+/// When a WAL-mode source retains more than this amount of WAL,
+/// `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert
+/// for the source.
+pub static PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB: GucSetting<i32> = GucSetting::<i32>::new(1024);
+
 /// When true, schema-altering DDL (column ADD/DROP/RENAME/ALTER TYPE) on
 /// source tables used by stream tables is blocked with an ERROR instead of
 /// triggering reinitialization.
@@ -324,6 +338,31 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"pg_trickle.slot_lag_warning_threshold_mb",
+        c"WAL slot lag warning threshold in MB.",
+        c"When a pg_trickle WAL replication slot retains more than this much WAL, \
+           the scheduler emits a slot_lag_warning NOTIFY event and pgtrickle.health_check() \
+           reports WARN for slot_lag.",
+        &PGS_SLOT_LAG_WARNING_THRESHOLD_MB,
+        1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.slot_lag_critical_threshold_mb",
+        c"WAL slot lag critical threshold in MB.",
+        c"When a pg_trickle WAL replication slot retains more than this much WAL, \
+           pgtrickle.check_cdc_health() reports slot_lag_exceeds_threshold for the source.",
+        &PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB,
+        1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_bool_guc(
         c"pg_trickle.block_source_ddl",
         c"Block column-altering DDL on source tables used by stream tables.",
@@ -493,6 +532,16 @@ pub fn pg_trickle_cdc_mode() -> String {
 /// Returns the WAL transition timeout in seconds.
 pub fn pg_trickle_wal_transition_timeout() -> i32 {
     PGS_WAL_TRANSITION_TIMEOUT.get()
+}
+
+/// Returns the WAL slot lag warning threshold in bytes.
+pub fn pg_trickle_slot_lag_warning_threshold_bytes() -> i64 {
+    PGS_SLOT_LAG_WARNING_THRESHOLD_MB.get() as i64 * 1024 * 1024
+}
+
+/// Returns the WAL slot lag critical threshold in bytes.
+pub fn pg_trickle_slot_lag_critical_threshold_bytes() -> i64 {
+    PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB.get() as i64 * 1024 * 1024
 }
 
 /// Returns whether source DDL blocking is enabled.

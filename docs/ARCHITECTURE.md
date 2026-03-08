@@ -463,7 +463,7 @@ Operational events are broadcast via PostgreSQL `NOTIFY` on the `pg_trickle_aler
 | `stale` | data staleness exceeds 2× `schedule` |
 | `auto_suspended` | ST suspended after `pg_trickle.max_consecutive_errors` failures |
 | `reinitialize_needed` | Upstream DDL change detected |
-| `slot_lag_warning` | Replication slot WAL retention is growing |
+| `slot_lag_warning` | Replication slot WAL retention exceeded `pg_trickle.slot_lag_warning_threshold_mb` |
 | `cdc_transition_complete` | Source transitioned from trigger to WAL-based CDC |
 | `cdc_transition_failed` | Trigger→WAL transition failed (fell back to triggers) |
 | `refresh_completed` | Refresh completed successfully |
@@ -534,7 +534,7 @@ The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operat
 
 ### 14. Configuration (`src/config.rs`)
 
-Twelve GUC (Grand Unified Configuration) variables control runtime behavior, plus five performance-tuning GUCs. See [CONFIGURATION.md](CONFIGURATION.md) for details.
+Runtime behavior is controlled by a growing set of GUC (Grand Unified Configuration) variables. See [CONFIGURATION.md](CONFIGURATION.md) for the complete, current list.
 
 | GUC | Default | Purpose |
 |---|---|---|
@@ -550,6 +550,8 @@ Twelve GUC (Grand Unified Configuration) variables control runtime behavior, plu
 | `pg_trickle.block_source_ddl` | `false` | Block column-affecting DDL on tracked source tables instead of reinit |
 | `pg_trickle.cdc_mode` | `'auto'` | CDC mechanism: `auto` / `trigger` / `wal` |
 | `pg_trickle.wal_transition_timeout` | `300` | Max seconds to wait for WAL decoder catch-up during transition |
+| `pg_trickle.slot_lag_warning_threshold_mb` | `100` | Warning threshold for WAL slot retention used by `slot_lag_warning` and `health_check()` |
+| `pg_trickle.slot_lag_critical_threshold_mb` | `1024` | Critical threshold for WAL slot retention used by `check_cdc_health()` alerts |
 | `pg_trickle.diamond_consistency` | `'none'` | Diamond dependency consistency mode: `none` or `atomic` |
 | `pg_trickle.diamond_schedule_policy` | `'fastest'` | Schedule policy for atomic diamond groups: `fastest` or `slowest` |
 | `pg_trickle.merge_planner_hints` | `true` | Inject `SET LOCAL` planner hints (disable nestloop, raise work_mem) before MERGE |

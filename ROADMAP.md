@@ -393,11 +393,16 @@ validations, resource leaks, and observability holes. Phased from quick wins
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | O1 | Prepared statement cleanup on cache invalidation | 3–4h | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G8.3 |
-| O2 | Slot lag alerting thresholds (configurable) | 2–3h | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G10 |
+| O2 | Slot lag alerting thresholds configurable (`slot_lag_warning_threshold_mb`, `slot_lag_critical_threshold_mb`) | Done | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) §6.2 |
 | O3 | Simplify `pg_trickle.user_triggers` GUC (remove redundant `on` value) | 1h | [PLAN_FEATURE_CLEANUP.md](plans/PLAN_FEATURE_CLEANUP.md) C5 |
 | O4 | `pg_trickle_dump`: SQL export tool for manual backup before upgrade | 3–4h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.3 |
 
 > **Operational subtotal: ~9–12 hours**
+>
+> **Progress:** O2 is now shipped in `Unreleased`. Warning-level WAL slot lag
+> monitoring (`NOTIFY` + `health_check`) and critical per-source CDC alerts
+> (`check_cdc_health`) now use configurable thresholds instead of hard-coded
+> values.
 
 > **v0.2.3 total: ~45–66 hours**
 

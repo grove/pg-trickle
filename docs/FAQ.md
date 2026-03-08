@@ -1159,7 +1159,7 @@ SHOW pg_trickle.cdc_mode;
 
 This shows the *desired* global behavior (`trigger`, `auto`, or `wal`), not the per-table actual state. The per-table state lives in `pgt_dependencies.cdc_mode` as described above.
 
-See [CONFIGURATION.md](CONFIGURATION.md) for details on the `pg_trickle.cdc_mode` and `pg_trickle.wal_transition_timeout` GUCs.
+See [CONFIGURATION.md](CONFIGURATION.md) for details on the `pg_trickle.cdc_mode`, `pg_trickle.wal_transition_timeout`, `pg_trickle.slot_lag_warning_threshold_mb`, and `pg_trickle.slot_lag_critical_threshold_mb` GUCs.
 
 ### Is it safe to add triggers to a stream table while the source table is switching CDC modes?
 
@@ -1213,7 +1213,7 @@ When an operator later enables `wal_level = logical` (e.g., for other replicatio
 
 **Caveats to be aware of in `auto` mode:**
 - Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a PK for `pk_hash` computation.
-- Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. The health check warns at >1 GB lag.
+- Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. pg_trickle now warns at `pg_trickle.slot_lag_warning_threshold_mb` (default 100 MB) and marks per-source CDC health unhealthy at `pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB).
 - The `TRANSITIONING` phase runs both trigger and WAL decoder simultaneously; LSN-based deduplication handles correctness. If anything goes wrong, the system rolls back to triggers.
 
 ### How does the trigger-to-WAL automatic transition work?

@@ -138,6 +138,24 @@ async fn test_gucs_registered() {
         max_conc, "4",
         "pg_trickle.max_concurrent_refreshes default should be '4'"
     );
+
+    // pg_trickle.slot_lag_warning_threshold_mb — default: 100
+    let slot_lag_warning = db
+        .show_setting("pg_trickle.slot_lag_warning_threshold_mb")
+        .await;
+    assert_eq!(
+        slot_lag_warning, "100",
+        "pg_trickle.slot_lag_warning_threshold_mb default should be '100'"
+    );
+
+    // pg_trickle.slot_lag_critical_threshold_mb — default: 1024
+    let slot_lag_critical = db
+        .show_setting("pg_trickle.slot_lag_critical_threshold_mb")
+        .await;
+    assert_eq!(
+        slot_lag_critical, "1024",
+        "pg_trickle.slot_lag_critical_threshold_mb default should be '1024'"
+    );
 }
 
 /// Verify that GUCs can be changed via ALTER SYSTEM and take effect.
@@ -172,8 +190,22 @@ async fn test_gucs_can_be_altered() {
     let enabled = db.show_setting("pg_trickle.enabled").await;
     assert_eq!(enabled, "off", "pg_trickle.enabled should be 'off'");
 
+    // Change slot_lag_warning_threshold_mb
+    db.alter_system_set_and_wait("pg_trickle.slot_lag_warning_threshold_mb", "256", "256")
+        .await;
+
+    let slot_lag_warning = db
+        .show_setting("pg_trickle.slot_lag_warning_threshold_mb")
+        .await;
+    assert_eq!(
+        slot_lag_warning, "256",
+        "slot_lag_warning_threshold_mb should be updated to 256"
+    );
+
     // Reset back
     db.alter_system_set_and_wait("pg_trickle.enabled", "true", "on")
+        .await;
+    db.alter_system_set_and_wait("pg_trickle.slot_lag_warning_threshold_mb", "100", "100")
         .await;
 }
 

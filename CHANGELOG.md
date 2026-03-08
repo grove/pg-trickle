@@ -19,6 +19,14 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   immutable-function acceptance, and nested volatile detection inside `WHERE`
   expressions.
 
+- **Configurable WAL slot lag thresholds** — Added
+  `pg_trickle.slot_lag_warning_threshold_mb` (default 100 MB) and
+  `pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB). The
+  scheduler now emits `slot_lag_warning` alerts on `pg_trickle_alert`,
+  `pgtrickle.health_check()` uses the warning threshold, and
+  `pgtrickle.check_cdc_health()` uses the critical threshold instead of
+  hard-coded values.
+
 ### Documentation
 
 - Clarified volatility semantics across the SQL reference, DVM operator docs,
