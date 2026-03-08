@@ -515,6 +515,33 @@ fn build_execute_params(
         .join(", ")
 }
 
+fn deallocate_prepared_merge_statement(_pgt_id: i64) {
+    #[cfg(not(test))]
+    {
+        let pgt_id = _pgt_id;
+        let stmt = format!("__pgt_merge_{pgt_id}");
+        let exists = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pg_prepared_statements WHERE name = '{stmt}')"
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if exists {
+            let _ = Spi::run(&format!("DEALLOCATE {stmt}"));
+        }
+    }
+}
+
+fn clear_prepared_merge_statements() {
+    let tracked_ids =
+        PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow().iter().copied().collect::<Vec<_>>());
+
+    for pgt_id in tracked_ids {
+        deallocate_prepared_merge_statement(pgt_id);
+    }
+
+    PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow_mut().clear());
+}
+
 /// Invalidate the MERGE template cache for a ST (call on DDL changes).
 pub fn invalidate_merge_cache(pgt_id: i64) {
     MERGE_TEMPLATE_CACHE.with(|cache| {
@@ -522,22 +549,7 @@ pub fn invalidate_merge_cache(pgt_id: i64) {
     });
     // D-2: Also deallocate any prepared statement for this ST.
     if PREPARED_MERGE_STMTS.with(|s| s.borrow_mut().remove(&pgt_id)) {
-        // Guard SPI call so unit tests (which run outside PG) don't
-        // force the linker to resolve pg_sys symbols at load time.
-        #[cfg(not(test))]
-        {
-            let stmt = format!("__pgt_merge_{pgt_id}");
-            // Note: DEALLOCATE does not support IF EXISTS in PostgreSQL.
-            // Check pg_prepared_statements first to avoid an error.
-            let exists = Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS(SELECT 1 FROM pg_prepared_statements WHERE name = '{stmt}')"
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false);
-            if exists {
-                let _ = Spi::run(&format!("DEALLOCATE {stmt}"));
-            }
-        }
+        deallocate_prepared_merge_statement(pgt_id);
     }
 }
 
@@ -1025,11 +1037,10 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     );
 
     // Check for user triggers to suppress during FULL refresh.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers();
-    let has_triggers = match user_triggers_mode.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => crate::cdc::has_user_triggers(st.pgt_relid)?,
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_triggers = match user_triggers_mode {
+        crate::config::UserTriggersMode::Off => false,
+        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
     // Suppress user triggers during TRUNCATE + INSERT to prevent
@@ -1660,7 +1671,7 @@ pub fn execute_differential_refresh(
     LOCAL_MERGE_CACHE_GEN.with(|local| {
         if local.get() < shared_gen {
             MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().clear());
-            PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow_mut().clear());
+            clear_prepared_merge_statements();
             local.set(shared_gen);
         }
     });
@@ -1984,14 +1995,10 @@ pub fn execute_differential_refresh(
     // ── User-trigger detection ───────────────────────────────────────
     // Determine whether to use the explicit DML path based on the GUC
     // and the presence of user-defined row-level triggers on the ST.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers();
-    let use_explicit_dml = match user_triggers_mode.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => {
-            // "auto": detect user triggers
-            crate::cdc::has_user_triggers(st.pgt_relid)?
-        }
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let use_explicit_dml = match user_triggers_mode {
+        crate::config::UserTriggersMode::Off => false,
+        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
     // EC-06: Keyless sources must use explicit DML because MERGE fails
@@ -2001,8 +2008,8 @@ pub fn execute_differential_refresh(
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.
-    let suppress_triggers =
-        user_triggers_mode.as_str() == "off" && crate::cdc::has_user_triggers(st.pgt_relid)?;
+    let suppress_triggers = user_triggers_mode == crate::config::UserTriggersMode::Off
+        && crate::cdc::has_user_triggers(st.pgt_relid)?;
     if suppress_triggers {
         let quoted_table = format!(
             "\"{}\".\"{}\"",
@@ -2349,6 +2356,7 @@ mod tests {
             diamond_schedule_policy: crate::dag::DiamondSchedulePolicy::default(),
             has_keyless_source: false,
             function_hashes: None,
+            requested_cdc_mode: None,
         }
     }
 

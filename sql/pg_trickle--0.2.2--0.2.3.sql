@@ -1,10 +1,59 @@
 -- pg_trickle 0.2.2 -> 0.2.3 upgrade script
 --
 -- CDC / refresh mode interaction gaps:
+--   - G1: add requested_cdc_mode override to pgt_stream_tables
 --   - G5: add cdc_modes to pg_stat_stream_tables
 --   - G5: add pgt_cdc_status convenience view
 --
 -- Keep the monitoring views in sync for ALTER EXTENSION UPDATE.
+
+ALTER TABLE pgtrickle.pgt_stream_tables
+    ADD COLUMN IF NOT EXISTS requested_cdc_mode TEXT;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'pgt_stream_tables_requested_cdc_mode_check'
+          AND conrelid = 'pgtrickle.pgt_stream_tables'::regclass
+    ) THEN
+        ALTER TABLE pgtrickle.pgt_stream_tables
+            ADD CONSTRAINT pgt_stream_tables_requested_cdc_mode_check
+            CHECK (requested_cdc_mode IN ('auto', 'trigger', 'wal'));
+    END IF;
+END
+$$;
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(text, text, text, text, bool, text, text);
+
+CREATE FUNCTION pgtrickle."create_stream_table"(
+    "name" TEXT,
+    "query" TEXT,
+    "schedule" TEXT DEFAULT 'calculated',
+    "refresh_mode" TEXT DEFAULT 'AUTO',
+    "initialize" bool DEFAULT true,
+    "diamond_consistency" TEXT DEFAULT NULL,
+    "diamond_schedule_policy" TEXT DEFAULT NULL,
+    "cdc_mode" TEXT DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
+
+DROP FUNCTION IF EXISTS pgtrickle."alter_stream_table"(text, text, text, text, text, text, text);
+
+CREATE FUNCTION pgtrickle."alter_stream_table"(
+    "name" TEXT,
+    "query" TEXT DEFAULT NULL,
+    "schedule" TEXT DEFAULT NULL,
+    "refresh_mode" TEXT DEFAULT NULL,
+    "status" TEXT DEFAULT NULL,
+    "diamond_consistency" TEXT DEFAULT NULL,
+    "diamond_schedule_policy" TEXT DEFAULT NULL,
+    "cdc_mode" TEXT DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'alter_stream_table_wrapper';
 
 CREATE OR REPLACE VIEW pgtrickle.pg_stat_stream_tables AS
 SELECT

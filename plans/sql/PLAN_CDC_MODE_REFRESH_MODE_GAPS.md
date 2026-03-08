@@ -1,13 +1,13 @@
 # Plan: CDC Mode / Refresh Mode Interaction Gaps
 
 Date: 2026-03-07
-Status: IN PROGRESS
+Status: DONE
 Last Updated: 2026-03-08
 
-> **G3, G4, G5 implemented** — WAL slot advancement, change-buffer flush after
-> FULL/adaptive-fallback, `pgt_cdc_status` view, and `cdc_modes` monitoring
-> column all shipped into `Unreleased`. G1 (per-table cdc_mode override) and
-> G2 phase 2 remain open.
+> **G1–G6 implemented** — per-table `cdc_mode` override, explicit
+> IMMEDIATE+`cdc_mode => 'wal'` rejection, WAL slot advancement,
+> adaptive-fallback cleanup, `pgt_cdc_status`, and the defensive
+> differential-baseline guard all shipped in v0.2.3.
 
 ---
 
@@ -74,7 +74,7 @@ This plan addresses six specific gaps, ordered by user impact.
 
 ---
 
-### G1: Per-Table `cdc_mode` Override
+### G1: Per-Table `cdc_mode` Override ✅
 
 **Problem.** `cdc_mode` is a cluster-wide GUC (`pg_trickle.cdc_mode`). In
 mixed environments — some tables have a PK (WAL-capable), others don't — users
@@ -147,7 +147,7 @@ tables of that stream table. When `NULL` (default), the global GUC applies
 
 ---
 
-### G2: Explicit Validation of `IMMEDIATE` + WAL CDC
+### G2: Explicit Validation of `IMMEDIATE` + WAL CDC ✅
 
 **Problem.** If a user sets `pg_trickle.cdc_mode = 'wal'` and creates a stream
 table with `refresh_mode = 'IMMEDIATE'`, the system silently bypasses WAL

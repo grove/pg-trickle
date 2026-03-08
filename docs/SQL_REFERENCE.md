@@ -92,7 +92,8 @@ pgtrickle.create_stream_table(
     refresh_mode          text      DEFAULT 'AUTO',
     initialize            bool      DEFAULT true,
     diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL
+    diamond_schedule_policy text    DEFAULT NULL,
+    cdc_mode              text      DEFAULT NULL
 ) → void
 ```
 
@@ -107,10 +108,14 @@ pgtrickle.create_stream_table(
 | `initialize` | `bool` | `true` | If `true`, populates the table immediately via a full refresh. If `false`, creates the table empty. |
 | `diamond_consistency` | `text` | `NULL` (defaults to `'none'`) | Diamond dependency consistency mode: `'none'` (independent refresh) or `'atomic'` (SAVEPOINT-based atomic group refresh). |
 | `diamond_schedule_policy` | `text` | `NULL` (defaults to `'fastest'`) | Schedule policy for atomic diamond groups: `'fastest'` (fire when any member is due) or `'slowest'` (fire when all are due). Set on the convergence node. |
+| `cdc_mode` | `text` | `NULL` (use `pg_trickle.cdc_mode`) | Optional per-stream-table CDC override: `'auto'`, `'trigger'`, or `'wal'`. This affects all deferred TABLE sources of the stream table. |
 
 When `refresh_mode => 'IMMEDIATE'`, the cluster-wide `pg_trickle.cdc_mode`
 setting is ignored. IMMEDIATE mode always uses statement-level IVM triggers
-instead of CDC triggers or WAL replication slots.
+instead of CDC triggers or WAL replication slots. If you explicitly pass
+`cdc_mode => 'wal'` together with `refresh_mode => 'IMMEDIATE'`, pg_trickle
+rejects the call because WAL CDC is asynchronous and incompatible with
+in-transaction maintenance.
 
 **Duration format:**
 
@@ -171,6 +176,15 @@ SELECT pgtrickle.create_stream_table(
     name         => 'live_totals',
     query        => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
     refresh_mode => 'IMMEDIATE'
+);
+
+-- Force WAL CDC for this stream table even if the global GUC is 'trigger'
+SELECT pgtrickle.create_stream_table(
+    name         => 'wal_orders',
+    query        => 'SELECT id, amount FROM orders',
+    schedule     => '1s',
+    refresh_mode => 'DIFFERENTIAL',
+    cdc_mode     => 'wal'
 );
 ```
 
@@ -629,7 +643,8 @@ pgtrickle.alter_stream_table(
     refresh_mode          text      DEFAULT NULL,
     status                text      DEFAULT NULL,
     diamond_consistency   text      DEFAULT NULL,
-    diamond_schedule_policy text    DEFAULT NULL
+    diamond_schedule_policy text    DEFAULT NULL,
+    cdc_mode              text      DEFAULT NULL
 ) → void
 ```
 
@@ -644,10 +659,14 @@ pgtrickle.alter_stream_table(
 | `status` | `text` | `NULL` | New status (`'ACTIVE'`, `'SUSPENDED'`). Pass `NULL` to leave unchanged. Resuming resets consecutive errors to 0. |
 | `diamond_consistency` | `text` | `NULL` | New diamond consistency mode (`'none'` or `'atomic'`). Pass `NULL` to leave unchanged. |
 | `diamond_schedule_policy` | `text` | `NULL` | New schedule policy for atomic diamond groups (`'fastest'` or `'slowest'`). Pass `NULL` to leave unchanged. |
+| `cdc_mode` | `text` | `NULL` | New requested CDC mode override (`'auto'`, `'trigger'`, or `'wal'`). Pass `NULL` to leave unchanged. |
 
 If you switch a stream table to `refresh_mode => 'IMMEDIATE'` while the
 cluster-wide `pg_trickle.cdc_mode` GUC is set to `'wal'`, pg_trickle logs an
 INFO and proceeds with IVM triggers. WAL CDC does not apply to IMMEDIATE mode.
+If the stream table has an explicit `cdc_mode => 'wal'` override, switching to
+`IMMEDIATE` is rejected until you change the requested CDC mode back to
+`'auto'` or `'trigger'`.
 
 **Examples:**
 
@@ -677,6 +696,9 @@ SELECT pgtrickle.alter_stream_table('order_totals', refresh_mode => 'IMMEDIATE')
 -- Switch from immediate back to differential — re-creates CDC triggers, restores schedule
 SELECT pgtrickle.alter_stream_table('order_totals',
     refresh_mode => 'DIFFERENTIAL', schedule => '5m');
+
+-- Pin a deferred stream table to trigger CDC even when the global GUC is 'auto'
+SELECT pgtrickle.alter_stream_table('order_totals', cdc_mode => 'trigger');
 
 -- Suspend a stream table
 SELECT pgtrickle.alter_stream_table('order_totals', status => 'SUSPENDED');
@@ -837,7 +859,8 @@ WHERE severity != 'OK';
 ```
 
 Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
-`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag` (> 100 MB).
+`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag`
+(retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB).
 
 ---
 
@@ -992,6 +1015,9 @@ SELECT * FROM pgtrickle.slot_health();
 ### pgtrickle.check_cdc_health
 
 Check CDC health for all tracked source tables. Returns per-source health status including the current CDC mode, replication slot details, estimated lag, and any alerts.
+
+The `alert` column uses the critical threshold configured by
+`pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB).
 
 ```sql
 pgtrickle.check_cdc_health() → SETOF record(

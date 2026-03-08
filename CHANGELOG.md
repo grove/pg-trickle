@@ -9,6 +9,8 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-03-08
+
 ### Added
 
 - **Non-deterministic function handling** — defining queries are now
@@ -18,6 +20,13 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   coverage verifies volatile rejection, stable-function warnings,
   immutable-function acceptance, and nested volatile detection inside `WHERE`
   expressions.
+
+- **Per-table `cdc_mode` override (G1)** — `pgtrickle.create_stream_table(...)`
+  and `pgtrickle.alter_stream_table(...)` now accept an optional `cdc_mode`
+  parameter (`'auto'`, `'trigger'`, or `'wal'`). The requested override is
+  stored in `pgtrickle.pgt_stream_tables.requested_cdc_mode`, dbt exposes the
+  same setting, and WAL transition eligibility is now resolved per source from
+  the effective requests of all deferred stream tables that depend on it.
 
 - **`pgtrickle.pgt_cdc_status` view (G5)** — new convenience view that joins
   `pgt_dependencies`, `pgt_stream_tables`, `pg_class`, and `pg_namespace` to
@@ -33,8 +42,25 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 - **`0.2.2 -> 0.2.3` upgrade SQL** — added
   `sql/pg_trickle--0.2.2--0.2.3.sql` so `ALTER EXTENSION pg_trickle UPDATE`
-  picks up the `pgtrickle.pgt_cdc_status` view and the updated
+  picks up the `requested_cdc_mode` catalog column, the updated
+  `create_stream_table` / `alter_stream_table` signatures, the
+  `pgtrickle.pgt_cdc_status` view, and the revised
   `pgtrickle.pg_stat_stream_tables` definition with `cdc_modes`.
+
+- **Configurable WAL slot lag thresholds** — Added
+  `pg_trickle.slot_lag_warning_threshold_mb` (default 100 MB) and
+  `pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB). The
+  scheduler now emits `slot_lag_warning` alerts on `pg_trickle_alert`,
+  `pgtrickle.health_check()` uses the warning threshold, and
+  `pgtrickle.check_cdc_health()` uses the critical threshold instead of
+  hard-coded values.
+
+- **`pg_trickle_dump` backup tool** — Added a standalone `pg_trickle_dump`
+  CLI that connects over pgwire, topologically orders stream tables by
+  dependency, and emits replayable SQL using
+  `pgtrickle.create_stream_table(...)` plus follow-up status restoration.
+  This gives operators a concrete pre-upgrade / pre-rollback export path
+  instead of relying on manual catalog queries.
 
 ### Documentation
 
@@ -74,8 +100,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `pg_trickle.cdc_mode = 'wal'` is in effect but the requested
   `refresh_mode = 'IMMEDIATE'`. IMMEDIATE mode continues to use
   statement-level IVM triggers and does not install CDC triggers or create WAL
-  replication slots. Unit tests and E2E coverage now lock in that behavior for
-  both create and alter flows.
+  replication slots. Explicit per-table `cdc_mode => 'wal'` requests are now
+  rejected for `IMMEDIATE` mode with a clear user error, while the global-GUC
+  path continues to log INFO and proceed with IVM triggers. Unit tests and E2E
+  coverage now lock in both behaviors.
+
+- **Prepared statement invalidation completed** — backends now explicitly
+  `DEALLOCATE` tracked `__pgt_merge_*` prepared statements when the shared
+  cache generation advances, closing the remaining path where cross-backend
+  invalidation cleared local bookkeeping without releasing the PostgreSQL-side
+  prepared plan.
+
+- **`pg_trickle.user_triggers` simplified** — the canonical modes are now
+  `auto` and `off`. The legacy `on` value remains accepted as a deprecated
+  compatibility alias for `auto`, so existing configs keep working without
+  preserving the redundant runtime branch.
 
 - **CI test pyramid rebalanced** — PRs now run a faster three-tier gate:
   Linux unit tests, integration tests, and a curated Light E2E tier split
@@ -84,6 +123,8 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   critical path and continue to run on push-to-main, schedule, or manual
   dispatch. The shared CI setup action now caches the `cargo-pgrx` binary,
   cutting Linux setup time substantially on warm runs.
+
+---
 
 ## [0.2.2] — 2026-03-08
 

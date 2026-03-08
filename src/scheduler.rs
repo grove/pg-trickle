@@ -805,8 +805,7 @@ fn check_cdc_transition_health() {
                 dep.source_relid.to_u32()
             );
             // Roll back to TRIGGER mode
-            if let Err(e) = StDependency::update_cdc_mode(
-                dep.pgt_id,
+            if let Err(e) = StDependency::update_cdc_mode_for_source(
                 dep.source_relid,
                 crate::catalog::CdcMode::Trigger,
                 None,

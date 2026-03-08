@@ -17,6 +17,7 @@
 //! - `stale` — data staleness exceeds 2× schedule
 //! - `auto_suspended` — ST suspended due to consecutive errors
 //! - `reinitialize_needed` — upstream DDL change detected
+//! - `buffer_growth_warning` — trigger-mode change buffers are growing
 //! - `slot_lag_warning` — replication slot WAL retention growing
 
 use pgrx::prelude::*;
@@ -39,8 +40,10 @@ pub enum AlertEvent {
     Resumed,
     /// Upstream DDL change requires reinitialize.
     ReinitializeNeeded,
-    /// Replication slot WAL retention is growing.
+    /// Trigger-mode change buffers are growing.
     BufferGrowthWarning,
+    /// WAL replication slot retention is growing.
+    SlotLagWarning,
     /// Refresh completed successfully.
     RefreshCompleted,
     /// Refresh failed.
@@ -57,6 +60,7 @@ impl AlertEvent {
             AlertEvent::Resumed => "resumed",
             AlertEvent::ReinitializeNeeded => "reinitialize_needed",
             AlertEvent::BufferGrowthWarning => "buffer_growth_warning",
+            AlertEvent::SlotLagWarning => "slot_lag_warning",
             AlertEvent::RefreshCompleted => "refresh_completed",
             AlertEvent::RefreshFailed => "refresh_failed",
             AlertEvent::SchedulerFallingBehind => "scheduler_falling_behind",
@@ -161,7 +165,121 @@ pub fn alert_buffer_growth(slot_name: &str, pending_bytes: i64) {
     let escaped = payload.replace('\'', "''");
     let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
     if let Err(e) = Spi::run(&sql) {
+        pgrx::warning!("pg_trickle: failed to emit buffer_growth_warning: {}", e);
+    }
+}
+
+/// Emit a WAL slot lag warning.
+pub fn alert_slot_lag(slot_name: &str, retained_wal_bytes: i64, threshold_bytes: i64) {
+    let payload = format!(
+        r#"{{"event":"slot_lag_warning","slot_name":"{}","retained_wal_bytes":{},"threshold_bytes":{}}}"#,
+        slot_name.replace('"', r#"\""#),
+        retained_wal_bytes,
+        threshold_bytes,
+    );
+    let escaped = payload.replace('\'', "''");
+    let sql = format!("NOTIFY pg_trickle_alert, '{}'", escaped);
+    if let Err(e) = Spi::run(&sql) {
         pgrx::warning!("pg_trickle: failed to emit slot_lag_warning: {}", e);
+    }
+}
+
+fn collect_slot_health_rows() -> Vec<(String, i64, bool, i64, String)> {
+    let mut rows = Vec::new();
+
+    let trigger_rows: Vec<_> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT
+                    ct.slot_name,
+                    ct.source_relid::bigint
+                FROM pgtrickle.pgt_change_tracking ct",
+                None,
+                &[],
+            )
+            .map_err(|e| pgrx::error!("slot_health: SPI select failed: {e}"))
+            .expect("unreachable after error!()");
+
+        let mut out = Vec::new();
+        for row in result {
+            let slot = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let relid = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
+            out.push((slot, relid));
+        }
+        out
+    });
+
+    let all_deps = StDependency::get_all().unwrap_or_default();
+    let mut wal_sources = std::collections::HashMap::new();
+    for dep in &all_deps {
+        if matches!(dep.cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
+            wal_sources
+                .entry(dep.source_relid.to_u32())
+                .or_insert((dep.cdc_mode, dep.slot_name.clone()));
+        }
+    }
+
+    for (slot, relid) in trigger_rows {
+        let source_oid_u32 = relid as u32;
+        if let Some((mode, _)) = wal_sources.remove(&source_oid_u32) {
+            let slot_name = wal_decoder::slot_name_for_source(pg_sys::Oid::from(source_oid_u32));
+            let lag = wal_decoder::get_slot_lag_bytes(&slot_name).unwrap_or(0);
+            rows.push((slot_name, relid, true, lag, mode.as_str().to_lowercase()));
+        } else {
+            rows.push((slot, relid, true, 0, "trigger".to_string()));
+        }
+    }
+
+    for (oid_u32, (mode, slot_opt)) in wal_sources {
+        let slot_name = slot_opt
+            .unwrap_or_else(|| wal_decoder::slot_name_for_source(pg_sys::Oid::from(oid_u32)));
+        let lag = wal_decoder::get_slot_lag_bytes(&slot_name).unwrap_or(0);
+        rows.push((
+            slot_name,
+            oid_u32 as i64,
+            true,
+            lag,
+            mode.as_str().to_lowercase(),
+        ));
+    }
+
+    rows
+}
+
+fn build_cdc_health_alert(
+    lag_bytes: i64,
+    threshold_bytes: i64,
+    slot_exists: bool,
+    cdc_mode: CdcMode,
+) -> Option<String> {
+    if lag_bytes > threshold_bytes {
+        Some(format!(
+            "slot_lag_exceeds_threshold: {} bytes > {} bytes",
+            lag_bytes, threshold_bytes
+        ))
+    } else if !slot_exists && cdc_mode == CdcMode::Wal {
+        Some("replication_slot_missing".to_string())
+    } else {
+        None
+    }
+}
+
+fn build_slot_lag_health_detail(lagging: &[String], threshold_bytes: i64) -> (String, String) {
+    if lagging.is_empty() {
+        (
+            "OK".to_string(),
+            "All WAL replication slots within normal range".to_string(),
+        )
+    } else {
+        (
+            "WARN".to_string(),
+            format!(
+                "{} WAL slot(s) retaining more than {} bytes: {}",
+                lagging.len(),
+                threshold_bytes,
+                lagging.join(", ")
+            ),
+        )
     }
 }
 
@@ -501,71 +619,7 @@ fn slot_health() -> TableIterator<
         name!(wal_status, String),
     ),
 > {
-    let mut rows = Vec::new();
-
-    // Trigger-mode sources from change_tracking
-    let trigger_rows: Vec<_> = Spi::connect(|client| {
-        let result = client
-            .select(
-                "SELECT
-                    ct.slot_name,
-                    ct.source_relid::bigint
-                FROM pgtrickle.pgt_change_tracking ct",
-                None,
-                &[],
-            )
-            .map_err(|e| pgrx::error!("slot_health: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
-
-        let mut out = Vec::new();
-        for row in result {
-            let slot = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
-            let relid = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
-            out.push((slot, relid));
-        }
-        out
-    });
-
-    // Collect source OIDs that have WAL-mode deps (to avoid duplicating)
-    let all_deps = StDependency::get_all().unwrap_or_default();
-    let mut wal_sources = std::collections::HashMap::new();
-    for dep in &all_deps {
-        if matches!(dep.cdc_mode, CdcMode::Wal | CdcMode::Transitioning) {
-            wal_sources
-                .entry(dep.source_relid.to_u32())
-                .or_insert((dep.cdc_mode, dep.slot_name.clone()));
-        }
-    }
-
-    for (slot, relid) in trigger_rows {
-        let source_oid_u32 = relid as u32;
-        if let Some((mode, _)) = wal_sources.remove(&source_oid_u32) {
-            // Source is WAL or transitioning — get real slot info
-            let slot_name = wal_decoder::slot_name_for_source(pg_sys::Oid::from(source_oid_u32));
-            let lag = wal_decoder::get_slot_lag_bytes(&slot_name).unwrap_or(0);
-            rows.push((slot_name, relid, true, lag, mode.as_str().to_lowercase()));
-        } else {
-            // Trigger-mode source
-            rows.push((slot, relid, true, 0, "trigger".to_string()));
-        }
-    }
-
-    // Any remaining WAL sources not in change_tracking (shouldn't happen
-    // in practice, but handle for robustness)
-    for (oid_u32, (mode, slot_opt)) in wal_sources {
-        let slot_name = slot_opt
-            .unwrap_or_else(|| wal_decoder::slot_name_for_source(pg_sys::Oid::from(oid_u32)));
-        let lag = wal_decoder::get_slot_lag_bytes(&slot_name).unwrap_or(0);
-        rows.push((
-            slot_name,
-            oid_u32 as i64,
-            true,
-            lag,
-            mode.as_str().to_lowercase(),
-        ));
-    }
-
-    TableIterator::new(rows)
+    TableIterator::new(collect_slot_health_rows())
 }
 
 /// Explain the DVM plan for a stream table's defining query.
@@ -693,8 +747,7 @@ fn check_cdc_health() -> TableIterator<
     let all_deps = StDependency::get_all().unwrap_or_default();
     let mut rows = Vec::new();
     let mut seen_sources = std::collections::HashSet::new();
-
-    const LAG_ALERT_BYTES: i64 = 1_073_741_824; // 1 GB
+    let lag_alert_threshold = config::pg_trickle_slot_lag_critical_threshold_bytes();
 
     for dep in &all_deps {
         if dep.source_type != "TABLE" {
@@ -735,23 +788,15 @@ fn check_cdc_health() -> TableIterator<
                 let lag = wal_decoder::get_slot_lag_bytes(&slot).unwrap_or(0);
                 let lsn = dep.decoder_confirmed_lsn.clone();
 
-                let alert = if lag > LAG_ALERT_BYTES {
-                    Some(format!("slot_lag_exceeds_threshold: {} bytes", lag))
-                } else {
-                    // Check if the slot still exists
-                    let slot_exists = Spi::get_one_with_args::<bool>(
-                        "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-                        &[slot.as_str().into()],
-                    )
-                    .unwrap_or(Some(false))
-                    .unwrap_or(false);
+                let slot_exists = Spi::get_one_with_args::<bool>(
+                    "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+                    &[slot.as_str().into()],
+                )
+                .unwrap_or(Some(false))
+                .unwrap_or(false);
 
-                    if !slot_exists && dep.cdc_mode == CdcMode::Wal {
-                        Some("replication_slot_missing".to_string())
-                    } else {
-                        None
-                    }
-                };
+                let alert =
+                    build_cdc_health_alert(lag, lag_alert_threshold, slot_exists, dep.cdc_mode);
 
                 rows.push((
                     oid_u32 as i64,
@@ -807,10 +852,8 @@ pub fn emit_cdc_transition_notify(
 
 // ── Slot Health Monitoring (used by scheduler) ─────────────────────────────
 
-/// Check all tracked replication slots and emit alerts for any with
-/// excessive WAL retention. Called from the scheduler loop.
-///
-/// Threshold: warn if retained WAL exceeds 1 GB.
+/// Check all tracked change buffers and WAL replication slots and emit alerts
+/// when either exceeds the configured threshold. Called from the scheduler loop.
 pub fn check_slot_health_and_alert() {
     // With trigger-based CDC, we check pending change buffer size instead
     // of replication slot WAL retention. Alert if buffer tables grow too large.
@@ -849,6 +892,15 @@ pub fn check_slot_health_and_alert() {
         let threshold = config::pg_trickle_buffer_alert_threshold();
         if pending > threshold {
             alert_buffer_growth(&trigger_name, pending);
+        }
+    }
+
+    let lag_warning_threshold = config::pg_trickle_slot_lag_warning_threshold_bytes();
+    for (slot_name, _source_relid, _active, retained_wal_bytes, wal_status) in
+        collect_slot_health_rows()
+    {
+        if wal_status != "trigger" && retained_wal_bytes > lag_warning_threshold {
+            alert_slot_lag(&slot_name, retained_wal_bytes, lag_warning_threshold);
         }
     }
 
@@ -1574,12 +1626,16 @@ fn health_check() -> TableIterator<
         rows.push(("buffer_growth".to_string(), sev, detail));
 
         // ── 7. WAL slot lag ─────────────────────────────────────────────────
+        let threshold_bytes = config::pg_trickle_slot_lag_warning_threshold_bytes();
         let lagging: Vec<String> = client
             .select(
-                "SELECT slot_name || ' (' || pg_size_pretty(retained_wal_bytes) || ')' \
-                 FROM pgtrickle.slot_health() \
-                 WHERE retained_wal_bytes > 100 * 1024 * 1024 \
-                 ORDER BY retained_wal_bytes DESC",
+                &format!(
+                    "SELECT slot_name || ' (' || pg_size_pretty(retained_wal_bytes) || ')' \
+                     FROM pgtrickle.slot_health() \
+                     WHERE retained_wal_bytes > {} \
+                     ORDER BY retained_wal_bytes DESC",
+                    threshold_bytes
+                ),
                 None,
                 &[],
             )
@@ -1589,21 +1645,7 @@ fn health_check() -> TableIterator<
             })
             .unwrap_or_default();
 
-        let (sev, detail) = if lagging.is_empty() {
-            (
-                "OK".to_string(),
-                "All WAL replication slots within normal range".to_string(),
-            )
-        } else {
-            (
-                "WARN".to_string(),
-                format!(
-                    "{} WAL slot(s) retaining > 100 MB — risk of slot invalidation: {}",
-                    lagging.len(),
-                    lagging.join(", ")
-                ),
-            )
-        };
+        let (sev, detail) = build_slot_lag_health_detail(&lagging, threshold_bytes);
         rows.push(("slot_lag".to_string(), sev, detail));
     });
 
@@ -1798,6 +1840,7 @@ mod tests {
             AlertEvent::BufferGrowthWarning.as_str(),
             "buffer_growth_warning"
         );
+        assert_eq!(AlertEvent::SlotLagWarning.as_str(), "slot_lag_warning");
         assert_eq!(AlertEvent::RefreshCompleted.as_str(), "refresh_completed");
         assert_eq!(AlertEvent::RefreshFailed.as_str(), "refresh_failed");
         assert_eq!(
@@ -1820,6 +1863,7 @@ mod tests {
             AlertEvent::Resumed,
             AlertEvent::ReinitializeNeeded,
             AlertEvent::BufferGrowthWarning,
+            AlertEvent::SlotLagWarning,
             AlertEvent::RefreshCompleted,
             AlertEvent::RefreshFailed,
             AlertEvent::SchedulerFallingBehind,
@@ -1914,6 +1958,32 @@ mod tests {
             r#""reason":"manual""#,
         );
         assert!(!payload.contains("...}}"));
+    }
+
+    #[test]
+    fn test_build_cdc_health_alert_for_slot_lag() {
+        let alert = build_cdc_health_alert(2048, 1024, true, CdcMode::Wal);
+        assert_eq!(
+            alert,
+            Some("slot_lag_exceeds_threshold: 2048 bytes > 1024 bytes".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_cdc_health_alert_for_missing_slot() {
+        let alert = build_cdc_health_alert(128, 1024, false, CdcMode::Wal);
+        assert_eq!(alert, Some("replication_slot_missing".to_string()));
+    }
+
+    #[test]
+    fn test_build_slot_lag_health_detail_warns_with_threshold() {
+        let (severity, detail) = build_slot_lag_health_detail(
+            &["pg_trickle_slot_123 (128 MB)".to_string()],
+            104_857_600,
+        );
+        assert_eq!(severity, "WARN");
+        assert!(detail.contains("104857600 bytes"));
+        assert!(detail.contains("pg_trickle_slot_123 (128 MB)"));
     }
 
     // ── render_dependency_tree tests ────────────────────────────────
