@@ -116,14 +116,50 @@ jobs:
             --test property_tests \
             -- --test-threads=1
 
+  # ── Light-E2E package (shared across shards) ─────────────────────────────
+  # Build the packaged extension once, then fan it out to the Light-E2E
+  # shards as a workflow artifact so each shard can skip `cargo pgrx package`.
+  light-e2e-package:
+    name: Package Light E2E extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Package light-E2E extension
+        run: bash ./scripts/run_light_e2e_tests.sh --package-only
+
+      - name: Archive packaged extension
+        run: |
+          PACKAGE_DIR="target/release/pg_trickle-pg18"
+          if [[ ! -d "$PACKAGE_DIR" ]]; then
+            echo "ERROR: expected package output at $PACKAGE_DIR" >&2
+            find target/release -maxdepth 2 -type d || true
+            exit 1
+          fi
+
+          tar czf /tmp/light-e2e-package.tar.gz -C target/release pg_trickle-pg18
+
+      - name: Upload light-E2E package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: light-e2e-package
+          path: /tmp/light-e2e-package.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
-  # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.1
-  # container. No custom Docker image build needed. The curated allowlist
-  # lives in scripts/run_light_e2e_tests.sh and is split across three shards
-  # to reduce PR wall-clock time.
+  # Uses packaged extension artifacts from the shared producer job plus a
+  # stock postgres:18.1 container. The curated allowlist lives in
+  # scripts/run_light_e2e_tests.sh and is split across three shards to
+  # reduce PR wall-clock time.
   light-e2e-tests:
     name: Light E2E tests (${{ matrix.shard_name }})
     runs-on: ubuntu-latest
+    needs: light-e2e-package
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -144,13 +180,24 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      - name: Download packaged extension artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: light-e2e-package
+          path: /tmp/light-e2e-package
+
+      - name: Extract packaged extension
+        run: |
+          rm -rf target/release/pg_trickle-pg18
+          mkdir -p target/release
+          tar xzf /tmp/light-e2e-package/light-e2e-package.tar.gz -C target/release
+
       - name: Pull postgres:18.1 image
         run: docker pull postgres:18.1
 
       - name: Run light-E2E test suite
         run: |
           bash ./scripts/run_light_e2e_tests.sh \
-            --package \
             --shard-index ${{ matrix.shard_index }} \
             --shard-count ${{ matrix.shard_count }}
 
