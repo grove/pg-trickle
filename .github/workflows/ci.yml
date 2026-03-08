@@ -118,13 +118,26 @@ jobs:
 
   # ── Light-E2E tests (stock postgres container, PR-friendly) ──────────────
   # Uses `cargo pgrx package` + bind-mount into a stock postgres:18.1
-  # container.  No custom Docker image build needed — runs ~42 test files
-  # (~570 tests) that don't require shared_preload_libraries, background
-  # worker, or custom GUCs.
+  # container. No custom Docker image build needed. The curated allowlist
+  # lives in scripts/run_light_e2e_tests.sh and is split across three shards
+  # to reduce PR wall-clock time.
   light-e2e-tests:
-    name: Light E2E tests
+    name: Light E2E tests (${{ matrix.shard_name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_index: 1
+            shard_count: 3
+            shard_name: 1/3
+          - shard_index: 2
+            shard_count: 3
+            shard_name: 2/3
+          - shard_index: 3
+            shard_count: 3
+            shard_name: 3/3
     steps:
       - uses: actions/checkout@v4
 
@@ -134,55 +147,12 @@ jobs:
       - name: Pull postgres:18.1 image
         run: docker pull postgres:18.1
 
-      - name: Package extension
-        run: cargo pgrx package --pg-config /usr/bin/pg_config
-
       - name: Run light-E2E test suite
         run: |
-          cargo test --features light-e2e \
-            --test e2e_aggregate_coverage_tests \
-            --test e2e_alter_tests \
-            --test e2e_cdc_tests \
-            --test e2e_concurrent_tests \
-            --test e2e_coverage_error_tests \
-            --test e2e_coverage_parser_tests \
-            --test e2e_create_tests \
-            --test e2e_cte_tests \
-            --test e2e_dag_concurrent_tests \
-            --test e2e_dag_error_tests \
-            --test e2e_dag_immediate_tests \
-            --test e2e_dag_operations_tests \
-            --test e2e_dag_topology_tests \
-            --test e2e_diamond_tests \
-            --test e2e_drop_tests \
-            --test e2e_error_tests \
-            --test e2e_expression_tests \
-            --test e2e_full_join_tests \
-            --test e2e_getting_started_tests \
-            --test e2e_guard_trigger_tests \
-            --test e2e_having_transition_tests \
-            --test e2e_ivm_tests \
-            --test e2e_keyless_duplicate_tests \
-            --test e2e_lateral_subquery_tests \
-            --test e2e_lateral_tests \
-            --test e2e_lifecycle_tests \
-            --test e2e_mixed_mode_dag_tests \
-            --test e2e_monitoring_tests \
-            --test e2e_multi_cycle_dag_tests \
-            --test e2e_multi_window_tests \
-            --test e2e_pipeline_dag_tests \
-            --test e2e_property_tests \
-            --test e2e_refresh_tests \
-            --test e2e_rows_from_tests \
-            --test e2e_scalar_subquery_tests \
-            --test e2e_set_operation_tests \
-            --test e2e_smoke_tests \
-            --test e2e_snapshot_consistency_tests \
-            --test e2e_sublink_or_tests \
-            --test e2e_topk_tests \
-            --test e2e_view_tests \
-            --test e2e_window_tests \
-            -- --test-threads=1
+          bash ./scripts/run_light_e2e_tests.sh \
+            --package \
+            --shard-index ${{ matrix.shard_index }} \
+            --shard-count ${{ matrix.shard_count }}
 
   # ── E2E tests (full extension in Docker, Linux only) ────────────────────
   # Skipped on PRs (takes ~20 min to build the Docker image). Runs on
