@@ -63,6 +63,12 @@ void  MemoryContextDelete(void *ctx)            { (void)ctx; }
 void *MemoryContextGetParent(void *ctx)         { (void)ctx; return NULL; }
 void  pfree(void *ptr)                          { (void)ptr; }
 
+/* ── List helpers ─────────────────────────────────────────────────────── */
+void *lappend(void *list, void *datum)          { (void)datum; return list; }
+void *lcons(void *datum, void *list)            { (void)datum; return list; }
+void  list_free(void *list)                     { (void)list; }
+void  list_free_deep(void *list)                { (void)list; }
+
 /* ── Error data ──────────────────────────────────────────────────────── */
 void *CopyErrorData(void)                       { return NULL; }
 void  FreeErrorData(void *edata)                { (void)edata; }
