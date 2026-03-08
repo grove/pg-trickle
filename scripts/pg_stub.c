@@ -22,7 +22,7 @@
  *
  * Regenerate the symbol list with:
  *   nm target/debug/deps/pg_trickle-* | grep ' U _' | awk '{print $NF}' \
- *     | grep -E '^_(Alloc|Cache|Copy|Cur|Current|err|Error|format_type|Free|Get|get_array_type|Is|Mem|Message|PG_|parse_|pfree|Portal|Postmaster|raw_|SPI_|Top)'
+ *     | grep -E '^_(Alloc|Cache|Copy|Cur|Current|err|Error|format_type|Free|Get|get_array_type|Is|Mem|Message|PG_|parse_|pfree|pg_|Portal|Postmaster|raw_|SPI_|Top)'
  */
 
 #include <stddef.h>
@@ -83,6 +83,9 @@ char *format_type_extended(uint32_t oid, int32_t typmod, int flags) {
     (void)oid; (void)typmod; (void)flags;
     return NULL;
 }
+
+/* ── Toast helpers ────────────────────────────────────────────────────── */
+void *pg_detoast_datum(void *datum)             { return datum; }
 
 /* ── Parser entry points ─────────────────────────────────────────────── */
 void *raw_parser(const char *str, int mode) {
