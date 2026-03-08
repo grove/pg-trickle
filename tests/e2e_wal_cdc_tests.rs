@@ -74,7 +74,7 @@ async fn wait_for_cdc_mode(
 async fn test_wal_auto_is_default_cdc_mode() {
     let db = E2eDb::new().await.with_extension().await;
 
-    let cdc_mode: String = db.query_scalar("SHOW pg_trickle.cdc_mode").await;
+    let cdc_mode = db.show_setting("pg_trickle.cdc_mode").await;
     assert_eq!(cdc_mode, "auto", "Default cdc_mode should be 'auto'");
 }
 
@@ -266,7 +266,7 @@ async fn test_wal_cdc_captures_delete() {
 #[tokio::test]
 async fn test_trigger_mode_no_wal_transition() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
-    let default_cdc_mode: String = db.query_scalar("SHOW pg_trickle.cdc_mode").await;
+    let default_cdc_mode = db.show_setting("pg_trickle.cdc_mode").await;
 
     // Force trigger-only mode
     db.alter_system_set_and_wait("pg_trickle.cdc_mode", "'trigger'", "trigger")

@@ -1336,7 +1336,7 @@ async fn test_topk_immediate_with_offset() {
 #[tokio::test]
 async fn test_topk_immediate_threshold_rejection() {
     let db = E2eDb::new().await.with_extension().await;
-    let default_limit: String = db.query_scalar("SHOW pg_trickle.ivm_topk_max_limit").await;
+    let default_limit = db.show_setting("pg_trickle.ivm_topk_max_limit").await;
 
     db.execute("CREATE TABLE topk_imm_rej (id INT PRIMARY KEY, val INT)")
         .await;

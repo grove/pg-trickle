@@ -101,49 +101,39 @@ async fn test_gucs_registered() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
 
     // pg_trickle.enabled — default: on
-    let enabled: String = db.query_scalar("SHOW pg_trickle.enabled").await;
+    let enabled = db.show_setting("pg_trickle.enabled").await;
     assert_eq!(enabled, "on", "pg_trickle.enabled default should be 'on'");
 
     // pg_trickle.scheduler_interval_ms — default: 1000
-    let interval: String = db
-        .query_scalar("SHOW pg_trickle.scheduler_interval_ms")
-        .await;
+    let interval = db.show_setting("pg_trickle.scheduler_interval_ms").await;
     assert_eq!(
         interval, "1000",
         "pg_trickle.scheduler_interval_ms default should be '1000'"
     );
 
     // pg_trickle.min_schedule_seconds — default: 1
-    let min_schedule: String = db
-        .query_scalar("SHOW pg_trickle.min_schedule_seconds")
-        .await;
+    let min_schedule = db.show_setting("pg_trickle.min_schedule_seconds").await;
     assert_eq!(
         min_schedule, "1",
         "pg_trickle.min_schedule_seconds default should be '1'"
     );
 
     // pg_trickle.max_consecutive_errors — default: 3
-    let max_errors: String = db
-        .query_scalar("SHOW pg_trickle.max_consecutive_errors")
-        .await;
+    let max_errors = db.show_setting("pg_trickle.max_consecutive_errors").await;
     assert_eq!(
         max_errors, "3",
         "pg_trickle.max_consecutive_errors default should be '3'"
     );
 
     // pg_trickle.change_buffer_schema — default: pgtrickle_changes
-    let buf_schema: String = db
-        .query_scalar("SHOW pg_trickle.change_buffer_schema")
-        .await;
+    let buf_schema = db.show_setting("pg_trickle.change_buffer_schema").await;
     assert_eq!(
         buf_schema, "pgtrickle_changes",
         "pg_trickle.change_buffer_schema default should be 'pgtrickle_changes'"
     );
 
     // pg_trickle.max_concurrent_refreshes — default: 4
-    let max_conc: String = db
-        .query_scalar("SHOW pg_trickle.max_concurrent_refreshes")
-        .await;
+    let max_conc = db.show_setting("pg_trickle.max_concurrent_refreshes").await;
     assert_eq!(
         max_conc, "4",
         "pg_trickle.max_concurrent_refreshes default should be '4'"
@@ -159,9 +149,7 @@ async fn test_gucs_can_be_altered() {
     db.alter_system_set_and_wait("pg_trickle.scheduler_interval_ms", "200", "200")
         .await;
 
-    let interval: String = db
-        .query_scalar("SHOW pg_trickle.scheduler_interval_ms")
-        .await;
+    let interval = db.show_setting("pg_trickle.scheduler_interval_ms").await;
     assert_eq!(
         interval, "200",
         "scheduler_interval_ms should be updated to 200"
@@ -171,9 +159,7 @@ async fn test_gucs_can_be_altered() {
     db.alter_system_set_and_wait("pg_trickle.min_schedule_seconds", "5", "5")
         .await;
 
-    let min_schedule: String = db
-        .query_scalar("SHOW pg_trickle.min_schedule_seconds")
-        .await;
+    let min_schedule = db.show_setting("pg_trickle.min_schedule_seconds").await;
     assert_eq!(
         min_schedule, "5",
         "min_schedule_seconds should be updated to 5"
@@ -183,7 +169,7 @@ async fn test_gucs_can_be_altered() {
     db.alter_system_set_and_wait("pg_trickle.enabled", "false", "off")
         .await;
 
-    let enabled: String = db.query_scalar("SHOW pg_trickle.enabled").await;
+    let enabled = db.show_setting("pg_trickle.enabled").await;
     assert_eq!(enabled, "off", "pg_trickle.enabled should be 'off'");
 
     // Reset back

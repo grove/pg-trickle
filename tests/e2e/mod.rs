@@ -484,18 +484,22 @@ impl E2eDb {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 
+    /// Read a GUC value via `SHOW`.
+    pub async fn show_setting(&self, setting: &str) -> String {
+        self.query_scalar(&format!("SHOW {setting}")).await
+    }
+
     /// Wait until `SHOW <setting>` reports the expected value.
     pub async fn wait_for_setting(&self, setting: &str, expected: &str) {
-        let show_sql = format!("SHOW {setting}");
         for _ in 0..10 {
-            let current: String = self.query_scalar(&show_sql).await;
+            let current = self.show_setting(setting).await;
             if current == expected {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let current: String = self.query_scalar(&show_sql).await;
+        let current = self.show_setting(setting).await;
         panic!("{setting} did not reload to {expected}; current value is {current}");
     }
 

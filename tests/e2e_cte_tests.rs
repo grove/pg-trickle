@@ -2687,9 +2687,7 @@ async fn test_recursive_cte_immediate_mode_delete_triggers_dred() {
 #[tokio::test]
 async fn test_recursive_cte_immediate_mode_depth_guard() {
     let db = E2eDb::new().await.with_extension().await;
-    let default_depth: String = db
-        .query_scalar("SHOW pg_trickle.ivm_recursive_max_depth")
-        .await;
+    let default_depth = db.show_setting("pg_trickle.ivm_recursive_max_depth").await;
 
     // Lower the depth guard to 3 so we can trigger it with a short chain.
     // The guard limits the number of semi-naive propagation iterations of

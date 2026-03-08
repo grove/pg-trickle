@@ -275,18 +275,38 @@ impl E2eDb {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 
+    /// Read a GUC value after forcing the extension to load on the same backend.
+    pub async fn show_setting(&self, setting: &str) -> String {
+        let mut conn =
+            self.pool.acquire().await.unwrap_or_else(|e| {
+                panic!("Failed to acquire DB connection for SHOW {setting}: {e}")
+            });
+
+        let _: String = sqlx::query_scalar("SELECT pgtrickle.version()")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Failed to load pg_trickle on backend before SHOW {setting}: {e}")
+            });
+
+        let show_sql = format!("SHOW {setting}");
+        sqlx::query_scalar(&show_sql)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, show_sql))
+    }
+
     /// Wait until `SHOW <setting>` reports the expected value.
     pub async fn wait_for_setting(&self, setting: &str, expected: &str) {
-        let show_sql = format!("SHOW {setting}");
         for _ in 0..10 {
-            let current: String = self.query_scalar(&show_sql).await;
+            let current = self.show_setting(setting).await;
             if current == expected {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let current: String = self.query_scalar(&show_sql).await;
+        let current = self.show_setting(setting).await;
         panic!("{setting} did not reload to {expected}; current value is {current}");
     }
 
