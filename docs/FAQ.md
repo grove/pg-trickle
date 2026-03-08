@@ -25,7 +25,7 @@ troubleshooting. Use the table of contents below to jump to a specific topic.
 - [Tables Without Primary Keys](#tables-without-primary-keys) — Content-based row identity
 
 **Internals & architecture**
-- [Change Data Capture (CDC)](#change-data-capture-cdc) — Triggers, WAL transition, why `auto` is not the default, change buffers
+- [Change Data Capture (CDC)](#change-data-capture-cdc) — Triggers, WAL transition, why `auto` is the default, change buffers
 - [Diamond Dependencies & DAG Scheduling](#diamond-dependencies--dag-scheduling) — Topological ordering, atomic groups
 - [Schema Changes & DDL Events](#schema-changes--ddl-events) — Reinitialize, event triggers
 
@@ -235,15 +235,37 @@ Check your provider's documentation for custom extension support. Services that 
 
 ## Creating & Managing Stream Tables
 
+### Do I need to choose a refresh mode?
+
+No. The default mode (`'AUTO'`) is adaptive: it uses differential (delta-only)
+maintenance when efficient, and automatically falls back to full
+recomputation when the change volume is high or the query cannot be
+differentiated. This works well for the vast majority of queries.
+
+You only need to specify a mode explicitly when:
+- You want **FULL** mode to force recomputation every time (rare).
+- You want **IMMEDIATE** mode for sub-second, in-transaction updates
+  (adds overhead to every write on source tables).
+- You want strict **DIFFERENTIAL** mode and prefer an error over silent
+  fallback when the query isn't differentiable.
+
 ### How do I create a stream table?
 
 ```sql
+-- Minimal: just name and query. Refreshes on a calculated schedule
+-- using adaptive differential maintenance.
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT customer_id, SUM(amount) AS total
+    'order_totals',
+    'SELECT customer_id, SUM(amount) AS total
+     FROM orders GROUP BY customer_id'
+);
+
+-- With custom schedule:
+SELECT pgtrickle.create_stream_table(
+    name     => 'order_totals',
+    query    => 'SELECT customer_id, SUM(amount) AS total
      FROM orders GROUP BY customer_id',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 
@@ -455,28 +477,31 @@ SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 
 ### Can I change the defining query of a stream table?
 
-Not directly — the defining query is fixed at creation time. To change it, you need to drop the existing stream table and create a new one with the updated query:
+Yes — use the `query` parameter of `alter_stream_table()`:
 
 ```sql
-SELECT pgtrickle.drop_stream_table('order_totals');
-SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count
-     FROM orders GROUP BY customer_id',  -- updated query
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
-);
+SELECT pgtrickle.alter_stream_table('order_totals',
+    query => 'SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count
+              FROM orders GROUP BY customer_id');
 ```
 
-The new stream table will perform a full initial refresh to populate itself. The original query is preserved in the catalog's `original_query` column for reference.
+The ALTER QUERY operation validates the new query, migrates the storage table schema if needed, updates catalog entries and source dependencies, and runs a full refresh — all within a single transaction. Concurrent readers see either the old data or the new data, never an empty table.
 
-### Why doesn't `alter_stream_table()` support changing the defining query?
+**Schema migration behavior:**
 
-`alter_stream_table()` lets you change operational parameters (schedule, refresh mode, status, diamond consistency) because those are metadata updates that don't affect the physical table or delta computation. But changing the defining query is fundamentally different — it requires rebuilding the `__pgt_row_id` hash computation, hidden auxiliary columns (`__pgt_count`, `__pgt_sum_x`), the DVM operator tree, the generated delta SQL, and the MERGE template. In practice, this means dropping the storage table and recreating it from scratch.
+| Schema change | Behavior |
+|---|---|
+| Same columns | Fast path — no storage DDL, just catalog update + full refresh |
+| Columns added or removed | Compatible migration via `ALTER TABLE ADD/DROP COLUMN` — storage table OID preserved |
+| Column type incompatible | Full rebuild — storage table dropped and recreated (OID changes, `WARNING` emitted) |
 
-In principle, `alter_stream_table()` could automate this by performing a drop + recreate under the hood. The reason it doesn't (yet) is that a query change is a destructive operation — it drops all indexes, user-defined triggers, and grants on the stream table. Making this explicit (separate `drop_stream_table` + `create_stream_table` calls) forces users to be aware of what they're losing and to re-apply any customizations afterward.
+You can also change the query and other parameters simultaneously:
 
-This may change in a future release — an `alter_stream_table(..., defining_query => '...')` that automates the drop-and-recreate cycle (with clear warnings about side effects) is a reasonable convenience improvement.
+```sql
+SELECT pgtrickle.alter_stream_table('order_totals',
+    query => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
+    refresh_mode => 'FULL');
+```
 
 ### How do I trigger a manual refresh?
 
@@ -587,20 +612,20 @@ Use IMMEDIATE when:
 
 Stick with DIFFERENTIAL when:
 - Staleness of a few seconds to minutes is acceptable.
-- The defining query uses unsupported IMMEDIATE constructs (recursive CTEs, TopK).
+- The defining query uses unsupported IMMEDIATE constructs (materialized-view sources, foreign-table sources).
 - Write-side performance is critical (high-throughput OLTP).
 - You need to decouple write latency from view maintenance.
 
 ### What SQL features are NOT supported in IMMEDIATE mode?
 
-IMMEDIATE mode supports nearly all constructs that DIFFERENTIAL supports. The exceptions are:
+IMMEDIATE mode supports **all** constructs that DIFFERENTIAL supports, with two source-type exceptions:
 
-| Feature | Why not supported | Alternative |
+| Feature | Status | Notes |
 |---|---|---|
-| Recursive CTEs (`WITH RECURSIVE`) | Not yet validated with transition tables | Use DIFFERENTIAL mode |
-| TopK (`ORDER BY … LIMIT N`) | Scoped recomputation requires scheduled refresh | Use DIFFERENTIAL mode |
-| Materialized views as sources | Stale-snapshot prevents trigger-based capture | Use the underlying query |
-| Foreign tables as sources | No triggers on foreign tables | Use FULL mode |
+| `WITH RECURSIVE` | ✅ Supported (IM1) | Semi-naive evaluation inside the trigger. A depth counter guards against infinite loops (`pg_trickle.ivm_recursive_max_depth`, default 100). A warning is emitted at create time for very deep hierarchies. |
+| TopK (`ORDER BY … LIMIT N [OFFSET M]`) | ✅ Supported (IM2) | Micro-refresh: recomputes the top-N rows on every DML statement. Gated by `pg_trickle.ivm_topk_max_limit` to prevent unbounded scans. |
+| Materialized views as sources | ❌ Rejected | Stale-snapshot prevents trigger-based capture — use the underlying query instead. |
+| Foreign tables as sources | ❌ Rejected | No triggers on foreign tables — use FULL mode instead. |
 
 Attempting to create or switch to IMMEDIATE mode with an unsupported construct produces a clear error message.
 
@@ -692,6 +717,7 @@ The following are rejected with clear error messages and suggested rewrites:
 | Window functions in expressions | Cannot be differentially maintained | Move window function to a separate column |
 | `LIMIT` / `OFFSET` (without `ORDER BY`) | Stream tables materialize the full result set; `ORDER BY … LIMIT N [OFFSET M]` *is* supported as [TopK](#topk-order-by--limit) | Apply when querying the stream table, or add `ORDER BY` + `LIMIT` to use the TopK pattern |
 | `FOR UPDATE` / `FOR SHARE` | Row-level locking not applicable | Remove the locking clause |
+| `RANGE_AGG` / `RANGE_INTERSECT_AGG` | No incremental delta decomposition exists for range aggregates | Use FULL mode, or compute range unions in the consuming query |
 
 Each rejected feature is explained in detail in the [Why Are These SQL Features Not Supported?](#why-are-these-sql-features-not-supported) section below.
 
@@ -1152,45 +1178,43 @@ Because these are independent concerns, you can freely add, modify, or remove tr
 
 A trigger added between two refresh cycles will simply be picked up on the next cycle. The only (theoretical) edge case is adding a trigger in the tiny window *during* a single refresh transaction, between the trigger-detection check and the MERGE execution — but since both happen within the same transaction, this is virtually impossible in practice.
 
-### Why does pg_trickle default to triggers instead of logical replication?
+### Why does pg_trickle use triggers instead of logical replication for initial CDC?
 
-pg_trickle defaults to row-level AFTER triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so: 
+pg_trickle always bootstraps CDC with row-level AFTER triggers because they provide **single-transaction atomicity** — the change record is written in the same transaction as the source DML, so: 
 
 1. **No commit-order ambiguity.** The change buffer always reflects committed data; rolled-back transactions never produce partial change records.
-2. **No replication slot management.** Logical replication requires creating and monitoring replication slots, which can bloat WAL if the subscriber falls behind. Triggers have no WAL retention side effects.
-3. **Works on all hosting providers.** Some managed PostgreSQL services restrict `wal_level = logical` or limit the number of replication slots. Triggers work everywhere, with no configuration changes.
-4. **Simpler deployment.** No need for `wal_level = logical`, no publication/subscription setup, and no extra connections for WAL senders.
+2. **No replication slot management at creation time.** Logical replication requires creating and monitoring replication slots, which can bloat WAL if the subscriber falls behind. Trigger-based bootstrap avoids this complexity.
+3. **Works on all hosting providers.** Some managed PostgreSQL services restrict `wal_level = logical` or limit the number of replication slots. Trigger bootstrap works everywhere, with no configuration changes.
+4. **Simpler initial deployment.** No need for `wal_level = logical`, no publication/subscription setup, and no extra connections for WAL senders.
 
-The trade-off is slightly higher per-row latency (~20–55 μs) compared to WAL decoding (~5–15 μs). For high-throughput workloads, pg_trickle supports an automatic transition to WAL-based CDC via `pg_trickle.cdc_mode = 'auto'`. See ADR-001 and ADR-002 in the architecture documentation for the full rationale.
+With `pg_trickle.cdc_mode = 'auto'` (the default since v0.3.0), pg_trickle uses triggers initially and then transparently transitions to WAL-based CDC if `wal_level = logical` is available. If WAL is not available, triggers are kept permanently — no degradation, no errors. Set `pg_trickle.cdc_mode = 'trigger'` if you want to disable WAL transitions entirely. See ADR-001 and ADR-002 in the architecture documentation for the full rationale.
 
-### Why is `auto` not the default `pg_trickle.cdc_mode`?
+### Why is `auto` the default `pg_trickle.cdc_mode`?
 
-`auto` mode (hybrid CDC: trigger bootstrap → WAL steady-state) is powerful, but making it the default would cause more problems than it solves on a typical PostgreSQL install. The `trigger` default was chosen because it is safe, deterministic, and works everywhere without any preconditions.
+As of v0.3.0, `auto` is the default CDC mode. This was changed from `trigger` based on the following considerations:
 
-Here are the specific reasons `auto` is not the default:
+**1. Safe no-op on standard installs.**
+PostgreSQL ships with `wal_level = replica` by default. In this configuration, `auto` simply stays on trigger-based CDC permanently — it does not create replication slots, publications, or any WAL infrastructure. There is no error, warning, or user-visible difference from the old `trigger` default. `auto` only activates the WAL transition path when `wal_level = logical` is explicitly configured by the operator.
 
-**1. Silent failure on the majority of installs.**
-PostgreSQL ships with `wal_level = replica` by default. `auto` mode requires `wal_level = logical` before it can create a replication slot and transition a table to WAL capture. On a standard install, `auto` would silently remain stuck in `TRIGGER` mode indefinitely — producing no error, no warning, and no visible indication that the intended WAL transition never happened. Users would believe they had WAL-based CDC when they actually had trigger-based CDC.
+**2. Automatic fallback hardening.**
+The WAL transition and steady-state polling now include robust automatic fallback:
+- Consecutive poll errors (5 failures) trigger automatic revert to triggers.
+- `check_decoder_health()` validates slot existence, WAL lag, and `wal_level` on every tick.
+- The `TRANSITIONING` phase has a progressive timeout with informative warnings.
+- Post-restart health checks (`check_cdc_transition_health()`) automatically clean up stale transitions.
 
-**2. Unexpected replication slot creation.**
-When conditions are finally met, `auto` creates a logical replication slot (`pg_trickle_slot_<oid>`). Replication slots prevent WAL segment recycling: if your pg_trickle worker falls behind, pauses, or crashes, the slot causes WAL to accumulate on disk. On a busy server this can exhaust disk space and bring the entire cluster down. This risk is significant enough that it should always be explicitly opted into, not imposed by default.
+**3. Zero overhead for trigger-only deployments.**
+When `wal_level != logical`, the `auto` scheduler branch takes a fast-path exit after a single GUC check and `pg_replication_slots` query. The overhead compared to `trigger` mode is negligible (<1 ms per scheduler tick).
 
-**3. Managed PostgreSQL incompatibility.**
-Many managed hosting providers (AWS RDS, Azure Database for PostgreSQL, Supabase, Neon, etc.) either restrict `wal_level = logical`, cap the number of replication slots, or both. Making `auto` the default would mean pg_trickle is broken-by-default on a large share of real-world deployment targets.
+**4. Progressive optimisation without config changes.**
+When an operator later enables `wal_level = logical` (e.g., for other replication needs), pg_trickle automatically benefits from lower per-row CDC overhead (~5–15 μs vs ~20–55 μs) without any configuration change. This aligns with the principle of least surprise.
 
-**4. REPLICA IDENTITY requirement for keyless tables.**
-WAL-based capture (used in the WAL phase of `auto`) requires `REPLICA IDENTITY FULL` on source tables that lack a primary key, so that the WAL decoder can reconstruct the full old row for UPDATE and DELETE events. Trigger-mode CDC does not have this requirement because it accesses `OLD` and `NEW` directly in the trigger function. Making `auto` the default would silently break CDC for any keyless table that doesn't have `REPLICA IDENTITY FULL` set.
+**When to use `trigger` instead:** Set `pg_trickle.cdc_mode = 'trigger'` if you want fully deterministic trigger-only behaviour, need to minimize any replication slot management, or are on a restricted managed PostgreSQL that caps replication slots. This reverts to the pre-v0.3.0 default.
 
-**5. Non-deterministic, environment-dependent behaviour.**
-The same `pg_trickle.cdc_mode = 'auto'` configuration produces fundamentally different runtime behaviour depending on whether `wal_level = logical` is set. A configuration that works correctly in production might behave differently in staging, CI, or on a developer laptop — and vice versa. The `trigger` default is fully deterministic: it works the same way everywhere.
-
-**6. Increased operational surface.**
-Once a table transitions to WAL mode, operators must monitor replication slot lag (`pgtrickle.pg_trickle_monitor()` → `lag_bytes`), slot invalidation events, and WAL retention pressure — in addition to all the usual pg_trickle metrics. Trigger mode has no such operational overhead. Exposing this complexity to all users by default, even those whose workloads never need WAL-level throughput, is not a good trade-off.
-
-**7. Dual-capture window correctness risk.**
-The `TRANSITIONING` phase (where both triggers and WAL decoding capture changes simultaneously) relies on LSN-based deduplication to ensure each change is applied exactly once. This window is well-tested, but it is inherently more complex than pure trigger capture. If anything goes wrong during the transition — slot creation failure, timeout, crash — pg_trickle rolls back to triggers. Making this complexity active by default on every installation increases the blast radius of any edge case.
-
-**When to use `auto`:** Set `pg_trickle.cdc_mode = 'auto'` explicitly when you have high-throughput source tables (>10K writes/sec), `wal_level = logical` is confirmed, you're on self-hosted or fully-permissive managed PostgreSQL, and you're comfortable monitoring replication slot health. It is a deliberate performance optimisation, not a better default.
+**Caveats to be aware of in `auto` mode:**
+- Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a PK for `pk_hash` computation.
+- Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. The health check warns at >1 GB lag.
+- The `TRANSITIONING` phase runs both trigger and WAL decoder simultaneously; LSN-based deduplication handles correctness. If anything goes wrong, the system rolls back to triggers.
 
 ### How does the trigger-to-WAL automatic transition work?
 
@@ -1898,7 +1922,7 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```sql
    ALTER EXTENSION pg_trickle UPDATE;
    ```
-   This applies migration scripts (e.g., `pg_trickle--0.1.3--0.2.0.sql`) that update catalog tables, add new functions, and migrate data as needed.
+   This applies migration scripts (e.g., `pg_trickle--0.2.1--0.2.2.sql`) that update catalog tables, add new functions, and migrate data as needed.
 3. **Restart PostgreSQL** if the shared library changed (required for `shared_preload_libraries` changes).
 4. **Verify:**
    ```sql
@@ -1906,6 +1930,35 @@ Ensure `max_worker_processes` (default 8) has room for the pg_trickle worker plu
    ```
 
 **Zero-downtime upgrades** are possible for minor versions (patch releases) that don't change the shared library. Just run `ALTER EXTENSION pg_trickle UPDATE` — no restart needed.
+
+For detailed instructions, version-specific notes, rollback procedures, and troubleshooting, see the full [Upgrading Guide](UPGRADING.md).
+
+### How do I know if my shared library and SQL extension versions match?
+
+The background worker checks for version mismatches at startup and logs a
+WARNING if the compiled `.so` version differs from the installed SQL extension
+version. You can also check manually:
+
+```sql
+-- Compiled .so version:
+SELECT pgtrickle.version();
+
+-- Installed SQL extension version:
+SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
+```
+
+If these differ, run `ALTER EXTENSION pg_trickle UPDATE;` and restart
+PostgreSQL if prompted.
+
+### Are stream tables preserved during an upgrade?
+
+Yes. `ALTER EXTENSION pg_trickle UPDATE` applies only additive schema
+migrations (new columns, updated function signatures). Existing stream tables,
+their data, refresh history, and CDC infrastructure are preserved. The
+scheduler resumes normal operation after the upgrade completes.
+
+For version-specific migration notes, see the
+[Upgrading Guide — Version-Specific Notes](UPGRADING.md#version-specific-notes).
 
 ### What happens to stream tables during a PostgreSQL restart?
 

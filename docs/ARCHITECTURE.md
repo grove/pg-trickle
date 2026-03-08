@@ -60,7 +60,7 @@ For a high-level description of what pg_trickle does and why, read [ESSENCE.md](
 The public entry point for users. All operations are exposed as `#[pg_extern]` functions in the `pgtrickle` schema:
 
 - **create_stream_table** — Applies a chain of auto-rewrite passes (view inlining → DISTINCT ON → GROUPING SETS → scalar subquery → SubLinks in OR → multi-PARTITION BY windows), parses the defining query, builds an operator tree, creates the storage table, registers CDC slots, populates the catalog, and optionally performs an initial full refresh.
-- **alter_stream_table** — Modifies schedule, refresh mode, or status (ACTIVE/SUSPENDED).
+- **alter_stream_table** — Modifies schedule, refresh mode, status (ACTIVE/SUSPENDED), or defining query. Query changes trigger schema migration, dependency updates, and a full refresh within a single transaction.
 - **drop_stream_table** — Removes the storage table, catalog entries, and cleans up CDC slots.
 - **refresh_stream_table** — Triggers a manual refresh (same path as automatic scheduling).
 - **pgt_status** — Returns a summary of all registered stream tables.
@@ -213,7 +213,7 @@ The parser produces an `OpTree` — a tree of operator nodes. CTE handling follo
 
 1. **Tier 1 (Inline Expansion)** — Non-recursive CTEs referenced once are expanded into `Subquery` nodes, equivalent to subqueries in FROM.
 2. **Tier 2 (Shared Delta)** — Non-recursive CTEs referenced multiple times produce `CteScan` nodes that share a single delta computation via a CTE registry and delta cache.
-3. **Tier 3a/3b/3c (Recursive)** — Recursive CTEs (`WITH RECURSIVE`) are detected via `query_has_recursive_cte()`. In FULL mode, the query executes as-is. In DIFFERENTIAL mode, the strategy is auto-selected: semi-naive evaluation for INSERT-only changes, Delete-and-Rederive (DRed) for mixed changes, or recomputation fallback when CTE columns don't match ST storage or when the recursive term contains non-monotone operators (EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, INTERSECT SET).
+3. **Tier 3a/3b/3c (Recursive)** — Recursive CTEs (`WITH RECURSIVE`) are detected via `query_has_recursive_cte()`. In FULL mode, the query executes as-is. In DIFFERENTIAL mode, the strategy is auto-selected: semi-naive evaluation for INSERT-only changes, Delete-and-Rederive (DRed) for mixed changes, or recomputation fallback when CTE columns don't match ST storage or when the recursive term contains non-monotone operators (EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, INTERSECT SET). In IMMEDIATE mode, the same semi-naive / DRed machinery runs against statement transition tables and is bounded by `pg_trickle.ivm_recursive_max_depth` to guard against unbounded recursion.
 
 #### Operators (`src/dvm/operators/`)
 
@@ -365,6 +365,7 @@ Key lifecycle properties:
 | **Config reload** | Handles `SIGHUP` — re-reads GUC values on the next latch wake |
 | **Crash recovery** | On startup, any `pgt_refresh_history` rows stuck in `RUNNING` status are marked `FAILED` (the transaction that wrote them was rolled back by PostgreSQL, but the status row may have been committed in a prior transaction) |
 | **Database** | Connects to the `postgres` database via SPI |
+| **Standby / replica** | On standby servers (`pg_is_in_recovery() = true`), the worker enters a sleep loop and does **not** attempt refreshes. Stream tables are still readable on standbys — they are regular heap tables replicated via physical streaming replication. After promotion the scheduler resumes automatically. See the [FAQ § Replication](FAQ.md#ec-21-22-23) for details on logical replication and subscriber limitations. |
 
 #### Scheduler Tick
 
@@ -547,7 +548,7 @@ Twelve GUC (Grand Unified Configuration) variables control runtime behavior, plu
 | `pg_trickle.cleanup_use_truncate` | `true` | Use `TRUNCATE` instead of `DELETE` for change buffer cleanup when the entire buffer is consumed |
 | `pg_trickle.user_triggers` | `'auto'` | User-defined trigger handling: `auto` / `on` / `off` |
 | `pg_trickle.block_source_ddl` | `false` | Block column-affecting DDL on tracked source tables instead of reinit |
-| `pg_trickle.cdc_mode` | `'trigger'` | CDC mechanism: `trigger` / `auto` / `wal` |
+| `pg_trickle.cdc_mode` | `'auto'` | CDC mechanism: `auto` / `trigger` / `wal` |
 | `pg_trickle.wal_transition_timeout` | `300` | Max seconds to wait for WAL decoder catch-up during transition |
 | `pg_trickle.diamond_consistency` | `'none'` | Diamond dependency consistency mode: `none` or `atomic` |
 | `pg_trickle.diamond_schedule_policy` | `'fastest'` | Schedule policy for atomic diamond groups: `fastest` or `slowest` |

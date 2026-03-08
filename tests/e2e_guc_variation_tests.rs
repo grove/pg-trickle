@@ -2,7 +2,8 @@
 //!
 //! Validates that differential refresh produces correct results under
 //! different GUC configurations: block_source_ddl, use_prepared_statements,
-//! merge_planner_hints, cleanup_use_truncate, merge_work_mem_mb.
+//! merge_planner_hints, cleanup_use_truncate, merge_work_mem_mb,
+//! max_grouping_set_branches, foreign_table_polling.
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
@@ -166,4 +167,222 @@ async fn test_guc_combined_non_default() {
         .await;
     db.assert_st_matches_query("guc_st", GUC_QUERY).await;
     mutate_and_verify(&db).await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// EC-02: max_grouping_set_branches — CUBE/ROLLUP branch limit
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_guc_max_grouping_set_branches_rejects_over_limit() {
+    // CUBE(a, b, c) produces 2^3 = 8 branches.  Setting the GUC to 4
+    // should cause creation to fail with a clear error.
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("SET pg_trickle.max_grouping_set_branches = 4")
+        .await;
+    db.execute("CREATE TABLE gs_limit_src (a TEXT, b TEXT, c TEXT, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('gs_limit_st', \
+             $$ SELECT a, b, c, SUM(val) FROM gs_limit_src GROUP BY CUBE (a, b, c) $$, \
+             '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "CUBE(3) = 8 branches should exceed limit of 4"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("exceeds the limit"),
+        "Error should mention branch limit, got: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_guc_max_grouping_set_branches_allows_within_limit() {
+    // CUBE(a, b) produces 2^2 = 4 branches.  Limit of 4 should pass.
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("SET pg_trickle.max_grouping_set_branches = 4")
+        .await;
+    db.execute("CREATE TABLE gs_ok_src (id SERIAL PRIMARY KEY, a TEXT, b TEXT, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('gs_ok_st', \
+             $$ SELECT a, b, SUM(val) FROM gs_ok_src GROUP BY CUBE (a, b) $$, \
+             '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "CUBE(2) = 4 branches should be within limit of 4, got: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_guc_max_grouping_set_branches_raised_allows_large_cube() {
+    // Raise the limit to 128 so CUBE(a, b, c, d, e) = 32 branches passes.
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("SET pg_trickle.max_grouping_set_branches = 128")
+        .await;
+    db.execute("CREATE TABLE gs_big_src (id SERIAL PRIMARY KEY, a TEXT, b TEXT, c TEXT, d TEXT, e TEXT, val INT)")
+        .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('gs_big_st', \
+             $$ SELECT a, b, c, d, e, SUM(val) FROM gs_big_src \
+             GROUP BY CUBE (a, b, c, d, e) $$, '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "CUBE(5) = 32 branches should be within limit of 128, got: {:?}",
+        result.err()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// EC-05: foreign_table_polling — polling-based CDC for foreign tables
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_guc_foreign_table_polling_off_rejects_differential() {
+    // With polling disabled (default), foreign tables should be rejected
+    // in DIFFERENTIAL mode.
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Set up a loopback foreign server via postgres_fdw.
+    db.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
+        .await;
+    db.execute("CREATE TABLE ft_local_src (id SERIAL PRIMARY KEY, val INT)")
+        .await;
+    db.execute(
+        "CREATE SERVER loopback FOREIGN DATA WRAPPER postgres_fdw \
+         OPTIONS (dbname 'pg_trickle_test', host '127.0.0.1', port '5432')",
+    )
+    .await;
+    db.execute(
+        "CREATE USER MAPPING FOR CURRENT_USER SERVER loopback \
+         OPTIONS (user 'postgres')",
+    )
+    .await;
+    db.execute(
+        "CREATE FOREIGN TABLE ft_remote_src (id INT, val INT) \
+         SERVER loopback OPTIONS (table_name 'ft_local_src')",
+    )
+    .await;
+
+    // Polling is off by default — DIFFERENTIAL should be rejected.
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('ft_diff_st', \
+             $$ SELECT id, val FROM ft_remote_src $$, '1m', 'DIFFERENTIAL')",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Foreign table in DIFFERENTIAL mode should be rejected when polling=off"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("foreign_table_polling"),
+        "Error should suggest enabling polling GUC, got: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_guc_foreign_table_polling_full_mode_no_guc_needed() {
+    // In FULL mode, foreign tables should always be accepted (no polling needed).
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
+        .await;
+    db.execute("CREATE TABLE ft_full_src (id SERIAL PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO ft_full_src (val) VALUES (10), (20), (30)")
+        .await;
+    db.execute(
+        "CREATE SERVER loopback_full FOREIGN DATA WRAPPER postgres_fdw \
+         OPTIONS (dbname 'pg_trickle_test', host '127.0.0.1', port '5432')",
+    )
+    .await;
+    db.execute(
+        "CREATE USER MAPPING FOR CURRENT_USER SERVER loopback_full \
+         OPTIONS (user 'postgres')",
+    )
+    .await;
+    db.execute(
+        "CREATE FOREIGN TABLE ft_full_remote (id INT, val INT) \
+         SERVER loopback_full OPTIONS (table_name 'ft_full_src')",
+    )
+    .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table('ft_full_st', \
+             $$ SELECT id, val FROM ft_full_remote $$, '1m', 'FULL')",
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "Foreign table in FULL mode should be accepted without polling GUC, got: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn test_guc_foreign_table_polling_on_allows_differential() {
+    // With polling enabled, foreign tables should be accepted in DIFFERENTIAL mode
+    // and the snapshot-based CDC should produce correct results.
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
+        .await;
+    db.execute("CREATE TABLE ft_poll_src (id SERIAL PRIMARY KEY, grp TEXT, val INT)")
+        .await;
+    db.execute("INSERT INTO ft_poll_src (grp, val) VALUES ('a', 10), ('a', 20), ('b', 30)")
+        .await;
+    db.execute(
+        "CREATE SERVER loopback_poll FOREIGN DATA WRAPPER postgres_fdw \
+         OPTIONS (dbname 'pg_trickle_test', host '127.0.0.1', port '5432')",
+    )
+    .await;
+    db.execute(
+        "CREATE USER MAPPING FOR CURRENT_USER SERVER loopback_poll \
+         OPTIONS (user 'postgres')",
+    )
+    .await;
+    db.execute(
+        "CREATE FOREIGN TABLE ft_poll_remote (id INT, grp TEXT, val INT) \
+         SERVER loopback_poll OPTIONS (table_name 'ft_poll_src')",
+    )
+    .await;
+
+    // Enable polling-based CDC (cluster-wide so it applies across pool connections).
+    db.execute("ALTER SYSTEM SET pg_trickle.foreign_table_polling = on")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let query = "SELECT grp, SUM(val) AS total FROM ft_poll_remote GROUP BY grp";
+    db.create_st("ft_poll_st", query, "1m", "DIFFERENTIAL")
+        .await;
+    db.assert_st_matches_query("ft_poll_st", query).await;
+
+    // Mutate the underlying local table (which the foreign table points to).
+    db.execute("INSERT INTO ft_poll_src (grp, val) VALUES ('c', 50), ('a', 5)")
+        .await;
+    db.execute("DELETE FROM ft_poll_src WHERE grp = 'b'").await;
+    db.refresh_st("ft_poll_st").await;
+    db.assert_st_matches_query("ft_poll_st", query).await;
+
+    db.execute("ALTER SYSTEM RESET pg_trickle.foreign_table_polling")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
 }

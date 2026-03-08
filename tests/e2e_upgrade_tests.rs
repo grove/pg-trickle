@@ -310,7 +310,7 @@ async fn test_upgrade_monitoring_views_present() {
 //
 // They are #[ignore]d by default because the upgrade image must be built
 // separately. Run with:
-//   just test-upgrade 0.1.3 0.2.1
+//   just test-upgrade 0.1.3 0.2.2
 // which builds the image and sets the env var automatically.
 
 /// Helper: returns true if the upgrade E2E image is available.
@@ -327,13 +327,13 @@ fn upgrade_image_available() -> bool {
 /// new functions are callable.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_new_functions_exist() {
+async fn test_upgrade_chain_new_functions_exist() {
     if !upgrade_image_available() {
         eprintln!("SKIP: PGS_UPGRADE_FROM not set (need upgrade E2E image)");
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     // Start container WITHOUT auto-extension, install old version manually
     let db = E2eDb::new().await;
@@ -391,7 +391,7 @@ async fn test_upgrade_0_1_3_to_0_2_0_new_functions_exist() {
 /// stream tables can be created and refreshed on the upgraded schema.
 ///
 /// Note: we cannot call `create_stream_table()` *before* the upgrade because
-/// the Docker image contains only the current binary (0.2.1). That binary's
+/// the Docker image contains only the current binary (0.2.2). That binary's
 /// `create_stream_table` inserts columns (`topk_offset`, `has_keyless_source`,
 /// `function_hashes`) that do not exist in the 0.1.3 schema. Testing that
 /// stream tables created under a true 0.1.3 binary survive the upgrade is
@@ -400,12 +400,12 @@ async fn test_upgrade_0_1_3_to_0_2_0_new_functions_exist() {
 /// chain completes, and the upgraded schema is fully usable.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_stream_tables_survive() {
+async fn test_upgrade_chain_stream_tables_survive() {
     if !upgrade_image_available() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     let db = E2eDb::new().await;
     db.execute(&format!(
@@ -414,14 +414,14 @@ async fn test_upgrade_0_1_3_to_0_2_0_stream_tables_survive() {
     .await;
 
     // Create source table and populate under old version.
-    // We intentionally do NOT call create_stream_table() here — the 0.2.1
+    // We intentionally do NOT call create_stream_table() here — the 0.2.2
     // binary cannot write to the 0.1.3 catalog schema (missing columns).
     db.execute("CREATE TABLE upgrade_src (id INT PRIMARY KEY, name TEXT)")
         .await;
     db.execute("INSERT INTO upgrade_src VALUES (1, 'alice'), (2, 'bob')")
         .await;
 
-    // Upgrade (applies 0.1.3→0.2.0 then 0.2.0→0.2.1 migration scripts)
+    // Upgrade (applies 0.1.3→0.2.0, 0.2.0→0.2.1, and 0.2.1→0.2.2 migration scripts)
     db.execute(&format!(
         "ALTER EXTENSION pg_trickle UPDATE TO '{to_version}'"
     ))
@@ -461,12 +461,12 @@ async fn test_upgrade_0_1_3_to_0_2_0_stream_tables_survive() {
 /// Verify all monitoring views are queryable after ALTER EXTENSION UPDATE.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_views_queryable() {
+async fn test_upgrade_chain_views_queryable() {
     if !upgrade_image_available() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     let db = E2eDb::new().await;
     db.execute(&format!(
@@ -504,12 +504,12 @@ async fn test_upgrade_0_1_3_to_0_2_0_views_queryable() {
 /// Verify event triggers are present after ALTER EXTENSION UPDATE.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_event_triggers_present() {
+async fn test_upgrade_chain_event_triggers_present() {
     if !upgrade_image_available() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     let db = E2eDb::new().await;
     db.execute(&format!(
@@ -547,12 +547,12 @@ async fn test_upgrade_0_1_3_to_0_2_0_event_triggers_present() {
 /// Verify pgtrickle.version() matches the new version after upgrade.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_version_consistency() {
+async fn test_upgrade_chain_version_consistency() {
     if !upgrade_image_available() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     let db = E2eDb::new().await;
     db.execute(&format!(
@@ -586,12 +586,12 @@ async fn test_upgrade_0_1_3_to_0_2_0_version_consistency() {
 /// in the full install SQL but missing from the upgrade script.
 #[tokio::test]
 #[ignore]
-async fn test_upgrade_0_1_3_to_0_2_0_function_parity_with_fresh_install() {
+async fn test_upgrade_chain_function_parity_with_fresh_install() {
     if !upgrade_image_available() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.1".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.2.2".into());
 
     let db = E2eDb::new().await;
 

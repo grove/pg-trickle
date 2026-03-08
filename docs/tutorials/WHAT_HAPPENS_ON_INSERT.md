@@ -16,13 +16,13 @@ CREATE TABLE orders (
 
 -- Stream table: always-fresh customer totals
 SELECT pgtrickle.create_stream_table(
-    name         => 'customer_totals',
-    query        => $$
+    name     => 'customer_totals',
+    query    => $$
       SELECT customer, SUM(amount) AS total, COUNT(*) AS order_count
       FROM orders GROUP BY customer
     $$,
-    schedule     => '1m',           -- refresh when data is staler than 1 minute
-    refresh_mode => 'DIFFERENTIAL'  -- only process changed rows, not the full table
+    schedule => '1m'  -- refresh when data is staler than 1 minute
+    -- refresh_mode defaults to 'AUTO' (differential with full-refresh fallback)
 );
 ```
 
@@ -288,7 +288,7 @@ For a table with 10 million rows and 100 changed rows, a DIFFERENTIAL refresh pr
 
 ## What About IMMEDIATE Mode?
 
-Everything described above applies to **DIFFERENTIAL** mode — the default, where changes accumulate in a buffer and are applied on a schedule. As of v0.2.0, pg_trickle also supports **IMMEDIATE** mode, which takes a fundamentally different path.
+Everything described above applies to the default **AUTO** mode — changes accumulate in a buffer and are applied on a schedule using differential (delta-only) maintenance. As of v0.2.0, pg_trickle also supports **IMMEDIATE** mode, which takes a fundamentally different path.
 
 With IMMEDIATE mode, there are no change buffers, no scheduler, and no waiting:
 

@@ -1,6 +1,6 @@
 # PLAN: OFFSET Support (ORDER BY + LIMIT + OFFSET)
 
-**Status:** In progress — Core implementation complete. Pending: clippy, E2E tests, upgrade migration SQL.
+**Status:** Complete — Core implementation done. Clippy clean. Upgrade SQL and CHANGELOG shipped in v0.2.2.
 **Effort:** ~4–8 hours (leverages existing TopK infrastructure)
 
 ---
@@ -305,11 +305,11 @@ to `strip_order_by_limit_offset()` or extend the existing implementation.
 - [x] E2E tests: 8 new tests + 2 updated rejection tests (Step 6)
 - [x] Documentation: FAQ, SQL_REFERENCE, DVM_OPERATORS, README (Step 7)
 - [x] `cargo fmt -- --check` clean
-- [ ] `just lint` (clippy) — blocked by pgrx build env on dev machine; CI will validate
+- [x] `just lint` (clippy) — clean as of v0.2.2
 - [ ] `just test-e2e` — requires Docker E2E image build
-- [ ] Upgrade migration SQL (`sql/pg_trickle--0.2.1--0.2.2.sql`) — add `topk_offset` column
+- [x] Upgrade migration SQL (`sql/pg_trickle--0.2.1--0.2.2.sql`) — topk_offset pre-provisioned in 0.2.1; 0.2.2 script handles function signature updates
 - [ ] Unit tests: parser tests for OFFSET handling in `parser.rs` `#[cfg(test)]`
-- [ ] CHANGELOG entry
+- [x] CHANGELOG entry — added in v0.2.2
 
 ---
 
@@ -317,10 +317,10 @@ to `strip_order_by_limit_offset()` or extend the existing implementation.
 
 | # | Item | Priority | Notes |
 |---|------|----------|-------|
-| 1 | **clippy validation** | P0 | Blocked locally (no pgrx env); CI will catch issues |
-| 2 | **E2E test run** | P0 | `just build-e2e-image && just test-e2e` to validate all 8 new OFFSET tests |
-| 3 | **Upgrade migration SQL** | P1 | `ALTER TABLE pgtrickle.pgt_stream_tables ADD COLUMN topk_offset INT;` in the next version migration file |
-| 4 | **CHANGELOG entry** | P1 | Add under next release version |
+| 1 | ~~**clippy validation**~~ | ~~P0~~ | ✅ Done — clean in v0.2.2 |
+| 2 | **E2E test run** | P0 | `just build-e2e-image && just test-e2e` to validate all 9 OFFSET tests |
+| 3 | ~~**Upgrade migration SQL**~~ | ~~P1~~ | ✅ Done — `topk_offset` column pre-provisioned in 0.2.1 |
+| 4 | ~~**CHANGELOG entry**~~ | ~~P1~~ | ✅ Done — added in v0.2.2 |
 | 5 | **Unit tests** | P2 | Parser-level tests for `detect_topk_pattern` with OFFSET; nice-to-have since E2E covers the full path |
 
 ---

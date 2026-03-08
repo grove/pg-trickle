@@ -7,27 +7,32 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 ## Table of Contents
 
 - [Functions](#functions)
-  - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
-  - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
-  - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
-  - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
-  - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
-  - [pgtrickle.pgt\_status](#pgtricklepgt_status)
-  - [pgtrickle.st\_refresh\_stats](#pgtricklest_refresh_stats)
-  - [pgtrickle.get\_refresh\_history](#pgtrickleget_refresh_history)
-  - [pgtrickle.get\_staleness](#pgtrickleget_staleness)
-  - [pgtrickle.slot\_health](#pgtrickleslot_health)
-  - [pgtrickle.check\_cdc\_health](#pgtricklecheck_cdc_health)
-  - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
-  - [pgtrickle.explain\_st](#pgtrickleexplain_st)
-  - [pgtrickle.change\_buffer\_sizes](#pgtricklechange_buffer_sizes)
-  - [pgtrickle.list\_sources](#pgtricklelist_sources)
-  - [pgtrickle.health\_check](#pgtricklehealth_check)
-  - [pgtrickle.refresh\_timeline](#pgtricklerefresh_timeline)
-  - [pgtrickle.trigger\_inventory](#pgtrickletrigger_inventory)
-  - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
-  - [pgtrickle.pg\_trickle\_hash](#pgtricklepg_trickle_hash)
-  - [pgtrickle.pg\_trickle\_hash\_multi](#pgtricklepg_trickle_hash_multi)
+  - [Core Lifecycle](#core-lifecycle)
+    - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
+    - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
+    - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
+    - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
+    - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
+  - [Status & Monitoring](#status--monitoring)
+    - [pgtrickle.pgt\_status](#pgtricklepgt_status)
+    - [pgtrickle.health\_check](#pgtricklehealth_check)
+    - [pgtrickle.refresh\_timeline](#pgtricklerefresh_timeline)
+    - [pgtrickle.st\_refresh\_stats](#pgtricklest_refresh_stats)
+    - [pgtrickle.get\_refresh\_history](#pgtrickleget_refresh_history)
+    - [pgtrickle.get\_staleness](#pgtrickleget_staleness)
+  - [CDC Diagnostics](#cdc-diagnostics)
+    - [pgtrickle.slot\_health](#pgtrickleslot_health)
+    - [pgtrickle.check\_cdc\_health](#pgtricklecheck_cdc_health)
+    - [pgtrickle.change\_buffer\_sizes](#pgtricklechange_buffer_sizes)
+    - [pgtrickle.trigger\_inventory](#pgtrickletrigger_inventory)
+  - [Dependency & Inspection](#dependency--inspection)
+    - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
+    - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
+    - [pgtrickle.explain\_st](#pgtrickleexplain_st)
+    - [pgtrickle.list\_sources](#pgtricklelist_sources)
+  - [Utilities](#utilities)
+    - [pgtrickle.pg\_trickle\_hash](#pgtricklepg_trickle_hash)
+    - [pgtrickle.pg\_trickle\_hash\_multi](#pgtricklepg_trickle_hash_multi)
 - [Expression Support](#expression-support)
   - [Conditional Expressions](#conditional-expressions)
   - [Comparison Operators](#comparison-operators)
@@ -68,6 +73,12 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 
 ## Functions
 
+### Core Lifecycle
+
+Create, modify, and manage the lifecycle of stream tables.
+
+---
+
 ### pgtrickle.create_stream_table
 
 Create a new stream table.
@@ -77,7 +88,7 @@ pgtrickle.create_stream_table(
     name                  text,
     query                 text,
     schedule              text      DEFAULT 'calculated',
-    refresh_mode          text      DEFAULT 'DIFFERENTIAL',
+    refresh_mode          text      DEFAULT 'AUTO',
     initialize            bool      DEFAULT true,
     diamond_consistency   text      DEFAULT NULL,
     diamond_schedule_policy text    DEFAULT NULL
@@ -91,7 +102,7 @@ pgtrickle.create_stream_table(
 | `name` | `text` | — | Name of the stream table. May be schema-qualified (`myschema.my_st`). Defaults to `public` schema. |
 | `query` | `text` | — | The defining SQL query. Must be a valid SELECT statement using supported operators. |
 | `schedule` | `text` | `'calculated'` | Refresh schedule as a Prometheus/GNU-style duration string (e.g., `'30s'`, `'5m'`, `'1h'`, `'1h30m'`, `'1d'`) **or** a cron expression (e.g., `'*/5 * * * *'`, `'@hourly'`). Use `'calculated'` for CALCULATED mode (inherits schedule from downstream dependents). |
-| `refresh_mode` | `text` | `'DIFFERENTIAL'` | `'FULL'` (truncate and reload), `'DIFFERENTIAL'` (apply delta only), or `'IMMEDIATE'` (synchronous in-transaction maintenance via statement-level triggers). |
+| `refresh_mode` | `text` | `'AUTO'` | `'AUTO'` (adaptive — uses DIFFERENTIAL when possible, falls back to FULL if the query is not differentiable), `'FULL'` (truncate and reload), `'DIFFERENTIAL'` (apply delta only — errors if the query is not differentiable), or `'IMMEDIATE'` (synchronous in-transaction maintenance via statement-level triggers). |
 | `initialize` | `bool` | `true` | If `true`, populates the table immediately via a full refresh. If `false`, creates the table empty. |
 | `diamond_consistency` | `text` | `NULL` (defaults to `'none'`) | Diamond dependency consistency mode: `'none'` (independent refresh) or `'atomic'` (SAVEPOINT-based atomic group refresh). |
 | `diamond_schedule_policy` | `text` | `NULL` (defaults to `'fastest'`) | Schedule policy for atomic diamond groups: `'fastest'` (fire when any member is due) or `'slowest'` (fire when all are due). Set on the convergence node. |
@@ -126,12 +137,11 @@ pgtrickle.create_stream_table(
 **Example:**
 
 ```sql
--- Duration-based: refresh when data is staler than 2 minutes
+-- Duration-based: refresh when data is staler than 2 minutes (refresh_mode defaults to 'AUTO')
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_totals',
+    query    => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
+    schedule => '2m'
 );
 
 -- Cron-based: refresh every hour
@@ -161,25 +171,25 @@ SELECT pgtrickle.create_stream_table(
 
 **Aggregate Examples:**
 
-All supported aggregate functions work in both FULL and DIFFERENTIAL modes:
+All supported aggregate functions work in AUTO mode (and all other modes).
+Examples below omit `refresh_mode` — the default `'AUTO'` selects DIFFERENTIAL automatically.
+Explicit modes are shown only when the mode itself is being demonstrated.
 
 ```sql
 -- Algebraic aggregates (fully differential — no rescan needed)
 SELECT pgtrickle.create_stream_table(
-    name         => 'sales_summary',
-    query        => 'SELECT region, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amount
+    name     => 'sales_summary',
+    query    => 'SELECT region, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amount
      FROM orders GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Semi-algebraic aggregates (MIN/MAX)
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_ranges',
-    query        => 'SELECT department, MIN(salary) AS min_sal, MAX(salary) AS max_sal
+    name     => 'salary_ranges',
+    query    => 'SELECT department, MIN(salary) AS min_sal, MAX(salary) AS max_sal
      FROM employees GROUP BY department',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Group-rescan aggregates (BOOL_AND/OR, STRING_AGG, ARRAY_AGG, JSON_AGG, JSONB_AGG,
@@ -190,74 +200,69 @@ SELECT pgtrickle.create_stream_table(
 --                          REGR_COUNT, REGR_INTERCEPT, REGR_R2, REGR_SLOPE,
 --                          REGR_SXX, REGR_SXY, REGR_SYY, ANY_VALUE)
 SELECT pgtrickle.create_stream_table(
-    name         => 'team_members',
-    query        => 'SELECT department,
+    name     => 'team_members',
+    query    => 'SELECT department,
             STRING_AGG(name, '', '' ORDER BY name) AS members,
             ARRAY_AGG(employee_id) AS member_ids,
             BOOL_AND(active) AS all_active,
             JSON_AGG(name) AS members_json
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Bitwise aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'permission_summary',
-    query        => 'SELECT department,
+    name     => 'permission_summary',
+    query    => 'SELECT department,
             BIT_OR(permissions) AS combined_perms,
             BIT_AND(permissions) AS common_perms,
             BIT_XOR(flags) AS xor_flags
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- JSON object aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'config_map',
-    query        => 'SELECT department,
+    name     => 'config_map',
+    query    => 'SELECT department,
             JSON_OBJECT_AGG(setting_name, setting_value) AS settings,
             JSONB_OBJECT_AGG(key, value) AS metadata
      FROM config
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Statistical aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_stats',
-    query        => 'SELECT department,
+    name     => 'salary_stats',
+    query    => 'SELECT department,
             STDDEV_POP(salary) AS sd_pop,
             STDDEV_SAMP(salary) AS sd_samp,
             VAR_POP(salary) AS var_pop,
             VAR_SAMP(salary) AS var_samp
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Ordered-set aggregates (MODE, PERCENTILE_CONT, PERCENTILE_DISC)
 SELECT pgtrickle.create_stream_table(
-    name         => 'salary_percentiles',
-    query        => 'SELECT department,
+    name     => 'salary_percentiles',
+    query    => 'SELECT department,
             MODE() WITHIN GROUP (ORDER BY grade) AS most_common_grade,
             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY salary) AS median_salary,
             PERCENTILE_DISC(0.9) WITHIN GROUP (ORDER BY salary) AS p90_salary
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Regression / correlation aggregates (CORR, COVAR_*, REGR_*)
 SELECT pgtrickle.create_stream_table(
-    name         => 'regression_stats',
-    query        => 'SELECT department,
+    name     => 'regression_stats',
+    query    => 'SELECT department,
             CORR(salary, experience) AS sal_exp_corr,
             COVAR_POP(salary, experience) AS covar_pop,
             COVAR_SAMP(salary, experience) AS covar_samp,
@@ -267,30 +272,27 @@ SELECT pgtrickle.create_stream_table(
             REGR_COUNT(salary, experience) AS regr_n
      FROM employees
      GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- ANY_VALUE aggregate (PostgreSQL 16+)
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_sample',
-    query        => 'SELECT department, ANY_VALUE(office_location) AS sample_office
+    name     => 'dept_sample',
+    query    => 'SELECT department, ANY_VALUE(office_location) AS sample_office
      FROM employees GROUP BY department',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- FILTER clause on aggregates
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_metrics',
-    query        => 'SELECT region,
+    name     => 'order_metrics',
+    query    => 'SELECT region,
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE status = ''active'') AS active_count,
             SUM(amount) FILTER (WHERE status = ''shipped'') AS shipped_total
      FROM orders
      GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -301,47 +303,44 @@ Non-recursive CTEs are fully supported in both FULL and DIFFERENTIAL modes:
 ```sql
 -- Simple CTE
 SELECT pgtrickle.create_stream_table(
-    name         => 'active_order_totals',
-    query        => 'WITH active_users AS (
+    name     => 'active_order_totals',
+    query    => 'WITH active_users AS (
         SELECT id, name FROM users WHERE active = true
     )
     SELECT a.id, a.name, SUM(o.amount) AS total
     FROM active_users a
     JOIN orders o ON o.user_id = a.id
     GROUP BY a.id, a.name',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Chained CTEs (CTE referencing another CTE)
 SELECT pgtrickle.create_stream_table(
-    name         => 'top_regions',
-    query        => 'WITH regional AS (
+    name     => 'top_regions',
+    query    => 'WITH regional AS (
         SELECT region, SUM(amount) AS total FROM orders GROUP BY region
     ),
     ranked AS (
         SELECT region, total FROM regional WHERE total > 1000
     )
     SELECT * FROM ranked',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Multi-reference CTE (referenced twice in FROM — shared delta optimization)
 SELECT pgtrickle.create_stream_table(
-    name         => 'self_compare',
-    query        => 'WITH totals AS (
+    name     => 'self_compare',
+    query    => 'WITH totals AS (
         SELECT user_id, SUM(amount) AS total FROM orders GROUP BY user_id
     )
     SELECT t1.user_id, t1.total, t2.total AS next_total
     FROM totals t1
     JOIN totals t2 ON t1.user_id = t2.user_id + 1',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
-Recursive CTEs work with both FULL and DIFFERENTIAL modes:
+Recursive CTEs work with FULL, DIFFERENTIAL, and IMMEDIATE modes:
 
 ```sql
 -- Recursive CTE (hierarchy traversal)
@@ -373,6 +372,19 @@ SELECT pgtrickle.create_stream_table(
     schedule     => '2m',
     refresh_mode => 'DIFFERENTIAL'  -- Uses semi-naive, DRed, or recomputation (auto-selected)
 );
+
+-- Recursive CTE with IMMEDIATE mode (same-transaction maintenance)
+SELECT pgtrickle.create_stream_table(
+    name         => 'org_chart_live',
+    query        => 'WITH RECURSIVE reports AS (
+        SELECT id, name, manager_id FROM employees WHERE manager_id IS NULL
+        UNION ALL
+        SELECT e.id, e.name, e.manager_id
+        FROM employees e JOIN reports r ON e.manager_id = r.id
+    )
+    SELECT * FROM reports',
+    refresh_mode => 'IMMEDIATE'  -- Uses transition tables with semi-naive / DRed maintenance
+);
 ```
 
 > **Non-monotone recursive terms:** If the recursive term contains operators
@@ -388,52 +400,47 @@ SELECT pgtrickle.create_stream_table(
 ```sql
 -- INTERSECT: customers who placed orders in BOTH regions
 SELECT pgtrickle.create_stream_table(
-    name         => 'bi_region_customers',
-    query        => 'SELECT customer_id FROM orders_east
+    name     => 'bi_region_customers',
+    query    => 'SELECT customer_id FROM orders_east
      INTERSECT
      SELECT customer_id FROM orders_west',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- INTERSECT ALL: preserves duplicates (bag semantics)
 SELECT pgtrickle.create_stream_table(
-    name         => 'common_items',
-    query        => 'SELECT item_name FROM warehouse_a
+    name     => 'common_items',
+    query    => 'SELECT item_name FROM warehouse_a
      INTERSECT ALL
      SELECT item_name FROM warehouse_b',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- EXCEPT: orders not yet shipped
 SELECT pgtrickle.create_stream_table(
-    name         => 'unshipped_orders',
-    query        => 'SELECT order_id FROM orders
+    name     => 'unshipped_orders',
+    query    => 'SELECT order_id FROM orders
      EXCEPT
      SELECT order_id FROM shipments',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- EXCEPT ALL: preserves duplicate counts (bag subtraction)
 SELECT pgtrickle.create_stream_table(
-    name         => 'excess_inventory',
-    query        => 'SELECT sku FROM stock_received
+    name     => 'excess_inventory',
+    query    => 'SELECT sku FROM stock_received
      EXCEPT ALL
      SELECT sku FROM stock_shipped',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 
 -- UNION: deduplicated merge of two sources
 SELECT pgtrickle.create_stream_table(
-    name         => 'all_contacts',
-    query        => 'SELECT email FROM customers
+    name     => 'all_contacts',
+    query    => 'SELECT email FROM customers
      UNION
      SELECT email FROM newsletter_subscribers',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 
@@ -444,43 +451,39 @@ Set-returning functions (SRFs) in the FROM clause are supported in both FULL and
 ```sql
 -- Flatten JSONB arrays into rows
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_children',
-    query        => 'SELECT p.id, child.value AS val
+    name     => 'flat_children',
+    query    => 'SELECT p.id, child.value AS val
      FROM parent_data p,
      jsonb_array_elements(p.data->''children'') AS child',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Expand JSONB key-value pairs (multi-column SRF)
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_properties',
-    query        => 'SELECT d.id, kv.key, kv.value
+    name     => 'flat_properties',
+    query    => 'SELECT d.id, kv.key, kv.value
      FROM documents d,
      jsonb_each(d.metadata) AS kv',
-    schedule     => '2m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '2m'
 );
 
 -- Unnest arrays
 SELECT pgtrickle.create_stream_table(
-    name         => 'flat_tags',
-    query        => 'SELECT t.id, tag.tag
+    name     => 'flat_tags',
+    query    => 'SELECT t.id, tag.tag
      FROM tagged_items t,
      unnest(t.tags) AS tag(tag)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- SRF with WHERE filter
 SELECT pgtrickle.create_stream_table(
-    name         => 'high_value_items',
-    query        => 'SELECT p.id, (e.value)::int AS amount
+    name     => 'high_value_items',
+    query    => 'SELECT p.id, (e.value)::int AS amount
      FROM products p,
      jsonb_array_elements(p.prices) AS e
      WHERE (e.value)::int > 100',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 
 -- SRF combined with aggregation
@@ -502,8 +505,8 @@ LATERAL subqueries in the FROM clause are supported in both FULL and DIFFERENTIA
 ```sql
 -- Top-N per group: latest item per order
 SELECT pgtrickle.create_stream_table(
-    name         => 'latest_items',
-    query        => 'SELECT o.id, o.customer, latest.amount
+    name     => 'latest_items',
+    query    => 'SELECT o.id, o.customer, latest.amount
      FROM orders o,
      LATERAL (
          SELECT li.amount
@@ -512,36 +515,33 @@ SELECT pgtrickle.create_stream_table(
          ORDER BY li.created_at DESC
          LIMIT 1
      ) AS latest',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Correlated aggregate
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_summaries',
-    query        => 'SELECT d.id, d.name, stats.total, stats.cnt
+    name     => 'dept_summaries',
+    query    => 'SELECT d.id, d.name, stats.total, stats.cnt
      FROM departments d,
      LATERAL (
          SELECT SUM(e.salary) AS total, COUNT(*) AS cnt
          FROM employees e
          WHERE e.dept_id = d.id
      ) AS stats',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- LEFT JOIN LATERAL: preserve outer rows with NULLs when subquery returns no rows
 SELECT pgtrickle.create_stream_table(
-    name         => 'dept_stats_all',
-    query        => 'SELECT d.id, d.name, stats.total
+    name     => 'dept_stats_all',
+    query    => 'SELECT d.id, d.name, stats.total
      FROM departments d
      LEFT JOIN LATERAL (
          SELECT SUM(e.salary) AS total
          FROM employees e
          WHERE e.dept_id = d.id
      ) AS stats ON true',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -552,51 +552,46 @@ Subqueries in the `WHERE` clause are automatically transformed into semi-join, a
 ```sql
 -- EXISTS subquery: customers who have placed orders
 SELECT pgtrickle.create_stream_table(
-    name         => 'active_customers',
-    query        => 'SELECT c.id, c.name
+    name     => 'active_customers',
+    query    => 'SELECT c.id, c.name
      FROM customers c
      WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- NOT EXISTS: customers with no orders
 SELECT pgtrickle.create_stream_table(
-    name         => 'inactive_customers',
-    query        => 'SELECT c.id, c.name
+    name     => 'inactive_customers',
+    query    => 'SELECT c.id, c.name
      FROM customers c
      WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- IN subquery: products that have been ordered
 SELECT pgtrickle.create_stream_table(
-    name         => 'ordered_products',
-    query        => 'SELECT p.id, p.name
+    name     => 'ordered_products',
+    query    => 'SELECT p.id, p.name
      FROM products p
      WHERE p.id IN (SELECT product_id FROM order_items)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- NOT IN subquery: products never ordered
 SELECT pgtrickle.create_stream_table(
-    name         => 'unordered_products',
-    query        => 'SELECT p.id, p.name
+    name     => 'unordered_products',
+    query    => 'SELECT p.id, p.name
      FROM products p
      WHERE p.id NOT IN (SELECT product_id FROM order_items)',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 
 -- Scalar subquery in SELECT list
 SELECT pgtrickle.create_stream_table(
-    name         => 'products_with_max_price',
-    query        => 'SELECT p.id, p.name, (SELECT max(price) FROM products) AS max_price
+    name     => 'products_with_max_price',
+    query    => 'SELECT p.id, p.name, (SELECT max(price) FROM products) AS max_price
      FROM products p',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -624,6 +619,7 @@ Alter properties of an existing stream table.
 ```sql
 pgtrickle.alter_stream_table(
     name                  text,
+    query                 text      DEFAULT NULL,
     schedule              text      DEFAULT NULL,
     refresh_mode          text      DEFAULT NULL,
     status                text      DEFAULT NULL,
@@ -637,8 +633,9 @@ pgtrickle.alter_stream_table(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `text` | — | Name of the stream table (schema-qualified or unqualified). |
+| `query` | `text` | `NULL` | New defining query. Pass `NULL` to leave unchanged. When set, the function validates the new query, migrates the storage table schema if needed, updates catalog entries and dependencies, and runs a full refresh. Schema changes are classified as **same** (no DDL), **compatible** (ALTER TABLE ADD/DROP COLUMN), or **incompatible** (full storage rebuild with OID change). |
 | `schedule` | `text` | `NULL` | New schedule as a duration string (e.g., `'5m'`). Pass `NULL` to leave unchanged. Pass `'calculated'` to switch to CALCULATED mode. |
-| `refresh_mode` | `text` | `NULL` | New refresh mode (`'FULL'`, `'DIFFERENTIAL'`, or `'IMMEDIATE'`). Pass `NULL` to leave unchanged. Switching to/from `'IMMEDIATE'` migrates trigger infrastructure (IVM triggers ↔ CDC triggers), clears or restores the schedule, and runs a full refresh. |
+| `refresh_mode` | `text` | `NULL` | New refresh mode (`'AUTO'`, `'FULL'`, `'DIFFERENTIAL'`, or `'IMMEDIATE'`). Pass `NULL` to leave unchanged. Switching to/from `'IMMEDIATE'` migrates trigger infrastructure (IVM triggers ↔ CDC triggers), clears or restores the schedule, and runs a full refresh. |
 | `status` | `text` | `NULL` | New status (`'ACTIVE'`, `'SUSPENDED'`). Pass `NULL` to leave unchanged. Resuming resets consecutive errors to 0. |
 | `diamond_consistency` | `text` | `NULL` | New diamond consistency mode (`'none'` or `'atomic'`). Pass `NULL` to leave unchanged. |
 | `diamond_schedule_policy` | `text` | `NULL` | New schedule policy for atomic diamond groups (`'fastest'` or `'slowest'`). Pass `NULL` to leave unchanged. |
@@ -646,6 +643,19 @@ pgtrickle.alter_stream_table(
 **Examples:**
 
 ```sql
+-- Change the defining query (same output schema — fast path)
+SELECT pgtrickle.alter_stream_table('order_totals',
+    query => 'SELECT customer_id, SUM(amount) AS total FROM orders WHERE status = ''active'' GROUP BY customer_id');
+
+-- Change query and add a column (compatible schema migration)
+SELECT pgtrickle.alter_stream_table('order_totals',
+    query => 'SELECT customer_id, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY customer_id');
+
+-- Change query and mode simultaneously
+SELECT pgtrickle.alter_stream_table('order_totals',
+    query => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
+    refresh_mode => 'FULL');
+
 -- Change schedule
 SELECT pgtrickle.alter_stream_table('order_totals', schedule => '5m');
 
@@ -667,6 +677,13 @@ SELECT pgtrickle.resume_stream_table('order_totals');
 -- Or via alter_stream_table
 SELECT pgtrickle.alter_stream_table('order_totals', status => 'ACTIVE');
 ```
+
+**Notes:**
+- When `query` is provided, the function runs the full query rewrite pipeline (view inlining, DISTINCT ON, GROUPING SETS, etc.) and validates the new query before applying changes.
+- The entire ALTER QUERY operation runs within a single transaction. If any step fails, the stream table is left unchanged.
+- For same-schema and compatible-schema changes, the storage table OID is preserved — views, policies, and publications referencing the stream table remain valid.
+- For incompatible schema changes (e.g., changing a column from `integer` to `text`), the storage table is rebuilt and the OID changes. A `WARNING` is emitted.
+- The stream table is temporarily suspended during query migration to prevent concurrent scheduler refreshes.
 
 ---
 
@@ -755,6 +772,12 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 
 ---
 
+### Status & Monitoring
+
+Query the state of stream tables, view refresh statistics, and diagnose problems.
+
+---
+
 ### pgtrickle.pgt_status
 
 Get the status of all stream tables.
@@ -781,6 +804,63 @@ SELECT * FROM pgtrickle.pgt_status();
 | name | status | refresh_mode | is_populated | consecutive_errors | schedule | data_timestamp | staleness |
 |---|---|---|---|---|---|---|---|
 | public.order_totals | ACTIVE | DIFFERENTIAL | true | 0 | 5m | 2026-02-21 12:00:00+00 | 00:02:30 |
+
+---
+
+### pgtrickle.health_check
+
+Run a set of health checks against the pg_trickle installation and return one row per check.
+
+```sql
+pgtrickle.health_check() → SETOF record(
+    check_name  text,   -- identifier for the check
+    severity    text,   -- 'OK', 'WARN', or 'ERROR'
+    detail      text    -- human-readable explanation
+)
+```
+
+Filter to problems only:
+
+```sql
+SELECT check_name, severity, detail
+FROM pgtrickle.health_check()
+WHERE severity != 'OK';
+```
+
+Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
+`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag` (> 100 MB).
+
+---
+
+### pgtrickle.refresh_timeline
+
+Return recent refresh records across **all** stream tables in a single chronological view.
+
+```sql
+pgtrickle.refresh_timeline(
+    max_rows int  DEFAULT 50
+) → SETOF record(
+    start_time      timestamptz,
+    stream_table    text,
+    action          text,
+    status          text,
+    rows_inserted   bigint,
+    rows_deleted    bigint,
+    duration_ms     float8,
+    error_message   text
+)
+```
+
+**Example:**
+
+```sql
+-- Most recent 20 events across all stream tables:
+SELECT start_time, stream_table, action, status, round(duration_ms::numeric,1) AS ms
+FROM pgtrickle.refresh_timeline(20);
+
+-- Just failures in the last 100 events:
+SELECT * FROM pgtrickle.refresh_timeline(100) WHERE status = 'ERROR';
+```
 
 ---
 
@@ -868,6 +948,12 @@ SELECT pgtrickle.get_staleness('order_totals');
 
 ---
 
+### CDC Diagnostics
+
+Inspect CDC pipeline health, replication slots, change buffers, and trigger coverage.
+
+---
+
 ### pgtrickle.slot_health
 
 Check replication slot health for all tracked CDC slots.
@@ -932,6 +1018,110 @@ SELECT * FROM pgtrickle.check_cdc_health();
 |---|---|---|---|---|---|---|
 | 16384 | public.orders | TRIGGER | | | | |
 | 16390 | public.events | WAL | pg_trickle_slot_16390 | 524288 | 0/1A8B000 | |
+
+---
+
+### pgtrickle.change_buffer_sizes
+
+Show pending change counts and estimated on-disk sizes for all CDC-tracked
+source tables.
+
+Returns one row per `(stream_table, source_table)` pair.
+
+```sql
+pgtrickle.change_buffer_sizes() → SETOF record(
+    stream_table  text,     -- qualified stream table name
+    source_table  text,     -- qualified source table name
+    source_oid    bigint,
+    cdc_mode      text,     -- 'trigger', 'wal', or 'transitioning'
+    pending_rows  bigint,   -- rows in buffer not yet consumed
+    buffer_bytes  bigint    -- estimated buffer table size in bytes
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.change_buffer_sizes()
+ORDER BY pending_rows DESC;
+```
+
+Useful for spotting a source table whose CDC buffer is growing unexpectedly
+(which may indicate a stalled differential refresh or a high-write source that
+has outpaced the schedule).
+
+---
+
+### pgtrickle.trigger_inventory
+
+List all CDC triggers that pg_trickle should have installed, and verify each one exists and is enabled in `pg_catalog`.
+
+```sql
+pgtrickle.trigger_inventory() → SETOF record(
+    source_table  text,    -- qualified source table name
+    source_oid    bigint,
+    trigger_name  text,    -- expected trigger name
+    trigger_type  text,    -- 'DML' or 'TRUNCATE'
+    present       bool,    -- trigger exists in pg_catalog
+    enabled       bool     -- trigger is not disabled
+)
+```
+
+A `present = false` row means change capture is broken for that source.
+
+**Example:**
+
+```sql
+-- Show only missing or disabled triggers:
+SELECT source_table, trigger_type, trigger_name
+FROM pgtrickle.trigger_inventory()
+WHERE NOT present OR NOT enabled;
+```
+
+---
+
+### Dependency & Inspection
+
+Visualize dependencies, understand query plans, and audit source table relationships.
+
+---
+
+### pgtrickle.dependency_tree
+
+Render all stream table dependencies as an indented ASCII tree.
+
+```sql
+pgtrickle.dependency_tree() → SETOF record(
+    tree_line    text,    -- indented visual line (├──, └──, │ characters)
+    node         text,    -- qualified name (schema.table)
+    node_type    text,    -- 'stream_table' or 'source_table'
+    depth        int,
+    status       text,    -- NULL for source_table nodes
+    refresh_mode text     -- NULL for source_table nodes
+)
+```
+
+Roots (stream tables with no stream-table parents) appear at depth 0. Each
+dependent is indented beneath its parent. Plain source tables are rendered as
+leaf nodes tagged `[src]`.
+
+**Example:**
+
+```sql
+SELECT tree_line, status, refresh_mode
+FROM pgtrickle.dependency_tree();
+```
+
+```
+tree_line                               status   refresh_mode
+----------------------------------------+---------+--------------
+report_summary                          ACTIVE   DIFFERENTIAL
+├── orders_by_region                    ACTIVE   DIFFERENTIAL
+│   ├── public.orders [src]
+│   └── public.customers [src]
+└── revenue_totals                      ACTIVE   DIFFERENTIAL
+    └── public.orders [src]
+```
 
 ---
 
@@ -1009,37 +1199,6 @@ SELECT * FROM pgtrickle.explain_st('order_totals');
 
 ---
 
-### pgtrickle.change_buffer_sizes
-
-Show pending change counts and estimated on-disk sizes for all CDC-tracked
-source tables.
-
-Returns one row per `(stream_table, source_table)` pair.
-
-```sql
-pgtrickle.change_buffer_sizes() → SETOF record(
-    stream_table  text,     -- qualified stream table name
-    source_table  text,     -- qualified source table name
-    source_oid    bigint,
-    cdc_mode      text,     -- 'trigger', 'wal', or 'transitioning'
-    pending_rows  bigint,   -- rows in buffer not yet consumed
-    buffer_bytes  bigint    -- estimated buffer table size in bytes
-)
-```
-
-**Example:**
-
-```sql
-SELECT * FROM pgtrickle.change_buffer_sizes()
-ORDER BY pending_rows DESC;
-```
-
-Useful for spotting a source table whose CDC buffer is growing unexpectedly
-(which may indicate a stalled differential refresh or a high-write source that
-has outpaced the schedule).
-
----
-
 ### pgtrickle.list_sources
 
 List the source tables that a stream table depends on.
@@ -1066,127 +1225,9 @@ not refreshing or to audit which source tables are being trigger-tracked.
 
 ---
 
-### pgtrickle.health_check
+### Utilities
 
-Run a set of health checks against the pg_trickle installation and return one row per check.
-
-```sql
-pgtrickle.health_check() → SETOF record(
-    check_name  text,   -- identifier for the check
-    severity    text,   -- 'OK', 'WARN', or 'ERROR'
-    detail      text    -- human-readable explanation
-)
-```
-
-Filter to problems only:
-
-```sql
-SELECT check_name, severity, detail
-FROM pgtrickle.health_check()
-WHERE severity != 'OK';
-```
-
-Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
-`consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag` (> 100 MB).
-
----
-
-### pgtrickle.refresh_timeline
-
-Return recent refresh records across **all** stream tables in a single chronological view.
-
-```sql
-pgtrickle.refresh_timeline(
-    max_rows int  DEFAULT 50
-) → SETOF record(
-    start_time      timestamptz,
-    stream_table    text,
-    action          text,
-    status          text,
-    rows_inserted   bigint,
-    rows_deleted    bigint,
-    duration_ms     float8,
-    error_message   text
-)
-```
-
-**Example:**
-
-```sql
--- Most recent 20 events across all stream tables:
-SELECT start_time, stream_table, action, status, round(duration_ms::numeric,1) AS ms
-FROM pgtrickle.refresh_timeline(20);
-
--- Just failures in the last 100 events:
-SELECT * FROM pgtrickle.refresh_timeline(100) WHERE status = 'ERROR';
-```
-
----
-
-### pgtrickle.trigger_inventory
-
-List all CDC triggers that pg_trickle should have installed, and verify each one exists and is enabled in `pg_catalog`.
-
-```sql
-pgtrickle.trigger_inventory() → SETOF record(
-    source_table  text,    -- qualified source table name
-    source_oid    bigint,
-    trigger_name  text,    -- expected trigger name
-    trigger_type  text,    -- 'DML' or 'TRUNCATE'
-    present       bool,    -- trigger exists in pg_catalog
-    enabled       bool     -- trigger is not disabled
-)
-```
-
-A `present = false` row means change capture is broken for that source.
-
-**Example:**
-
-```sql
--- Show only missing or disabled triggers:
-SELECT source_table, trigger_type, trigger_name
-FROM pgtrickle.trigger_inventory()
-WHERE NOT present OR NOT enabled;
-```
-
----
-
-### pgtrickle.dependency_tree
-
-Render all stream table dependencies as an indented ASCII tree.
-
-```sql
-pgtrickle.dependency_tree() → SETOF record(
-    tree_line    text,    -- indented visual line (├──, └──, │ characters)
-    node         text,    -- qualified name (schema.table)
-    node_type    text,    -- 'stream_table' or 'source_table'
-    depth        int,
-    status       text,    -- NULL for source_table nodes
-    refresh_mode text     -- NULL for source_table nodes
-)
-```
-
-Roots (stream tables with no stream-table parents) appear at depth 0. Each
-dependent is indented beneath its parent. Plain source tables are rendered as
-leaf nodes tagged `[src]`.
-
-**Example:**
-
-```sql
-SELECT tree_line, status, refresh_mode
-FROM pgtrickle.dependency_tree();
-```
-
-```
-tree_line                               status   refresh_mode
-----------------------------------------+---------+--------------
-report_summary                          ACTIVE   DIFFERENTIAL
-├── orders_by_region                    ACTIVE   DIFFERENTIAL
-│   ├── public.orders [src]
-│   └── public.customers [src]
-└── revenue_totals                      ACTIVE   DIFFERENTIAL
-    └── public.orders [src]
-```
+Low-level hashing functions used internally for row identity.
 
 ---
 
@@ -1327,10 +1368,9 @@ pg_trickle transparently rewrites certain SQL constructs before parsing. These r
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    name         => 'big_departments',
-    query        => 'SELECT department, COUNT(*) AS cnt FROM employees GROUP BY department HAVING COUNT(*) > 10',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'big_departments',
+    query    => 'SELECT department, COUNT(*) AS cnt FROM employees GROUP BY department HAVING COUNT(*) > 10',
+    schedule => '1m'
 );
 ```
 
@@ -1344,10 +1384,9 @@ though at the cost of being unable to distinguish truly duplicate rows (rows wit
 -- No primary key — pg_trickle uses content hashing for row identity
 CREATE TABLE events (ts TIMESTAMPTZ, payload JSONB);
 SELECT pgtrickle.create_stream_table(
-    name         => 'event_summary',
-    query        => 'SELECT payload->>''type'' AS event_type, COUNT(*) FROM events GROUP BY 1',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'event_summary',
+    query    => 'SELECT payload->>''type'' AS event_type, COUNT(*) FROM events GROUP BY 1',
+    schedule => '1m'
 );
 ```
 
@@ -1381,10 +1420,9 @@ FULL mode accepts all volatility classes since it re-evaluates the entire query 
 
 ```sql
 SELECT pgtrickle.create_stream_table(
-    name         => 'sorted_names',
-    query        => 'SELECT name COLLATE "C" AS c_name FROM users',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'sorted_names',
+    query    => 'SELECT name COLLATE "C" AS c_name FROM users',
+    schedule => '1m'
 );
 ```
 
@@ -1395,10 +1433,9 @@ The `IS JSON` predicate validates whether a value is valid JSON. All variants ar
 ```sql
 -- Filter rows with valid JSON
 SELECT pgtrickle.create_stream_table(
-    name         => 'valid_json_events',
-    query        => 'SELECT id, payload FROM events WHERE payload::text IS JSON',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'valid_json_events',
+    query    => 'SELECT id, payload FROM events WHERE payload::text IS JSON',
+    schedule => '1m'
 );
 
 -- Type-specific checks
@@ -1422,10 +1459,9 @@ SQL-standard JSON constructor functions are supported in both FULL and DIFFERENT
 ```sql
 -- JSON_OBJECT: construct a JSON object from key-value pairs
 SELECT pgtrickle.create_stream_table(
-    name         => 'user_json',
-    query        => 'SELECT id, JSON_OBJECT(''name'' : name, ''age'' : age) AS data FROM users',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'user_json',
+    query    => 'SELECT id, JSON_OBJECT(''name'' : name, ''age'' : age) AS data FROM users',
+    schedule => '1m'
 );
 
 -- JSON_ARRAY: construct a JSON array from values
@@ -1450,8 +1486,8 @@ SELECT pgtrickle.create_stream_table(
 ```sql
 -- Extract structured data from a JSON column
 SELECT pgtrickle.create_stream_table(
-    name         => 'user_phones',
-    query        => $$SELECT u.id, j.phone_type, j.phone_number
+    name     => 'user_phones',
+    query    => $$SELECT u.id, j.phone_type, j.phone_number
     FROM users u,
          JSON_TABLE(u.contact_info, '$.phones[*]'
            COLUMNS (
@@ -1459,8 +1495,7 @@ SELECT pgtrickle.create_stream_table(
              phone_number TEXT PATH '$.number'
            )
          ) AS j$$,
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '1m'
 );
 ```
 
@@ -1496,18 +1531,16 @@ Stream tables **can** reference other stream tables in their defining query. Thi
 ```sql
 -- ST1 reads from a base table
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_totals',
-    query        => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_totals',
+    query    => 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id',
+    schedule => '1m'
 );
 
 -- ST2 reads from ST1
 SELECT pgtrickle.create_stream_table(
-    name         => 'big_customers',
-    query        => 'SELECT customer_id, total FROM pgtrickle.order_totals WHERE total > 1000',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'big_customers',
+    query    => 'SELECT customer_id, total FROM pgtrickle.order_totals WHERE total > 1000',
+    schedule => '1m'
 );
 ```
 
@@ -1519,12 +1552,11 @@ PostgreSQL views **can** be used as source tables in a stream table's defining q
 CREATE VIEW active_orders AS
   SELECT * FROM orders WHERE status = 'active';
 
--- This works in DIFFERENTIAL mode:
+-- This works (views are auto-inlined):
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_summary',
-    query        => 'SELECT customer_id, COUNT(*) FROM active_orders GROUP BY customer_id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_summary',
+    query    => 'SELECT customer_id, COUNT(*) FROM active_orders GROUP BY customer_id',
+    schedule => '1m'
 );
 -- Internally, 'active_orders' is replaced with:
 --   (SELECT ... FROM orders WHERE status = 'active') AS active_orders
@@ -1553,10 +1585,9 @@ CREATE TABLE orders_eu PARTITION OF orders FOR VALUES IN ('EU');
 
 -- Works — inserts into any partition are captured:
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_summary',
-    query        => 'SELECT region, SUM(amount) FROM orders GROUP BY region',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_summary',
+    query    => 'SELECT region, SUM(amount) FROM orders GROUP BY region',
+    schedule => '1m'
 );
 ```
 
@@ -1581,14 +1612,27 @@ The `'IMMEDIATE'` refresh mode supports nearly all SQL constructs supported by `
 - `LATERAL` set-returning functions (`unnest()`, `jsonb_array_elements()`, etc.)
 - Scalar subqueries in `SELECT`
 - Cascading IMMEDIATE stream tables (ST depending on another IMMEDIATE ST)
+- Recursive CTEs (`WITH RECURSIVE`) — uses semi-naive evaluation (INSERT-only) or
+  Delete-and-Rederive (DELETE/UPDATE); bounded by `pg_trickle.ivm_recursive_max_depth`
+  (default 100) to guard against infinite loops from cyclic data
 
-**Not yet supported in IMMEDIATE mode** (use `'DIFFERENTIAL'` instead):
+**Not yet supported in IMMEDIATE mode:**
 
-| Construct | Reason |
-|-----------|--------|
-| Recursive CTEs (`WITH RECURSIVE`) | Semi-naive evaluation with fixpoint iteration not yet validated with transition tables |
+None — all constructs that work in `'DIFFERENTIAL'` mode are now also available in
+`'IMMEDIATE'` mode.
 
-Attempting to create or switch to IMMEDIATE mode with an unsupported construct produces a clear error message suggesting `'DIFFERENTIAL'` mode.
+**Notes on `WITH RECURSIVE` in IMMEDIATE mode:**
+
+- A `__pgt_depth` counter is injected into the generated semi-naive SQL.  Propagation
+  stops when the counter reaches `ivm_recursive_max_depth` (default 100).  Raise this
+  GUC for deeper hierarchies or set it to 0 to disable the guard.
+- A WARNING is emitted at stream table creation time reminding operators to monitor
+  for `stack depth limit exceeded` errors on very deep hierarchies.
+- Non-linear recursion (multiple self-references) is rejected — PostgreSQL itself
+  enforces this restriction.
+
+Attempting to create a stream table with an unsupported construct produces a clear
+error message.
 
 ### Logical Replication Targets
 
@@ -1650,10 +1694,9 @@ the delta query may fail to emit the required DELETE from the stream table:
 ```sql
 -- Stream table joining orders with customers
 SELECT pgtrickle.create_stream_table(
-    name         => 'order_details',
-    query        => 'SELECT o.id, c.name FROM orders o JOIN customers c ON o.cust_id = c.id',
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    name     => 'order_details',
+    query    => 'SELECT o.id, c.name FROM orders o JOIN customers c ON o.cust_id = c.id',
+    schedule => '1m'
 );
 
 -- Scenario that exposes the limitation:
@@ -1688,11 +1731,10 @@ memory usage during query generation. Use explicit `GROUPING SETS(...)` instead:
 -- Rejected: CUBE(a, b, c, d, e, f, g) would generate 128 branches
 -- Use instead:
 SELECT pgtrickle.create_stream_table(
-    name         => 'multi_dim',
-    query        => 'SELECT a, b, c, SUM(v) FROM t
+    name     => 'multi_dim',
+    query    => 'SELECT a, b, c, SUM(v) FROM t
    GROUP BY GROUPING SETS ((a, b, c), (a, b), (a), ())',
-    schedule     => '5m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule => '5m'
 );
 ```
 
@@ -1784,7 +1826,7 @@ Core metadata for each stream table.
 | `functions_used` | `text[]` | Function names used in the defining query (for DDL tracking) |
 | `topk_limit` | `int` | LIMIT value for TopK stream tables (`NULL` if not TopK) |
 | `topk_order_by` | `text` | ORDER BY clause SQL for TopK stream tables |
-| `topk_offset` | `int` | OFFSET value for paged TopK queries (pre-provisioned for v0.2.2) |
+| `topk_offset` | `int` | OFFSET value for paged TopK queries (`NULL` if not paged) |
 | `diamond_consistency` | `text` | Diamond consistency mode: `none` or `atomic` |
 | `diamond_schedule_policy` | `text` | Diamond schedule policy: `fastest` or `slowest` |
 | `has_keyless_source` | `bool` | Whether any source table lacks a PRIMARY KEY (EC-06) |

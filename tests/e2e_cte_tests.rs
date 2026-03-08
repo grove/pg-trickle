@@ -6,6 +6,7 @@
 //! - Tier 3a: Recursive CTEs — FULL mode
 //! - Tier 3b: Recursive CTEs — DIFFERENTIAL via recomputation diff
 //! - Tier 3c: Semi-naive evaluation (INSERT-only) vs recomputation fallback (DELETE/UPDATE)
+//! - Tier 3d: Recursive CTEs — IMMEDIATE mode (semi-naive, DRed, depth guard)
 //! - Subqueries in FROM (T_RangeSubselect)
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh`
@@ -2580,4 +2581,163 @@ async fn test_cte_large_batch() {
     db.refresh_st("big_cte_st").await;
 
     assert_eq!(db.count("public.big_cte_st").await, 1100);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tier 3d — Recursive CTEs in IMMEDIATE mode
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: create an IMMEDIATE-mode stream table (NULL schedule).
+async fn create_immediate_st(db: &E2eDb, name: &str, query: &str) {
+    let sql = format!(
+        "SELECT pgtrickle.create_stream_table('{name}', $${query}$$, \
+         NULL, 'IMMEDIATE')"
+    );
+    db.execute(&sql).await;
+}
+
+/// INSERT-only path: semi-naive evaluation in IMMEDIATE mode.
+///
+/// Verifies that a new base-table row appears in the materialised ST
+/// within the same transaction (no manual refresh needed).
+#[tokio::test]
+async fn test_recursive_cte_immediate_mode_insert_only() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE org (id INT PRIMARY KEY, parent_id INT, name TEXT)")
+        .await;
+    db.execute("INSERT INTO org VALUES (1, NULL, 'root'), (2, 1, 'child')")
+        .await;
+
+    create_immediate_st(
+        &db,
+        "org_tree_ivm",
+        "WITH RECURSIVE tree AS (\
+             SELECT id, parent_id, name FROM org WHERE parent_id IS NULL \
+             UNION ALL \
+             SELECT o.id, o.parent_id, o.name FROM org o JOIN tree ON o.parent_id = tree.id\
+         ) SELECT id, name FROM tree",
+    )
+    .await;
+
+    assert_eq!(
+        db.count("public.org_tree_ivm").await,
+        2,
+        "Initial population should have 2 rows"
+    );
+
+    // INSERT a new grandchild — IMMEDIATE mode should propagate within the same TX
+    db.execute("INSERT INTO org VALUES (3, 2, 'grandchild')")
+        .await;
+
+    assert_eq!(
+        db.count("public.org_tree_ivm").await,
+        3,
+        "IMMEDIATE semi-naive should add the new grandchild without a manual refresh"
+    );
+}
+
+/// DELETE path: DRed (Delete-and-Rederive) strategy in IMMEDIATE mode.
+///
+/// Deleting a node that has descendants must remove the node *and* all
+/// rows that were derived through it (DRed strategy), so that the ST
+/// remains consistent without a manual refresh.
+#[tokio::test]
+async fn test_recursive_cte_immediate_mode_delete_triggers_dred() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE hrch (id INT PRIMARY KEY, parent_id INT, label TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO hrch VALUES \
+         (1, NULL, 'root'), \
+         (2, 1,    'child'), \
+         (3, 2,    'grandchild')",
+    )
+    .await;
+
+    create_immediate_st(
+        &db,
+        "hrch_ivm",
+        "WITH RECURSIVE t AS (\
+             SELECT id, parent_id, label FROM hrch WHERE parent_id IS NULL \
+             UNION ALL \
+             SELECT h.id, h.parent_id, h.label FROM hrch h JOIN t ON h.parent_id = t.id\
+         ) SELECT id, label FROM t",
+    )
+    .await;
+
+    assert_eq!(db.count("public.hrch_ivm").await, 3);
+
+    // Delete the intermediate node — DRed must remove it *and* the grandchild
+    db.execute("DELETE FROM hrch WHERE id = 2").await;
+
+    assert_eq!(
+        db.count("public.hrch_ivm").await,
+        1,
+        "After DRed, only root should remain (child and grandchild derived through it)"
+    );
+}
+
+/// Depth-guard test: `pg_trickle.ivm_recursive_max_depth` prevents runaway
+/// recursion in IMMEDIATE mode when data forms a very deep (but acyclic) tree.
+///
+/// Rows beyond the configured depth are simply not materialised — rather than
+/// causing a stack-overflow error.
+#[tokio::test]
+async fn test_recursive_cte_immediate_mode_depth_guard() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Lower the depth guard to 3 so we can trigger it with a short chain.
+    // The guard limits the number of semi-naive propagation iterations of
+    // the incremental delta (not the total hierarchy depth).
+    // Use ALTER SYSTEM so the GUC applies cluster-wide (pool-safe).
+    db.execute("ALTER SYSTEM SET pg_trickle.ivm_recursive_max_depth = 3")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    // Small delay for reload
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    db.execute("CREATE TABLE chain (id INT PRIMARY KEY, parent_id INT)")
+        .await;
+    // Build a baseline chain: 1 → 2
+    db.execute("INSERT INTO chain VALUES (1, NULL), (2, 1)")
+        .await;
+
+    create_immediate_st(
+        &db,
+        "chain_ivm",
+        "WITH RECURSIVE c AS (\
+             SELECT id, parent_id FROM chain WHERE parent_id IS NULL \
+             UNION ALL \
+             SELECT ch.id, ch.parent_id FROM chain ch JOIN c ON ch.parent_id = c.id\
+         ) SELECT id, parent_id FROM c",
+    )
+    .await;
+
+    assert_eq!(db.count("public.chain_ivm").await, 2);
+
+    // Insert a long chain: 3→2, 4→3, 5→4, 6→5, 7→6
+    // The delta seed is {3,4,5,6,7}. Propagation iterations:
+    //   iter 0 (seed): row 3 connects to existing row 2
+    //   iter 1: row 4 connects to row 3
+    //   iter 2: row 5 connects to row 4
+    //   iter 3: clamped by depth guard (row 6 and 7 not found)
+    db.execute("INSERT INTO chain VALUES (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)")
+        .await;
+
+    // With depth guard = 3, some tail rows should be absent
+    let count = db.count("public.chain_ivm").await;
+    assert!(
+        count < 7,
+        "Depth guard should prevent all 7 rows from being materialised; got {count}"
+    );
+    assert!(
+        count >= 4,
+        "Rows within the depth guard must be materialised; got {count}"
+    );
+
+    db.execute("ALTER SYSTEM RESET pg_trickle.ivm_recursive_max_depth")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
 }

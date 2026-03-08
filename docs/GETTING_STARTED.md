@@ -83,7 +83,9 @@ No additional configuration is needed. pg_trickle automatically discovers all da
 
 ## Step 1: Create the Base Tables
 
-These are ordinary PostgreSQL tables — pg_trickle doesn't require any special column types, annotations, or schema conventions. The only requirement is that tables have a **primary key** (pg_trickle uses it internally to track which rows changed).
+These are ordinary PostgreSQL tables — pg_trickle doesn't require any special column types, annotations, or schema conventions.
+
+Tables without a primary key work, but pg_trickle will emit a `WARNING` at stream table creation time: change detection falls back to a content-based hash across all columns, which is slower for wide tables and cannot distinguish between identical duplicate rows. Adding a primary key gives the best performance and most reliable change detection. A primary key is also required for automatic transition to WAL-based CDC (`cdc_mode = 'auto'`); without one the source table stays on trigger-based CDC.
 
 ```sql
 -- Department hierarchy (self-referencing tree)
@@ -171,8 +173,7 @@ SELECT pgtrickle.create_stream_table(
     )
     SELECT id, name, parent_id, path, depth FROM tree
     $$,
-    schedule     => '1m',
-    refresh_mode => 'DIFFERENTIAL'
+    schedule     => '1m'
 );
 ```
 
@@ -237,8 +238,7 @@ SELECT pgtrickle.create_stream_table(
     LEFT JOIN employees e ON e.department_id = t.id
     GROUP BY t.id, t.name, t.path, t.depth
     $$,
-    schedule     => 'calculated',      -- CALCULATED: inherit schedule from downstream; see explanation below
-    refresh_mode => 'DIFFERENTIAL'
+    schedule     => 'calculated'      -- CALCULATED: inherit schedule from downstream; see explanation below
 );
 ```
 
@@ -299,8 +299,7 @@ SELECT pgtrickle.create_stream_table(
     WHERE depth >= 1
     GROUP BY 1
     $$,
-    schedule     => '1m',             -- this is the only explicit schedule; CALCULATED tables above inherit it
-    refresh_mode => 'DIFFERENTIAL'
+    schedule     => '1m'              -- this is the only explicit schedule; CALCULATED tables above inherit it
 );
 ```
 
@@ -625,9 +624,12 @@ You've now seen the IVM strategies pg_trickle uses for incremental view maintena
 
 | Mode | When it refreshes | Use case |
 |------|------------------|----------|
-| **DIFFERENTIAL** | On a schedule (background) | Most use cases — processes only changed rows |
-| **FULL** | On a schedule (background) | Fallback when the query can't be differentiated |
+| **AUTO** (default) | On a schedule (background) | Most use cases — uses DIFFERENTIAL when possible, falls back to FULL automatically |
+| **DIFFERENTIAL** | On a schedule (background) | Like AUTO but errors if the query can't be differentiated |
+| **FULL** | On a schedule (background) | Forces full recompute every cycle |
 | **IMMEDIATE** | Synchronously, in the same transaction as the DML | Real-time dashboards, audit tables — the stream table is always up-to-date |
+
+When you omit `refresh_mode`, the default is `'AUTO'` — it uses differential (delta-only) maintenance when the query supports it, and automatically falls back to full recomputation when it doesn't. You only need to specify a mode explicitly for advanced cases.
 
 **IMMEDIATE mode** (new in v0.2.0) maintains stream tables synchronously within the same transaction as the base table DML. It uses statement-level AFTER triggers with transition tables — no change buffers, no scheduler. The stream table is always consistent with the current transaction.
 

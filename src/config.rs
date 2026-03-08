@@ -89,11 +89,12 @@ pub static PGS_USER_TRIGGERS: GucSetting<Option<std::ffi::CString>> =
 
 /// CDC mechanism selection.
 ///
-/// - `"trigger"` (default): Always use row-level triggers for CDC.
-/// - `"auto"`: Use triggers for creation, transition to WAL if available.
+/// - `"auto"` (default): Use triggers for creation, transition to WAL if
+///   `wal_level = logical` is available. Falls back to triggers automatically.
+/// - `"trigger"`: Always use row-level triggers for CDC.
 /// - `"wal"`: Require WAL-based CDC (fail if `wal_level != logical`).
 pub static PGS_CDC_MODE: GucSetting<Option<std::ffi::CString>> =
-    GucSetting::<Option<std::ffi::CString>>::new(Some(c"trigger"));
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 
 /// Maximum time (seconds) to wait for the WAL decoder to catch up during
 /// transition from triggers to WAL-based CDC before falling back to triggers.
@@ -126,6 +127,18 @@ pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::n
 /// because inline recomputation of large result sets adds unacceptable
 /// latency to the trigger path. Set to 0 to disable TopK in IMMEDIATE mode.
 pub static PGS_IVM_TOPK_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000);
+
+/// Maximum recursion depth for `WITH RECURSIVE` CTEs in IMMEDIATE mode.
+///
+/// The semi-naive delta query generated for an IMMEDIATE-mode recursive
+/// CTE includes a `__pgt_depth` counter.  Propagation stops when this
+/// counter reaches the configured limit, preventing infinite loops caused
+/// by cyclic data or deeply recursive hierarchies that would otherwise
+/// exhaust PostgreSQL's `max_stack_depth` inside a trigger body.
+///
+/// Set to 0 to disable the depth guard (allow unlimited recursion).
+/// The default (100) is sufficient for virtually all practical hierarchies.
+pub static PGS_IVM_RECURSIVE_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(100);
 
 /// Buffer table partitioning mode (Task 3.3).
 ///
@@ -288,9 +301,10 @@ pub fn register_gucs() {
 
     GucRegistry::define_string_guc(
         c"pg_trickle.cdc_mode",
-        c"CDC mechanism: trigger, auto, or wal.",
-        c"'trigger' always uses row-level triggers for change capture. \
-           'auto' uses triggers initially and transitions to WAL-based CDC if wal_level=logical. \
+        c"CDC mechanism: auto (default), trigger, or wal.",
+        c"'auto' (default) uses triggers initially and transitions to WAL-based CDC \
+           if wal_level=logical, falling back to triggers on error. \
+           'trigger' always uses row-level triggers for change capture. \
            'wal' requires wal_level=logical (fails otherwise).",
         &PGS_CDC_MODE,
         GucContext::Suset,
@@ -302,8 +316,7 @@ pub fn register_gucs() {
         c"Max seconds for WAL decoder catch-up during CDC transition.",
         c"When transitioning from trigger-based to WAL-based CDC, the WAL decoder must catch up \
            past the trigger's last captured LSN. If it hasn't caught up within this timeout, \
-           the system falls back to trigger-based CDC. \
-           NOTE: WAL-based CDC is pre-production in v0.2.0 and not recommended for production use.",
+           the system falls back to trigger-based CDC.",
         &PGS_WAL_TRANSITION_TIMEOUT,
         10,    // min: 10 seconds
         3_600, // max: 1 hour
@@ -355,6 +368,19 @@ pub fn register_gucs() {
         &PGS_IVM_TOPK_MAX_LIMIT,
         0,
         1_000_000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.ivm_recursive_max_depth",
+        c"Maximum recursion depth for WITH RECURSIVE CTEs in IMMEDIATE mode.",
+        c"Limits the depth counter injected into semi-naive delta queries to guard \
+           against infinite loops from cyclic data or very deep hierarchies inside \
+           trigger bodies. Set to 0 to disable the guard (allow unlimited recursion).",
+        &PGS_IVM_RECURSIVE_MAX_DEPTH,
+        0,
+        100_000,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -456,12 +482,12 @@ pub fn pg_trickle_user_triggers() -> String {
         .unwrap_or_else(|| "auto".to_string())
 }
 
-/// Returns the CDC mode: `"trigger"`, `"auto"`, or `"wal"`.
+/// Returns the CDC mode: `"auto"`, `"trigger"`, or `"wal"`.
 pub fn pg_trickle_cdc_mode() -> String {
     PGS_CDC_MODE
         .get()
-        .map(|cs| cs.to_str().unwrap_or("trigger").to_string())
-        .unwrap_or_else(|| "trigger".to_string())
+        .map(|cs| cs.to_str().unwrap_or("auto").to_string())
+        .unwrap_or_else(|| "auto".to_string())
 }
 
 /// Returns the WAL transition timeout in seconds.
@@ -490,4 +516,11 @@ pub fn pg_trickle_buffer_partitioning() -> String {
 /// Returns whether foreign table polling CDC is enabled.
 pub fn pg_trickle_foreign_table_polling() -> bool {
     PGS_FOREIGN_TABLE_POLLING.get()
+}
+
+/// Returns the maximum recursion depth for WITH RECURSIVE in IMMEDIATE mode.
+/// Returns `None` when the guard is disabled (value = 0).
+pub fn pg_trickle_ivm_recursive_max_depth() -> Option<i32> {
+    let v = PGS_IVM_RECURSIVE_MAX_DEPTH.get();
+    if v > 0 { Some(v) } else { None }
 }
