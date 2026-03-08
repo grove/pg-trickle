@@ -503,6 +503,46 @@ async fn test_guc_auto_detects_triggers() {
     );
 }
 
+// ── GUC: deprecated on alias still detects triggers ───────────────────
+
+#[tokio::test]
+async fn test_guc_on_alias_detects_triggers() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE src_guc_on (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO src_guc_on VALUES (1, 'a')").await;
+
+    db.create_st(
+        "st_guc_on",
+        "SELECT id, val FROM src_guc_on",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    db.refresh_st("st_guc_on").await;
+
+    for sql in audit_trigger_sql("st_guc_on") {
+        db.execute(&sql).await;
+    }
+    db.execute("TRUNCATE audit_log").await;
+
+    db.execute("SET pg_trickle.user_triggers = 'on'").await;
+
+    db.execute("INSERT INTO src_guc_on VALUES (2, 'b')").await;
+    db.refresh_st("st_guc_on").await;
+
+    let insert_count: i64 = db
+        .query_scalar("SELECT count(*) FROM audit_log WHERE op = 'INSERT'")
+        .await;
+    assert!(
+        insert_count >= 1,
+        "Deprecated 'on' alias should still detect trigger and fire it, got {} INSERT entries",
+        insert_count
+    );
+}
+
 // ── FULL refresh suppresses row-level triggers ─────────────────────────
 
 #[tokio::test]

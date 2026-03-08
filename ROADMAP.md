@@ -392,12 +392,19 @@ validations, resource leaks, and observability holes. Phased from quick wins
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| O1 | Prepared statement cleanup on cache invalidation | 3–4h | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G8.3 |
-| O2 | Slot lag alerting thresholds (configurable) | 2–3h | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G10 |
-| O3 | Simplify `pg_trickle.user_triggers` GUC (remove redundant `on` value) | 1h | [PLAN_FEATURE_CLEANUP.md](plans/PLAN_FEATURE_CLEANUP.md) C5 |
-| O4 | `pg_trickle_dump`: SQL export tool for manual backup before upgrade | 3–4h | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.3 |
+| O1 | Prepared statement cleanup on cache invalidation | Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) G4.4 |
+| O2 | Slot lag alerting thresholds configurable (`slot_lag_warning_threshold_mb`, `slot_lag_critical_threshold_mb`) | Done | [PLAN_HYBRID_CDC.md](plans/sql/PLAN_HYBRID_CDC.md) §6.2 |
+| O3 | Simplify `pg_trickle.user_triggers` GUC (canonical `auto` / `off`, deprecated `on` alias) | Done | [PLAN_FEATURE_CLEANUP.md](plans/PLAN_FEATURE_CLEANUP.md) C5 |
+| O4 | `pg_trickle_dump`: SQL export tool for manual backup before upgrade | Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.3 |
 
-> **Operational subtotal: ~9–12 hours**
+> **Operational subtotal: Done**
+>
+> **Progress:** All four operational items are now shipped in `Unreleased`.
+> Warning-level and critical WAL slot lag thresholds are configurable,
+> prepared `__pgt_merge_*` statements are cleaned up on shared cache
+> invalidation, `pg_trickle.user_triggers` is simplified to canonical
+> `auto` / `off` semantics with a deprecated `on` alias, and
+> `pg_trickle_dump` provides a replayable SQL export for upgrade backups.
 
 > **v0.2.3 total: ~45–66 hours**
 
@@ -409,7 +416,7 @@ validations, resource leaks, and observability holes. Phased from quick wins
 - [ ] Adaptive fallback flushes change buffers; no ping-pong cycles (G4)
 - [ ] `pgtrickle.pgt_cdc_status` view available; NOTIFY on CDC transitions (G5)
 - [ ] Per-table `cdc_mode` override functional in SQL API and dbt adapter (G1)
-- [ ] Prepared statement cache cleanup works after invalidation
+- [x] Prepared statement cache cleanup works after invalidation
 - [ ] Extension upgrade path tested (`0.2.2 → 0.2.3`)
 
 ---

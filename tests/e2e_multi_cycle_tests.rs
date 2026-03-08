@@ -177,6 +177,104 @@ async fn test_multi_cycle_prepared_statement_cache() {
     }
 }
 
+#[tokio::test]
+async fn test_prepared_statements_cleared_after_cache_invalidation() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    let (client, connection) =
+        tokio_postgres::connect(db.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("Failed to open dedicated test session");
+    let connection_task = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            panic!("Dedicated test session failed: {error}");
+        }
+    });
+
+    client
+        .batch_execute(
+            "SET pg_trickle.use_prepared_statements = on;
+             CREATE TABLE mc_prep_invalidate (id SERIAL PRIMARY KEY, grp TEXT, val INT);
+             INSERT INTO mc_prep_invalidate (grp, val) VALUES ('a', 1);",
+        )
+        .await
+        .expect("Failed to set up prepared-statement invalidation test");
+
+    let q = "SELECT grp, SUM(val) AS total FROM mc_prep_invalidate GROUP BY grp";
+    client
+        .execute(
+            "SELECT pgtrickle.create_stream_table($1, $2, schedule => '1m', refresh_mode => 'DIFFERENTIAL')",
+            &[&"mc_prep_invalidate_st", &q],
+        )
+        .await
+        .expect("Failed to create stream table");
+
+    client
+        .batch_execute(
+            "INSERT INTO mc_prep_invalidate (grp, val) VALUES ('a', 2);
+             SELECT pgtrickle.refresh_stream_table('mc_prep_invalidate_st');
+             INSERT INTO mc_prep_invalidate (grp, val) VALUES ('a', 4);
+             SELECT pgtrickle.refresh_stream_table('mc_prep_invalidate_st');",
+        )
+        .await
+        .expect("Failed to warm prepared MERGE statement");
+
+    let prepared_count_before: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_prepared_statements WHERE name LIKE '__pgt_merge_%'",
+            &[],
+        )
+        .await
+        .expect("Failed to inspect prepared statements before invalidation")
+        .get(0);
+    assert!(
+        prepared_count_before >= 1,
+        "Expected prepared MERGE statement before invalidation, found {}",
+        prepared_count_before
+    );
+
+    client
+        .batch_execute(
+            "SELECT pgtrickle.alter_stream_table('mc_prep_invalidate_st', schedule => '2m');
+             INSERT INTO mc_prep_invalidate (grp, val) VALUES ('a', 3);
+             SELECT pgtrickle.refresh_stream_table('mc_prep_invalidate_st');",
+        )
+        .await
+        .expect("Failed to invalidate cache and refresh stream table");
+
+    let st_total: i64 = client
+        .query_one(
+            "SELECT total FROM mc_prep_invalidate_st WHERE grp = 'a'",
+            &[],
+        )
+        .await
+        .expect("Failed to query refreshed stream table")
+        .get(0);
+    assert_eq!(
+        st_total, 10,
+        "Stream table should reflect the post-invalidation refresh"
+    );
+
+    let prepared_count_after: i64 = client
+        .query_one(
+            "SELECT count(*) FROM pg_prepared_statements WHERE name LIKE '__pgt_merge_%'",
+            &[],
+        )
+        .await
+        .expect("Failed to inspect prepared statements after invalidation")
+        .get(0);
+    assert_eq!(
+        prepared_count_after, 0,
+        "Prepared MERGE statements should be deallocated after cache invalidation, found {}",
+        prepared_count_after
+    );
+
+    drop(client);
+    connection_task
+        .await
+        .expect("Dedicated session task failed");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Multi-cycle: group elimination and revival
 // ═══════════════════════════════════════════════════════════════════════

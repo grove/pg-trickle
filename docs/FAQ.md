@@ -1159,7 +1159,7 @@ SHOW pg_trickle.cdc_mode;
 
 This shows the *desired* global behavior (`trigger`, `auto`, or `wal`), not the per-table actual state. The per-table state lives in `pgt_dependencies.cdc_mode` as described above.
 
-See [CONFIGURATION.md](CONFIGURATION.md) for details on the `pg_trickle.cdc_mode` and `pg_trickle.wal_transition_timeout` GUCs.
+See [CONFIGURATION.md](CONFIGURATION.md) for details on the `pg_trickle.cdc_mode`, `pg_trickle.wal_transition_timeout`, `pg_trickle.slot_lag_warning_threshold_mb`, and `pg_trickle.slot_lag_critical_threshold_mb` GUCs.
 
 ### Is it safe to add triggers to a stream table while the source table is switching CDC modes?
 
@@ -1213,7 +1213,7 @@ When an operator later enables `wal_level = logical` (e.g., for other replicatio
 
 **Caveats to be aware of in `auto` mode:**
 - Keyless tables (no PRIMARY KEY) stay on triggers permanently — WAL mode requires a PK for `pk_hash` computation.
-- Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. The health check warns at >1 GB lag.
+- Replication slots prevent WAL recycling: if the decoder falls behind, WAL accumulates. pg_trickle now warns at `pg_trickle.slot_lag_warning_threshold_mb` (default 100 MB) and marks per-source CDC health unhealthy at `pg_trickle.slot_lag_critical_threshold_mb` (default 1024 MB).
 - The `TRANSITIONING` phase runs both trigger and WAL decoder simultaneously; LSN-based deduplication handles correctness. If anything goes wrong, the system rolls back to triggers.
 
 ### How does the trigger-to-WAL automatic transition work?
@@ -1635,6 +1635,7 @@ The refresh engine uses PostgreSQL prepared statements (`PREPARE` / `EXECUTE`) f
 
 Prepared statements are stored per-session and are invalidated when:
 - The stream table is reinitialized (schema change)
+- The shared cache generation advances after DDL or stream-table metadata changes
 - The PostgreSQL connection is recycled
 - The session ends
 
@@ -1736,7 +1737,7 @@ See [Why can't I add foreign keys?](#why-cant-i-add-foreign-keys-to-or-from-a-st
 
 ### Can I add my own triggers to stream tables?
 
-**Yes, for DIFFERENTIAL mode stream tables.** When user-defined row-level triggers are detected (or `pg_trickle.user_triggers = 'on'`), the refresh engine automatically switches from `MERGE` to explicit `DELETE` + `UPDATE` + `INSERT` statements. This ensures triggers fire with the correct `TG_OP`, `OLD`, and `NEW` values.
+**Yes, for DIFFERENTIAL mode stream tables.** When user-defined row-level triggers are detected, the refresh engine automatically switches from `MERGE` to explicit `DELETE` + `UPDATE` + `INSERT` statements. This ensures triggers fire with the correct `TG_OP`, `OLD`, and `NEW` values. Legacy configs that still set `pg_trickle.user_triggers = 'on'` are treated the same as `auto`.
 
 **Limitations:**
 - Row-level triggers do **not** fire during FULL refresh (they are automatically suppressed via `DISABLE TRIGGER USER`). Use `REFRESH MODE DIFFERENTIAL` for stream tables with triggers.
@@ -2199,7 +2200,7 @@ below lists every available parameter with its type, default, and description.
 | `pg_trickle.max_consecutive_errors` | int | `3` | Failures before auto-suspending (1–100) |
 | `pg_trickle.change_buffer_schema` | text | `pgtrickle_changes` | Schema for CDC buffer tables |
 | `pg_trickle.max_concurrent_refreshes` | int | `4` | Max parallel refresh workers (1–32) |
-| `pg_trickle.user_triggers` | text | `auto` | User trigger handling: `auto` (detect), `on` (always explicit DML), `off` (suppress) |
+| `pg_trickle.user_triggers` | text | `auto` | User trigger handling: `auto` (detect), `off` (suppress), `on` (deprecated alias for `auto`) |
 | `pg_trickle.differential_max_change_ratio` | float | `0.15` | Change ratio threshold for adaptive FULL fallback (0.0–1.0) |
 | `pg_trickle.cleanup_use_truncate` | bool | `true` | Use TRUNCATE instead of DELETE for buffer cleanup |
 
@@ -2602,7 +2603,7 @@ Foreign key constraints require that referenced/referencing rows exist at the ti
 
 ### How do user-defined triggers work on stream tables?
 
-When a DIFFERENTIAL mode stream table has user-defined row-level triggers (or `pg_trickle.user_triggers = 'on'`), the refresh engine uses **explicit DML decomposition** instead of `MERGE`:
+When a DIFFERENTIAL mode stream table has user-defined row-level triggers, the refresh engine uses **explicit DML decomposition** instead of `MERGE`:
 
 1. **Delta materialized once.** The delta query result is stored in a temporary table (`__pgt_delta_<id>`) to avoid evaluating it three times.
 
@@ -2618,8 +2619,8 @@ When a DIFFERENTIAL mode stream table has user-defined row-level triggers (or `p
 
 **Control:** The `pg_trickle.user_triggers` GUC controls this behavior:
 - `auto` (default): detect user triggers automatically
-- `on`: always use explicit DML (useful for testing)
 - `off`: always use MERGE, suppressing triggers
+- `on`: deprecated compatibility alias for `auto`
 
 ### Why can't I `ALTER TABLE` a stream table directly?
 

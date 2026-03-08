@@ -397,7 +397,8 @@ needed:
    ```bash
    pg_trickle_dump --format sql --output backup.sql
    ```
-   *(Tool to be implemented — see §9.3)*
+   Uses the standalone dump tool added in Phase 5.3. The tool also accepts
+   `--dsn`, `DATABASE_URL`, or `PG*` environment variables.
 
 2. `DROP EXTENSION pg_trickle CASCADE;` — **destroys all stream tables**
 
@@ -508,9 +509,14 @@ upgrades.
 |---|------|-------------|--------|
 | 5.1 | Write `docs/UPGRADING.md` user-facing guide | Documentation | ✅ Done |
 | 5.2 | Add pre-upgrade version check to `CREATE EXTENSION` path | Rust code | ✅ Done (v0.2.2) |
-| 5.3 | Implement `pg_trickle_dump` backup tool (SQL export) | Rust / SQL | Not started |
+| 5.3 | Implement `pg_trickle_dump` backup tool (SQL export) | Rust / SQL | ✅ Done (v0.2.3) |
 | 5.4 | Add upgrade section to `docs/FAQ.md` | Documentation | ✅ Done (v0.2.2) |
 | 5.5 | Document upgrade path in `INSTALL.md` | Documentation | ✅ Done |
+
+**Phase 5.3 deliverable:** `pg_trickle_dump` now exports replayable SQL using
+`pgtrickle.create_stream_table(...)`, orders dependent stream tables
+topologically, prefers `original_query` when available, and restores
+non-`ACTIVE` status after replay.
 
 ---
 
@@ -581,12 +587,10 @@ For every version bump, complete all items before merging:
    but not yet executed against the Docker image.
 2. ~~**Phase 5.2: Version check at CREATE EXTENSION**~~ — ✅ Done in v0.2.2.
    Implemented as a scheduler startup check in `check_extension_version_match()`.
-3. **Phase 5.3: `pg_trickle_dump`** — SQL export tool for backup before
-   destructive rollbacks.
-4. **DIFFERENTIAL compat test (3.8)** — Requires building a real v0.1.3
+3. **DIFFERENTIAL compat test (3.8)** — Requires building a real v0.1.3
    binary from source to test CDC trigger compatibility across versions.
-5. **Chained upgrade test (3.9)** — Blocked until v0.3.0 exists.
-6. ~~**Phase 5.4: FAQ upgrade section**~~ — ✅ Done in v0.2.2.
+4. **Chained upgrade test (3.9)** — Blocked until v0.3.0 exists.
+5. ~~**Phase 5.4: FAQ upgrade section**~~ — ✅ Done in v0.2.2.
    Three new FAQ entries with cross-links to UPGRADING.md.
 
 ---

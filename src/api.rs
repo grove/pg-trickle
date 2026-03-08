@@ -1877,11 +1877,10 @@ fn execute_manual_full_refresh(
     );
 
     // Check for user triggers to suppress during FULL refresh.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers();
-    let has_triggers = match user_triggers_mode.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => crate::cdc::has_user_triggers(st.pgt_relid)?,
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_triggers = match user_triggers_mode {
+        crate::config::UserTriggersMode::Off => false,
+        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
     // Suppress user triggers during TRUNCATE + INSERT to prevent

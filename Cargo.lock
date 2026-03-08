@@ -2081,6 +2081,7 @@ dependencies = [
  "croner",
  "pgrx",
  "pgrx-tests",
+ "postgres",
  "proptest",
  "serde",
  "serde_json",

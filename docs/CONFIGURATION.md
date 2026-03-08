@@ -17,6 +17,8 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.max\_consecutive\_errors](#pg_tricklemax_consecutive_errors)
   - [WAL CDC](#wal-cdc)
     - [pg\_trickle.wal\_transition\_timeout](#pg_tricklewal_transition_timeout)
+    - [pg\_trickle.slot\_lag\_warning\_threshold\_mb](#pg_trickleslot_lag_warning_threshold_mb)
+    - [pg\_trickle.slot\_lag\_critical\_threshold\_mb](#pg_trickleslot_lag_critical_threshold_mb)
   - [Refresh Performance](#refresh-performance)
     - [pg\_trickle.differential\_max\_change\_ratio](#pg_trickledifferential_max_change_ratio)
     - [pg\_trickle.merge\_planner\_hints](#pg_tricklemerge_planner_hints)
@@ -42,7 +44,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
 
 ## Overview
 
-pg_trickle exposes twenty-one configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
+pg_trickle exposes twenty-three configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
 
 **Required `postgresql.conf` settings:**
 
@@ -244,6 +246,54 @@ SET pg_trickle.wal_transition_timeout = 300;
 
 ---
 
+### pg_trickle.slot_lag_warning_threshold_mb
+
+Warning threshold for retained WAL on pg_trickle replication slots.
+
+| Property | Value |
+|---|---|
+| Type | `int` |
+| Default | `100` (MB) |
+| Range | `1` – `1048576` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+When retained WAL for a pg_trickle replication slot exceeds this threshold:
+- The scheduler emits a `slot_lag_warning` event on `LISTEN pg_trickle_alert`
+- `pgtrickle.health_check()` reports `WARN` for the `slot_lag` check
+
+Raise this on high-throughput systems that intentionally tolerate larger WAL retention. Lower it if you want earlier warning before slots risk invalidation.
+
+```sql
+SET pg_trickle.slot_lag_warning_threshold_mb = 256;
+```
+
+---
+
+### pg_trickle.slot_lag_critical_threshold_mb
+
+Critical threshold for retained WAL on pg_trickle replication slots.
+
+| Property | Value |
+|---|---|
+| Type | `int` |
+| Default | `1024` (MB) |
+| Range | `1` – `1048576` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+When retained WAL for a pg_trickle replication slot exceeds this threshold,
+`pgtrickle.check_cdc_health()` returns a per-source
+`slot_lag_exceeds_threshold` alert.
+
+This threshold is intentionally higher than the warning threshold so operators can separate early warning from source-level unhealthy state.
+
+```sql
+SET pg_trickle.slot_lag_critical_threshold_mb = 2048;
+```
+
+---
+
 ### Refresh Performance
 
 Fine-grained tuning for the differential refresh engine.
@@ -394,7 +444,7 @@ Control how user-defined triggers on stream tables are handled during refresh.
 |---|---|
 | Type | `text` |
 | Default | `'auto'` |
-| Values | `'auto'`, `'on'`, `'off'` |
+| Values | `'auto'`, `'off'` (`'on'` accepted as deprecated alias for `'auto'`) |
 | Context | `SUSET` |
 | Restart Required | No |
 
@@ -402,8 +452,8 @@ When a stream table has user-defined row-level triggers, the refresh engine can 
 
 **Values:**
 - **`auto`** (default): Automatically detect user triggers on the stream table. If present, use the explicit DML path; otherwise use `MERGE`.
-- **`on`**: Always use the explicit DML path, even without user triggers. Useful for testing.
 - **`off`**: Always use `MERGE`. User triggers are suppressed during refresh. This is the escape hatch if explicit DML causes issues.
+- **`on`**: Deprecated compatibility alias for `auto`. Existing configs continue to work, but new configs should use `auto`.
 
 **Notes:**
 - Row-level triggers do **not** fire during FULL refresh regardless of this setting. FULL refresh uses `DISABLE TRIGGER USER` / `ENABLE TRIGGER USER` to suppress them.
@@ -414,11 +464,11 @@ When a stream table has user-defined row-level triggers, the refresh engine can 
 -- Auto-detect (default)
 SET pg_trickle.user_triggers = 'auto';
 
--- Always use explicit DML (for testing)
-SET pg_trickle.user_triggers = 'on';
-
 -- Suppress triggers, use MERGE
 SET pg_trickle.user_triggers = 'off';
+
+-- Backward-compatible legacy setting (treated the same as 'auto')
+SET pg_trickle.user_triggers = 'on';
 ```
 
 ---
@@ -610,6 +660,8 @@ pg_trickle.max_consecutive_errors = 3
 
 # WAL CDC
 pg_trickle.wal_transition_timeout = 300
+pg_trickle.slot_lag_warning_threshold_mb = 100
+pg_trickle.slot_lag_critical_threshold_mb = 1024
 
 # Refresh performance
 pg_trickle.differential_max_change_ratio = 0.15

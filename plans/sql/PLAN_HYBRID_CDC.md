@@ -769,7 +769,13 @@ Returns a table with per-source health status:
 - CDC mode
 - Estimated lag (bytes or time)
 - Last confirmed LSN
-- Alert if slot lag exceeds threshold
+- Alert if slot lag exceeds the configured critical threshold
+
+Status update (2026-03-08): implemented in `Unreleased` with two GUCs:
+`pg_trickle.slot_lag_warning_threshold_mb` (scheduler `NOTIFY` +
+`pgtrickle.health_check()` WARN threshold, default 100 MB) and
+`pg_trickle.slot_lag_critical_threshold_mb`
+(`pgtrickle.check_cdc_health()` alert threshold, default 1024 MB).
 
 #### 6.3 `NOTIFY` integration
 
@@ -778,6 +784,9 @@ modes, including:
 - Source table name
 - Old mode → New mode
 - Slot name (if applicable)
+
+WAL lag warnings are now also emitted on `pg_trickle_alert` as
+`slot_lag_warning` when retained WAL exceeds the configured warning threshold.
 
 #### 6.4 Files modified
 
