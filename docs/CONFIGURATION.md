@@ -29,8 +29,10 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.buffer\_alert\_threshold](#pg_tricklebuffer_alert_threshold)
     - [pg\_trickle.max\_grouping\_set\_branches](#pg_tricklemax_grouping_set_branches)
     - [pg\_trickle.ivm\_topk\_max\_limit](#pg_trickleivm_topk_max_limit)
+    - [pg\_trickle.ivm\_recursive\_max\_depth](#pg_trickleivm_recursive_max_depth)
   - [Advanced / Internal](#advanced--internal)
     - [pg\_trickle.change\_buffer\_schema](#pg_tricklechange_buffer_schema)
+    - [pg\_trickle.foreign\_table\_polling](#pg_trickleforeign_table_polling)
     - [pg\_trickle.max\_concurrent\_refreshes](#pg_tricklemax_concurrent_refreshes)
 - [Complete postgresql.conf Example](#complete-postgresqlconf-example)
 - [Runtime Configuration](#runtime-configuration)
@@ -40,7 +42,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
 
 ## Overview
 
-pg_trickle exposes nineteen configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
+pg_trickle exposes twenty-one configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
 
 **Required `postgresql.conf` settings:**
 
@@ -498,6 +500,23 @@ SET pg_trickle.ivm_topk_max_limit = 5000;
 
 ---
 
+### pg_trickle.ivm_recursive_max_depth
+
+Maximum recursion depth for `WITH RECURSIVE` queries in **IMMEDIATE** mode.
+The semi-naive evaluation injects a `__pgt_depth` counter column into the
+recursive SQL; iteration stops when the counter reaches this limit. Protects
+against infinite recursion in pathological graphs.
+
+**Default:** `100`  
+**Range:** `1` – `10000`
+
+```sql
+-- Allow deeper recursion for large hierarchies
+SET pg_trickle.ivm_recursive_max_depth = 500;
+```
+
+---
+
 ### Advanced / Internal
 
 Rarely changed. Leave at defaults unless you have a specific reason to adjust.
@@ -526,10 +545,27 @@ SET pg_trickle.change_buffer_schema = 'my_change_buffers';
 
 ---
 
+### pg_trickle.foreign_table_polling
+
+Enable polling-based change detection for foreign table sources. When
+enabled, the scheduler periodically re-executes the foreign table query
+and computes deltas via snapshot comparison (`EXCEPT ALL`). Foreign tables
+cannot use trigger or WAL-based CDC, so this is the only mechanism for
+incremental maintenance.
+
+**Default:** `false`
+
+```sql
+-- Enable foreign table polling
+SET pg_trickle.foreign_table_polling = true;
+```
+
+---
+
 ### pg_trickle.max_concurrent_refreshes
 
 > **Reserved for future use.** This setting is accepted and stored but has no
-> effect in v0.2.0. Parallel refresh is planned for v0.3.0.
+> effect in v0.2.2. Parallel refresh is planned for v0.4.0.
 
 Maximum number of stream tables that can be refreshed simultaneously.
 
@@ -542,11 +578,11 @@ Maximum number of stream tables that can be refreshed simultaneously.
 | Restart Required | No |
 
 The scheduler currently processes stream tables sequentially in topological
-order. This GUC is reserved for v0.3.0 when parallel scheduling is
-implemented. Setting it has no effect in v0.2.0.
+order. This GUC is reserved for future parallel scheduling work and has no
+effect in v0.2.2.
 
 ```sql
--- Accepted but has no effect in v0.2.0
+-- Accepted but has no effect in v0.2.2
 SET pg_trickle.max_concurrent_refreshes = 8;
 ```
 
@@ -582,10 +618,12 @@ pg_trickle.block_source_ddl = false
 pg_trickle.buffer_alert_threshold = 1000000
 pg_trickle.max_grouping_set_branches = 64
 pg_trickle.ivm_topk_max_limit = 1000
+pg_trickle.ivm_recursive_max_depth = 100
 
 # Advanced / internal
 pg_trickle.change_buffer_schema = 'pgtrickle_changes'
-pg_trickle.max_concurrent_refreshes = 4   # reserved; no effect in v0.2.0
+pg_trickle.foreign_table_polling = false
+pg_trickle.max_concurrent_refreshes = 4   # reserved; no effect in v0.2.2
 # pg_trickle.merge_strategy removed in v0.2.0
 ```
 

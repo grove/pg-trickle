@@ -1,7 +1,8 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-03-08
-> **Current version:** 0.2.2
+> **Latest release:** 0.2.1 (2026-03-05)
+> **Current milestone:** 0.2.2
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -19,13 +20,13 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
 1.0 and beyond.
 
 ```
-                                  We are here
+                                      We are here
                                        │
                                        ▼
  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
  │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 1.0.0  │ │ 1.x+   │
- │Released│─│Released│─│Released│─│OFFSET+│─│Mode & │─│Security│─│Compat │─│Observ-│─│Stable │─│Scale &│
- │ ✅      │ │ ✅      │ │ ✅      │ │Upgrade│ │Ops Gap│ │& Part.│ │& Cloud│ │ability│ │Release│ │Ecosys.│
+ │Released│─│Released│─│Released│─│Ready  │─│Mode & │─│Security│─│Compat │─│Observ-│─│Stable │─│Scale &│
+ │ ✅      │ │ ✅      │ │ ✅      │ │Soon   │ │Ops Gap│ │& Part.│ │& Cloud│ │ability│ │Release│ │Ecosys.│
  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
 ```
 
@@ -229,10 +230,12 @@ GitHub Pages book grew from 14 to 20 pages:
 
 ## v0.2.2 — OFFSET, AUTO Mode, ALTER QUERY, Edge Cases & CDC Hardening
 
-**Goal:** Ship the `ORDER BY + LIMIT + OFFSET` (Paged TopK) feature started
-in v0.2.1, make AUTO the default refresh mode, add ALTER QUERY support,
-close upgrade tooling gaps, harden edge cases and WAL CDC, close IMMEDIATE
-mode parity gaps, and sweep remaining documentation holes.
+**Status: Ready for release (2026-03-08).**
+
+This milestone shipped paged TopK OFFSET support, AUTO-by-default refresh
+selection, ALTER QUERY, the remaining upgrade-tooling work, edge-case and WAL
+CDC hardening, IMMEDIATE-mode parity fixes, and the outstanding documentation
+sweep.
 
 ### ORDER BY + LIMIT + OFFSET (Paged TopK) — Finalization ✅
 
@@ -269,6 +272,7 @@ by the paged TopK feature here.
 |------|-------------|--------|-----|
 | UG1 | Version mismatch check — scheduler warns if `.so` version ≠ SQL version | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.2 |
 | UG2 | FAQ upgrade section — 3 new entries with UPGRADING.md cross-links | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.4 |
+| UG3 | CI and local upgrade automation now target 0.2.2 (`upgrade-check`, upgrade-image defaults, upgrade E2E env) | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) |
 
 ### IMMEDIATE Mode Parity ✅
 
@@ -320,8 +324,9 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 
 **Exit criteria:**
 - [x] `ORDER BY + LIMIT + OFFSET` defining queries accepted, refreshed, and E2E-tested
-- [x] `sql/pg_trickle--0.2.1--0.2.2.sql` exists (function signature updates for paged TopK)
-- [ ] Upgrade completeness check passes for 0.2.1→0.2.2
+- [x] `sql/pg_trickle--0.2.1--0.2.2.sql` exists (column pre-provisioned in 0.2.1; function signature updates)
+- [x] Upgrade completeness check passes for 0.2.1→0.2.2
+- [x] CI and local upgrade-E2E defaults target 0.2.2
 - [x] Version check fires at scheduler startup if `.so`/SQL versions diverge
 - [x] IMMEDIATE mode: recursive CTE semi-naive validated; `ivm_recursive_max_depth` depth guard added
 - [x] IMMEDIATE mode: TopK micro-refresh fully tested end-to-end (10 E2E tests)
@@ -330,7 +335,7 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 - [x] Foreign table polling-based CDC implemented (3 E2E tests)
 - [x] DDL-during-refresh and standby/replication limitations documented
 - [x] WAL CDC mode passes full E2E suite
-- [ ] E2E tests pass (`just build-e2e-image && just test-e2e`)
+- [x] E2E tests pass (`just build-e2e-image && just test-e2e`)
 
 ---
 
@@ -638,7 +643,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
 | v0.2.0 — TopK, Diamond & Transactional IVM | ✔️ Complete | 62–78h | ✅ Released |
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
-| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | |
+| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | Ready for release |
 | v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish | 45–66h | 165–222h | |
 | v0.3.0 — Security & Partitioning | 26–44h | 191–266h | |
 | v0.4.0 — Backward Compatibility, Cloud & Scale | 200–280h | 391–546h | |

@@ -7,7 +7,9 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [0.2.2] — Unreleased
+## [Unreleased]
+
+## [0.2.2] — 2026-03-08
 
 ### Added
 
@@ -35,6 +37,12 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   table preservation guidance. Cross-links to the full
   [Upgrading Guide](docs/UPGRADING.md).
 
+- **ORDER BY + LIMIT + OFFSET (Paged TopK)** — `OFFSET` is now supported in
+  defining queries with `ORDER BY ... LIMIT N OFFSET M`. Nine E2E tests
+  validate paging, catalog metadata storage, aggregate queries, and rejection
+  of invalid patterns (OFFSET without LIMIT, dynamic OFFSET, negative OFFSET).
+  The `topk_offset` catalog column was pre-provisioned in v0.2.1.
+
 - **IMMEDIATE mode — WITH RECURSIVE (IM1)** — `WITH RECURSIVE` queries are now
   fully supported in IMMEDIATE refresh mode. The delta engine applies the
   base-case delta first, then iterates the recursive step until no new rows
@@ -43,52 +51,44 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   A warning is emitted at stream table creation time for very deep hierarchy
   queries so you know the recursion guard is active.
 
-- **IMMEDIATE mode — TopK micro-refresh (IM2)** — `ORDER BY … LIMIT N` (TopK)
+- **IMMEDIATE mode — TopK micro-refresh (IM2)** — `ORDER BY ... LIMIT N`
   queries are now fully supported in IMMEDIATE refresh mode. On each DML
-  statement the top-N rows are recomputed and merged into the stream table —
-  fast for small N, and simpler than tracking incremental rank changes. Ten E2E
-  tests validate INSERT/UPDATE/DELETE propagation, `ORDER BY … LIMIT … OFFSET`,
-  aggregate TopK, and mode switching between IMMEDIATE and DIFFERENTIAL. The
-  maximum N is controlled by `pg_trickle.ivm_topk_max_limit` (default 1000).
+  statement the top-N rows are recomputed and merged into the stream table.
+  Ten E2E tests validate INSERT/UPDATE/DELETE propagation, paged TopK,
+  aggregate TopK, threshold rejection, and mode switching between IMMEDIATE
+  and DIFFERENTIAL. The maximum N is controlled by
+  `pg_trickle.ivm_topk_max_limit` (default 1000).
 
-- **WAL CDC Hardening (W1/W2/W3):**
-  - **W1** — Ten new E2E tests for the WAL CDC pipeline: slot creation,
-    INSERT/UPDATE/DELETE capture, fallback to triggers, slot cleanup, and
-    keyless-table handling. The E2E Docker image now enables
-    `wal_level = logical` and `max_replication_slots = 10`.
-  - **W2** — Automatic fallback hardening: the WAL decoder tracks consecutive
-    poll errors per source (falls back after 5) and validates that `wal_level`
-    is still `logical` at each poll cycle. A successful poll resets the counter.
-  - **W3** — `pg_trickle.cdc_mode` default promoted from `'trigger'` to
-    `'auto'`. In auto mode the scheduler transitions each source to WAL-based
-    CDC whenever `wal_level = logical`. On replicas or managed instances without
-    logical replication it stays on trigger-based CDC — no configuration needed.
+- **Edge case hardening (EC1–EC3)** — New operational guardrails and coverage:
+  - `pg_trickle.max_grouping_set_branches` GUC (default 64) caps
+    CUBE/ROLLUP branch-count explosion at parse time, with three E2E tests.
+  - Post-restart CDC `TRANSITIONING` health checks detect stuck transitions
+    after crash or restart and roll them back to TRIGGER mode.
+  - `pg_trickle.foreign_table_polling` enables polling-based differential
+    maintenance for foreign tables via snapshot comparison (`EXCEPT ALL`), with
+    three E2E tests.
 
-- **Edge case E2E test coverage** — Six new E2E tests completing the edge-case
-  hardening cycle:
-  - **EC1** (`max_grouping_set_branches`): three tests — branch-limit rejection,
-    within-limit acceptance, and raised-limit acceptance for queries using
-    `GROUPING SETS` / `CUBE` / `ROLLUP`.
-  - **EC3** (`foreign_table_polling`): three tests — polling-off rejection in
-    DIFFERENTIAL mode, FULL-mode acceptance without the GUC, and polling-on
-    differential correctness with `EXCEPT ALL` delta detection.
+- **WAL CDC hardening (W1/W2/W3):**
+  - WAL mode E2E coverage now mirrors the trigger-based suite for slot
+    creation, DML capture, fallback, cleanup, and keyless-table handling.
+  - Automatic fallback is hardened with consecutive-error tracking and
+    `wal_level` revalidation on each poll cycle.
+  - `pg_trickle.cdc_mode` default is promoted from `'trigger'` to `'auto'`.
 
-- **Documentation reorganization (DS1/DS2/DS3):**
-  - `CONFIGURATION.md` — 19 GUCs now grouped into five purpose-based sections
-    (Essential, WAL CDC, Refresh Performance, Guardrails & Limits, Advanced /
-    Internal). Easier to scan when you just want to tune a specific area.
-  - `SQL_REFERENCE.md` — 21 functions reorganized into five sections (Core
-    Lifecycle, Status & Monitoring, CDC Diagnostics, Dependency & Inspection,
-    Utilities). The layout now follows "what are you trying to do" rather than
-    arbitrary order.
-  - `GETTING_STARTED.md` — corrected the primary key requirement: tables
-    without a PK are fully supported in trigger-based CDC. A PK is recommended
-    but only required if you want WAL-based CDC auto-transition.
+- **Documentation sweep and reorganization (DS1/DS2/DS3):**
+  - DDL-during-refresh behaviour, replication/standby limitations, and
+    PgBouncer constraints are now documented.
+  - `CONFIGURATION.md` and `SQL_REFERENCE.md` are reorganized around practical
+    operator workflows instead of flat lists.
+  - `GETTING_STARTED.md` now clarifies that trigger-based CDC supports source
+    tables without a primary key; a PK is only required for WAL auto-transition.
 
 ### Changed
 
 - `create_stream_table` default `refresh_mode` changed from `'DIFFERENTIAL'`
   to `'AUTO'`.
+- `create_stream_table` default `schedule` changed from `'1m'` to
+  `'calculated'`.
 - `pg_trickle.cdc_mode` default changed from `'trigger'` to `'auto'` — the
   scheduler now starts WAL-based CDC automatically when `wal_level = logical`;
   it falls back to trigger-based CDC on replicas or when WAL is unavailable.

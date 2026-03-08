@@ -758,7 +758,7 @@ fn get_or_compute_ivm_delta(
     st: &crate::catalog::StreamTableMeta,
 ) -> Result<(String, Vec<String>), PgTrickleError> {
     use crate::dvm::diff::{DeltaSource, DiffContext, TransitionTableNames};
-    use crate::dvm::parser::parse_defining_query;
+    use crate::dvm::parser::parse_defining_query_full;
     use crate::version::Frontier;
 
     let defining_query = &st.defining_query;
@@ -794,9 +794,11 @@ fn get_or_compute_ivm_delta(
     }
 
     // Cache miss — parse, differentiate, and cache.
-    let op_tree = parse_defining_query(defining_query).map_err(|e| {
+    let result = parse_defining_query_full(defining_query).map_err(|e| {
         PgTrickleError::InternalError(format!("Failed to parse defining query for IVM: {e}"))
     })?;
+    let op_tree = result.tree;
+    let cte_registry = result.cte_registry;
 
     // Build transition table names.
     let mut tables = HashMap::new();
@@ -818,9 +820,15 @@ fn get_or_compute_ivm_delta(
 
     // Create a DiffContext with transition table source.
     let dummy_frontier = Frontier::default();
+    let st_user_cols = op_tree.output_columns();
+    let has_pgt_count = op_tree.needs_pgt_count();
     let mut ctx = DiffContext::new(dummy_frontier.clone(), dummy_frontier)
         .with_delta_source(DeltaSource::TransitionTable { tables })
-        .with_pgt_name(&st.pgt_schema, &st.pgt_name);
+        .with_pgt_name(&st.pgt_schema, &st.pgt_name)
+        .with_cte_registry(cte_registry)
+        .with_defining_query(defining_query);
+    ctx.st_user_columns = Some(st_user_cols);
+    ctx.st_has_pgt_count = has_pgt_count;
 
     // Differentiate the operator tree to get delta SQL.
     let (delta_sql, user_columns, _is_dedup) = ctx.differentiate_with_columns(&op_tree)?;

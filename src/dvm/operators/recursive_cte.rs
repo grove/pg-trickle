@@ -1001,9 +1001,11 @@ fn generate_semi_naive_delta(
     };
 
     let (seed_from_base, seed_from_existing, propagation) = if let Some(depth_limit) = max_depth {
-        // Append `, 0::int AS __pgt_depth` to all seeds.
-        let depth_seed_suffix = ", 0::int AS __pgt_depth";
-        let seeded_from_base = format!("{seed_from_base}{depth_seed_suffix}");
+        // Wrap each seed in a subquery and add __pgt_depth = 0 in the
+        // outer SELECT to avoid appending to arbitrary SQL (which breaks
+        // when the inner query has WHERE / JOIN ON clauses).
+        let seeded_from_base =
+            format!("SELECT __seed.*, 0::int AS __pgt_depth FROM ({seed_from_base}) __seed");
 
         // Generate depth-guarded propagation SQL.
         let prop = match try_generate_propagation_with_depth(recursive, &delta_cte, depth_limit)? {
@@ -1033,7 +1035,8 @@ fn generate_semi_naive_delta(
 
         // Only reach here when depth-guarded propagation succeeded — safe to
         // consume seed_from_existing now.
-        let seeded_from_existing = seed_from_existing.map(|s| format!("{s}{depth_seed_suffix}"));
+        let seeded_from_existing = seed_from_existing
+            .map(|s| format!("SELECT __seed.*, 0::int AS __pgt_depth FROM ({s}) __seed"));
 
         (seeded_from_base, seeded_from_existing, prop)
     } else {
