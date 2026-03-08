@@ -373,7 +373,7 @@ validations, resource leaks, and observability holes. Phased from quick wins
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G6 | Defensive `is_populated` + empty-frontier check in `execute_differential_refresh()` | 2h | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G6 |
+| G6 | Defensive `is_populated` + empty-frontier check in `execute_differential_refresh()` | Done | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G6 |
 | G2 | Validate `IMMEDIATE` + `cdc_mode='wal'` — INFO for implicit global-GUC path shipped; explicit per-table rejection pending G1 | 2–3h | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G2 |
 | G3 | Advance WAL replication slot after FULL refresh; flush change buffers | 4–6h | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G3 |
 | G4 | Flush change buffers after AUTO→FULL adaptive fallback (prevents ping-pong) | 3–4h | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G4 |
@@ -381,6 +381,11 @@ validations, resource leaks, and observability holes. Phased from quick wins
 | G1 | Per-table `cdc_mode` override (SQL API, catalog, dbt, migration) | 2–3d | [PLAN_CDC_MODE_REFRESH_MODE_GAPS.md](plans/sql/PLAN_CDC_MODE_REFRESH_MODE_GAPS.md) §G1 |
 
 > **CDC/refresh mode gaps subtotal: ~4–6 days**
+>
+> **Progress:** G6 is now implemented in `Unreleased`: the low-level
+> differential executor rejects unpopulated stream tables and missing
+> frontiers before it can scan from `0/0`, while the public manual-refresh
+> path continues to fall back to FULL for `initialize => false` stream tables.
 >
 > **Progress:** G2 phase 1 is now implemented in `Unreleased`: when the
 > cluster-wide `pg_trickle.cdc_mode` is `'wal'`, creating or switching a
@@ -403,7 +408,7 @@ validations, resource leaks, and observability holes. Phased from quick wins
 
 **Exit criteria:**
 - [x] Volatile functions rejected in DIFFERENTIAL mode; stable functions warned
-- [ ] DIFFERENTIAL on unpopulated ST returns error (G6)
+- [x] DIFFERENTIAL on unpopulated ST returns error (G6)
 - [ ] IMMEDIATE + explicit `cdc_mode='wal'` rejected with clear error (G2)
 - [ ] WAL slot advanced after FULL refresh; change buffers flushed (G3)
 - [ ] Adaptive fallback flushes change buffers; no ping-pong cycles (G4)

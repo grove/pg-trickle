@@ -388,6 +388,12 @@ This makes it difficult to debug slow transitions or stuck states.
 
 ### G6: DIFFERENTIAL Without Initialization Baseline
 
+**Progress (2026-03-08).** Completed in `Unreleased`. The low-level
+`execute_differential_refresh()` path now rejects unpopulated stream tables
+and empty previous frontiers before any SPI work begins, and E2E coverage
+continues to verify that manual refresh for `initialize => false` falls back
+to FULL rather than surfacing that internal guard.
+
 **Problem.** If `execute_differential_refresh()` is called on a stream table
 that has `is_populated = false` (never initialized), the frontier defaults to
 `'0/0'::pg_lsn`. This means the delta query scans the *entire* change buffer
@@ -407,7 +413,7 @@ trusts its callers. A future caller could skip the check.
 
 #### Implementation Steps
 
-1. **Defensive check in `execute_differential_refresh()`** (`src/refresh.rs:1260`)
+1. **Defensive check in `execute_differential_refresh()`** (`src/refresh.rs`)
    - Add an early return at the top of the function:
      ```rust
      if !st.is_populated {
@@ -433,11 +439,12 @@ trusts its callers. A future caller could skip the check.
      ```
 
 3. **Tests**
-   - Unit test: call `execute_differential_refresh()` with
-     `is_populated = false` → returns error.
-   - Integration test: create ST with `initialize => false`, attempt manual
-     DIFFERENTIAL refresh → verify it falls back to FULL (existing behavior,
-     but now explicitly guarded).
+   - Unit tests: call `execute_differential_refresh()` with
+     `is_populated = false` and with `prev_frontier.is_empty()` → both return
+     `InvalidArgument` before SPI work.
+   - Integration/E2E test: create ST with `initialize => false`, attempt
+     manual DIFFERENTIAL refresh → verify it still falls back to FULL and
+     populates the stream table.
 
 ---
 

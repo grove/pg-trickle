@@ -29,6 +29,13 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ### Changed
 
+- **Differential refresh now rejects missing baselines defensively** —
+  `execute_differential_refresh()` now returns a user error if it is invoked
+  for an unpopulated stream table or without a previous frontier. Manual
+  refresh still falls back to FULL for `initialize => false` stream tables,
+  and unit plus E2E coverage now lock in both the low-level guard and the
+  public fallback behavior.
+
 - **IMMEDIATE/WAL CDC interaction clarified** — `create_stream_table()` and
   `alter_stream_table()` now emit an INFO message when
   `pg_trickle.cdc_mode = 'wal'` is in effect but the requested

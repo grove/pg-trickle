@@ -1265,6 +1265,20 @@ pub fn execute_differential_refresh(
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
 
+    if !st.is_populated {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on unpopulated stream table {}.{}; a FULL refresh is required first.",
+            schema, name
+        )));
+    }
+
+    if prev_frontier.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on {}.{}; no previous frontier exists.",
+            schema, name
+        )));
+    }
+
     // ── EC-16: Function-body change detection ────────────────────────
     // Check whether any user-defined function referenced in this ST's
     // defining query has had its source code changed via ALTER FUNCTION
@@ -2301,6 +2315,44 @@ mod tests {
         let _incr = RefreshAction::Differential;
         let _no_data = RefreshAction::NoData;
         let _reinit = RefreshAction::Reinitialize;
+    }
+
+    #[test]
+    fn test_execute_differential_refresh_rejects_unpopulated_stream_table() {
+        let mut st = test_st(RefreshMode::Differential, false);
+        st.is_populated = false;
+
+        let error = execute_differential_refresh(
+            &st,
+            &make_frontier(&[(42, "0/10")]),
+            &make_frontier(&[(42, "0/20")]),
+        )
+        .expect_err("unpopulated stream tables must be rejected before SPI work");
+
+        match error {
+            PgTrickleError::InvalidArgument(message) => {
+                assert!(message.contains("unpopulated stream table public.test_st"));
+                assert!(message.contains("FULL refresh is required first"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_differential_refresh_rejects_empty_frontier() {
+        let st = test_st(RefreshMode::Differential, false);
+
+        let error =
+            execute_differential_refresh(&st, &Frontier::new(), &make_frontier(&[(42, "0/20")]))
+                .expect_err("missing baseline frontier must be rejected before SPI work");
+
+        match error {
+            PgTrickleError::InvalidArgument(message) => {
+                assert!(message.contains("public.test_st"));
+                assert!(message.contains("no previous frontier exists"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
     }
 
     // ── determine_refresh_action() ──────────────────────────────────
