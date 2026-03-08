@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-03-08
-> **Latest release:** 0.2.2 (2026-03-08)
-> **Current milestone:** 0.3.0
+> **Latest release:** 0.2.1 (2026-03-05)
+> **Current milestone:** 0.2.2
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -25,8 +25,8 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
                                        ▼
  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
  │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 1.0.0  │ │ 1.x+   │
- │Released│─│Released│─│Released│─│Released│─│Correct │─│Compat  │─│Observ-│─│Stable │─│Scale &│
- │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │& Secur│ │& Cloud│ │ability│ │Release│ │Ecosys.│
+ │Released│─│Released│─│Released│─│Ready   │─│Correct │─│Compat  │─│Observ-│─│Stable │─│Scale &│
+ │ ✅      │ │ ✅      │ │ ✅      │ │ Soon   │ │& Secur│ │& Cloud│ │ability│ │Release│ │Ecosys.│
  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
 ```
 
@@ -230,7 +230,7 @@ GitHub Pages book grew from 14 to 20 pages:
 
 ## v0.2.2 — OFFSET, AUTO Mode, ALTER QUERY, Edge Cases & CDC Hardening
 
-**Status: Released (2026-03-08).**
+**Status: Ready for release (2026-03-08).**
 
 This milestone shipped paged TopK OFFSET support, AUTO-by-default refresh
 selection, ALTER QUERY, the remaining upgrade-tooling work, edge-case and WAL
@@ -271,6 +271,7 @@ tests). The `topk_offset` catalog column was pre-provisioned in v0.2.1.
 |------|-------------|--------|-----|
 | UG1 | Version mismatch check — scheduler warns if `.so` version ≠ SQL version | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.2 |
 | UG2 | FAQ upgrade section — 3 new entries with UPGRADING.md cross-links | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) §5.4 |
+| UG3 | CI and local upgrade automation now target 0.2.2 (`upgrade-check`, upgrade-image defaults, upgrade E2E env) | ✅ Done | [PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) |
 
 ### IMMEDIATE Mode Parity ✅
 
@@ -324,6 +325,7 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 - [x] `ORDER BY + LIMIT + OFFSET` defining queries accepted, refreshed, and E2E-tested
 - [x] `sql/pg_trickle--0.2.1--0.2.2.sql` exists (column pre-provisioned in 0.2.1; function signature updates)
 - [x] Upgrade completeness check passes for 0.2.1→0.2.2
+- [x] CI and local upgrade-E2E defaults target 0.2.2
 - [x] Version check fires at scheduler startup if `.so`/SQL versions diverge
 - [x] IMMEDIATE mode: recursive CTE semi-naive validated; `ivm_recursive_max_depth` depth guard added
 - [x] IMMEDIATE mode: TopK micro-refresh fully tested end-to-end (10 E2E tests)
@@ -594,7 +596,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
 | v0.2.0 — TopK, Diamond & Transactional IVM | ✔️ Complete | 62–78h | ✅ Released |
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
-| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | ✅ Released |
+| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | Ready for release |
 | v0.3.0 — Correctness, Security & Operations | 75–115h | 195–271h | |
 | v0.4.0 — Backward Compatibility, Cloud & Scale | 200–280h | 395–541h | |
 | v0.5.0 — Observability & Integration | 14–21h | 409–562h | |

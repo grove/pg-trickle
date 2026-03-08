@@ -56,6 +56,15 @@ Ensure the [CI workflow](../.github/workflows/ci.yml) passes on `main` with
 the version bump commit. All unit, integration, E2E, and pgrx tests must be
 green.
 
+Before tagging, make sure the upgrade automation also targets the new release:
+
+```bash
+just check-upgrade <previous-version> <new-version>
+
+# Confirm the local and CI upgrade-image / upgrade-E2E defaults
+# were advanced to the new release where applicable.
+```
+
 ### 5. Create and push the tag
 
 ```bash
@@ -179,6 +188,7 @@ Every release requires manual updates to the files below. Missing any of them le
 | `docs/UPGRADING.md` | Add the new version-specific migration notes and extend the supported upgrade-path table | Documents exactly what `ALTER EXTENSION ... UPDATE` will do and which chains are supported. |
 | `sql/pg_trickle--<old>--<new>.sql` | Add or update the hand-authored upgrade script for every SQL-surface change (new objects, changed signatures, changed defaults, view changes) | `ALTER EXTENSION ... UPDATE` only applies what is explicitly scripted; function defaults and signatures stored in `pg_proc` do not update themselves. |
 | `sql/archive/pg_trickle--<new>.sql` | Commit the generated full-install SQL baseline for the new version | Future upgrade-completeness checks and upgrade E2E tests need an exact baseline for the released version. |
+| `.github/workflows/ci.yml`, `justfile`, `tests/build_e2e_upgrade_image.sh`, `tests/Dockerfile.e2e-upgrade` | Advance the upgrade-check chain and default upgrade-E2E target version to the new release | Prevents release automation and local upgrade validation from getting stuck on the previous version after a new migration hop is added. |
 | `pg_trickle.control` | **No manual edit needed** — `default_version` is set to `'@CARGO_VERSION@'` and pgrx substitutes it at build time. Verify the substitution in the built artifact. | Ensures the SQL `CREATE EXTENSION` command installs the right version. |
 
 ### Checklist summary
@@ -192,6 +202,7 @@ Every release requires manual updates to the files below. Missing any of them le
 [ ] docs/UPGRADING.md — latest migration notes and supported chains added
 [ ] sql/pg_trickle--<old>--<new>.sql — covers every SQL-surface change
 [ ] sql/archive/pg_trickle--<new>.sql — archived full install SQL committed
+[ ] Upgrade automation defaults — CI/local upgrade checks and E2E target the new version
 [ ] git tag matches Cargo.toml version
 ```
 
