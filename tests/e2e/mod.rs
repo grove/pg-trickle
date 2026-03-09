@@ -250,6 +250,7 @@ async fn shared_container() -> &'static SharedContainer {
         .get_or_init(|| async {
             let (img_name, img_tag) = e2e_image();
             assert_docker_image_exists(&img_name, &img_tag).await;
+            let run_id = std::env::var("PGT_E2E_RUN_ID").ok();
 
             let mut image = GenericImage::new(img_name, img_tag)
                 .with_exposed_port(5432_u16.tcp())
@@ -257,7 +258,14 @@ async fn shared_container() -> &'static SharedContainer {
                     "database system is ready to accept connections",
                 ))
                 .with_env_var("POSTGRES_PASSWORD", "postgres")
-                .with_env_var("POSTGRES_DB", "postgres");
+                .with_env_var("POSTGRES_DB", "postgres")
+                .with_label("com.pgtrickle.test", "true")
+                .with_label("com.pgtrickle.suite", "full-e2e")
+                .with_label("com.pgtrickle.repo", "pg-stream");
+
+            if let Some(run_id) = run_id {
+                image = image.with_label("com.pgtrickle.run-id", run_id);
+            }
 
             if let Some(mount) = coverage_mount() {
                 image = image.with_mount(mount);
@@ -409,13 +417,21 @@ impl E2eDb {
     async fn new_with_db(db_name: &str) -> Self {
         let (img_name, img_tag) = e2e_image();
         assert_docker_image_exists(&img_name, &img_tag).await;
+        let run_id = std::env::var("PGT_E2E_RUN_ID").ok();
         let mut image = GenericImage::new(img_name, img_tag)
             .with_exposed_port(5432_u16.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
                 "database system is ready to accept connections",
             ))
             .with_env_var("POSTGRES_PASSWORD", "postgres")
-            .with_env_var("POSTGRES_DB", db_name);
+            .with_env_var("POSTGRES_DB", db_name)
+            .with_label("com.pgtrickle.test", "true")
+            .with_label("com.pgtrickle.suite", "full-e2e")
+            .with_label("com.pgtrickle.repo", "pg-stream");
+
+        if let Some(run_id) = run_id {
+            image = image.with_label("com.pgtrickle.run-id", run_id);
+        }
 
         // When running under the coverage harness, bind-mount a host
         // directory at /coverage so profraw files are written to the host.
@@ -455,6 +471,7 @@ impl E2eDb {
     async fn new_with_db_bench(db_name: &str) -> Self {
         let (img_name, img_tag) = e2e_image();
         assert_docker_image_exists(&img_name, &img_tag).await;
+        let run_id = std::env::var("PGT_E2E_RUN_ID").ok();
         let mut image = GenericImage::new(img_name, img_tag)
             .with_exposed_port(5432_u16.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
@@ -462,7 +479,14 @@ impl E2eDb {
             ))
             .with_env_var("POSTGRES_PASSWORD", "postgres")
             .with_env_var("POSTGRES_DB", db_name)
+            .with_label("com.pgtrickle.test", "true")
+            .with_label("com.pgtrickle.suite", "full-e2e")
+            .with_label("com.pgtrickle.repo", "pg-stream")
             .with_shm_size(268_435_456); // 256 MB shared memory
+
+        if let Some(run_id) = run_id {
+            image = image.with_label("com.pgtrickle.run-id", run_id);
+        }
 
         // When running under the coverage harness, bind-mount a host
         // directory at /coverage so profraw files are written to the host.
