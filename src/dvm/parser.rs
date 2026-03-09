@@ -1278,6 +1278,12 @@ impl OpTree {
                 let cols = self.output_columns();
                 if cols.is_empty() { None } else { Some(cols) }
             }
+            OpTree::ScalarSubquery { child, .. } => {
+                // Scalar subquery row identity comes from the outer child —
+                // the scalar column changes value for ALL rows simultaneously
+                // and does not affect which rows exist.
+                child.row_id_key_columns()
+            }
             // Join, UnionAll, RecursiveCte: complex hash, no simple column list
             _ => None,
         }
@@ -10615,14 +10621,15 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
             };
             parts.push(format!("{} : {}", key.to_sql(), val.to_sql()));
         }
-        let mut sql = format!("JSON_OBJECTAGG({})", parts.join(", "));
+        let mut inner = parts.join(", ");
         if joa.absent_on_null {
-            sql.push_str(" ABSENT ON NULL");
+            inner.push_str(" ABSENT ON NULL");
         }
         if joa.unique {
-            sql.push_str(" WITH UNIQUE KEYS");
+            inner.push_str(" WITH UNIQUE KEYS");
         }
-        unsafe { append_json_agg_clauses(&mut sql, joa.constructor) };
+        unsafe { append_json_agg_clauses(&mut inner, joa.constructor) };
+        let sql = format!("JSON_OBJECTAGG({inner})");
         Ok(Expr::Raw(sql))
     } else if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_JsonArrayAgg) } {
         // ── F10/F11: JSON_ARRAYAGG(expr [ORDER BY ...]) ──
@@ -10635,11 +10642,12 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
         } else {
             Expr::Raw("NULL".to_string())
         };
-        let mut sql = format!("JSON_ARRAYAGG({})", arg.to_sql());
+        let mut inner = arg.to_sql();
         if jaa.absent_on_null {
-            sql.push_str(" ABSENT ON NULL");
+            inner.push_str(" ABSENT ON NULL");
         }
-        unsafe { append_json_agg_clauses(&mut sql, jaa.constructor) };
+        unsafe { append_json_agg_clauses(&mut inner, jaa.constructor) };
+        let sql = format!("JSON_ARRAYAGG({inner})");
         Ok(Expr::Raw(sql))
     } else {
         // Catch-all: reject with clear error instead of silently producing broken SQL
