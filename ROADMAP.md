@@ -25,8 +25,8 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
                                                     ▼
  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
  │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 1.0.0  │ │ 1.x+   │
- │Released│─│Released│─│Released│─│Released│─│Mode & │─│Security│─│Compat │─│Observ-│─│Stable │─│Scale &│
- │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │Ops Gap│ │& Part.│ │& Cloud│ │ability│ │Release│ │Ecosys.│
+ │Released│─│Released│─│Released│─│Released│─│Mode & │─│Parallel│─│Compat │─│Observ-│─│Stable │─│Scale &│
+ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │Ops Gap│ │Sec/Part│ │& Cloud│ │ability│ │Release│ │Ecosys.│
  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
 ```
 
@@ -342,7 +342,8 @@ Remaining documentation gaps identified in Stage 7 of the gap analysis.
 ## v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish
 
 **Goal:** Close a small set of high-leverage correctness and operational gaps
-that do not need to wait for the larger v0.3.0 security and partitioning work.
+that do not need to wait for the larger v0.3.0 parallel refresh, security, and
+partitioning work.
 This milestone tightens refresh-mode behavior, makes CDC transitions easier to
 observe, and removes one silent correctness hazard in DIFFERENTIAL mode.
 
@@ -452,10 +453,30 @@ validations, resource leaks, and observability holes. Phased from quick wins
 
 ---
 
-## v0.3.0 — Security & Partitioning
+## v0.3.0 — Parallel Refresh, Security & Partitioning
 
-**Goal:** Harden security (RLS) and validate partitioned sources so the
-extension is safer to deploy in multi-tenant and real-world schemas.
+**Goal:** Deliver true parallel refresh first, then harden security (RLS) and
+validate partitioned sources so the extension is safer to deploy in
+multi-tenant and real-world schemas.
+
+### Parallel Refresh
+
+Detailed implementation is now tracked in
+[PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md). The older
+[REPORT_PARALLELIZATION.md](plans/performance/REPORT_PARALLELIZATION.md)
+remains the options-analysis precursor.
+
+This milestone is expected to improve refresh throughput and freshness latency
+for independent work, but not materially raise source-table write throughput on
+the current trigger-based CDC path.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| P1 | Phase 0–1: instrumentation, `dry_run`, and execution-unit DAG (atomic groups + IMMEDIATE closures) | 12–20h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
+| P2 | Phase 2–4: job table, worker budget, dynamic refresh workers, and ready-queue dispatch | 16–28h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
+| P3 | Phase 5–7: composite units, observability, rollout gating, and CI validation | 12–24h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
+
+> **Parallel refresh subtotal: ~40–72 hours**
 
 ### Row-Level Security (RLS) Support
 
@@ -496,9 +517,10 @@ partitioned storage tables are deferred to a future release.
 
 > **Partitioning subtotal: ~18–32 hours**
 
-> **v0.3.0 total: ~26–44 hours**
+> **v0.3.0 total: ~66–116 hours**
 
 **Exit criteria:**
+- [ ] `max_concurrent_refreshes` drives real parallel refresh via coordinator + dynamic refresh workers
 - [ ] RLS semantics documented; change buffers RLS-hardened; IVM triggers SECURITY DEFINER
 - [ ] RLS on stream table E2E-tested (DIFFERENTIAL + IMMEDIATE)
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
@@ -509,10 +531,10 @@ partitioned storage tables are deferred to a future release.
 ## v0.4.0 — Backward Compatibility, Cloud & Scale
 
 **Goal:** Widen the deployment target from PG 18-only to PG 16–18, enable
-true parallel refresh within a database, achieve compatibility with connection
-poolers (PgBouncer transaction mode), and validate correctness against
-external test corpora. After this milestone the extension is suitable for
-production use on mainstream PostgreSQL deployments including cloud providers.
+compatibility with connection poolers (PgBouncer transaction mode), and
+validate correctness against external test corpora. After this milestone the
+extension is suitable for production use on mainstream PostgreSQL deployments
+including cloud providers.
 
 ### PostgreSQL Backward Compatibility (PG 16–18)
 
@@ -530,25 +552,6 @@ PG 14–15 support can follow in a later release.
 | BC5 | WAL decoder validation against PG 16–17 `pgoutput` format | 8–12h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §6A |
 
 > **Backward compatibility subtotal: ~38–56 hours**
-
-### Parallel Refresh
-
-Detailed implementation is now tracked in
-[PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md). The older
-[REPORT_PARALLELIZATION.md](plans/performance/REPORT_PARALLELIZATION.md)
-remains the options-analysis precursor.
-
-This milestone is expected to improve refresh throughput and freshness latency
-for independent work, but not materially raise source-table write throughput on
-the current trigger-based CDC path.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| P1 | Phase 0–1: instrumentation, `dry_run`, and execution-unit DAG (atomic groups + IMMEDIATE closures) | 12–20h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
-| P2 | Phase 2–4: job table, worker budget, dynamic refresh workers, and ready-queue dispatch | 16–28h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
-| P3 | Phase 5–7: composite units, observability, rollout gating, and CI validation | 12–24h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
-
-> **Parallel refresh subtotal: ~40–72 hours**
 
 ### Connection Pooler Compatibility
 
@@ -578,11 +581,10 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **External test suites subtotal: ~4–7 days**
 
-> **v0.4.0 total: ~200–280 hours**
+> **v0.4.0 total: ~160–208 hours**
 
 **Exit criteria:**
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
-- [ ] `max_concurrent_refreshes` drives real parallel refresh via coordinator + dynamic refresh workers
 - [ ] WAL decoder validated against PG 16–17 `pgoutput` format
 - [ ] CI matrix covers PG 16, 17, 18
 - [ ] pg_trickle works correctly under PgBouncer transaction-mode pooling
@@ -692,8 +694,8 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
 | v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | ✅ Released |
 | v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish | 45–66h | 165–222h | |
-| v0.3.0 — Security & Partitioning | 26–44h | 191–266h | |
-| v0.4.0 — Backward Compatibility, Cloud & Scale | 200–280h | 391–546h | |
+| v0.3.0 — Parallel Refresh, Security & Partitioning | 66–116h | 231–338h | |
+| v0.4.0 — Backward Compatibility, Cloud & Scale | 160–208h | 391–546h | |
 | v0.5.0 — Observability & Integration | 14–21h | 405–567h | |
 | v1.0.0 — Stable release | 18–27h | 423–594h | |
 | Post-1.0 (ecosystem) | 88–134h | 511–728h | |

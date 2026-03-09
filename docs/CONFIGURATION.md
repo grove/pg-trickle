@@ -629,7 +629,7 @@ SET pg_trickle.foreign_table_polling = true;
 ### pg_trickle.max_concurrent_refreshes
 
 > **Reserved for future use.** This setting is accepted and stored but has no
-> effect in v0.2.2. Parallel refresh is planned for v0.4.0.
+> effect in v0.2.x. Parallel refresh is planned for v0.3.0.
 
 Maximum number of stream tables that can be refreshed simultaneously.
 
