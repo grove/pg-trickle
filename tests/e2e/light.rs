@@ -29,9 +29,8 @@
 //! - No auto-refresh (`wait_for_auto_refresh` will always time out).
 //! - Custom GUCs (`SET pg_trickle.*`) may not be available in all
 //!   connections (registered only when `.so` is first loaded).
-//! - Locally on macOS, `cargo pgrx package` produces a `.dylib` that
-//!   won't work inside a Linux container.  Use `just test-e2e-fast`
-//!   instead.
+//! - On macOS, the Light E2E runner must package Linux artifacts via the
+//!   Docker builder image and pass them through `PGT_EXTENSION_DIR`.
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::{

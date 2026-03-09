@@ -93,8 +93,8 @@ test-e2e-fast:
 package-extension:
     bash ./scripts/run_light_e2e_tests.sh --package-only
 
-# Run light-E2E tests (stock postgres container, no custom Docker image)
-# Only works on Linux — macOS produces .dylib that can't run in a Linux container.
+# Run light-E2E tests (stock postgres container, no custom Docker image).
+# On macOS the runner builds Linux package artifacts in the Docker builder image.
 [group: "test"]
 test-light-e2e:
     bash ./scripts/run_light_e2e_tests.sh --package
