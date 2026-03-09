@@ -1039,14 +1039,7 @@ pub struct Phase1Result {
 /// separate transaction (because the SPI connection is broken after a
 /// caught panic).
 pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Result, PgTrickleError> {
-    // Only process if CDC mode allows WAL
     let cdc_mode = config::pg_trickle_cdc_mode();
-    if cdc_mode == "trigger" {
-        return Ok(Phase1Result {
-            pending_slots: vec![],
-            pending_aborts: vec![],
-        });
-    }
 
     // Get all dependencies to check their CDC mode
     let all_deps = StDependency::get_all()?;
