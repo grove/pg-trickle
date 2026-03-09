@@ -1119,9 +1119,18 @@ fn upstream_change_state(
     )
 }
 
-/// Returns `true` if any TABLE-type upstream source has rows in its CDC change
-/// buffer that have not yet been consumed by a differential refresh.
+/// Returns `true` if any TABLE or FOREIGN_TABLE upstream source has rows in
+/// its CDC change buffer that have not yet been consumed by a refresh.
 fn has_table_source_changes(st: &StreamTableMeta) -> bool {
+    if let Err(e) = refresh::poll_foreign_table_sources_for_st(st) {
+        log!(
+            "pg_trickle: failed to poll foreign table sources for {}.{} while checking upstream changes: {}",
+            st.pgt_schema,
+            st.pgt_name,
+            e,
+        );
+    }
+
     let change_schema = config::pg_trickle_change_buffer_schema();
     let source_oids = get_source_oids_for_st(st.pgt_id);
 
@@ -1662,7 +1671,7 @@ fn get_source_oids_for_st(pgt_id: i64) -> Vec<pg_sys::Oid> {
     StDependency::get_for_st(pgt_id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|dep| dep.source_type == "TABLE")
+        .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
         .map(|dep| dep.source_relid)
         .collect()
 }
