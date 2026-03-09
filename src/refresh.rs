@@ -551,7 +551,12 @@ const WIDE_TABLE_HASH_THRESHOLD: usize = 50;
 /// Build the IS DISTINCT FROM clause for the MERGE `WHEN MATCHED` guard.
 ///
 /// For tables with ≤ [`WIDE_TABLE_HASH_THRESHOLD`] columns, generates
-/// per-column `st."col" IS DISTINCT FROM d."col"` checks joined with `OR`.
+/// per-column text comparisons joined with `OR`.
+///
+/// The text cast avoids PostgreSQL's requirement that the underlying type
+/// implement `=` for `IS DISTINCT FROM` to work. This matters for `json`
+/// aggregate outputs, which intentionally do not have a native equality
+/// operator.
 ///
 /// For wider tables (F41), generates a single `md5()` hash comparison:
 /// ```sql
@@ -564,7 +569,7 @@ fn build_is_distinct_clause(user_cols: &[String]) -> String {
             .iter()
             .map(|c| {
                 let qc = format!("\"{}\"", c.replace('"', "\"\""));
-                format!("st.{qc} IS DISTINCT FROM d.{qc}")
+                format!("st.{qc}::text IS DISTINCT FROM d.{qc}::text")
             })
             .collect::<Vec<_>>()
             .join(" OR ")
@@ -960,7 +965,7 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     } else {
         col_list
             .iter()
-            .map(|c| format!("{quoted_table}.{c} IS DISTINCT FROM __pgt_topk_src.{c}"))
+            .map(|c| format!("{quoted_table}.{c}::text IS DISTINCT FROM __pgt_topk_src.{c}::text"))
             .collect::<Vec<_>>()
             .join(" OR ")
     };
