@@ -1207,6 +1207,25 @@ pub fn post_full_refresh_cleanup(st: &StreamTableMeta) {
     cleanup_change_buffers_by_frontier(&change_schema, &source_oids);
 }
 
+/// Poll all FOREIGN_TABLE dependencies for a stream table before selecting a
+/// new differential frontier.
+///
+/// Polling writes synthetic CDC rows into the local change buffers and updates
+/// the per-source snapshot tables. Callers must do this before capturing the
+/// new upper frontier so the synthetic rows fall within the refresh window.
+pub fn poll_foreign_table_sources_for_st(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+
+    for dep in StDependency::get_for_st(st.pgt_id)?
+        .into_iter()
+        .filter(|dep| dep.source_type == "FOREIGN_TABLE")
+    {
+        crate::cdc::poll_foreign_table_changes(dep.source_relid, &change_schema)?;
+    }
+
+    Ok(())
+}
+
 /// Execute a NO_DATA refresh: just advance the data timestamp.
 pub fn execute_no_data_refresh(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
     // Record that we checked — but do NOT update data_timestamp.
@@ -1442,28 +1461,6 @@ pub fn execute_differential_refresh(
     // ensuring stale change buffer rows are removed even when the
     // thread-local queue is empty.
     cleanup_change_buffers_by_frontier(&change_schema, &catalog_source_oids);
-
-    // ── EC-05: Poll foreign table sources ────────────────────────────
-    // For any FOREIGN_TABLE source, snapshot-diff the current contents
-    // and inject delta rows into the change buffer before the decision
-    // query checks for new data.
-    {
-        let ft_deps: Vec<_> = StDependency::get_for_st(st.pgt_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|dep| dep.source_type == "FOREIGN_TABLE")
-            .collect();
-        for dep in &ft_deps {
-            if let Err(e) = crate::cdc::poll_foreign_table_changes(dep.source_relid, &change_schema)
-            {
-                pgrx::warning!(
-                    "[pg_trickle] EC-05: failed to poll foreign table source OID {} \
-                     for ST {schema}.{name}: {e}",
-                    dep.source_relid.to_u32(),
-                );
-            }
-        }
-    }
 
     let t_decision_start = Instant::now();
 

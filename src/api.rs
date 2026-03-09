@@ -2139,6 +2139,8 @@ fn execute_manual_differential_refresh(
         }
     }
 
+    refresh::poll_foreign_table_sources_for_st(st)?;
+
     // Mixed-dependency guard: if ANY upstream is a STREAM_TABLE, the DVM
     // delta SQL will reference change buffers that don't exist for stream
     // tables (they have no CDC triggers). Fall back to FULL refresh,
@@ -2253,7 +2255,7 @@ fn get_source_oids_for_manual_refresh(pgt_id: i64) -> Result<Vec<pg_sys::Oid>, P
     let deps = StDependency::get_for_st(pgt_id)?;
     Ok(deps
         .into_iter()
-        .filter(|dep| dep.source_type == "TABLE")
+        .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
         .map(|dep| dep.source_relid)
         .collect())
 }
