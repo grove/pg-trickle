@@ -62,9 +62,19 @@ enum ContainerLease {
 ///
 /// Checks `PGT_EXTENSION_DIR` env var first, then falls back to the
 /// default pgrx package output path.
+fn is_valid_light_e2e_package_dir(dir: &str) -> bool {
+    let base = std::path::Path::new(dir);
+    base.join("usr/share/postgresql/18/extension/pg_trickle.control")
+        .exists()
+        && base
+            .join("usr/lib/postgresql/18/lib/pg_trickle.so")
+            .exists()
+}
+
 fn find_extension_dir() -> String {
     if let Ok(dir) = std::env::var("PGT_EXTENSION_DIR")
         && !dir.is_empty()
+        && is_valid_light_e2e_package_dir(&dir)
     {
         return dir;
     }
@@ -72,14 +82,16 @@ fn find_extension_dir() -> String {
     // Default: cargo pgrx package output
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let default_path = format!("{}/target/release/pg_trickle-pg18", manifest_dir);
-    if std::path::Path::new(&default_path).exists() {
+    if is_valid_light_e2e_package_dir(&default_path) {
         return default_path;
     }
 
     panic!(
-        "Extension package directory not found.\n\
-         Run `cargo pgrx package --pg-config $(pg_config --bindir)/pg_config` first,\n\
-         or set PGT_EXTENSION_DIR to the package output directory."
+        "Valid Linux light-E2E extension package directory not found.\n\
+         Expected packaged artifacts under usr/share/postgresql/18/extension and\n\
+         usr/lib/postgresql/18/lib.\n\
+         Run `bash ./scripts/run_light_e2e_tests.sh --package-only` first,\n\
+         or set PGT_EXTENSION_DIR to a valid Linux package output directory."
     );
 }
 

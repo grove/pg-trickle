@@ -11,6 +11,14 @@ LIGHT_E2E_PACKAGE_DIR="${PROJECT_DIR}/target/light-e2e/pg_trickle-pg18"
 LIGHT_E2E_LABEL_TEST="com.pgtrickle.test=true"
 LIGHT_E2E_LABEL_SUITE="com.pgtrickle.suite=light-e2e"
 
+is_valid_light_e2e_package_dir() {
+    local dir="$1"
+
+    [[ -n "$dir" ]] || return 1
+    [[ -f "$dir/usr/share/postgresql/18/extension/pg_trickle.control" ]] || return 1
+    [[ -f "$dir/usr/lib/postgresql/18/lib/pg_trickle.so" ]] || return 1
+}
+
 make_light_e2e_run_id() {
     printf 'light-e2e-%s-%s' "$$" "$(date +%s)"
 }
@@ -197,16 +205,16 @@ package_extension() {
 }
 
 set_existing_extension_dir() {
-    if [[ -n "${PGT_EXTENSION_DIR:-}" ]]; then
+    if is_valid_light_e2e_package_dir "${PGT_EXTENSION_DIR:-}"; then
         return
     fi
 
-    if [[ -d "${LIGHT_E2E_PACKAGE_DIR}" ]]; then
+    if is_valid_light_e2e_package_dir "${LIGHT_E2E_PACKAGE_DIR}"; then
         export PGT_EXTENSION_DIR="${LIGHT_E2E_PACKAGE_DIR}"
         return
     fi
 
-    if [[ -d "${PROJECT_DIR}/target/release/pg_trickle-pg18" ]]; then
+    if is_valid_light_e2e_package_dir "${PROJECT_DIR}/target/release/pg_trickle-pg18"; then
         export PGT_EXTENSION_DIR="${PROJECT_DIR}/target/release/pg_trickle-pg18"
     fi
 }
@@ -292,6 +300,11 @@ if [[ "$package_before_run" == true ]]; then
 fi
 
 set_existing_extension_dir
+
+if [[ "$package_before_run" != true ]] && ! is_valid_light_e2e_package_dir "${PGT_EXTENSION_DIR:-}"; then
+    echo "No valid Linux light-E2E package found; packaging extension artifacts now"
+    package_extension
+fi
 
 if [[ "$package_only" == true ]]; then
     exit 0
