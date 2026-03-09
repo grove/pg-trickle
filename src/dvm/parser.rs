@@ -9251,32 +9251,9 @@ unsafe fn parse_appended_scalar_target_subqueries(
         let alias =
             unsafe { target_alias_for_res_target(rt, plain_exprs.len() + scalar_targets.len()) };
 
-        let is_bare_scalar_target = unsafe { pgrx::is_a(rt.val, pg_sys::NodeTag::T_SubLink) } && {
-            let sublink = unsafe { &*(rt.val as *const pg_sys::SubLink) };
-            sublink.subLinkType == pg_sys::SubLinkType::EXPR_SUBLINK
-        };
-
-        if is_bare_scalar_target {
-            let sublink = unsafe { &*(rt.val as *const pg_sys::SubLink) };
-            if sublink.subselect.is_null()
-                || !unsafe { pgrx::is_a(sublink.subselect, pg_sys::NodeTag::T_SelectStmt) }
-            {
-                return Err(PgTrickleError::QueryParseError(
-                    "Scalar subquery target must contain a SELECT".into(),
-                ));
-            }
-
-            let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
-            let subquery = if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
-                unsafe { parse_set_operation(inner_select, cte_ctx)? }
-            } else {
-                unsafe { parse_select_stmt(inner_select, "", cte_ctx)? }
-            };
-
-            let mut source_oids = subquery.source_oids();
-            source_oids.sort_unstable();
-            source_oids.dedup();
-
+        if let Some((subquery, source_oids)) =
+            unsafe { parse_scalar_target_subquery(rt.val, cte_ctx)? }
+        {
             scalar_targets.push(ScalarTarget {
                 alias,
                 subquery,
@@ -9319,6 +9296,100 @@ unsafe fn parse_appended_scalar_target_subqueries(
     }
 
     Ok(Some(tree))
+}
+
+/// Parse a bare scalar subquery target into an OpTree.
+///
+/// Accepts both:
+/// - raw parser `T_SubLink` nodes for `EXPR_SUBLINK`, and
+/// - `Expr::Raw("(SELECT ...)")` fallback expressions produced by `node_to_expr()`.
+unsafe fn parse_scalar_target_subquery(
+    node: *mut pg_sys::Node,
+    cte_ctx: &mut CteParseContext,
+) -> Result<Option<(OpTree, Vec<u32>)>, PgTrickleError> {
+    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_SubLink) } {
+        let sublink = unsafe { &*(node as *const pg_sys::SubLink) };
+        if sublink.subLinkType != pg_sys::SubLinkType::EXPR_SUBLINK {
+            return Ok(None);
+        }
+        if sublink.subselect.is_null()
+            || !unsafe { pgrx::is_a(sublink.subselect, pg_sys::NodeTag::T_SelectStmt) }
+        {
+            return Err(PgTrickleError::QueryParseError(
+                "Scalar subquery target must contain a SELECT".into(),
+            ));
+        }
+
+        let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
+        let subquery = if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
+            unsafe { parse_set_operation(inner_select, cte_ctx)? }
+        } else {
+            unsafe { parse_select_stmt(inner_select, "", cte_ctx)? }
+        };
+
+        let mut source_oids = subquery.source_oids();
+        source_oids.sort_unstable();
+        source_oids.dedup();
+        return Ok(Some((subquery, source_oids)));
+    }
+
+    let expr = unsafe { node_to_expr(node)? };
+    let Expr::Raw(raw_sql) = expr else {
+        return Ok(None);
+    };
+
+    let Some(inner_sql) = extract_bare_scalar_subquery_sql(&raw_sql) else {
+        return Ok(None);
+    };
+
+    let c_sql = std::ffi::CString::new(inner_sql.as_str()).map_err(|_| {
+        PgTrickleError::QueryParseError("Scalar subquery contains null bytes".into())
+    })?;
+
+    let raw_list =
+        unsafe { pg_sys::raw_parser(c_sql.as_ptr(), pg_sys::RawParseMode::RAW_PARSE_DEFAULT) };
+    if raw_list.is_null() {
+        return Err(PgTrickleError::QueryParseError(
+            "Failed to parse scalar subquery target".into(),
+        ));
+    }
+
+    let list = unsafe { pgrx::PgList::<pg_sys::RawStmt>::from_pg(raw_list) };
+    let raw_stmt = list.head().ok_or_else(|| {
+        PgTrickleError::QueryParseError("Scalar subquery target parse tree is empty".into())
+    })?;
+    let stmt = unsafe { (*raw_stmt).stmt };
+    if !unsafe { pgrx::is_a(stmt, pg_sys::NodeTag::T_SelectStmt) } {
+        return Err(PgTrickleError::QueryParseError(
+            "Scalar subquery target must parse to a SELECT".into(),
+        ));
+    }
+
+    let inner_select = unsafe { &*(stmt as *const pg_sys::SelectStmt) };
+    let subquery = if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
+        unsafe { parse_set_operation(inner_select, cte_ctx)? }
+    } else {
+        unsafe { parse_select_stmt(inner_select, "", cte_ctx)? }
+    };
+
+    let mut source_oids = subquery.source_oids();
+    source_oids.sort_unstable();
+    source_oids.dedup();
+    Ok(Some((subquery, source_oids)))
+}
+
+fn extract_bare_scalar_subquery_sql(raw_sql: &str) -> Option<String> {
+    let trimmed = raw_sql.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return None;
+    }
+
+    let inner = trimmed[1..trimmed.len() - 1].trim();
+    if inner.len() < 6 || !inner[..6].eq_ignore_ascii_case("SELECT") {
+        return None;
+    }
+
+    Some(inner.to_string())
 }
 
 /// Parse a FROM clause item (RangeVar, JoinExpr, or RangeSubselect) into an OpTree.
