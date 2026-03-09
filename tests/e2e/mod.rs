@@ -782,15 +782,24 @@ impl E2eDb {
             ))
             .await;
 
-        // Build a visibility filter for EXCEPT STs.
-        // - EXCEPT (set): visible iff count_l > 0 AND count_r = 0
-        // - EXCEPT ALL:   visible iff count_l > count_r
-        // INTERSECT STs don't need this (invisible rows are deleted).
-        let except_filter = if has_dual_counts && defining_query.to_uppercase().contains("EXCEPT") {
-            if defining_query.to_uppercase().contains("EXCEPT ALL") {
+        // Build a visibility filter for set operation STs.
+        // INTERSECT/EXCEPT STs keep invisible rows for multiplicity tracking.
+        // - INTERSECT (set): visible iff LEAST(count_l, count_r) > 0
+        // - INTERSECT ALL:   visible rows = LEAST(count_l, count_r), expanded
+        // - EXCEPT (set):    visible iff count_l > 0 AND count_r = 0
+        // - EXCEPT ALL:      visible iff count_l > count_r
+        let dq_upper = defining_query.to_uppercase();
+        let set_op_filter = if has_dual_counts {
+            if dq_upper.contains("INTERSECT ALL") {
+                " WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
+            } else if dq_upper.contains("INTERSECT") {
+                " WHERE __pgt_count_l > 0 AND __pgt_count_r > 0"
+            } else if dq_upper.contains("EXCEPT ALL") {
                 " WHERE __pgt_count_l > __pgt_count_r"
-            } else {
+            } else if dq_upper.contains("EXCEPT") {
                 " WHERE __pgt_count_l > 0 AND __pgt_count_r = 0"
+            } else {
+                ""
             }
         } else {
             ""
@@ -802,21 +811,21 @@ impl E2eDb {
             // json columns present: cast them on both sides of EXCEPT
             format!(
                 "SELECT NOT EXISTS ( \
-                    (SELECT {cast_cols} FROM {st_table}{except_filter} \
+                    (SELECT {cast_cols} FROM {st_table}{set_op_filter} \
                      EXCEPT \
                      SELECT {cast_cols} FROM ({defining_query}) __pgt_dq) \
                     UNION ALL \
                     (SELECT {cast_cols} FROM ({defining_query}) __pgt_dq2 \
                      EXCEPT \
-                     SELECT {cast_cols} FROM {st_table}{except_filter}) \
+                     SELECT {cast_cols} FROM {st_table}{set_op_filter}) \
                 )"
             )
         } else {
             format!(
                 "SELECT NOT EXISTS ( \
-                    (SELECT {raw_cols} FROM {st_table}{except_filter} EXCEPT ({defining_query})) \
+                    (SELECT {raw_cols} FROM {st_table}{set_op_filter} EXCEPT ({defining_query})) \
                     UNION ALL \
-                    (({defining_query}) EXCEPT SELECT {raw_cols} FROM {st_table}{except_filter}) \
+                    (({defining_query}) EXCEPT SELECT {raw_cols} FROM {st_table}{set_op_filter}) \
                 )"
             )
         };
