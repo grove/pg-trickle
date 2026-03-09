@@ -12,7 +12,7 @@
 |---|---|---|
 | Phase 1: Trigger detection + explicit DML | ✅ Complete | `has_user_triggers()` in cdc.rs, explicit DML path in refresh.rs, `CachedMergeTemplate` extended, per-step profiling |
 | Phase 2: FULL refresh trigger support | ❌ Will not implement | Row-level triggers suppressed during FULL refresh via `DISABLE TRIGGER USER` + `NOTIFY pgtrickle_refresh`. Snapshot-diff replay rejected — see [Phase 2 Decision](#phase-2-decision-will-not-implement). |
-| Phase 3: Documentation + GUC + DDL warning | ✅ Complete | `pg_trickle.user_triggers` GUC (auto/on/off), DDL warning in hooks.rs, docs updated (SQL_REFERENCE.md, FAQ.md, CONFIGURATION.md) |
+| Phase 3: Documentation + GUC + DDL warning | ✅ Complete | `pg_trickle.user_triggers` GUC (canonical `auto` / `off`, deprecated `on` alias), DDL warning in hooks.rs, docs updated (SQL_REFERENCE.md, FAQ.md, CONFIGURATION.md) |
 
 **Files modified:**
 - `src/cdc.rs` — `has_user_triggers()`
@@ -22,7 +22,7 @@
 - `docs/SQL_REFERENCE.md` — User triggers now ✅ Supported (DIFFERENTIAL)
 - `docs/FAQ.md` — Rewrote trigger FAQ entries, added GUC to reference table
 - `docs/CONFIGURATION.md` — Added `pg_trickle.user_triggers` section
-- `tests/e2e_user_trigger_tests.rs` — 10 E2E tests (INSERT/UPDATE/DELETE triggers, no-op skip, audit trail, GUC control, FULL suppression, BEFORE trigger)
+- `tests/e2e_user_trigger_tests.rs` — 11 E2E tests (INSERT/UPDATE/DELETE triggers, no-op skip, audit trail, GUC control, deprecated `on` alias compatibility, FULL suppression, BEFORE trigger)
 - `tests/trigger_detection_tests.rs` — 7 integration tests for `has_user_triggers()` SQL pattern
 
 **Tests:** 841 unit tests pass, 7 new integration tests pass, 10 new E2E tests (require `just build-e2e-image`).
@@ -548,7 +548,7 @@ row-level triggers.
 /// Enable user-trigger-aware refresh paths.
 /// - "auto" (default): use explicit DML when user triggers are detected
 /// - "off": suppress user triggers during refresh (current behavior)
-/// - "on": always use explicit DML path (even without triggers, for testing)
+/// - "on": deprecated compatibility alias for "auto"
 pub static PGS_USER_TRIGGERS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 ```

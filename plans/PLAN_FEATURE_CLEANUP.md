@@ -231,7 +231,7 @@ for users who need to tune MERGE performance on large deltas.
 
 #### Background
 
-`pg_trickle.user_triggers` accepts: `auto` (default), `on`, `off`.
+`pg_trickle.user_triggers` originally accepted: `auto` (default), `on`, `off`.
 
 - `auto`: detect user-defined row-level triggers on the stream table and
   use explicit DML (DELETE + UPDATE + INSERT) so they fire correctly
@@ -264,9 +264,12 @@ footgun.
 - ❌ Removes an escape hatch for the rare case where explicit DML has
   unacceptable overhead and the user knowingly has no triggers
 
-**Decision:** Defer to v0.3.0. The value difference between `on` and `auto`
-is small. Document the footgun risk of `off` in the GUC description. Not
-worth the churn before v0.2.0.
+**Decision:** Implemented in v0.2.3 with backward compatibility. Runtime
+behavior is now canonicalized to `auto` and `off`; the legacy `on` value is
+still accepted as a deprecated alias for `auto` so existing deployments do
+not break.
+
+**Status: DONE ✅**
 
 ---
 
@@ -317,7 +320,7 @@ WAL CDC is pre-production in v0.2.0. No code change.
 | C2 | Implement missing `resume_stream_table()` | P0 | 1–2h | ✅ Done |
 | C3 | Document `max_concurrent_refreshes` as reserved | P1 | 30 min | ✅ Done |
 | C4 | Keep both merge GUCs as-is | P2 | — | ✅ No-op |
-| C5 | Simplify `user_triggers` GUC | P3 | Defer to v0.3.0 | ⏳ Deferred |
+| C5 | Simplify `user_triggers` GUC | P3 | Canonical `auto` / `off`, keep `on` as deprecated alias | ✅ Done |
 | C6 | Document WAL GUCs as pre-production | P3 | 30 min | ✅ Done |
 
 **Total for v0.2.0 (C1–C3 + C6):** completed.

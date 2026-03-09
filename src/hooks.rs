@@ -929,13 +929,13 @@ fn handle_create_trigger(cmd: &DdlCommand) {
         .object_identity
         .as_deref()
         .unwrap_or("(unknown trigger)");
-    let user_triggers_mode = config::pg_trickle_user_triggers();
+    let user_triggers_mode = config::pg_trickle_user_triggers_mode();
 
-    if user_triggers_mode == "off" {
+    if user_triggers_mode == config::UserTriggersMode::Off {
         pgrx::warning!(
             "pg_trickle: trigger {} is on a stream table, but pg_trickle.user_triggers = 'off'. \
              This trigger will NOT fire correctly during refresh. \
-             Set pg_trickle.user_triggers = 'auto' or 'on' to enable trigger support.",
+             Set pg_trickle.user_triggers = 'auto' to enable trigger support.",
             trigger_identity,
         );
     } else {

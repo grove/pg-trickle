@@ -82,10 +82,25 @@ pub static PGS_USE_PREPARED_STATEMENTS: GucSetting<bool> = GucSetting::<bool>::n
 /// - `"auto"` (default): Detect user-defined row-level triggers on the
 ///   stream table and automatically use explicit DML (DELETE + UPDATE +
 ///   INSERT) so triggers fire with correct `TG_OP`, `OLD`, and `NEW`.
-/// - `"on"`: Always use explicit DML, even if no user triggers exist.
 /// - `"off"`: Always use MERGE; user triggers will NOT fire correctly.
+/// - `"on"`: Deprecated compatibility alias for `"auto"`.
 pub static PGS_USER_TRIGGERS: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserTriggersMode {
+    Auto,
+    Off,
+}
+
+impl UserTriggersMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserTriggersMode::Auto => "auto",
+            UserTriggersMode::Off => "off",
+        }
+    }
+}
 
 /// CDC mechanism selection.
 ///
@@ -99,6 +114,20 @@ pub static PGS_CDC_MODE: GucSetting<Option<std::ffi::CString>> =
 /// Maximum time (seconds) to wait for the WAL decoder to catch up during
 /// transition from triggers to WAL-based CDC before falling back to triggers.
 pub static PGS_WAL_TRANSITION_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(300);
+
+/// Warning threshold (in MB) for retained WAL on pg_trickle replication slots.
+///
+/// When a WAL-mode source retains more than this amount of WAL, pg_trickle:
+/// - emits a `slot_lag_warning` NOTIFY event from the scheduler, and
+/// - reports a WARN row in `pgtrickle.health_check()`.
+pub static PGS_SLOT_LAG_WARNING_THRESHOLD_MB: GucSetting<i32> = GucSetting::<i32>::new(100);
+
+/// Critical threshold (in MB) for retained WAL on pg_trickle replication slots.
+///
+/// When a WAL-mode source retains more than this amount of WAL,
+/// `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert
+/// for the source.
+pub static PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
 /// When true, schema-altering DDL (column ADD/DROP/RENAME/ALTER TYPE) on
 /// source tables used by stream tables is blocked with an ERROR instead of
@@ -290,10 +319,10 @@ pub fn register_gucs() {
 
     GucRegistry::define_string_guc(
         c"pg_trickle.user_triggers",
-        c"User-trigger handling: auto, on, or off.",
-        c"'auto' detects row-level user triggers and switches to explicit DML so they fire correctly. \
-           'on' forces explicit DML even without triggers. \
-           'off' always uses MERGE (triggers will NOT fire correctly).",
+          c"User-trigger handling: auto or off.",
+          c"'auto' detects row-level user triggers and switches to explicit DML so they fire correctly. \
+              'off' always uses MERGE (triggers will NOT fire correctly). \
+              'on' is accepted as a deprecated alias for 'auto'.",
         &PGS_USER_TRIGGERS,
         GucContext::Suset,
         GucFlags::default(),
@@ -320,6 +349,31 @@ pub fn register_gucs() {
         &PGS_WAL_TRANSITION_TIMEOUT,
         10,    // min: 10 seconds
         3_600, // max: 1 hour
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.slot_lag_warning_threshold_mb",
+        c"WAL slot lag warning threshold in MB.",
+        c"When a pg_trickle WAL replication slot retains more than this much WAL, \
+           the scheduler emits a slot_lag_warning NOTIFY event and pgtrickle.health_check() \
+           reports WARN for slot_lag.",
+        &PGS_SLOT_LAG_WARNING_THRESHOLD_MB,
+        1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.slot_lag_critical_threshold_mb",
+        c"WAL slot lag critical threshold in MB.",
+        c"When a pg_trickle WAL replication slot retains more than this much WAL, \
+           pgtrickle.check_cdc_health() reports slot_lag_exceeds_threshold for the source.",
+        &PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB,
+        1,
+        1_048_576,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -474,12 +528,24 @@ pub fn pg_trickle_use_prepared_statements() -> bool {
     PGS_USE_PREPARED_STATEMENTS.get()
 }
 
-/// Returns the user-trigger handling mode: `"auto"`, `"on"`, or `"off"`.
-pub fn pg_trickle_user_triggers() -> String {
-    PGS_USER_TRIGGERS
+/// Returns the canonical user-trigger handling mode.
+///
+/// `on` is preserved as a deprecated input alias for backward compatibility
+/// but is normalized to `auto` at runtime.
+pub fn pg_trickle_user_triggers_mode() -> UserTriggersMode {
+    match PGS_USER_TRIGGERS
         .get()
-        .map(|cs| cs.to_str().unwrap_or("auto").to_string())
-        .unwrap_or_else(|| "auto".to_string())
+        .and_then(|cs| cs.to_str().ok().map(str::to_ascii_lowercase))
+        .as_deref()
+    {
+        Some("off") => UserTriggersMode::Off,
+        _ => UserTriggersMode::Auto,
+    }
+}
+
+/// Returns the canonical user-trigger handling mode as a string.
+pub fn pg_trickle_user_triggers() -> String {
+    pg_trickle_user_triggers_mode().as_str().to_string()
 }
 
 /// Returns the CDC mode: `"auto"`, `"trigger"`, or `"wal"`.
@@ -493,6 +559,16 @@ pub fn pg_trickle_cdc_mode() -> String {
 /// Returns the WAL transition timeout in seconds.
 pub fn pg_trickle_wal_transition_timeout() -> i32 {
     PGS_WAL_TRANSITION_TIMEOUT.get()
+}
+
+/// Returns the WAL slot lag warning threshold in bytes.
+pub fn pg_trickle_slot_lag_warning_threshold_bytes() -> i64 {
+    PGS_SLOT_LAG_WARNING_THRESHOLD_MB.get() as i64 * 1024 * 1024
+}
+
+/// Returns the WAL slot lag critical threshold in bytes.
+pub fn pg_trickle_slot_lag_critical_threshold_bytes() -> i64 {
+    PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB.get() as i64 * 1024 * 1024
 }
 
 /// Returns whether source DDL blocking is enabled.

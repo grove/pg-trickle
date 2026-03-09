@@ -36,7 +36,7 @@ pub use light::E2eDb;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 #[cfg(not(feature = "light-e2e"))]
 use std::sync::{
-    Mutex,
+    Arc, LazyLock, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 #[cfg(not(feature = "light-e2e"))]
@@ -55,6 +55,9 @@ static SHARED_DB_COUNTER: AtomicUsize = AtomicUsize::new(1);
 #[cfg(not(feature = "light-e2e"))]
 static SHARED_CONTAINER: tokio::sync::OnceCell<SharedContainer> =
     tokio::sync::OnceCell::const_new();
+#[cfg(not(feature = "light-e2e"))]
+static SHARED_POSTGRES_DB_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
 #[cfg(not(feature = "light-e2e"))]
 struct SharedContainer {
@@ -215,19 +218,16 @@ async fn reset_postgres_database(admin_connection_string: &str) {
 
     // Background-worker tests share the `postgres` database and use
     // `ALTER SYSTEM` to speed up the scheduler. Those changes persist in
-    // `postgresql.auto.conf`, so clear them before recreating the extension
-    // to keep each test independent of execution order.
-    sqlx::query("ALTER SYSTEM RESET ALL")
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to reset shared postgres ALTER SYSTEM state: {e}"));
-    sqlx::query("SELECT pg_reload_conf()")
-        .execute(&admin_pool)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to reload config during postgres reset: {e}"));
-
+    // `postgresql.auto.conf`, so clear them during reset to keep each test
+    // independent of execution order.
+    //
+    // Drop the extension before reloading config. A pre-drop pg_reload_conf()
+    // wakes the shared launcher worker, which can respawn a scheduler for
+    // `postgres` while reset is still in progress.
     for sql in [
         "DROP EXTENSION IF EXISTS pg_trickle CASCADE",
+        "ALTER SYSTEM RESET ALL",
+        "SELECT pg_reload_conf()",
         "DROP SCHEMA IF EXISTS public CASCADE",
         "CREATE SCHEMA public",
         "GRANT ALL ON SCHEMA public TO postgres",
@@ -294,6 +294,7 @@ pub struct E2eDb {
     pub pool: PgPool,
     connection_string: String,
     container_id: String,
+    _shared_postgres_db_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     _container: ContainerLease,
 }
 
@@ -315,6 +316,7 @@ impl E2eDb {
             pool,
             connection_string,
             container_id: shared.container_id.clone(),
+            _shared_postgres_db_guard: None,
             _container: ContainerLease::Shared { _shared: shared },
         }
     }
@@ -326,6 +328,7 @@ impl E2eDb {
     /// so the extension + STs must live in the `postgres` database for the
     /// scheduler to see them.
     pub async fn new_on_postgres_db() -> Self {
+        let shared_postgres_db_guard = SHARED_POSTGRES_DB_LOCK.clone().lock_owned().await;
         let shared = shared_container().await;
         reset_postgres_database(&shared.admin_connection_string).await;
         let pool = Self::connect_with_retry(&shared.admin_connection_string, 15).await;
@@ -334,6 +337,7 @@ impl E2eDb {
             pool,
             connection_string: shared.admin_connection_string.clone(),
             container_id: shared.container_id.clone(),
+            _shared_postgres_db_guard: Some(shared_postgres_db_guard),
             _container: ContainerLease::Shared { _shared: shared },
         }
     }
@@ -360,6 +364,10 @@ impl E2eDb {
     /// Get the Docker container ID (for `docker logs` and profile capture).
     pub fn container_id(&self) -> &str {
         &self.container_id
+    }
+
+    pub fn connection_string(&self) -> &str {
+        &self.connection_string
     }
 
     /// Execute SQL on a dedicated connection and collect PostgreSQL notices.
@@ -436,6 +444,7 @@ impl E2eDb {
             pool,
             connection_string,
             container_id: container.id().to_string(),
+            _shared_postgres_db_guard: None,
             _container: ContainerLease::Dedicated {
                 _container: Box::new(container),
             },
@@ -482,6 +491,7 @@ impl E2eDb {
             pool,
             connection_string,
             container_id: container.id().to_string(),
+            _shared_postgres_db_guard: None,
             _container: ContainerLease::Dedicated {
                 _container: Box::new(container),
             },

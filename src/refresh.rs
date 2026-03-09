@@ -515,6 +515,33 @@ fn build_execute_params(
         .join(", ")
 }
 
+fn deallocate_prepared_merge_statement(_pgt_id: i64) {
+    #[cfg(not(test))]
+    {
+        let pgt_id = _pgt_id;
+        let stmt = format!("__pgt_merge_{pgt_id}");
+        let exists = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pg_prepared_statements WHERE name = '{stmt}')"
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if exists {
+            let _ = Spi::run(&format!("DEALLOCATE {stmt}"));
+        }
+    }
+}
+
+fn clear_prepared_merge_statements() {
+    let tracked_ids =
+        PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow().iter().copied().collect::<Vec<_>>());
+
+    for pgt_id in tracked_ids {
+        deallocate_prepared_merge_statement(pgt_id);
+    }
+
+    PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow_mut().clear());
+}
+
 /// Invalidate the MERGE template cache for a ST (call on DDL changes).
 pub fn invalidate_merge_cache(pgt_id: i64) {
     MERGE_TEMPLATE_CACHE.with(|cache| {
@@ -522,22 +549,7 @@ pub fn invalidate_merge_cache(pgt_id: i64) {
     });
     // D-2: Also deallocate any prepared statement for this ST.
     if PREPARED_MERGE_STMTS.with(|s| s.borrow_mut().remove(&pgt_id)) {
-        // Guard SPI call so unit tests (which run outside PG) don't
-        // force the linker to resolve pg_sys symbols at load time.
-        #[cfg(not(test))]
-        {
-            let stmt = format!("__pgt_merge_{pgt_id}");
-            // Note: DEALLOCATE does not support IF EXISTS in PostgreSQL.
-            // Check pg_prepared_statements first to avoid an error.
-            let exists = Spi::get_one::<bool>(&format!(
-                "SELECT EXISTS(SELECT 1 FROM pg_prepared_statements WHERE name = '{stmt}')"
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false);
-            if exists {
-                let _ = Spi::run(&format!("DEALLOCATE {stmt}"));
-            }
-        }
+        deallocate_prepared_merge_statement(pgt_id);
     }
 }
 
@@ -1030,11 +1042,10 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     );
 
     // Check for user triggers to suppress during FULL refresh.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers();
-    let has_triggers = match user_triggers_mode.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => crate::cdc::has_user_triggers(st.pgt_relid)?,
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let has_triggers = match user_triggers_mode {
+        crate::config::UserTriggersMode::Off => false,
+        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
     // Suppress user triggers during TRUNCATE + INSERT to prevent
@@ -1121,6 +1132,70 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     }
 
     Ok((rows_inserted as i64, 0))
+}
+
+/// Post-full-refresh cleanup helper (G3 + G4).
+///
+/// Intended to be called immediately after any FULL or REINITIALIZE refresh
+/// completes successfully, from both the scheduled refresh path and from the
+/// adaptive fallback path inside `execute_differential_refresh`.
+///
+/// 1. **G3 — WAL slot advancement**: For each WAL-mode source dependency,
+///    advances the replication slot's `confirmed_flush_lsn` to the current WAL
+///    LSN. This lets PostgreSQL reclaim WAL segments that the full refresh
+///    already materialized, preventing unbounded `pg_wal/` growth on servers
+///    that do repeated FULL refreshes.
+///
+/// 2. **G4 — Change buffer flush**: Deletes stale change buffer rows up to the
+///    minimum stored frontier across all stream tables sharing each source.
+///    This prevents the next differential tick from re-examining rows that are
+///    already materialized, breaking the "adaptive fallback ping-pong" pattern.
+///
+/// Multi-ST safety: `cleanup_change_buffers_by_frontier` queries the catalog
+/// for the minimum frontier across *all* STs that share each source OID, so
+/// rows that another ST still needs are never deleted.
+pub fn post_full_refresh_cleanup(st: &StreamTableMeta) {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let deps = crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    let source_oids: Vec<u32> = deps
+        .iter()
+        .filter(|d| d.source_type == "TABLE" || d.source_type == "FOREIGN_TABLE")
+        .map(|d| d.source_relid.to_u32())
+        .collect();
+
+    // G3: Advance WAL slots past the current LSN so WAL segments produced
+    // before and during the full refresh can be reclaimed by PostgreSQL.
+    for slot in deps
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.cdc_mode,
+                crate::catalog::CdcMode::Wal | crate::catalog::CdcMode::Transitioning
+            )
+        })
+        .filter_map(|d| d.slot_name.as_deref())
+    {
+        match crate::wal_decoder::advance_slot_to_current(slot) {
+            Ok(()) => {
+                pgrx::debug1!(
+                    "[pg_trickle] post_full_refresh_cleanup: advanced WAL slot '{}' to current LSN",
+                    slot,
+                );
+            }
+            Err(e) => {
+                pgrx::debug1!(
+                    "[pg_trickle] post_full_refresh_cleanup: failed to advance slot '{}': {}",
+                    slot,
+                    e,
+                );
+            }
+        }
+    }
+
+    // G4: Flush change buffer rows that are now irrelevant because the full
+    // refresh already captured them.  Prevents the next differential cycle
+    // from re-examining them and re-triggering another adaptive fallback.
+    cleanup_change_buffers_by_frontier(&change_schema, &source_oids);
 }
 
 /// Execute a NO_DATA refresh: just advance the data timestamp.
@@ -1269,6 +1344,20 @@ pub fn execute_differential_refresh(
 ) -> Result<(i64, i64), PgTrickleError> {
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
+
+    if !st.is_populated {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on unpopulated stream table {}.{}; a FULL refresh is required first.",
+            schema, name
+        )));
+    }
+
+    if prev_frontier.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Cannot run DIFFERENTIAL refresh on {}.{}; no previous frontier exists.",
+            schema, name
+        )));
+    }
 
     // ── EC-16: Function-body change detection ────────────────────────
     // Check whether any user-defined function referenced in this ST's
@@ -1473,7 +1562,11 @@ pub fn execute_differential_refresh(
             schema,
             name,
         );
-        return execute_full_refresh(st);
+        let truncate_full_result = execute_full_refresh(st);
+        if truncate_full_result.is_ok() {
+            post_full_refresh_cleanup(st);
+        }
+        return truncate_full_result;
     }
 
     // ── P2: Capped-count threshold check (only when changes exist) ───────
@@ -1567,6 +1660,11 @@ pub fn execute_differential_refresh(
         ) {
             pgrx::debug1!("[pg_trickle] Failed to update last_full_ms: {}", e);
         }
+        // G4: Flush stale change buffer rows to prevent the next differential
+        // tick from re-examining rows already materialized by this FULL refresh.
+        if result.is_ok() {
+            post_full_refresh_cleanup(st);
+        }
         return result;
     }
 
@@ -1578,7 +1676,7 @@ pub fn execute_differential_refresh(
     LOCAL_MERGE_CACHE_GEN.with(|local| {
         if local.get() < shared_gen {
             MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().clear());
-            PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow_mut().clear());
+            clear_prepared_merge_statements();
             local.set(shared_gen);
         }
     });
@@ -1902,14 +2000,10 @@ pub fn execute_differential_refresh(
     // ── User-trigger detection ───────────────────────────────────────
     // Determine whether to use the explicit DML path based on the GUC
     // and the presence of user-defined row-level triggers on the ST.
-    let user_triggers_mode = crate::config::pg_trickle_user_triggers();
-    let use_explicit_dml = match user_triggers_mode.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => {
-            // "auto": detect user triggers
-            crate::cdc::has_user_triggers(st.pgt_relid)?
-        }
+    let user_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+    let use_explicit_dml = match user_triggers_mode {
+        crate::config::UserTriggersMode::Off => false,
+        crate::config::UserTriggersMode::Auto => crate::cdc::has_user_triggers(st.pgt_relid)?,
     };
 
     // EC-06: Keyless sources must use explicit DML because MERGE fails
@@ -1919,8 +2013,8 @@ pub fn execute_differential_refresh(
 
     // When user_triggers = 'off' but there ARE user triggers on the ST,
     // suppress them during the MERGE to prevent spurious firing.
-    let suppress_triggers =
-        user_triggers_mode.as_str() == "off" && crate::cdc::has_user_triggers(st.pgt_relid)?;
+    let suppress_triggers = user_triggers_mode == crate::config::UserTriggersMode::Off
+        && crate::cdc::has_user_triggers(st.pgt_relid)?;
     if suppress_triggers {
         let quoted_table = format!(
             "\"{}\".\"{}\"",
@@ -2267,6 +2361,7 @@ mod tests {
             diamond_schedule_policy: crate::dag::DiamondSchedulePolicy::default(),
             has_keyless_source: false,
             function_hashes: None,
+            requested_cdc_mode: None,
         }
     }
 
@@ -2306,6 +2401,44 @@ mod tests {
         let _incr = RefreshAction::Differential;
         let _no_data = RefreshAction::NoData;
         let _reinit = RefreshAction::Reinitialize;
+    }
+
+    #[test]
+    fn test_execute_differential_refresh_rejects_unpopulated_stream_table() {
+        let mut st = test_st(RefreshMode::Differential, false);
+        st.is_populated = false;
+
+        let error = execute_differential_refresh(
+            &st,
+            &make_frontier(&[(42, "0/10")]),
+            &make_frontier(&[(42, "0/20")]),
+        )
+        .expect_err("unpopulated stream tables must be rejected before SPI work");
+
+        match error {
+            PgTrickleError::InvalidArgument(message) => {
+                assert!(message.contains("unpopulated stream table public.test_st"));
+                assert!(message.contains("FULL refresh is required first"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_differential_refresh_rejects_empty_frontier() {
+        let st = test_st(RefreshMode::Differential, false);
+
+        let error =
+            execute_differential_refresh(&st, &Frontier::new(), &make_frontier(&[(42, "0/20")]))
+                .expect_err("missing baseline frontier must be rejected before SPI work");
+
+        match error {
+            PgTrickleError::InvalidArgument(message) => {
+                assert!(message.contains("public.test_st"));
+                assert!(message.contains("no previous frontier exists"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
     }
 
     // ── determine_refresh_action() ──────────────────────────────────
