@@ -327,7 +327,7 @@ jobs:
           docker exec pgtrickle-dbt-test \
             psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_trickle;"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
