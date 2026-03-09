@@ -1213,6 +1213,15 @@ impl OpTree {
                 // the output. E.g., Aggregate GROUP BY "name" → Project
                 // alias "region" at the same position.
                 let child_out = child.output_columns();
+                // When the child has more output columns than the Project
+                // has aliases (e.g., SELECT id, name FROM cte where cte
+                // produces [id, parent_id, name]), positional mapping is
+                // unreliable — child_out[1] is "parent_id" but aliases[1]
+                // is "name". Fall back to content-hashing all projected
+                // columns, which matches the CteScan wrapper's formula.
+                if child_out.len() != aliases.len() {
+                    return Some(aliases.clone());
+                }
                 match child.row_id_key_columns() {
                     Some(keys) => {
                         let mapped: Vec<String> = keys
