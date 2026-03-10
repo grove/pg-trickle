@@ -1208,6 +1208,19 @@ impl OpTree {
                 ) {
                     return Some(aliases.clone());
                 }
+                // For semi-join/anti-join children (EXISTS / NOT EXISTS / IN),
+                // use all projected output columns as a content hash.  A semi-join
+                // filters the left side without changing its cardinality or
+                // introducing new columns, so the projected output is a stable
+                // identifier as long as it is unique — which it typically is
+                // (the left table's PK columns are usually projected).  Both the
+                // FULL refresh (hash from projected columns) and  the DIFFERENTIAL
+                // refresh (row_id recomputed in diff_project) then use the same
+                // formula, preventing the row_id mismatch that would leave stale
+                // rows in the stream table after a differential refresh.
+                if matches!(unwrapped, OpTree::SemiJoin { .. } | OpTree::AntiJoin { .. }) {
+                    return Some(aliases.clone());
+                }
                 // Project may drop or rename columns — map child's key
                 // column names through the aliasing, then verify they're in
                 // the output. E.g., Aggregate GROUP BY "name" → Project
@@ -8127,10 +8140,21 @@ unsafe fn parse_sublink_to_wrapper(
 
 /// Parse an EXISTS SubLink into a SublinkWrapper.
 ///
+/// Simple form (no GROUP BY / HAVING):
 /// `EXISTS (SELECT ... FROM inner_table WHERE correlation_cond AND inner_filter)`
+/// → The inner WHERE becomes the semi/anti-join condition.
 ///
-/// The inner SELECT's FROM clause becomes the right side of the semi/anti-join.
-/// The inner SELECT's WHERE clause becomes the join condition.
+/// Grouped form (with GROUP BY / HAVING):
+/// `EXISTS (SELECT 1 FROM T WHERE inner.k = outer.k GROUP BY inner.k HAVING agg > threshold)`
+///
+/// This is semantically equivalent to:
+/// `outer.k IN (SELECT inner.k FROM T GROUP BY inner.k HAVING agg > threshold)`
+///
+/// The correlation predicate (`inner.k = outer.k`) is extracted from the inner WHERE
+/// and converted to the SemiJoin join condition. The remaining (non-correlated)
+/// inner WHERE predicates are applied as a pre-aggregate filter. The inner tree is
+/// wrapped in `Aggregate → Filter(HAVING) → Subquery`, matching the `parse_any_sublink`
+/// GROUP BY treatment.
 ///
 /// # Safety
 /// Caller must ensure `sublink` points to a valid `pg_sys::SubLink`.
@@ -8169,7 +8193,137 @@ unsafe fn parse_exists_sublink(
         }
     }
 
-    // The inner WHERE clause becomes the semi/anti-join condition
+    // ── GROUP BY / HAVING handling ──────────────────────────────────
+    //
+    // When the inner SELECT has GROUP BY or HAVING, a flat SemiJoin on the
+    // raw scan would lose the aggregation semantics entirely. We restructure
+    // the inner tree to:
+    //
+    //   Subquery(
+    //     Filter(HAVING, Aggregate(GROUP BY inner.k, ..., child=Scan(T))))
+    //
+    // and derive the SemiJoin join condition by extracting the correlation
+    // predicate from the inner WHERE clause.
+    //
+    // A correlation predicate has the form `inner.col = outer.col` (or the
+    // reverse), where `inner.col` refers to one of the inner FROM aliases
+    // and `outer.col` refers to an alias from the enclosing query.
+    //
+    // Example transformation:
+    //   EXISTS (SELECT 1 FROM eh_ord o
+    //           WHERE o.cust_id = c.id
+    //           GROUP BY o.cust_id
+    //           HAVING SUM(o.amount) > 100)
+    // →
+    //   SemiJoin(cond  = c.id = __pgt_in_sub.cust_id,
+    //            left  = Scan(eh_cust c),
+    //            right = Subquery(Filter(HAVING sum > 100,
+    //                      Aggregate(GROUP BY o.cust_id,
+    //                        Scan(eh_ord o)))))
+    let group_list = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(inner_select.groupClause) };
+    let has_group_by = !group_list.is_empty();
+    let has_having = !inner_select.havingClause.is_null();
+
+    if has_group_by || has_having {
+        // Collect the inner FROM aliases to distinguish correlated references.
+        let inner_aliases = collect_tree_source_aliases(&inner_tree);
+
+        // Split the inner WHERE into:
+        //   corr_pairs  — (outer_expr, inner_group_key_output_name)
+        //   inner_filter — everything else (applied before aggregation)
+        let (corr_pairs, inner_filter) = if !inner_select.whereClause.is_null() {
+            let where_expr = unsafe { node_to_expr(inner_select.whereClause)? };
+            split_exists_correlation(&where_expr, &inner_aliases)
+        } else {
+            (Vec::new(), None)
+        };
+
+        // Apply the non-correlated inner WHERE as a pre-aggregate filter.
+        if let Some(filter_expr) = inner_filter {
+            inner_tree = OpTree::Filter {
+                predicate: filter_expr,
+                child: Box::new(inner_tree),
+            };
+        }
+
+        // Parse GROUP BY expressions.
+        let mut group_by = Vec::new();
+        for node_ptr in group_list.iter_ptr() {
+            let expr = unsafe { node_to_expr(node_ptr)? };
+            group_by.push(expr);
+        }
+
+        // Extract aggregates from the HAVING clause (SELECT 1 has no agg targets).
+        let mut aggregates: Vec<AggExpr> = Vec::new();
+        if has_having {
+            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let having_aggs = extract_aggregates_from_expr(&having_expr, 0);
+            aggregates.extend(having_aggs);
+        }
+
+        // Build the Aggregate node.
+        inner_tree = OpTree::Aggregate {
+            group_by,
+            aggregates: aggregates.clone(),
+            child: Box::new(inner_tree),
+        };
+
+        // Apply HAVING as Filter on top of Aggregate.
+        if has_having {
+            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let rewritten = rewrite_having_expr(&having_expr, &aggregates);
+            inner_tree = OpTree::Filter {
+                predicate: rewritten,
+                child: Box::new(inner_tree),
+            };
+        }
+
+        // Wrap in Subquery so the SemiJoin sees it as a derived table.
+        let sub_alias = format!("__pgt_in_sub_{}", inner_tree.alias());
+        inner_tree = OpTree::Subquery {
+            alias: sub_alias.clone(),
+            column_aliases: Vec::new(),
+            child: Box::new(inner_tree),
+        };
+
+        // Build the SemiJoin condition from extracted correlation pairs.
+        // Each pair produces: outer_expr = subquery_alias.inner_col_output_name.
+        let condition = if !corr_pairs.is_empty() {
+            let equalities: Vec<Expr> = corr_pairs
+                .into_iter()
+                .map(|(outer_expr, inner_col_name)| Expr::BinaryOp {
+                    op: "=".to_string(),
+                    left: Box::new(outer_expr),
+                    right: Box::new(Expr::ColumnRef {
+                        table_alias: Some(sub_alias.clone()),
+                        column_name: inner_col_name,
+                    }),
+                })
+                .collect();
+            equalities
+                .into_iter()
+                .reduce(|acc, eq| Expr::BinaryOp {
+                    op: "AND".to_string(),
+                    left: Box::new(acc),
+                    right: Box::new(eq),
+                })
+                .unwrap()
+        } else {
+            // No correlation found — let the pre-aggregate filter handle
+            // all filtering; the SemiJoin condition is a tautology.
+            Expr::Literal("TRUE".into())
+        };
+
+        return Ok(SublinkWrapper {
+            negated,
+            condition,
+            inner_tree,
+        });
+    }
+
+    // ── Simple form: no GROUP BY / HAVING ───────────────────────────
+
+    // The inner WHERE clause becomes the semi/anti-join condition.
     let condition = if inner_select.whereClause.is_null() {
         Expr::Literal("TRUE".into())
     } else {
@@ -8181,6 +8335,124 @@ unsafe fn parse_exists_sublink(
         condition,
         inner_tree,
     })
+}
+
+/// Collect all base-table Scan aliases from an OpTree.
+///
+/// Used by `parse_exists_sublink` to identify which column references in an
+/// EXISTS inner WHERE clause belong to the inner subquery vs. the outer query.
+fn collect_tree_source_aliases(tree: &OpTree) -> Vec<String> {
+    match tree {
+        OpTree::Scan { alias, .. } | OpTree::CteScan { alias, .. } => vec![alias.clone()],
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            let mut aliases = collect_tree_source_aliases(left);
+            aliases.extend(collect_tree_source_aliases(right));
+            aliases
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Distinct { child, .. }
+        | OpTree::Aggregate { child, .. } => collect_tree_source_aliases(child),
+        OpTree::Subquery { alias, .. } => vec![alias.clone()],
+        _ => vec![],
+    }
+}
+
+/// Split an EXISTS inner WHERE expression into correlation predicates and
+/// inner-only predicates.
+///
+/// Walks the conjuncts of `where_expr` (splitting on `AND`) and classifies
+/// each conjunct:
+///
+/// - Correlation predicate: an equality `inner_alias.col = outer_ref` (or the
+///   reverse) where `inner_alias` is in `inner_aliases` and the other side is
+///   a column reference from an alias NOT in `inner_aliases` (i.e., an outer
+///   reference). Each such predicate is extracted as `(outer_expr, inner_col_name)`.
+///
+/// - Inner-only predicate: everything else; left in the filter applied before
+///   aggregation.
+///
+/// Returns `(corr_pairs, remaining_filter)`.
+fn split_exists_correlation(
+    where_expr: &Expr,
+    inner_aliases: &[String],
+) -> (Vec<(Expr, String)>, Option<Expr>) {
+    match where_expr {
+        Expr::BinaryOp { op, left, right } if op == "AND" => {
+            let (mut lc, lr) = split_exists_correlation(left, inner_aliases);
+            let (rc, rr) = split_exists_correlation(right, inner_aliases);
+            lc.extend(rc);
+            let remaining = match (lr, rr) {
+                (Some(l), Some(r)) => Some(Expr::BinaryOp {
+                    op: "AND".to_string(),
+                    left: Box::new(l),
+                    right: Box::new(r),
+                }),
+                (Some(l), None) | (None, Some(l)) => Some(l),
+                (None, None) => None,
+            };
+            (lc, remaining)
+        }
+        _ => {
+            if let Some(pair) = try_extract_exists_corr_pair(where_expr, inner_aliases) {
+                (vec![pair], None)
+            } else {
+                (vec![], Some(where_expr.clone()))
+            }
+        }
+    }
+}
+
+/// Try to extract `(outer_expr, inner_col_output_name)` from an equality predicate.
+///
+/// Succeeds when:
+/// - The expression is `A = B`
+/// - Exactly one of A, B is a `ColumnRef` with a qualifier in `inner_aliases`
+/// - The other is a `ColumnRef` with a qualifier NOT in `inner_aliases` (outer ref)
+///
+/// Returns `None` for non-equality predicates or predicates where both / neither
+/// side is an inner reference.
+fn try_extract_exists_corr_pair(pred: &Expr, inner_aliases: &[String]) -> Option<(Expr, String)> {
+    let Expr::BinaryOp { op, left, right } = pred else {
+        return None;
+    };
+    if op != "=" {
+        return None;
+    }
+
+    let left_qualifier = match left.as_ref() {
+        Expr::ColumnRef {
+            table_alias: Some(a),
+            ..
+        } => Some(a.as_str()),
+        _ => None,
+    };
+    let right_qualifier = match right.as_ref() {
+        Expr::ColumnRef {
+            table_alias: Some(a),
+            ..
+        } => Some(a.as_str()),
+        _ => None,
+    };
+
+    match (left_qualifier, right_qualifier) {
+        (Some(la), Some(ra)) => {
+            let left_is_inner = inner_aliases.iter().any(|a| a == la);
+            let right_is_inner = inner_aliases.iter().any(|a| a == ra);
+            if left_is_inner && !right_is_inner {
+                // inner.col = outer.ref → outer_expr=right, inner_col=left.output_name()
+                Some((*right.clone(), left.output_name()))
+            } else if !left_is_inner && right_is_inner {
+                // outer.ref = inner.col → outer_expr=left, inner_col=right.output_name()
+                Some((*left.clone(), right.output_name()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Parse an ANY SubLink (IN / = ANY) into a SublinkWrapper.
@@ -17968,5 +18240,108 @@ mod tests {
         let mut worst = 'i';
         collect_volatilities(&expr, &mut worst).unwrap();
         assert_eq!(worst, 'i');
+    }
+
+    // ── split_exists_correlation / try_extract_exists_corr_pair tests
+
+    fn qcol(table: &str, name: &str) -> Expr {
+        Expr::ColumnRef {
+            table_alias: Some(table.to_string()),
+            column_name: name.to_string(),
+        }
+    }
+
+    fn eq_pred(left: Expr, right: Expr) -> Expr {
+        Expr::BinaryOp {
+            op: "=".to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn and_pred(left: Expr, right: Expr) -> Expr {
+        Expr::BinaryOp {
+            op: "AND".to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn test_split_exists_correlation_simple() {
+        // WHERE o.cust_id = c.id (inner=o, outer=c)
+        let pred = eq_pred(qcol("o", "cust_id"), qcol("c", "id"));
+        let (corr, remaining) = split_exists_correlation(&pred, &["o".to_string()]);
+        assert_eq!(corr.len(), 1);
+        let (outer_expr, inner_col) = &corr[0];
+        assert_eq!(inner_col, "cust_id");
+        assert!(matches!(outer_expr, Expr::ColumnRef { column_name, .. } if column_name == "id"));
+        assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn test_split_exists_correlation_reversed() {
+        // WHERE c.id = o.cust_id (outer=c, inner=o)
+        let pred = eq_pred(qcol("c", "id"), qcol("o", "cust_id"));
+        let (corr, remaining) = split_exists_correlation(&pred, &["o".to_string()]);
+        assert_eq!(corr.len(), 1);
+        let (outer_expr, inner_col) = &corr[0];
+        assert_eq!(inner_col, "cust_id");
+        assert!(matches!(outer_expr, Expr::ColumnRef { column_name, .. } if column_name == "id"));
+        assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn test_split_exists_correlation_with_inner_only() {
+        // WHERE o.cust_id = c.id AND o.status = 'active'
+        let pred = and_pred(
+            eq_pred(qcol("o", "cust_id"), qcol("c", "id")),
+            eq_pred(qcol("o", "status"), Expr::Literal("'active'".to_string())),
+        );
+        let (corr, remaining) = split_exists_correlation(&pred, &["o".to_string()]);
+        assert_eq!(corr.len(), 1, "should extract one correlation pair");
+        assert!(
+            remaining.is_some(),
+            "inner-only predicate should be in remaining"
+        );
+    }
+
+    #[test]
+    fn test_split_exists_correlation_no_correlation() {
+        // WHERE o.status = 'active' (no outer reference)
+        let pred = eq_pred(qcol("o", "status"), Expr::Literal("'active'".to_string()));
+        let (corr, remaining) = split_exists_correlation(&pred, &["o".to_string()]);
+        assert!(corr.is_empty(), "no correlation pair expected");
+        assert!(remaining.is_some(), "inner-only pred should remain");
+    }
+
+    #[test]
+    fn test_split_exists_correlation_multi_key() {
+        // WHERE o.a = c.x AND o.b = c.y
+        let pred = and_pred(
+            eq_pred(qcol("o", "a"), qcol("c", "x")),
+            eq_pred(qcol("o", "b"), qcol("c", "y")),
+        );
+        let (corr, remaining) = split_exists_correlation(&pred, &["o".to_string()]);
+        assert_eq!(corr.len(), 2, "should extract two correlation pairs");
+        assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn test_collect_tree_source_aliases_scan() {
+        let tree = scan_node("o", 1, &["id"]);
+        assert_eq!(collect_tree_source_aliases(&tree), vec!["o"]);
+    }
+
+    #[test]
+    fn test_collect_tree_source_aliases_join() {
+        let tree = OpTree::InnerJoin {
+            condition: Expr::Literal("TRUE".to_string()),
+            left: Box::new(scan_node("a", 1, &["id"])),
+            right: Box::new(scan_node("b", 2, &["id"])),
+        };
+        let aliases = collect_tree_source_aliases(&tree);
+        assert!(aliases.contains(&"a".to_string()));
+        assert!(aliases.contains(&"b".to_string()));
     }
 }

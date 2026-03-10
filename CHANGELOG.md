@@ -96,24 +96,61 @@ without `#[ignore]`:
 - `test_full_join_with_aggregate_differential` — SUM over FULL JOIN with COALESCE GROUP BY
 - `test_full_join_multi_column_key_differential` — composite join keys
 
+#### Correlated EXISTS with HAVING Differential Correctness (1 test un-ignored)
+
+Fixed three DVM bugs that caused `EXISTS(... GROUP BY ... HAVING ...)` stream
+tables to produce incorrect results in DIFFERENTIAL mode:
+
+- **`parser.rs` — `parse_exists_sublink` ignored GROUP BY / HAVING:** The
+  EXISTS sublink parser discarded GROUP BY and HAVING from the inner subquery,
+  treating `EXISTS(SELECT 1 FROM T WHERE T.k=outer.k GROUP BY T.k HAVING agg>N)`
+  as a plain "does any row exist?" check. Fixed by detecting `GROUP BY`/`HAVING`
+  in the inner SELECT and restructuring to:
+  `SemiJoin(cond=outer.k=sub.T.k, right=Subquery(Filter(HAVING, Aggregate(GROUP BY, Scan(T)))))`.
+  New helpers `collect_tree_source_aliases`, `split_exists_correlation`, and
+  `try_extract_exists_corr_pair` support the correlation-predicate extraction
+  (7 new unit tests).
+
+- **`parser.rs` — row ID mismatch for `Project(SemiJoin)` trees:** For a
+  defining query `SELECT c.name FROM eh_cust WHERE EXISTS(...)`,
+  `row_id_key_columns()` returned `None` when `aliases.len() ≠ child.output_columns().len()`.
+  FULL refresh fell to the `row_to_json(sub)::TEXT || '/' || row_number()` hash,
+  while differential passed through `hash_multi(left_cols)` from `diff_semi_join`.
+  The MERGE `ON st.__pgt_row_id = d.__pgt_row_id` never matched existing rows,
+  so `DELETE` mutations were silently discarded. Fixed by returning
+  `Some(aliases.clone())` for `SemiJoin`/`AntiJoin` children — the same
+  treatment already given to `LateralFunction`/`LateralSubquery`.
+
+- **`project.rs` — `diff_project` row-id recomputation for SemiJoin children:**
+  `diff_project` must recompute `__pgt_row_id` from the projected output columns
+  for `SemiJoin`/`AntiJoin` children (matching the FULL refresh formula).
+  Added `is_semijoin_child` detection alongside the existing `is_lateral_child`
+  branch so both share the `build_hash_expr(projected_cols)` recomputation path.
+
+One previously-ignored E2E test in `tests/e2e_sublink_or_tests.rs` now runs
+without `#[ignore]`:
+
+- `test_exists_with_having_in_subquery_differential` — EXISTS with GROUP BY /
+  HAVING threshold crossing (insert brings group above threshold; delete drops
+  it back below)
+
 ### Changed
 
-- **Test count:** 8 DVM-correctness E2E tests remain `#[ignore]`d (down from
-  18 at the v0.2.3 release). The 5 HAVING tests above plus the 5 keyless-table
-  duplicate tests (already un-ignored before this release) account for the 10
-  recovered tests. Remaining: `e2e_full_join_tests` (5),
-  `e2e_scalar_subquery_tests` (2), `e2e_sublink_or_tests` (1).
+- **Test count:** 7 DVM-correctness E2E tests remain `#[ignore]`d (down from
+  18 at the v0.2.3 release). The 5 HAVING tests, 5 keyless-table duplicate
+  tests (already un-ignored before this release), 5 FULL JOIN tests, and 1
+  EXISTS+HAVING test account for the 11 recovered tests. Remaining:
+  `e2e_scalar_subquery_tests` (2), `e2e_sublink_or_tests` (0),
+  other suites (5).
 
 ### Known Limitations
 
-8 E2E tests are currently marked `#[ignore]` due to DVM correctness bugs that
+7 E2E tests are currently marked `#[ignore]` due to DVM correctness bugs that
 will be addressed in future releases:
 
 | Suite | Ignored | Reason |
 |---|---|---|
-| `e2e_full_join_tests` | 5/5 | FULL OUTER JOIN differential produces incorrect boundary results |
 | `e2e_scalar_subquery_tests` | 2/4 | Correlated scalar subquery differential generates invalid SQL |
-| `e2e_sublink_or_tests` | 1/4 | Correlated EXISTS with HAVING loses aggregate state |
 
 ---
 

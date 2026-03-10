@@ -15,7 +15,7 @@
 | A2 — HAVING transition suite | ✅ Complete | 2 DVM bugs fixed; 5 tests un-ignored |
 | B1 — Correlated scalar subquery | 🔴 Keep ignored | Still fails with two distinct errors — see below |
 | C1 — FULL JOIN differential | ✅ Complete | 5 DVM bugs fixed; 5 tests un-ignored |
-| C2 — Correlated EXISTS with HAVING | ⬜ Not started | Real DVM bug remains |
+| C2 — Correlated EXISTS with HAVING | ✅ Complete | 3 DVM bugs fixed; 1 test un-ignored |
 | D1 — Changelog/docs re-baseline | ✅ Complete | CHANGELOG + Known Limitations updated |
 
 ### A2 Root Causes Fixed
@@ -281,45 +281,67 @@ bug were fixed across `src/dvm/operators/project.rs` and `src/dvm/operators/aggr
    did not catch these bugs; regression is covered by the E2E suite).
 3. ✅ `FULL OUTER JOIN` is no longer listed as a known limitation in the changelog.
 
-### C2. Correlated `EXISTS` with `HAVING` in OR-Rewritten Sublink Path
+### C2. Correlated `EXISTS` with `HAVING` in Sublink ✅ COMPLETE
 
-**Current state:** The single ignored test in `tests/e2e_sublink_or_tests.rs` still fails.
+**Completed:** 2026-03 (branch `plan-ignored-e2e-tests`)
 
-**Failure description from the annotation:**
+The single previously ignored test in `tests/e2e_sublink_or_tests.rs` now passes.
+Three distinct DVM bugs were fixed across `src/dvm/parser.rs` and
+`src/dvm/operators/project.rs`.
 
-Correlated `EXISTS` with `HAVING` uses a recomputation diff path that loses aggregate state.
+**Root causes found and fixed:**
 
-**Most likely implementation touchpoints:**
+1. **`parser.rs` — `parse_exists_sublink` ignored GROUP BY / HAVING:**
+   When the inner EXISTS subquery contained `GROUP BY` and/or `HAVING`, the parser
+   completely discarded those clauses and treated the subquery as a plain scan
+   semi-join. `EXISTS (SELECT 1 FROM T WHERE T.k = outer.k GROUP BY T.k HAVING
+   SUM(T.v) > threshold)` was mis-parsed as `SemiJoin(cond=T.k=outer.k, right=Scan(T))`
+   — i.e., "does this outer row have ANY matching inner row?" instead of "does the sum
+   for this outer row exceed the threshold?".
 
-- `src/api.rs`
-  - `rewrite_sublinks_in_or()` call site
-- `src/dvm/parser.rs`
-  - `rewrite_sublinks_in_or`
-  - semijoin wrapping for grouped/HAVING subqueries
-  - aggregate extraction from `HAVING`
-  - `rewrite_having_expr`
-- `src/dvm/operators/aggregate.rs`
-  - aggregate delta and rescan behavior when fed by filter/semijoin wrappers
+   Fix: When the inner SELECT has GROUP BY or HAVING, extract the correlation predicate
+   from the inner WHERE, remove it from the pre-aggregate filter, build an
+   `Aggregate(GROUP BY, agg_from_HAVING, child)` node, wrap it in `Filter(HAVING)`,
+   wrap that in `Subquery(alias)`, and use the correlation predicate as the SemiJoin
+   condition. Added three helper functions:
+   - `collect_tree_source_aliases` — gathers Scan/CteScan aliases from an OpTree
+   - `split_exists_correlation` — splits AND conjuncts into correlated equalities vs.
+     inner-only predicates
+   - `try_extract_exists_corr_pair` — tests whether an equality predicate is
+     `inner.col = outer.ref` (or the reverse)
 
-**Primary hypothesis:**
+   Added 7 unit tests for these helpers.
+   Files: `src/dvm/parser.rs`
 
-The OR-to-UNION rewrite preserves logical equivalence for plain `EXISTS`, but drops or mis-rebinds the pre-HAVING aggregate columns needed by the correlated grouped subquery branch. The branch still answers the right question on a full recomputation, but the differential path does not retain enough state to emit the right delete/insert sequence when the correlated aggregate crosses the threshold.
+2. **`parser.rs` / `project.rs` — row-id mismatch for `Project(SemiJoin)` trees:**
+   `row_id_key_columns()` returned `None` for `Project(child=SemiJoin, aliases)` when
+   `aliases.len()` differed from `child.output_columns().len()`. This caused the FULL
+   refresh to use a `row_to_json(…) || '/' || row_number()` sentinel hash, while the
+   differential refresh (via `diff_semi_join` Part 2 + `diff_project`) used
+   `pg_trickle_hash_multi(ARRAY[left_col1, left_col2, ...])`. The row-id mismatch meant
+   that rows inserted by FULL refresh were never matched — and therefore never deleted —
+   by subsequent differential refreshes.
 
-**Implementation steps:**
+   Fix 1 (`parser.rs`): Extended `row_id_key_columns()` inside the `Project` branch to
+   return `Some(aliases.clone())` when `unwrapped` is `SemiJoin` or `AntiJoin`. This
+   makes the FULL refresh use a content hash of the projected output columns, matching
+   what `diff_project` now produces.
 
-1. Reproduce the failing test with generated SQL logging enabled for the rewritten OR branches.
-2. Confirm which branch loses the grouped aggregate state and whether the failure occurs in rewrite, parse, or diff generation.
-3. Add parser-level tests that lock down the expected transformed tree for:
-   - `EXISTS (SELECT 1 ... GROUP BY ... HAVING ...) OR ...`
-   - correlated aggregate aliases extracted only from `HAVING`
-4. Ensure the rewritten branch preserves every aggregate output needed by the `HAVING` filter, even when those aggregates are not in the original SELECT list.
-5. If the problem is downstream of the parser, update aggregate/filter diff logic so threshold transitions in the correlated semijoin branch are emitted correctly.
-6. Add at least one unit test and one E2E regression test before removing the ignore.
+   Fix 2 (`project.rs`): Extended `diff_project` to recompute `__pgt_row_id` from the
+   projected column expressions for SemiJoin/AntiJoin children (the same treatment
+   already applied to lateral function/subquery children). Both the FULL and DIFF
+   paths now hash the same columns, so the MERGE `ON st.__pgt_row_id = d.__pgt_row_id`
+   correctly matches existing rows.
+   Files: `src/dvm/parser.rs`, `src/dvm/operators/project.rs`
 
-**Acceptance criteria:**
+**Acceptance criteria met:**
 
-1. The ignored sublink test passes without `#[ignore]`.
-2. There is parser or operator unit coverage for the exact grouped correlated sublink shape.
+1. ✅ The previously ignored `test_exists_with_having_in_subquery_differential` test
+   passes without `#[ignore]`.
+2. ✅ All previously passing OR-exists/OR-in differential tests still pass.
+3. ✅ All 5 full-join tests still pass.
+4. ✅ All 7 HAVING-transition tests still pass.
+5. ✅ Parser unit tests for the new correlation-splitting helpers added (7 unit tests).
 
 ---
 
