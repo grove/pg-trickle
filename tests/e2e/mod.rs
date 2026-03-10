@@ -244,6 +244,81 @@ async fn reset_postgres_database(admin_connection_string: &str) {
     admin_pool.close().await;
 }
 
+/// Ensure `had_scheduler["postgres"]` is populated in the launcher before
+/// `reset_postgres_database` kills the scheduler.
+///
+/// ## Why this is needed
+///
+/// At container startup the launcher's **first** loop probes all databases
+/// and, if it finds pg_trickle installed, spawns a scheduler while setting
+/// `last_attempt["postgres"] = now`.  The launcher's `had_scheduler` set is
+/// only populated in a **subsequent** loop iteration after it observes the
+/// scheduler as active in `pg_stat_activity`.
+///
+/// If the test's `reset_postgres_database` (which kills the scheduler via
+/// `terminate_other_backends`) runs before that second loop iteration,
+/// `had_scheduler["postgres"]` is never set.  As a result the launcher uses
+/// `skip_ttl = 300 s` for back-off instead of `retry_ttl = 15 s`, making
+/// the scheduler take **five minutes** to restart — far beyond any test
+/// timeout.
+///
+/// Additionally, `with_extension()` calls `CREATE EXTENSION` which invokes
+/// `pgtrickle._signal_launcher_rescan()`, bumping the DAG version.  The
+/// thundering-herd fix's `retain(elapsed < retry_ttl)` then **keeps** the
+/// fresh `last_attempt` entry (set only seconds earlier), compounding the
+/// delay: the 300 s skip-TTL timer is never evicted by a DAG signal while
+/// the entry is still fresh.
+///
+/// ## Fix
+///
+/// Poll until the scheduler is visible, then wake the launcher via
+/// `pg_reload_conf()` so its next loop iteration runs immediately and
+/// records `had_scheduler["postgres"]`.  After that, `reset_postgres_database`
+/// can kill the scheduler safely: the launcher will use `retry_ttl = 15 s`
+/// and the scheduler will reappear within ~15–25 s after the extension is
+/// reinstalled.
+#[cfg(not(feature = "light-e2e"))]
+async fn prime_postgres_had_scheduler(admin_connection_string: &str) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_connection_string)
+        .await
+        .unwrap_or_else(|e| panic!("prime_postgres_had_scheduler: connect failed: {e}"));
+
+    // Wait up to 20 s for the postgres scheduler to appear.
+    let mut appeared = false;
+    for _ in 0..100 {
+        let running: bool = sqlx::query_scalar(
+            "SELECT EXISTS(\
+                 SELECT 1 FROM pg_stat_activity \
+                 WHERE application_name = 'pg_trickle scheduler' \
+                   AND datname = 'postgres'\
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+
+        if running {
+            appeared = true;
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    if appeared {
+        // Send SIGHUP so the launcher runs its next loop immediately and
+        // records the active scheduler into had_scheduler["postgres"].
+        let _ = sqlx::query("SELECT pg_reload_conf()").execute(&pool).await;
+        // Allow the launcher one full loop cycle (SPI queries + logic ≈ 100 ms;
+        // 500 ms is a comfortable upper bound).
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    pool.close().await;
+}
+
 #[cfg(not(feature = "light-e2e"))]
 async fn shared_container() -> &'static SharedContainer {
     SHARED_CONTAINER
@@ -338,6 +413,10 @@ impl E2eDb {
     pub async fn new_on_postgres_db() -> Self {
         let shared_postgres_db_guard = SHARED_POSTGRES_DB_LOCK.clone().lock_owned().await;
         let shared = shared_container().await;
+        // Ensure had_scheduler["postgres"] is set in the launcher before
+        // reset_postgres_database kills the scheduler.  See the function
+        // documentation for the full explanation of why this is needed.
+        prime_postgres_had_scheduler(&shared.admin_connection_string).await;
         reset_postgres_database(&shared.admin_connection_string).await;
         let pool = Self::connect_with_retry(&shared.admin_connection_string, 15).await;
 

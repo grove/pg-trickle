@@ -30,20 +30,14 @@ use std::time::Duration;
 ///
 /// ## Why this is needed
 ///
-/// After the thundering-herd fix (#147), the launcher retains fresh
-/// `last_attempt` entries on DAG signals, so it can take up to `retry_ttl
-/// (15 s) + poll interval (10 s) = 25 s` to respawn the `postgres` scheduler
-/// after `reset_postgres_database` kills it.
+/// `new_on_postgres_db()` calls `prime_postgres_had_scheduler()` before
+/// `reset_postgres_database()` to ensure the launcher's `had_scheduler` set
+/// contains `"postgres"`.  With that set the launcher uses `retry_ttl = 15 s`
+/// (instead of `skip_ttl = 300 s`) when respawning the scheduler after the
+/// DROP/CREATE EXTENSION cycle, so the scheduler reappears within ~15–25 s.
 ///
-/// Additionally, in CI the full E2E suite runs ~55 test binaries concurrently,
-/// each with its own scheduler BGW.  When `max_worker_processes` is exhausted
-/// (e.g. previously set to 32), `load_dynamic()` silently fails for the
-/// `postgres` scheduler and the launcher backs off for another `retry_ttl`.
-/// The Dockerfile now sets `max_worker_processes = 128` to avoid this.
-///
-/// To help the launcher discover the newly-installed extension quickly, this
-/// function calls `pg_reload_conf()` every 10 s during the wait, which sends
-/// SIGHUP and wakes the launcher from its 10 s latch sleep.
+/// The nudge via `pg_reload_conf()` every 10 s during the wait wakes the
+/// launcher from its latch sleep so it retries as soon as the TTL expires.
 async fn configure_fast_scheduler(db: &E2eDb) {
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
         .await;
@@ -95,12 +89,13 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     assert!(
         sched_running,
         "pg_trickle scheduler did not appear in pg_stat_activity within 90 s. \
-         Possible causes: (1) max_worker_processes exhausted — the E2E Docker \
-         image now sets max_worker_processes = 128; rebuild with \
-         `just build-e2e-image` if using an older image; \
+         Possible causes: \
+         (1) prime_postgres_had_scheduler() did not run before reset — the launcher \
+         may be using skip_ttl (300 s) instead of retry_ttl (15 s); \
          (2) launcher retry back-off (retry_ttl=15 s + poll=10 s = 25 s) exceeded \
-         the timeout — three full cycles allowed by 90 s window; \
-         (3) pg_trickle.enabled GUC is false."
+         the timeout; \
+         (3) pg_trickle.enabled GUC is false; \
+         (4) max_worker_processes exhausted — E2E image sets it to 128."
     );
 }
 

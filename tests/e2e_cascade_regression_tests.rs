@@ -297,12 +297,13 @@ async fn configure_fast_scheduler(db: &E2eDb) {
     assert!(
         sched_running,
         "pg_trickle scheduler did not appear in pg_stat_activity within 90 s. \
-         Possible causes: (1) max_worker_processes exhausted — the E2E Docker \
-         image now sets max_worker_processes = 128; rebuild with \
-         `just build-e2e-image` if using an older image; \
+         Possible causes: \
+         (1) prime_postgres_had_scheduler() did not run before reset — the launcher \
+         may be using skip_ttl (300 s) instead of retry_ttl (15 s); \
          (2) launcher retry back-off (retry_ttl=15 s + poll=10 s = 25 s) exceeded \
-         the timeout — three full cycles allowed by 90 s window; \
-         (3) pg_trickle.enabled GUC is false."
+         the timeout; \
+         (3) pg_trickle.enabled GUC is false; \
+         (4) max_worker_processes exhausted — E2E image sets it to 128."
     );
 }
 
