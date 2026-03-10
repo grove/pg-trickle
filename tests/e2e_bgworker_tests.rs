@@ -25,6 +25,14 @@ use std::time::Duration;
 ///
 /// Uses `ALTER SYSTEM` + `pg_reload_conf()` so the background worker
 /// picks up the changes.
+///
+/// Also waits for the pg_trickle scheduler BGW to appear in pg_stat_activity.
+/// After the thundering-herd fix (commit 88c20d2), the launcher retains
+/// fresh `last_attempt` entries on DAG signals, meaning it can take up to
+/// retry_ttl (15 s) + poll interval (10 s) = 25 s to respawn the postgres
+/// scheduler after `reset_postgres_database` kills it. Without waiting here,
+/// a 30 s `wait_for_auto_refresh` timeout can expire before the scheduler
+/// even starts.
 async fn configure_fast_scheduler(db: &E2eDb) {
     db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
         .await;
@@ -35,8 +43,24 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
-    // Give the bgworker a moment to pick up new config
     tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Ensure the scheduler BGW is actually running before tests depend on it.
+    // The launcher needs up to retry_ttl (15 s) + poll interval (10 s) = 25 s
+    // to respawn the postgres scheduler; give it 60 s for slow CI environments.
+    let sched_running = db
+        .wait_for_scheduler(Duration::from_secs(60))
+        .await;
+    assert!(
+        sched_running,
+        "pg_trickle scheduler did not appear in pg_stat_activity within 60 s. \
+         Possible causes: (1) max_worker_processes exhausted — check that the \
+         E2E Docker image sets max_worker_processes = 32; \
+         (2) launcher retry back-off not yet expired — the launcher waits up to \
+         retry_ttl (15 s) + poll interval (10 s) = 25 s after the last failed \
+         spawn attempt before retrying; \
+         (3) pg_trickle.enabled GUC is false."
+    );
 }
 
 /// Wait until a ST has been auto-refreshed by checking pgt_refresh_history.
