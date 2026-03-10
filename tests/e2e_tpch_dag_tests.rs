@@ -237,8 +237,7 @@ async fn test_tpch_dag_chain() {
         FROM tpch_dag_q01 WHERE l_returnflag = 'R'";
 
     // Level-0 ground truth (same as Q01 but pre-filtered — used for level-1 invariant)
-    const DERIVED_GROUND_TRUTH: &str =
-        "SELECT l_returnflag, l_linestatus, \
+    const DERIVED_GROUND_TRUTH: &str = "SELECT l_returnflag, l_linestatus, \
             SUM(l_quantity) AS sum_qty, \
             SUM(l_extendedprice) AS sum_base_price, \
             SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price, \
@@ -290,8 +289,14 @@ async fn test_tpch_dag_chain() {
             .await;
         panic!("DAG chain baseline failed: {e}");
     }
-    if let Err(e) =
-        assert_invariant(&db, "tpch_dag_derived", DERIVED_GROUND_TRUTH, "dag_derived", 0).await
+    if let Err(e) = assert_invariant(
+        &db,
+        "tpch_dag_derived",
+        DERIVED_GROUND_TRUTH,
+        "dag_derived",
+        0,
+    )
+    .await
     {
         println!("  WARN baseline dag_derived — {e}");
         let _ = db
@@ -365,9 +370,7 @@ async fn test_tpch_dag_chain() {
         .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_q01')")
         .await;
 
-    println!(
-        "\n  DAG chain correctness: PASSED — {n_cycles} cycle(s) ✓\n"
-    );
+    println!("\n  DAG chain correctness: PASSED — {n_cycles} cycle(s) ✓\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -403,8 +406,7 @@ async fn test_tpch_dag_multi_parent() {
 
     // Level-1: aggregate revenue from the combined Q06 and Q01 sum_base_price.
     // Both parent STs expose a numeric column we can sum.
-    const UNION_SQL: &str =
-        "SELECT SUM(revenue_total) AS grand_revenue \
+    const UNION_SQL: &str = "SELECT SUM(revenue_total) AS grand_revenue \
          FROM ( \
              SELECT SUM(revenue) AS revenue_total FROM tpch_dag_q06_fp \
              UNION ALL \
@@ -412,8 +414,7 @@ async fn test_tpch_dag_multi_parent() {
          ) combined";
 
     // Ground truth: compute union directly from base tables
-    const UNION_GROUND_TRUTH: &str =
-        "SELECT SUM(revenue_total) AS grand_revenue \
+    const UNION_GROUND_TRUTH: &str = "SELECT SUM(revenue_total) AS grand_revenue \
          FROM ( \
              SELECT SUM(l_extendedprice * l_discount) AS revenue_total \
              FROM lineitem \
@@ -477,16 +478,7 @@ async fn test_tpch_dag_multi_parent() {
     let baseline_ok = assert_invariant(&db, "tpch_dag_q01_fp", Q01_SQL, "dag_q01_fp", 0)
         .await
         .and(assert_invariant(&db, "tpch_dag_q06_fp", Q06_SQL, "dag_q06_fp", 0).await)
-        .and(
-            assert_invariant(
-                &db,
-                "tpch_dag_union",
-                UNION_GROUND_TRUTH,
-                "dag_union",
-                0,
-            )
-            .await,
-        );
+        .and(assert_invariant(&db, "tpch_dag_union", UNION_GROUND_TRUTH, "dag_union", 0).await);
 
     if let Err(e) = baseline_ok {
         // Soft-skip if baseline fails — the individual Q01/Q06 tests already validate them.

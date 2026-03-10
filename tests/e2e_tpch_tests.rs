@@ -84,9 +84,8 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[];
 const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
     // All queries — allowlist is not yet populated from an initial run.
     // Remove this catch-all once the real skip set is known.
-    "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10",
-    "q11", "q12", "q13", "q14", "q15", "q16", "q17", "q18", "q19",
-    "q20", "q21", "q22", "q01",
+    "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10", "q11", "q12", "q13", "q14",
+    "q15", "q16", "q17", "q18", "q19", "q20", "q21", "q22", "q01",
 ];
 
 // ── Scale factor dimensions ────────────────────────────────────────────
@@ -1840,9 +1839,7 @@ async fn test_tpch_immediate_rollback() {
             println!("  SKIP (baseline) — {e}");
             skipped.push((name, format!("baseline: {e}")));
             let _ = db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.drop_stream_table('{st_name}')"
-                ))
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                 .await;
             continue;
         }
@@ -1880,21 +1877,18 @@ async fn test_tpch_immediate_rollback() {
                 println!("  SKIP RF1 — IVM trigger error: {msg}");
                 skipped.push((name, format!("RF1 trigger error: {msg}")));
                 let _ = db
-                    .try_execute(&format!(
-                        "SELECT pgtrickle.drop_stream_table('{st_name}')"
-                    ))
+                    .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                     .await;
                 all_passed = false;
                 continue;
             }
 
             // Within transaction: verify ST was updated by the IVM trigger
-            let mid_count: i64 = sqlx::query_scalar(&format!(
-                "SELECT count(*) FROM public.{st_name}"
-            ))
-            .fetch_one(&mut *txn)
-            .await
-            .unwrap_or(pre_count);
+            let mid_count: i64 =
+                sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
+                    .fetch_one(&mut *txn)
+                    .await
+                    .unwrap_or(pre_count);
 
             println!("  RF1 (INSERT) mid-txn rows: {mid_count}");
 
@@ -1909,9 +1903,7 @@ async fn test_tpch_immediate_rollback() {
                     "  FAIL RF1 ROLLBACK: row count changed — pre={pre_count} post={post_count}"
                 );
                 all_passed = false;
-            } else if let Err(e) =
-                assert_tpch_invariant(&db, &st_name, sql, name, 0).await
-            {
+            } else if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 0).await {
                 println!("  FAIL RF1 ROLLBACK invariant — {e}");
                 all_passed = false;
             } else {
@@ -1945,12 +1937,11 @@ async fn test_tpch_immediate_rollback() {
                 println!("  SKIP RF2 — IVM trigger error: {msg}");
                 skipped.push((name, format!("RF2 trigger error: {msg}")));
             } else {
-                let mid_count: i64 = sqlx::query_scalar(&format!(
-                    "SELECT count(*) FROM public.{st_name}"
-                ))
-                .fetch_one(&mut *txn)
-                .await
-                .unwrap_or(pre_count);
+                let mid_count: i64 =
+                    sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
+                        .fetch_one(&mut *txn)
+                        .await
+                        .unwrap_or(pre_count);
                 println!("  RF2 (DELETE) mid-txn rows: {mid_count}");
 
                 txn.rollback().await.expect("RF2 rollback");
@@ -1963,9 +1954,7 @@ async fn test_tpch_immediate_rollback() {
                         "  FAIL RF2 ROLLBACK: row count changed — pre={pre_count} post={post_count}"
                     );
                     all_passed = false;
-                } else if let Err(e) =
-                    assert_tpch_invariant(&db, &st_name, sql, name, 0).await
-                {
+                } else if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 0).await {
                     println!("  FAIL RF2 ROLLBACK invariant — {e}");
                     all_passed = false;
                 } else {
@@ -2000,12 +1989,11 @@ async fn test_tpch_immediate_rollback() {
                 println!("  SKIP RF3 — IVM trigger error: {msg}");
                 skipped.push((name, format!("RF3 trigger error: {msg}")));
             } else {
-                let mid_count: i64 = sqlx::query_scalar(&format!(
-                    "SELECT count(*) FROM public.{st_name}"
-                ))
-                .fetch_one(&mut *txn)
-                .await
-                .unwrap_or(pre_count);
+                let mid_count: i64 =
+                    sqlx::query_scalar(&format!("SELECT count(*) FROM public.{st_name}"))
+                        .fetch_one(&mut *txn)
+                        .await
+                        .unwrap_or(pre_count);
                 println!("  RF3 (UPDATE) mid-txn rows: {mid_count}");
 
                 txn.rollback().await.expect("RF3 rollback");
@@ -2018,9 +2006,7 @@ async fn test_tpch_immediate_rollback() {
                         "  FAIL RF3 ROLLBACK: row count changed — pre={pre_count} post={post_count}"
                     );
                     all_passed = false;
-                } else if let Err(e) =
-                    assert_tpch_invariant(&db, &st_name, sql, name, 0).await
-                {
+                } else if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 0).await {
                     println!("  FAIL RF3 ROLLBACK invariant — {e}");
                     all_passed = false;
                 } else {
@@ -2030,9 +2016,7 @@ async fn test_tpch_immediate_rollback() {
         }
 
         let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.drop_stream_table('{st_name}')"
-            ))
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
             .await;
     }
 
@@ -2046,7 +2030,11 @@ async fn test_tpch_immediate_rollback() {
     }
     println!(
         "  Rollback correctness: {}",
-        if all_passed { "PASSED ✓" } else { "FAILED ✗" }
+        if all_passed {
+            "PASSED ✓"
+        } else {
+            "FAILED ✗"
+        }
     );
     println!("══════════════════════════════════════════════════════════\n");
 
@@ -2105,18 +2093,18 @@ async fn test_tpch_differential_vs_immediate() {
             .await;
 
         if diff_ok.is_err() || imm_ok.is_err() {
-            let reason = if diff_ok.is_err() { "DIFF create failed" } else { "IMMEDIATE create failed" };
+            let reason = if diff_ok.is_err() {
+                "DIFF create failed"
+            } else {
+                "IMMEDIATE create failed"
+            };
             println!("  {}: SKIP — {reason}", q.name);
             skipped.push(q.name.to_string());
             let _ = db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.drop_stream_table('{st_diff}')"
-                ))
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_diff}')"))
                 .await;
             let _ = db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.drop_stream_table('{st_imm}')"
-                ))
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_imm}')"))
                 .await;
             continue;
         }
@@ -2212,7 +2200,10 @@ async fn test_tpch_differential_vs_immediate() {
 
             println!(
                 "  [T{}] {:<4} cycle {}/{} — DIFF==IMM ✓ — {:.0}ms",
-                q.tier, q.name, cycle, n_cycles,
+                q.tier,
+                q.name,
+                cycle,
+                n_cycles,
                 ct.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -2224,14 +2215,10 @@ async fn test_tpch_differential_vs_immediate() {
         }
 
         let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.drop_stream_table('{st_diff}')"
-            ))
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_diff}')"))
             .await;
         let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.drop_stream_table('{st_imm}')"
-            ))
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_imm}')"))
             .await;
     }
 
@@ -2329,9 +2316,7 @@ async fn test_tpch_single_row_mutations() {
             println!("  SKIP (baseline) — {e}");
             skipped.push((name, format!("baseline: {e}")));
             let _ = db
-                .try_execute(&format!(
-                    "SELECT pgtrickle.drop_stream_table('{st_name}')"
-                ))
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                 .await;
             continue;
         }
@@ -2379,9 +2364,7 @@ async fn test_tpch_single_row_mutations() {
                     println!("  SKIP single DELETE — IVM trigger error: {msg}");
                     skipped.push((name, format!("single DELETE: {msg}")));
                     query_ok = false;
-                } else if let Err(e) =
-                    assert_tpch_invariant(&db, &st_name, sql, name, 3).await
-                {
+                } else if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 3).await {
                     println!("  FAIL after single DELETE — {e}");
                     query_ok = false;
                 } else {
@@ -2395,9 +2378,7 @@ async fn test_tpch_single_row_mutations() {
         }
 
         let _ = db
-            .try_execute(&format!(
-                "SELECT pgtrickle.drop_stream_table('{st_name}')"
-            ))
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
             .await;
     }
 
