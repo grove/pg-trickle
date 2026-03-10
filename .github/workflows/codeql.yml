@@ -1,0 +1,73 @@
+# =============================================================================
+# CodeQL Workflow — static analysis for Rust extension code
+#
+# Uses a manual Rust build so the pgrx/PostgreSQL toolchain is available during
+# extraction. This complements clippy by looking for higher-level security and
+# dataflow issues.
+# =============================================================================
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'PLAN*.md'
+      - 'REPORT*.md'
+      - 'adrs/**'
+      - 'plans/**'
+      - 'coverage/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'PLAN*.md'
+      - 'REPORT*.md'
+      - 'adrs/**'
+      - 'plans/**'
+      - 'coverage/**'
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+env:
+  CARGO_TERM_COLOR: always
+  PG_VERSION: '18'
+
+jobs:
+  analyze:
+    name: CodeQL (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+          build-mode: manual
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Build for CodeQL extraction
+        run: cargo build --all-targets --features pg18
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
