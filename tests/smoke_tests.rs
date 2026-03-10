@@ -1,7 +1,7 @@
 //! Integration tests for basic PostgreSQL connectivity via Testcontainers.
 //!
 //! These tests verify the Testcontainers setup works correctly with
-//! PostgreSQL 18.1 before running more complex extension tests.
+//! PostgreSQL 18.3 before running more complex extension tests.
 
 mod common;
 

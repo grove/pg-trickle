@@ -116,7 +116,7 @@ SELECT st.*,
 FROM pgtrickle.pgt_stream_tables st;
 "#;
 
-/// A test database backed by a Testcontainers PostgreSQL 18.1 instance.
+/// A test database backed by a Testcontainers PostgreSQL 18.3 instance.
 ///
 /// The container is automatically cleaned up when `TestDb` is dropped.
 pub struct TestDb {
@@ -126,13 +126,13 @@ pub struct TestDb {
 
 #[allow(dead_code)]
 impl TestDb {
-    /// Start a fresh PostgreSQL 18.1 container and connect to it.
+    /// Start a fresh PostgreSQL 18.3 container and connect to it.
     pub async fn new() -> Self {
         let container = Postgres::default()
-            .with_tag("18.1-alpine")
+            .with_tag("18.3-alpine")
             .start()
             .await
-            .expect("Failed to start PostgreSQL 18.1 container");
+            .expect("Failed to start PostgreSQL 18.3 container");
 
         let port = container
             .get_host_port_ipv4(5432)
