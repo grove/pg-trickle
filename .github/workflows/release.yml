@@ -235,7 +235,7 @@ jobs:
           # actually works with PostgreSQL. This image is NOT shipped.
           cat > /tmp/Dockerfile.smoke <<'DOCKERFILE'
           FROM pg_trickle-ext:test AS ext
-          FROM postgres:18.1
+          FROM postgres:18.3
           COPY --from=ext /lib/ /usr/lib/postgresql/18/lib/
           COPY --from=ext /share/extension/ /usr/share/postgresql/18/extension/
           DOCKERFILE
