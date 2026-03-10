@@ -1,8 +1,8 @@
 # PLAN: Static Application Security Testing (SAST)
 
-**Status:** In progress  
+**Status:** Phase 2 + 3 complete  
 **Date:** 2026-03-10  
-**Branch:** `codeql-workflow`  
+**Branch:** `codeql-workflow` (merged), `sast-review-1` (Phase 1–3)  
 **Scope:** Establish a practical SAST program for the `pg_trickle` PostgreSQL
 extension that covers Rust application code, PostgreSQL extension attack
 surfaces, dependency risk, and extension-specific SQL/security-context hazards.
@@ -26,6 +26,7 @@ surfaces, dependency risk, and extension-specific SQL/security-context hazards.
 13. [Success Criteria](#success-criteria)
 14. [Implementation Checklist](#implementation-checklist)
 15. [Open Questions](#open-questions)
+16. [Triage Log](#triage-log)
 
 ---
 
@@ -335,79 +336,109 @@ deserve intentional review.
 
 ### Phase 0 — Baseline rollout (current branch)
 
-**Status:** Implemented  
+**Status:** ✅ Complete — merged to `main` 2026-03-10  
 **Goal:** Introduce low-friction SAST foundations with minimal CI disruption.
 
 | Item | Status | Notes |
 |------|--------|------|
-| CodeQL workflow | Done | Manual Rust build with pgrx toolchain |
-| `cargo deny` workflow + config | Done | Advisory/supply-chain policy checks |
-| Semgrep workflow + starter rules | Done | Advisory-only SARIF upload |
+| CodeQL workflow | ✅ Done | `build-mode: none`, upgraded to v4 action |
+| `cargo deny` workflow + config | ✅ Done | License allow-list, advisory ignores, duplicate skips |
+| Semgrep workflow + starter rules | ✅ Done | Advisory-only SARIF upload |
 
-**Exit criteria:**
+**Actual CI outcomes:**
 
-- workflows validate cleanly
-- repo still passes `just lint`
-- branch can be reviewed and merged independently
+- CodeQL scanned 115/115 Rust files; 1 extraction error (pgrx macro file, benign)
+- CodeQL: **zero security findings** across all 16 security queries
+- `cargo deny`: clean after adding `[licenses]` section and `skip` entries
+- Semgrep: 47 initial alerts — all triaged and dismissed (see Triage Log below)
+
+**Exit criteria:** all met.
 
 ### Phase 1 — Triage and noise reduction
 
 **Priority:** P0  
-**Estimated effort:** 2–4 hours after first CI run.
+**Status:** ✅ Complete — 2026-03-10 (branch `sast-review-1`)  
 
-**Tasks:**
+**Completed tasks:**
 
-1. Run the new workflows once on this branch.
-2. Export or review initial findings from CodeQL and Semgrep.
-3. Classify findings into:
-   - true positives
-   - acceptable dynamic SQL requiring documentation
-   - noisy patterns that need rule refinement
-4. Tune Semgrep rules to reduce obvious false positives.
-5. Add inline suppression guidance where exceptions are legitimate.
+1. ✅ Ran all workflows on the merged `codeql-workflow` branch.
+2. ✅ Reviewed all 47 initial findings via GitHub Security tab + `gh api`.
+3. ✅ Classified all findings — see Triage Log section below.
+4. ✅ Tuned `sql.security-definer.present` rule to exclude `plans/**`, `docs/**`,
+   and `**/*.md` (root cause: `sql/**` include matched `plans/sql/` as substring).
+5. ✅ Dismissed all 47 alerts via `gh api` with documented justifications.
 
 **Deliverables:**
 
-- first triage pass documented in PR comments or follow-up issue
-- reduced-noise Semgrep ruleset
+- ✅ Full triage pass documented in Triage Log section
+- ✅ Reduced-noise Semgrep ruleset (security-definer scope fix)
 
 ### Phase 2 — Extension-specific rule expansion
 
 **Priority:** P0  
-**Estimated effort:** 4–8 hours.
+**Status:** ✅ Complete — 2026-03-10 (branch `sast-review-1`)
 
-**Tasks:**
+**Completed tasks:**
 
-1. Add Semgrep rules for `SECURITY DEFINER` plus `search_path` pairing.
-2. Add rules for `SET LOCAL row_security = off`.
-3. Add rules for `SET ROLE` / `RESET ROLE`.
-4. Add rules for `Spi::run(&format!(...))` where interpolated values are not
-   wrapped in local quoting helpers.
-5. Add rules for unsafe blocks without a nearby `SAFETY:` comment.
+1. ✅ Added `sql.row-security.disabled` Semgrep rule (detects `SET LOCAL row_security = off`).
+2. ✅ Added `sql.set-role.present` Semgrep rule (detects `SET ROLE` / `RESET ROLE`).
+3. ✅ Updated `sql.security-definer.present` message to include explicit `SET search_path` guidance.
+4. ✅ All three privilege-context rules are advisory (WARNING/INFO), scoped to `src/**` and `sql/**`, excluding `*.md`, `plans/**`, `docs/**`.
+
+**Notes:**
+- No current occurrences in source — these are proactive forward-looking rules.
+- The `SECURITY DEFINER` without `SET search_path` pairing check is aspirational:
+  Semgrep generic mode cannot reliably span a multi-line `CREATE FUNCTION` body
+  to assert both patterns are present. The updated message in `security-definer.present`
+  makes the `search_path` requirement explicit for reviewers.
+- A Semgrep rule for `unsafe {}` without `// SAFETY:` was deferred to Phase 3.
 
 **Deliverables:**
 
-- broader Semgrep ruleset
-- documented suppression policy for legitimate dynamic SQL
+- ✅ Two new Semgrep rules (`sql.row-security.disabled`, `sql.set-role.present`)
+- ✅ Improved `sql.security-definer.present` message with `SET search_path` guidance
 
 ### Phase 3 — Unsafe growth controls
 
 **Priority:** P1  
-**Estimated effort:** 2–4 hours.
+**Status:** ✅ Complete — 2026-03-10 (branch `sast-review-1`)
 
-**Tasks:**
+**Completed tasks:**
 
-1. Add `cargo geiger` or an equivalent unsafe inventory step.
-2. Record the baseline unsafe count.
-3. Fail CI if unsafe count increases unexpectedly, or at minimum surface it in
-   the PR as a diff signal.
-4. Review whether `undocumented_unsafe_blocks` can be enforced through clippy
-   or another linter in this toolchain.
+1. ✅ Added `scripts/unsafe_inventory.sh` — grep-based per-file `unsafe {` counter.
+2. ✅ Added `.unsafe-baseline` — committed baseline (6 files, 1309 total blocks).
+3. ✅ Added `.github/workflows/unsafe-inventory.yml` — CI workflow that runs the script
+   on PRs targeting `src/**` and posts a per-file table to `GITHUB_STEP_SUMMARY`.
+   Fails if any file exceeds its baseline count.
+4. ✅ Added `just unsafe-inventory` recipe to `justfile`.
+
+**Notes on `undocumented_unsafe_blocks` clippy lint:**
+- The lint exists in stable clippy and would be valuable.
+- `src/dvm/parser.rs` has 1286 `unsafe {` blocks (mechanical pgrx FFI node casts)
+  but only 38 `// SAFETY:` comments — enabling the lint globally would produce
+  ~1248 new warnings.
+- **Policy decision:** add `#![allow(clippy::undocumented_unsafe_blocks)]` to
+  `parser.rs` and enable the lint globally for all other files. This is tracked
+  as a future improvement; it is not blocked on Phase 3.
+
+**Baseline summary (2026-03-10):**
+
+| File | `unsafe {` blocks |
+|------|-------------------|
+| `src/api.rs` | 10 |
+| `src/dvm/parser.rs` | 1286 |
+| `src/lib.rs` | 1 |
+| `src/scheduler.rs` | 5 |
+| `src/shmem.rs` | 3 |
+| `src/wal_decoder.rs` | 4 |
+| **Total** | **1309** |
 
 **Deliverables:**
 
-- unsafe inventory workflow/report
-- explicit policy on unsafe growth
+- ✅ `scripts/unsafe_inventory.sh` with `--report-only` and `--update` modes
+- ✅ `.unsafe-baseline` committed baseline
+- ✅ `unsafe-inventory.yml` CI workflow (advisory, fails on regression)
+- ✅ `just unsafe-inventory` recipe
 
 ### Phase 4 — Move from advisory to blocking
 
@@ -455,7 +486,10 @@ deserve intentional review.
 |--------|---------|------|
 | `rust.spi.run.dynamic-format` | Flag dynamic SQL passed to `Spi::run` | Advisory |
 | `rust.spi.query.dynamic-format` | Flag dynamic SQL passed to `Spi::get_*` | Advisory |
-| `sql.security-definer.present` | Surface `SECURITY DEFINER` for review | Advisory |
+| `sql.security-definer.present` | Surface `SECURITY DEFINER` for review (message includes `search_path` guidance) | Advisory |
+| `sql.row-security.disabled` | Detect `SET LOCAL row_security = off` | Advisory |
+| `sql.set-role.present` | Detect `SET ROLE` / `RESET ROLE` | Advisory |
+| `rust.panic-in-sql-path` | Flag `.unwrap()`, `.expect()`, `panic!()` in `src/**` | Advisory |
 
 ### Planned next rules
 
@@ -463,9 +497,9 @@ deserve intentional review.
 |----------|----------------|------|
 | SQL quoting | Detect string interpolation into SPI SQL without quoting helper | High |
 | Privilege context | `SECURITY DEFINER` without `SET search_path` | High |
-| Role changes | `SET ROLE`, `RESET ROLE`, `row_security = off` | High |
+| Role changes | `SET ROLE`, `RESET ROLE`, `row_security = off` | High — ✅ Added Phase 2 |
 | Unsafe docs | `unsafe` without nearby `SAFETY:` comment | Medium |
-| Panics in SQL path | `unwrap()` / `expect()` / `panic!()` in non-test SQL-reachable code | Medium |
+| Panics in SQL path | `unwrap()` / `expect()` / `panic!()` in non-test SQL-reachable code | Medium — ✅ Added Phase 2 |
 | GUC-sensitive SQL | direct `SET LOCAL work_mem`, `SET LOCAL row_security` review hooks | Medium |
 
 ### False-positive strategy
@@ -594,10 +628,10 @@ This plan is successful when all of the following are true:
 
 | Phase | Done when |
 |------|-----------|
-| Phase 0 | Workflows merged and repo lint remains clean |
-| Phase 1 | First findings triaged and Semgrep noise reduced |
-| Phase 2 | High-value extension-specific rules added |
-| Phase 3 | Unsafe inventory visible in CI |
+| Phase 0 | ✅ Workflows merged and repo lint remains clean |
+| Phase 1 | ✅ First findings triaged and Semgrep noise reduced |
+| Phase 2 | ✅ High-value extension-specific rules added |
+| Phase 3 | ✅ Unsafe inventory visible in CI |
 | Phase 4 | High-confidence rules become blocking |
 | Phase 5 | Static findings mapped to runtime security tests |
 
@@ -605,24 +639,41 @@ This plan is successful when all of the following are true:
 
 ## Implementation Checklist
 
-### Done on this branch
+### Phase 0 — Done
 
-- [x] Add CodeQL workflow for Rust
+- [x] Add CodeQL workflow for Rust (`build-mode: none`, v4 action)
 - [x] Add `cargo deny` policy workflow
-- [x] Add `deny.toml`
+- [x] Add `deny.toml` with license allow-list and advisory ignores
 - [x] Add initial Semgrep workflow
 - [x] Add starter Semgrep ruleset
 - [x] Validate the repo still passes `just lint`
+- [x] Merge to `main`
 
-### Next implementation tasks
+### Phase 1 — Done
 
-- [ ] Run all new workflows once and capture findings
-- [ ] Triage first Semgrep and CodeQL results
-- [ ] Add `SECURITY DEFINER` + `search_path` pairing rule
-- [ ] Add `row_security` / `SET ROLE` rules
-- [ ] Add unsafe inventory reporting
-- [ ] Decide which Semgrep rules should become blocking
-- [ ] Add documentation for suppression / false-positive handling
+- [x] Run all new workflows and capture findings
+- [x] Triage all 47 Semgrep and CodeQL results (see Triage Log)
+- [x] Fix `security-definer` Semgrep rule to exclude `plans/**` / `docs/**` / `**/*.md`
+- [x] Dismiss all 47 alerts via `gh api` with documented justifications
+
+### Phase 2 — Done
+
+- [x] Add Semgrep rule: `SET LOCAL row_security = off` (`sql.row-security.disabled`)
+- [x] Add Semgrep rule: `SET ROLE` / `RESET ROLE` (`sql.set-role.present`)
+- [x] Add Semgrep rule: `.unwrap()` / `.expect()` / `panic!()` in `src/**` (`rust.panic-in-sql-path`)
+- [x] Update `sql.security-definer.present` message with explicit `SET search_path` guidance
+- [x] Proactive rules scoped to `src/**` + `sql/**`, excluding `*.md`/`plans/**`/`docs/**`
+
+Deferred to future: Semgrep rule for `unsafe {}` without `// SAFETY:` (clippy lint is  the better tool; see Phase 3 notes). `SECURITY DEFINER` + `SET search_path` pairing
+check is aspirational with Semgrep generic mode; message guidance covers it for now.
+
+### Phase 3 — Done
+
+- [x] Add `scripts/unsafe_inventory.sh` — per-file `unsafe {` counter with baseline comparison
+- [x] Commit `.unsafe-baseline` (baseline: 1309 blocks across 6 files)
+- [x] Add `.github/workflows/unsafe-inventory.yml` — advisory CI workflow, fails on regression
+- [x] Add `just unsafe-inventory` recipe for local use
+- [x] Document `undocumented_unsafe_blocks` clippy lint policy (deferred until `parser.rs` gets `#![allow]`)
 
 ---
 
@@ -630,7 +681,9 @@ This plan is successful when all of the following are true:
 
 1. Should Semgrep eventually fail PRs, or remain advisory with only select
    high-confidence rules blocking?
-2. Do we want unsafe growth to hard-fail CI, or just surface as a review signal?
+2. ~~Do we want unsafe growth to hard-fail CI, or just surface as a review signal?~~
+   **Resolved Phase 3:** Inventory workflow hard-fails on regression; not a required
+   status check yet. Add to branch protection once the team adopts the policy.
 3. Should `cargo audit` remain separate from `cargo deny`, or be consolidated
    once confidence in `cargo deny` is established?
 4. Do we want a dedicated security-review checklist for PRs that touch:
@@ -644,10 +697,60 @@ This plan is successful when all of the following are true:
 
 ---
 
+## Triage Log
+
+### 2026-03-10 — First triage pass (Phase 1)
+
+**Total alerts:** 47 (all WARNING or NOTE — zero errors)
+
+#### CodeQL (2 alerts dismissed as `used in tests`)
+
+| Alert # | Rule | File | Decision |
+|---------|------|------|----------|
+| 47 | CWE-312 Cleartext logging | `tests/e2e/light.rs:325` | False positive — `execute()` test helper; `salary` column is synthetic tutorial data, not PII |
+| 46 | CWE-312 Cleartext storage in DB | `tests/e2e/light.rs:322` | False positive — same as above |
+
+**Notes:** CodeQL traced a dataflow path from a test schema containing a `salary`
+column through generic `execute()`/`try_execute()` helpers (in the e2e test harness)
+and inferred that sensitive data was being stored unencrypted. This is test-only code;
+the extension has no concept of PII sensitivity.
+
+#### Semgrep `sql.security-definer.present` (13 alerts dismissed as `false positive`)
+
+All 13 hits were in `plans/sql/PLAN_ROW_LEVEL_SECURITY.md` and
+`plans/sql/PLAN_VIEW_INLINING.md` — design plan markdown files, not source code.
+
+**Root cause:** The `paths.include: [sql/**]` pattern was matching `plans/sql/`
+as a substring. Fixed by adding `exclude: ["**/*.md", "plans/**", "docs/**"]`
+to the rule in `.semgrep/pg_trickle.yml`.
+
+#### Semgrep `spi.run.dynamic-format` / `spi.query.dynamic-format` (32 alerts dismissed as `false positive`)
+
+All 32 hits were in production code (`src/api.rs`, `src/refresh.rs`, `src/ivm.rs`,
+`src/cdc.rs`, `src/monitor.rs`). Each was individually reviewed.
+
+**Finding:** Every interpolated value is one of:
+- A pre-quoted catalog identifier via `quote_identifier()` or double-quote escaping
+  (`schema.replace('"', "\"\"")`)
+- An internal storage-table name constructed from catalog OIDs
+- A GUC-supplied integer (e.g. `mb` from `pg_trickle_merge_work_mem_mb()`)
+- An internally generated prepared-statement name (`__pgt_merge_{pgt_id}`)
+- A NOTIFY payload where string values are manually escaped
+  (`name.replace('\'', "''")`) before interpolation
+
+None of these are reachable from direct user input at the SQL API boundary.
+
+**Policy decision:** Dismissed as false positives. The advisory rules are
+retained so that *future* dynamic SPI callsites are surfaced for review.
+Suppressions should not be added inline; instead each new callsite should be
+triaged at the time it is introduced.
+
+---
+
 ## Recommendation
 
-Merge Phase 0 now. Then treat the first real workflow run as a tuning exercise,
-not a pass/fail judgment on the codebase. The highest-value next move is to
-reduce Semgrep noise while expanding checks around `SECURITY DEFINER`,
-`search_path`, and `row_security`, because those are the extension-specific
-security hazards most likely to evade generic Rust tooling.
+~~Merge Phase 0 now.~~ Phase 0 and Phase 1 are complete. The next highest-value
+move is Phase 2: adding Semgrep rules for `SECURITY DEFINER` + `search_path`
+missing pairs, `row_security` toggles, and `SET ROLE` changes. These are the
+extension-specific security hazards most likely to evade generic Rust tooling
+and are not yet covered by any current rule.
