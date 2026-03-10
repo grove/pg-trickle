@@ -796,17 +796,25 @@ fn build_rescan_cte(
     group_output: &[String],
     aggregates: &[AggExpr],
     delta_cte: &str,
+    force_all_aggs: bool,
 ) -> Option<String> {
     // Include group-rescan aggregates AND MIN/MAX (which need rescan
     // when the old extremum is deleted).
-    let rescan_aggs: Vec<&AggExpr> = aggregates
-        .iter()
-        .filter(|a| {
-            a.is_distinct
-                || a.function.is_group_rescan()
-                || matches!(a.function, AggFunc::Min | AggFunc::Max)
-        })
-        .collect();
+    // When `force_all_aggs` is true (HAVING context), include ALL aggregates
+    // so that the merge CTE can use the correct full aggregate value for
+    // groups that were absent from the ST (below the HAVING threshold).
+    let rescan_aggs: Vec<&AggExpr> = if force_all_aggs {
+        aggregates.iter().collect()
+    } else {
+        aggregates
+            .iter()
+            .filter(|a| {
+                a.is_distinct
+                    || a.function.is_group_rescan()
+                    || matches!(a.function, AggFunc::Min | AggFunc::Max)
+            })
+            .collect()
+    };
     if rescan_aggs.is_empty() {
         return None;
     }
@@ -823,6 +831,12 @@ fn build_rescan_cte(
         } else {
             selects.push(format!("{expr_sql} AS {qt_output}"));
         }
+    }
+    // When rescanning for HAVING threshold crossings, also compute the
+    // correct row count so the ST's __pgt_count is set correctly for
+    // groups entering the view for the first time.
+    if force_all_aggs {
+        selects.push("COUNT(*) AS __pgt_count".to_string());
     }
     for agg in &rescan_aggs {
         selects.push(format!(
@@ -1302,7 +1316,19 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     }
 
     // ── Rescan CTE: re-aggregate affected groups for group-rescan aggs ──
-    let rescan_cte = build_rescan_cte(ctx, child, group_by, &group_output, aggregates, &delta_cte);
+    // Also forced when under a HAVING filter (`ctx.having_filter = true`) so
+    // that groups crossing the threshold upward (absent from the ST) receive
+    // the correct full aggregate value rather than just the per-cycle delta.
+    let use_having_rescan = ctx.having_filter;
+    let rescan_cte = build_rescan_cte(
+        ctx,
+        child,
+        group_by,
+        &group_output,
+        aggregates,
+        &delta_cte,
+        use_having_rescan,
+    );
     let has_rescan = rescan_cte.is_some();
 
     // ── CTE 2: Merge with existing ST state to classify actions ────────
@@ -1347,14 +1373,27 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // are filtered out the SUM(CASE …) expressions evaluate over an empty
     // set and return NULL, not 0.  Wrapping in COALESCE(…, 0) keeps the
     // arithmetic safe.
-    merge_selects.push(
-        "COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) AS new_count".to_string(),
-    );
+    //
+    // HAVING rescan override: for groups not yet in the ST (below the HAVING
+    // threshold), the algebraic formula `0 + ins - del` only accounts for the
+    // current-cycle delta, missing pre-existing rows.  Use the rescan CTE's
+    // COUNT(*) instead when the group is new.
+    let new_count_expr = if use_having_rescan {
+        "CASE WHEN st.__pgt_count IS NULL \
+         THEN COALESCE(r.__pgt_count, 0) \
+         ELSE COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0) END"
+            .to_string()
+    } else {
+        "COALESCE(st.__pgt_count, 0) + COALESCE(d.__ins_count, 0) - COALESCE(d.__del_count, 0)"
+            .to_string()
+    };
+    merge_selects.push(format!("{new_count_expr} AS new_count"));
     merge_selects.push("COALESCE(st.__pgt_count, 0) AS old_count".to_string());
 
     // Per-aggregate new values + old values for G-S1 change detection
     for agg in aggregates {
-        let new_val_expr = agg_merge_expr_mapped(agg, has_rescan, &st_col_name(&agg.alias));
+        let new_val_expr =
+            agg_merge_expr_mapped(agg, has_rescan, use_having_rescan, &st_col_name(&agg.alias));
         merge_selects.push(format!(
             "{new_val_expr} AS {}",
             quote_ident(&format!("new_{}", agg.alias)),
@@ -1646,7 +1685,12 @@ fn agg_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
 ///
 /// When no column aliasing is in effect, use [`agg_merge_expr`] which
 /// defaults `st_col` to `agg.alias`.
-fn agg_merge_expr_mapped(agg: &AggExpr, has_rescan: bool, st_col: &str) -> String {
+fn agg_merge_expr_mapped(
+    agg: &AggExpr,
+    has_rescan: bool,
+    having_rescan: bool,
+    st_col: &str,
+) -> String {
     let alias = &agg.alias;
     let qt = quote_ident(st_col);
     let r_qt = quote_ident(alias);
@@ -1671,18 +1715,34 @@ fn agg_merge_expr_mapped(agg: &AggExpr, has_rescan: bool, st_col: &str) -> Strin
 
     match &agg.function {
         AggFunc::CountStar | AggFunc::Count => {
-            format!(
-                "COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)",
-                ins = quote_ident(&format!("__ins_{alias}")),
-                del = quote_ident(&format!("__del_{alias}")),
-            )
+            let ins = quote_ident(&format!("__ins_{alias}"));
+            let del = quote_ident(&format!("__del_{alias}"));
+            if having_rescan {
+                // For groups not yet in the ST (below HAVING threshold), use the
+                // full rescan count so the stored value is correct from the start.
+                format!(
+                    "CASE WHEN st.{qt} IS NULL \
+                     THEN COALESCE(r.{r_qt}, 0) \
+                     ELSE COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0) END",
+                )
+            } else {
+                format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)",)
+            }
         }
         AggFunc::Sum => {
-            format!(
-                "COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)",
-                ins = quote_ident(&format!("__ins_{alias}")),
-                del = quote_ident(&format!("__del_{alias}")),
-            )
+            let ins = quote_ident(&format!("__ins_{alias}"));
+            let del = quote_ident(&format!("__del_{alias}"));
+            if having_rescan {
+                // For groups not yet in the ST (below HAVING threshold), use the
+                // full rescan aggregate value so the stored value is correct.
+                format!(
+                    "CASE WHEN st.{qt} IS NULL \
+                     THEN COALESCE(r.{r_qt}, 0) \
+                     ELSE COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0) END",
+                )
+            } else {
+                format!("COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0)",)
+            }
         }
         AggFunc::Min | AggFunc::Max => {
             // MIN/MAX merge with group-rescan fallback.
@@ -1749,9 +1809,9 @@ fn agg_merge_expr_mapped(agg: &AggExpr, has_rescan: bool, st_col: &str) -> Strin
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, &agg.alias)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, &agg.alias)`.
 fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, &agg.alias)
+    agg_merge_expr_mapped(agg, has_rescan, false, &agg.alias)
 }
 
 #[cfg(test)]

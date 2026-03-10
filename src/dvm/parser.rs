@@ -8398,7 +8398,11 @@ fn extract_aggregates_from_expr_inner(expr: &Expr, start_idx: usize, out: &mut V
             let name_lower = func_name.to_lowercase();
             let agg_func = match name_lower.as_str() {
                 "count" => {
-                    if args.is_empty() {
+                    // COUNT(*) from HAVING arrives as FuncCall { args: [Raw("*")] };
+                    // treat it as CountStar with no argument (same as target list).
+                    if args.is_empty()
+                        || (args.len() == 1 && matches!(&args[0], Expr::Raw(s) if s == "*"))
+                    {
                         Some(AggFunc::CountStar)
                     } else {
                         Some(AggFunc::Count)
@@ -8411,7 +8415,12 @@ fn extract_aggregates_from_expr_inner(expr: &Expr, start_idx: usize, out: &mut V
                 _ => None,
             };
             if let Some(func) = agg_func {
-                let argument = args.first().cloned();
+                // CountStar has no argument (even if the parse produced [Raw("*")]).
+                let argument = if matches!(func, AggFunc::CountStar) {
+                    None
+                } else {
+                    args.first().cloned()
+                };
                 let alias = format!("__pgt_having_{}", start_idx + out.len());
                 out.push(AggExpr {
                     function: func,
@@ -12941,8 +12950,13 @@ fn rewrite_having_expr(expr: &Expr, aggregates: &[AggExpr]) -> Expr {
                     continue;
                 }
                 // Match by argument SQL representation.
+                // COUNT(*) is represented as FuncCall { args: [Raw("*")] } when parsed
+                // from a HAVING clause, but as argument = None in the target-list AggExpr.
                 let args_match = match &agg.argument {
-                    None => args.is_empty(), // COUNT(*)
+                    None => {
+                        args.is_empty()
+                            || (args.len() == 1 && matches!(&args[0], Expr::Raw(s) if s == "*"))
+                    }
                     Some(agg_arg) => args.len() == 1 && args[0].to_sql() == agg_arg.to_sql(),
                 };
                 if args_match {
