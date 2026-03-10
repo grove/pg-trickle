@@ -115,7 +115,7 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     let unwrapped = unwrap_transparent(child);
     let is_join_child = matches!(
         unwrapped,
-        OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. }
+        OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. }
     );
     let is_lateral_child = matches!(
         unwrapped,

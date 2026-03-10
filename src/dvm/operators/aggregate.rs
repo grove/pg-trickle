@@ -67,8 +67,28 @@ fn resolve_col_for_child(expr: &Expr, child_cols: &[String]) -> String {
 }
 
 /// Resolve a group-by expression for the child CTE's column names.
+///
+/// Uses `resolve_expr_for_child` so that compound expressions such as
+/// `COALESCE(l.dept, r.dept)` are recursed into, producing
+/// `COALESCE(l__dept, r__dept)` rather than the incorrect
+/// `COALESCE(dept, dept)` that `resolve_col_for_child` would emit.
 fn resolve_group_col(expr: &Expr, child_cols: &[String]) -> String {
-    resolve_col_for_child(expr, child_cols)
+    resolve_expr_for_child(expr, child_cols)
+}
+
+/// Return a SQL fragment that can be safely embedded in a SELECT list or
+/// GROUP BY clause.
+///
+/// Simple column names (no parentheses) are double-quoted as identifiers.
+/// Compound SQL expressions (containing `(`) are returned as-is — quoting
+/// them as identifiers would cause PostgreSQL to look for a column whose
+/// name is literally the expression string.
+fn col_ref_or_sql_expr(s: &str) -> String {
+    if s.contains('(') {
+        s.to_string()
+    } else {
+        quote_ident(s)
+    }
 }
 
 /// Resolve an entire expression tree against child CTE column names.
@@ -102,6 +122,25 @@ fn resolve_expr_for_child(expr: &Expr, child_cols: &[String]) -> String {
 }
 
 // ── Group-rescan helpers ────────────────────────────────────────────
+
+/// Returns true if the child operator tree contains a FULL OUTER JOIN node.
+///
+/// Used to decide whether SUM aggregates need a rescan CTE to handle
+/// NULL-producing transitions (matched → unmatched rows) correctly. The
+/// algebraic `old + ins − del` formula gives 0 instead of NULL when all
+/// newly inserted rows carry NULL for the aggregate column (which happens
+/// when a matched pair becomes a left-only row after the right side is
+/// deleted). A rescan re-aggregates the affected groups from current source
+/// data and yields the correct NULL from `SUM(NULL, NULL, …)`.
+fn child_has_full_join(op: &OpTree) -> bool {
+    match op {
+        OpTree::FullJoin { .. } => true,
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => child_has_full_join(child),
+        _ => false,
+    }
+}
 
 /// Reconstruct the FROM clause SQL from a child OpTree.
 ///
@@ -406,7 +445,7 @@ fn build_intermediate_agg_delta(
     for (expr, output) in group_by.iter().zip(group_output.iter()) {
         let expr_sql = expr.to_sql();
         let qt_output = quote_ident(output);
-        if expr_sql == *output {
+        if expr_sql == *output && !expr_sql.contains('(') {
             rescan_selects.push(qt_output);
         } else {
             rescan_selects.push(format!("{expr_sql} AS {qt_output}"));
@@ -803,6 +842,7 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
+    let has_full_join_child = child_has_full_join(child);
     let rescan_aggs: Vec<&AggExpr> = if force_all_aggs {
         aggregates.iter().collect()
     } else {
@@ -812,6 +852,10 @@ fn build_rescan_cte(
                 a.is_distinct
                     || a.function.is_group_rescan()
                     || matches!(a.function, AggFunc::Min | AggFunc::Max)
+                    // SUM over a FULL JOIN child needs rescan because the algebraic
+                    // `old + ins − del` formula gives 0 instead of NULL when a
+                    // matched row transitions to a null-padded (unmatched) row.
+                    || (has_full_join_child && matches!(a.function, AggFunc::Sum))
             })
             .collect()
     };
@@ -826,7 +870,14 @@ fn build_rescan_cte(
     for (expr, output) in group_by.iter().zip(group_output.iter()) {
         let expr_sql = expr.to_sql();
         let qt_output = quote_ident(output);
-        if expr_sql == *output {
+        // When `expr_sql == *output` AND the expression is a simple
+        // identifier (no parentheses), SELECT the column directly.
+        // For compound expressions like `COALESCE(l.dept, r.dept)`,
+        // `to_sql()` equals `output_name()` (both fall back to to_sql).
+        // In that case we must use `expr AS alias` form, because
+        // `qt_output` alone would be treated as an identifier lookup
+        // ("`COALESCE(...)`" does not exist as a column), not a function call.
+        if expr_sql == *output && !expr_sql.contains('(') {
             selects.push(qt_output);
         } else {
             selects.push(format!("{expr_sql} AS {qt_output}"));
@@ -1224,7 +1275,10 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         let group_by_clause = if group_resolved.is_empty() {
             String::new()
         } else {
-            let gb_cols: Vec<String> = group_resolved.iter().map(|c| quote_ident(c)).collect();
+            let gb_cols: Vec<String> = group_resolved
+                .iter()
+                .map(|c| col_ref_or_sql_expr(c))
+                .collect();
             format!("\nGROUP BY {}", gb_cols.join(", "))
         };
 
@@ -1234,11 +1288,11 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         // Group by columns — alias to output name for consistent downstream refs
         for (resolved, output) in group_resolved.iter().zip(group_output.iter()) {
             if resolved == output {
-                delta_selects.push(quote_ident(resolved));
+                delta_selects.push(col_ref_or_sql_expr(resolved));
             } else {
                 delta_selects.push(format!(
                     "{} AS {}",
-                    quote_ident(resolved),
+                    col_ref_or_sql_expr(resolved),
                     quote_ident(output)
                 ));
             }
@@ -1390,10 +1444,30 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     merge_selects.push(format!("{new_count_expr} AS new_count"));
     merge_selects.push("COALESCE(st.__pgt_count, 0) AS old_count".to_string());
 
+    // For SUM aggregates on top of a FULL JOIN child: the algebraic
+    // `old + ins − del` formula gives 0 instead of NULL when all newly
+    // inserted rows carry NULL for the aggregate column (matched rows
+    // transitioning to null-padded unmatched rows). Use the rescan CTE's
+    // value for those aggregates instead.
+    //
+    // SUM(DISTINCT ...) already has a rescan CTE built (via `a.is_distinct`)
+    // and gets the correct `r.{alias}` path in agg_merge_expr_mapped, so
+    // the plain-SUM gate only applies to non-DISTINCT SUM.
+    let sum_has_rescan = has_rescan && child_has_full_join(child);
+
     // Per-aggregate new values + old values for G-S1 change detection
     for agg in aggregates {
-        let new_val_expr =
-            agg_merge_expr_mapped(agg, has_rescan, use_having_rescan, &st_col_name(&agg.alias));
+        let agg_has_rescan = if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
+            sum_has_rescan
+        } else {
+            has_rescan
+        };
+        let new_val_expr = agg_merge_expr_mapped(
+            agg,
+            agg_has_rescan,
+            use_having_rescan,
+            &st_col_name(&agg.alias),
+        );
         merge_selects.push(format!(
             "{new_val_expr} AS {}",
             quote_ident(&format!("new_{}", agg.alias)),
@@ -1732,9 +1806,20 @@ fn agg_merge_expr_mapped(
         AggFunc::Sum => {
             let ins = quote_ident(&format!("__ins_{alias}"));
             let del = quote_ident(&format!("__del_{alias}"));
-            if having_rescan {
-                // For groups not yet in the ST (below HAVING threshold), use the
-                // full rescan aggregate value so the stored value is correct.
+            if has_rescan {
+                // Rescan CTE available (e.g., FULL JOIN child or HAVING context):
+                // use the re-aggregated value for any changed group. This correctly
+                // handles NULL transitions (matched → unmatched) in FULL/LEFT JOINs
+                // where the algebraic formula produces 0 instead of NULL, and also
+                // covers HAVING threshold crossings for new groups.
+                format!(
+                    "CASE WHEN COALESCE(d.{ins}, 0) > 0 OR COALESCE(d.{del}, 0) > 0 \
+                     THEN r.{r_qt} \
+                     ELSE st.{qt} END",
+                )
+            } else if having_rescan {
+                // Safety net (having_rescan should always imply has_rescan,
+                // but guard against edge cases).
                 format!(
                     "CASE WHEN st.{qt} IS NULL \
                      THEN COALESCE(r.{r_qt}, 0) \
