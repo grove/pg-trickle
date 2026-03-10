@@ -134,23 +134,39 @@ without `#[ignore]`:
   HAVING threshold crossing (insert brings group above threshold; delete drops
   it back below)
 
+#### Correlated Scalar Subquery Differential Correctness (2 tests un-ignored)
+
+Fixed correlated scalar subqueries in the SELECT list by decorrelating them
+into LEFT JOINs before DVM parsing:
+
+- **`parser.rs` — `rewrite_correlated_scalar_in_select` rewrite:** Correlated
+  scalar subqueries (e.g., `(SELECT MAX(e.salary) FROM emp e WHERE e.dept_id =
+  d.id)`) were not supported by the DVM's `ScalarSubquery` operator. Added a
+  pre-parser rewrite that detects correlation conditions, extracts them into
+  JOIN-ON clauses, and rewrites the subquery as a `LEFT JOIN` with GROUP BY
+  aggregation. The rewrite runs before `parse_defining_query` so the DVM tree
+  sees a standard LEFT JOIN.
+
+- **`parser.rs` — inner table qualifier leak:** The rewrite initially preserved
+  inner table qualifiers (`MAX(e.salary)`). The DVM's intermediate aggregate
+  delta engine wraps FROM in EXCEPT ALL subqueries where the original inner
+  alias is invisible. Fixed by stripping inner table qualifiers during the
+  rewrite (`strip_qualifier()`), producing `MAX(salary)`.
+
+Two previously-ignored E2E tests in `tests/e2e_scalar_subquery_tests.rs` now
+run without `#[ignore]`:
+
+- `test_correlated_scalar_subquery_differential` — correlated MAX in SELECT
+  with insert/delete of top earner and new department
+- `test_scalar_subquery_null_result_differential` — correlated SUM with
+  NULL-producing category that has no lookup match
+
 ### Changed
 
-- **Test count:** 7 DVM-correctness E2E tests remain `#[ignore]`d (down from
-  18 at the v0.2.3 release). The 5 HAVING tests, 5 keyless-table duplicate
-  tests (already un-ignored before this release), 5 FULL JOIN tests, and 1
-  EXISTS+HAVING test account for the 11 recovered tests. Remaining:
-  `e2e_scalar_subquery_tests` (2), `e2e_sublink_or_tests` (0),
-  other suites (5).
-
-### Known Limitations
-
-7 E2E tests are currently marked `#[ignore]` due to DVM correctness bugs that
-will be addressed in future releases:
-
-| Suite | Ignored | Reason |
-|---|---|---|
-| `e2e_scalar_subquery_tests` | 2/4 | Correlated scalar subquery differential generates invalid SQL |
+- **Test count:** All 18 previously-ignored DVM-correctness E2E tests have been
+  re-enabled (0 remaining). The 5 HAVING tests, 5 keyless-table duplicate tests
+  (already un-ignored before this release), 5 FULL JOIN tests, 1 EXISTS+HAVING
+  test, and 2 correlated scalar subquery tests account for the full recovery.
 
 ---
 

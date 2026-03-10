@@ -1,7 +1,7 @@
 # PLAN_IGNORED_E2E_TESTS.md — Re-enable Ignored E2E Coverage
 
-**Status:** In Progress  
-**Date:** 2026-03-09  
+**Status:** Complete  
+**Date:** 2026-03-10  
 **Branch:** `plan-ignored-e2e-tests`  
 **Scope:** Reconcile the stale changelog note about 18 ignored E2E tests, re-enable the suites that are already supportable, and implement the remaining DVM fixes needed to bring the still-failing ignored tests back into normal E2E coverage.
 
@@ -13,7 +13,7 @@
 |---|---|---|
 | A1 — Keyless duplicate suite | ✅ Complete | Already done before this plan; docs updated |
 | A2 — HAVING transition suite | ✅ Complete | 2 DVM bugs fixed; 5 tests un-ignored |
-| B1 — Correlated scalar subquery | 🔴 Keep ignored | Still fails with two distinct errors — see below |
+| B1 — Correlated scalar subquery | ✅ Complete | Rewrite-based decorrelation; 2 tests un-ignored |
 | C1 — FULL JOIN differential | ✅ Complete | 5 DVM bugs fixed; 5 tests un-ignored |
 | C2 — Correlated EXISTS with HAVING | ✅ Complete | 3 DVM bugs fixed; 1 test un-ignored |
 | D1 — Changelog/docs re-baseline | ✅ Complete | CHANGELOG + Known Limitations updated |
@@ -38,17 +38,49 @@
   `having_rescan = true`, using the full rescan value for new groups.
 - Files: `src/dvm/diff.rs`, `src/dvm/operators/filter.rs`, `src/dvm/operators/aggregate.rs`
 
-### B1 Scalar Subquery — Still Failing
+### B1 Correlated Scalar Subquery ✅ COMPLETE
 
-Clean re-run confirms both ignored tests still fail:
-- `test_correlated_scalar_subquery_differential` → "column `d.name` must appear in the GROUP BY
-  clause or be used in an aggregate function" (invalid SQL generation in scalar subquery diff)
-- `test_scalar_subquery_null_result_differential` → "missing FROM-clause entry for table `m`"
-  (alias resolution error during refresh)
+**Completed:** 2026-03 (branch `plan-ignored-e2e-tests`)
 
-Decision: Keep `#[ignore]` per the plan's decision rule ("fails once reproducibly → move into
-Workstream C-style bugfix work and keep ignored until fixed"). These require dedicated DVM
-operator work in `src/dvm/operators/scalar_subquery.rs`.
+Both previously-ignored tests in `tests/e2e_scalar_subquery_tests.rs` now pass.
+The fix uses a pre-parser rewrite that decorrelates correlated scalar subqueries
+in the SELECT list into LEFT JOINs before the DVM parser sees the query.
+
+**Root causes found and fixed:**
+
+1. **`parser.rs` — correlated scalar subquery in SELECT not decorrelated:**
+   The DVM parser could not handle correlated scalar subqueries in the SELECT
+   list (e.g., `(SELECT MAX(e.salary) FROM emp e WHERE e.dept_id = d.id)`).
+   The `ScalarSubquery` operator only handled non-correlated cases. Added a
+   new pre-parser rewrite `rewrite_correlated_scalar_in_select()` that detects
+   correlated scalar subqueries in the target list, extracts correlation
+   conditions, and rewrites them as LEFT JOIN subqueries:
+   ```sql
+   -- Before: SELECT d.name, (SELECT MAX(e.salary) FROM emp e WHERE e.dept_id = d.id) ...
+   -- After:  SELECT d.name, "__pgt_sq_1"."__pgt_scalar_1" ...
+   --         FROM dept d LEFT JOIN (SELECT dept_id AS "__pgt_corr_key_1",
+   --           MAX(salary) AS "__pgt_scalar_1" FROM emp GROUP BY dept_id) AS "__pgt_sq_1"
+   --         ON d.id = "__pgt_sq_1"."__pgt_corr_key_1"
+   ```
+   Files: `src/dvm/parser.rs`, `src/dvm/mod.rs`, `src/api.rs`
+
+2. **`parser.rs` — inner table qualifiers leaked into differential SQL:**
+   The initial rewrite preserved inner table qualifiers (e.g., `MAX(e.salary)`)
+   in the decorrelated subquery's SELECT list. While valid for the subquery
+   itself, the DVM's intermediate aggregate delta engine wraps the FROM clause
+   in an EXCEPT ALL subquery aliased as `__pgt_old`, making the original inner
+   alias (`e`) invisible. Fixed by stripping inner table qualifiers from the
+   scalar expression during rewrite (`expr.strip_qualifier().to_sql()`),
+   producing `MAX(salary)` which resolves correctly in all DVM-generated SQL
+   contexts.
+   Files: `src/dvm/parser.rs`
+
+**Acceptance criteria met:**
+
+1. ✅ Both `test_correlated_scalar_subquery_differential` and
+   `test_scalar_subquery_null_result_differential` pass without `#[ignore]`.
+2. ✅ All 2 non-correlated scalar subquery tests still pass.
+3. ✅ All previously-fixed HAVING, FULL JOIN, and EXISTS+HAVING tests still pass.
 
 ---
 
