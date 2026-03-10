@@ -51,18 +51,41 @@ async fn configure_fast_scheduler(db: &E2eDb) {
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
 
-    assert!(
-        sched_running,
-        "pg_trickle scheduler did not appear in pg_stat_activity within 90 s. \
-         Possible causes: \
-         (1) the launcher never re-probed the fresh test database after CREATE EXTENSION, \
-         despite periodic launcher rescan nudges; \
-         (2) launcher retry back-off (retry_ttl=15 s + poll=10 s = 25 s) exceeded \
-         the timeout even after periodic launcher rescan nudges; \
-         (3) pg_trickle.enabled GUC is false; \
-         (4) max_worker_processes exhausted — E2E image sets it to 128 (rebuild with \
-         `just build-e2e-image` if using an older image)."
-    );
+    if !sched_running {
+        // Dump diagnostic info before panicking.
+        let launcher_count: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE application_name = 'pg_trickle launcher'",
+            )
+            .await;
+        let sched_count: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE application_name = 'pg_trickle scheduler'",
+            )
+            .await;
+        let db_name: String = db.query_scalar("SELECT current_database()").await;
+        let enabled: String = db.show_setting("pg_trickle.enabled").await;
+        let worker_count: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'background worker'",
+            )
+            .await;
+
+        panic!(
+            "pg_trickle scheduler did not appear in pg_stat_activity within 90 s.\n\
+             Diagnostics: database={db_name}, enabled={enabled}, \
+             launcher_count={launcher_count}, scheduler_count={sched_count}, \
+             total_bgworkers={worker_count}\n\
+             Possible causes: \
+             (1) the launcher never re-probed the fresh test database after CREATE EXTENSION; \
+             (2) launcher retry back-off exceeded the timeout; \
+             (3) pg_trickle.enabled GUC is false; \
+             (4) max_worker_processes exhausted — E2E image sets it to 128 (rebuild with \
+             `just build-e2e-image` if using an older image)."
+        );
+    }
 }
 
 /// Wait until a ST has been auto-refreshed by checking pgt_refresh_history.

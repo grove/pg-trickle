@@ -541,6 +541,14 @@ impl E2eDb {
             .execute(&self.pool)
             .await
             .expect("Failed to CREATE EXTENSION pg_trickle");
+
+        // Signal the launcher BGW to re-probe this database immediately.
+        // Without this, the launcher may have already cached the database
+        // as "no extension" (5-minute skip TTL) during its regular poll
+        // between CREATE DATABASE and CREATE EXTENSION.
+        // Harmless no-op when shared_preload_libraries is not configured.
+        self.nudge_launcher_rescan().await;
+
         self
     }
 
@@ -857,7 +865,8 @@ impl E2eDb {
     pub async fn wait_for_scheduler(&self, timeout: std::time::Duration) -> bool {
         let start = std::time::Instant::now();
         let nudge_interval = std::time::Duration::from_secs(10);
-        let mut last_nudge = std::time::Instant::now();
+        // Trigger the first nudge immediately rather than waiting 10 s.
+        let mut last_nudge = start - nudge_interval;
         loop {
             if start.elapsed() > timeout {
                 return false;
