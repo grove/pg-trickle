@@ -1,9 +1,9 @@
 # =============================================================================
 # CodeQL Workflow — static analysis for Rust extension code
 #
-# Uses a manual Rust build so the pgrx/PostgreSQL toolchain is available during
-# extraction. This complements clippy by looking for higher-level security and
-# dataflow issues.
+# Uses build-mode: none (the only mode supported for Rust) so CodeQL analyses
+# the source directly. This complements clippy by looking for higher-level
+# security and dataflow issues.
 # =============================================================================
 name: CodeQL
 
@@ -58,16 +58,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: rust
-          build-mode: manual
-
-      - name: Setup pgrx environment
-        uses: ./.github/actions/setup-pgrx
-
-      - name: Build for CodeQL extraction
-        run: cargo build --all-targets --features pg18
+          build-mode: none
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
