@@ -189,6 +189,23 @@ pub static PGS_BUFFER_PARTITIONING: GucSetting<Option<std::ffi::CString>> =
 /// deltas against the previous snapshot.
 pub static PGS_FOREIGN_TABLE_POLLING: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Parallel refresh mode — controls whether the scheduler dispatches
+/// refresh work to dynamic background workers.
+///
+/// - `"off"` (default): Current sequential behavior.
+/// - `"dry_run"`: Compute execution units and log dispatch decisions,
+///   but execute inline (no actual workers spawned).
+/// - `"on"`: Enable true parallel refresh via dynamic workers.
+pub static PGS_PARALLEL_REFRESH_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
+
+/// Cluster-wide cap on concurrently active pg_trickle dynamic refresh workers.
+///
+/// This is distinct from `pg_trickle.max_concurrent_refreshes`, which is the
+/// per-database dispatch cap. This GUC prevents multiple database coordinators
+/// from overcommitting the shared PostgreSQL `max_worker_processes` budget.
+pub static PGS_MAX_DYNAMIC_REFRESH_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(4);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -257,10 +274,11 @@ pub fn register_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_trickle.max_concurrent_refreshes",
-        c"Reserved for future use — parallel refresh is not yet implemented.",
-        c"This setting is reserved for v0.3.0 parallel refresh. \
-           It is accepted and stored but has no effect on behaviour in v0.2.0. \
-           The scheduler processes stream tables sequentially.",
+        c"Maximum active refresh workers per database coordinator.",
+        c"Limits the number of concurrent refresh operations within a single database. \
+           In sequential mode (parallel_refresh_mode=off) this has no effect. \
+           In parallel mode, the coordinator will not dispatch more than this many \
+           concurrent refresh workers for one database.",
         &PGS_MAX_CONCURRENT_REFRESHES,
         1,  // min
         32, // max
@@ -460,6 +478,29 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    GucRegistry::define_string_guc(
+        c"pg_trickle.parallel_refresh_mode",
+        c"Parallel refresh mode: off, dry_run, or on.",
+        c"'off' (default): sequential refresh. \
+           'dry_run': compute execution units and log dispatch decisions but execute inline. \
+           'on': enable true parallel refresh via dynamic background workers.",
+        &PGS_PARALLEL_REFRESH_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.max_dynamic_refresh_workers",
+        c"Cluster-wide cap on pg_trickle dynamic refresh workers.",
+        c"Limits the total number of concurrently active pg_trickle refresh workers \
+           across all databases. Prevents overcommitting max_worker_processes.",
+        &PGS_MAX_DYNAMIC_REFRESH_WORKERS,
+        1,  // min
+        64, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -599,4 +640,49 @@ pub fn pg_trickle_foreign_table_polling() -> bool {
 pub fn pg_trickle_ivm_recursive_max_depth() -> Option<i32> {
     let v = PGS_IVM_RECURSIVE_MAX_DEPTH.get();
     if v > 0 { Some(v) } else { None }
+}
+
+/// Parallel refresh operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelRefreshMode {
+    /// Sequential execution — current behavior (default).
+    Off,
+    /// Compute execution units and log dispatch decisions, but execute inline.
+    DryRun,
+    /// Enable true parallel refresh via dynamic background workers.
+    On,
+}
+
+impl ParallelRefreshMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParallelRefreshMode::Off => "off",
+            ParallelRefreshMode::DryRun => "dry_run",
+            ParallelRefreshMode::On => "on",
+        }
+    }
+}
+
+impl std::fmt::Display for ParallelRefreshMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Returns the current parallel refresh mode.
+pub fn pg_trickle_parallel_refresh_mode() -> ParallelRefreshMode {
+    match PGS_PARALLEL_REFRESH_MODE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(str::to_ascii_lowercase))
+        .as_deref()
+    {
+        Some("dry_run") => ParallelRefreshMode::DryRun,
+        Some("on") => ParallelRefreshMode::On,
+        _ => ParallelRefreshMode::Off,
+    }
+}
+
+/// Returns the cluster-wide cap on dynamic refresh workers.
+pub fn pg_trickle_max_dynamic_refresh_workers() -> i32 {
+    PGS_MAX_DYNAMIC_REFRESH_WORKERS.get()
 }

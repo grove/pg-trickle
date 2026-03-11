@@ -41,7 +41,9 @@ use std::panic::AssertUnwindSafe;
 use crate::catalog::{RefreshRecord, StreamTableMeta};
 use crate::cdc;
 use crate::config;
-use crate::dag::{DiamondConsistency, DiamondSchedulePolicy, NodeId, StDag, StStatus};
+use crate::dag::{
+    DiamondConsistency, DiamondSchedulePolicy, ExecutionUnitDag, NodeId, StDag, StStatus,
+};
 use crate::error::{RetryPolicy, RetryState};
 use crate::monitor;
 use crate::refresh::{self, RefreshAction};
@@ -518,6 +520,32 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             if let Err(e) = dag_ref.topological_order() {
                 log!("pg_trickle: DAG has cycles: {}", e);
                 return;
+            }
+
+            // Step B2: Build execution unit DAG for parallel-refresh awareness.
+            // In `dry_run` mode, log what would be dispatched. In `off` mode,
+            // compute but only use for observability (summary logged on rebuild).
+            // In `on` mode, the EU DAG will drive the dispatch loop (Phase 4).
+            let parallel_mode = config::pg_trickle_parallel_refresh_mode();
+            if parallel_mode != config::ParallelRefreshMode::Off {
+                let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
+                    load_st_by_id(pgt_id).map(|st| st.refresh_mode)
+                });
+                match parallel_mode {
+                    config::ParallelRefreshMode::DryRun => {
+                        log!(
+                            "pg_trickle: parallel refresh (dry_run): {}",
+                            eu_dag.summary()
+                        );
+                        log!("{}", eu_dag.dry_run_log());
+                    }
+                    config::ParallelRefreshMode::On => {
+                        log!("pg_trickle: parallel refresh (on): {}", eu_dag.summary());
+                        // Phase 4 (future): dispatch loop replaces inline refresh.
+                        // For now, fall through to sequential execution.
+                    }
+                    config::ParallelRefreshMode::Off => unreachable!(),
+                }
             }
 
             // Step C: Compute consistency groups and refresh group-by-group
