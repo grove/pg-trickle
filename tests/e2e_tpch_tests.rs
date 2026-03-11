@@ -504,12 +504,18 @@ fn log_progress(qname: &str, tier: u8, cycle: usize, total_cycles: usize, elapse
 
 /// Refresh a stream table, returning an error instead of panicking.
 /// Used to gracefully handle known pg_trickle DVM bugs without stopping the test.
+/// A 60-second lock_timeout prevents the test from hanging if the background
+/// scheduler unexpectedly holds a conflicting transaction lock.
 async fn try_refresh_st(db: &E2eDb, st_name: &str) -> Result<(), String> {
-    db.try_execute(&format!(
-        "SELECT pgtrickle.refresh_stream_table('{st_name}')"
-    ))
-    .await
-    .map_err(|e| e.to_string())
+    db.try_execute("SET lock_timeout = '60s'").await.ok();
+    let result = db
+        .try_execute(&format!(
+            "SELECT pgtrickle.refresh_stream_table('{st_name}')"
+        ))
+        .await
+        .map_err(|e| e.to_string());
+    db.try_execute("SET lock_timeout = 0").await.ok();
+    result
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -776,9 +782,13 @@ async fn test_tpch_cross_query_consistency() {
         let st_name = format!("tpch_x_{}", q.name);
         let result = db
             .try_execute(&format!(
-                // NULL schedule — prevents background worker from auto-refreshing
-                // these tables, which would race with the cross-query refresh loop.
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                // '24h' schedule — time-based check will never fire during the test
+                // window (now() - last_refresh_at ≪ 86400s), so the background
+                // scheduler skips these tables and does NOT race with the
+                // cross-query refresh loop.  ('calculated' = CALCULATED mode,
+                // which auto-refreshes whenever CDC changes are pending — the
+                // opposite of what we want here.)
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -1393,9 +1403,12 @@ async fn test_tpch_sustained_churn() {
         let st_name = format!("churn_{name}");
         match db
             .try_execute(&format!(
-                // NULL schedule prevents background auto-refresh from racing
-                // with the churn loop's explicit per-cycle refreshes.
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                // '24h' schedule — time-based check will never fire during the test
+                // window, so the background scheduler skips these tables and does
+                // NOT race with the churn loop's explicit per-cycle refreshes.
+                // ('calculated' = CALCULATED mode = auto-refresh on pending CDC
+                // changes, which is the opposite of what we want here.)
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', 'DIFFERENTIAL')",
             ))
             .await
         {

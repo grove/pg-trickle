@@ -492,6 +492,12 @@ impl E2eDb {
         // Enable INFO logging so [PGS_PROFILE] lines appear in server stderr
         db.execute("ALTER SYSTEM SET log_min_messages = 'info'")
             .await;
+        // Raise the scheduler tick interval to its maximum so the background
+        // worker does not auto-refresh during bench tests, which use explicit
+        // manual refreshes.  This is a defence-in-depth companion to using
+        // '24h' schedules for bench stream tables.
+        db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = '60000'")
+            .await;
         db.reload_config_and_wait().await;
 
         db
