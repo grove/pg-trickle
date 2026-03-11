@@ -25,9 +25,24 @@ permissions:
   packages: write   # push to GHCR
 
 jobs:
+  # ── Pre-flight version checks ────────────────────────────────────────────
+  # Verify that all version references (archive SQL, upgrade script, CI
+  # targets, justfile defaults, test fallbacks) match the Cargo.toml version
+  # before spending time on the multi-platform build matrix.
+  preflight:
+    name: Version sync check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check version references are in sync
+        run: ./scripts/check_version_sync.sh
+
   # ── Build release artifacts for each platform ───────────────────────────
   build-release:
     name: Build (${{ matrix.artifact_suffix }})
+    needs: [preflight]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     continue-on-error: ${{ matrix.os == 'windows-2022' }}

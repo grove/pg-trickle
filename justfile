@@ -181,6 +181,11 @@ test-upgrade from="0.1.3" to="0.3.0": (build-upgrade-image from to)
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests -- --ignored --test-threads=1 --nocapture
 
+# Check that all version-related files and references are in sync with Cargo.toml
+[group: "upgrade"]
+check-version-sync:
+    ./scripts/check_version_sync.sh
+
 # ── Benchmarks ────────────────────────────────────────────────────────────
 
 # Run all criterion benchmarks
