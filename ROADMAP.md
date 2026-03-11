@@ -548,11 +548,11 @@ trigger overhead reduction of 50–80% for bulk DML; neutral for single-row.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| B1 | Replace per-row triggers with statement-level triggers; INSERT/UPDATE/DELETE via set-based buffer fill | 8h | [PLAN_PERFORMANCE_PART_9.md](plans/performance/PLAN_PERFORMANCE_PART_9.md) §Session 3 |
-| B2 | `pg_trickle.cdc_trigger_mode = 'statement'\|'row'` GUC + migration to replace row-level triggers on `ALTER EXTENSION UPDATE` | 4h | [PLAN_PERFORMANCE_PART_9.md](plans/performance/PLAN_PERFORMANCE_PART_9.md) §Session 3 |
+| ~~B1~~ | ~~Replace per-row triggers with statement-level triggers; INSERT/UPDATE/DELETE via set-based buffer fill~~ | ~~8h~~ | ✅ Done — `build_stmt_trigger_fn_sql` in cdc.rs; `REFERENCING NEW TABLE AS __pgt_new OLD TABLE AS __pgt_old FOR EACH STATEMENT` created by `create_change_trigger` |
+| ~~B2~~ | ~~`pg_trickle.cdc_trigger_mode = 'statement'\|'row'` GUC + migration to replace row-level triggers on `ALTER EXTENSION UPDATE`~~ | ~~4h~~ | ✅ Done — `CdcTriggerMode` enum in config.rs; `rebuild_cdc_triggers()` in api.rs; 0.3.0→0.4.0 upgrade script migrates existing triggers |
 | B3 | Write-side benchmark matrix (narrow/medium/wide tables × bulk/single DML) | 2h | [PLAN_PERFORMANCE_PART_9.md](plans/performance/PLAN_PERFORMANCE_PART_9.md) §Session 3 |
 
-> **Statement-level CDC subtotal: ~14 hours**
+> **Statement-level CDC subtotal: ~12h done, ~2h remaining (B3)**
 
 ### Cross-Source Snapshot Consistency (Phase 1)
 
@@ -587,7 +587,7 @@ updated in the same transaction from producing an inconsistent stream table.
 
 **Exit criteria:**
 - [ ] `max_concurrent_refreshes` drives real parallel refresh via coordinator + dynamic refresh workers
-- [ ] Statement-level CDC triggers pass full E2E suite; write overhead benchmarked
+- [x] Statement-level CDC triggers implemented (B1/B2); write overhead benchmark (B3) pending
 - [ ] LSN tick watermark active by default; no interleaved-source inconsistency in E2E tests
 - [x] Codecov badge on README; coverage report uploading
 - [ ] Extension upgrade path tested (`0.3.0 → 0.4.0`)
