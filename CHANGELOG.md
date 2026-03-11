@@ -7,7 +7,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [Unreleased]
+## [0.3.0] — 2026-03-11
 
 ### Fixed
 
@@ -161,6 +161,32 @@ run without `#[ignore]`:
 - `test_scalar_subquery_null_result_differential` — correlated SUM with
   NULL-producing category that has no lookup match
 
+#### Backend Worker Detection Fix (PG 18)
+
+Fixed a critical bug where `health_check()` and the scheduler's active-worker
+detection returned zero results on PostgreSQL 18. In PG 18,
+`BackgroundWorkerBuilder::new(name)` sets `bgw_name` which maps to
+`pg_stat_activity.backend_type`, not `application_name`. All queries checking
+for `'pg_trickle scheduler'` and `'pg_trickle launcher'` were using
+`application_name` and finding zero matches.
+
+Fixed in `src/scheduler.rs` (launcher detection), `src/monitor.rs`
+(`health_check()` scheduler count), `tests/e2e/mod.rs` (`wait_for_scheduler()`),
+and `tests/e2e_bgworker_tests.rs` (diagnostic dump queries).
+
+#### Scheduler Launcher Thundering-Herd Prevention
+
+Fixed an infinite back-off loop where concurrent test databases calling
+`create_stream_table()` each bumped the DAG rebuild signal, which previously
+called `last_attempt.clear()` on every bump. This wiped all per-database
+back-off timers (including `postgres`), causing the launcher to immediately
+re-probe, fail (extension not yet installed), and reset the timer — an
+infinite loop preventing the 15 s retry TTL from ever expiring.
+
+Fixed by retaining `last_attempt` entries whose elapsed time is still within
+`retry_ttl` on a DAG signal. Only entries older than `retry_ttl` (already
+expired) are evicted, so recently-failed probes stay protected by back-off.
+
 ### Changed
 
 - **Test count:** All 18 previously-ignored DVM-correctness E2E tests have been
@@ -168,9 +194,23 @@ run without `#[ignore]`:
   (already un-ignored before this release), 5 FULL JOIN tests, 1 EXISTS+HAVING
   test, and 2 correlated scalar subquery tests account for the full recovery.
 
+- **PostgreSQL 18.1 → 18.3** — CI pipelines, Dockerfiles, and the test harness
+  have been updated to use `postgres:18.3`. This is a maintenance release of
+  PostgreSQL 18 with bug fixes and no API changes.
+
+- **Dependency updates** — `tokio` 1.49 → 1.50; GitHub Actions updated:
+  `docker/build-push-action` 6→7, `actions/cache` 4→5,
+  `docker/login-action` 3→4, `docker/setup-buildx-action` 3→4,
+  `actions/setup-python` 5→6.
+
 ---
 
 ### Added
+
+- **`test_tpch_immediate_correctness`** — new TPC-H test that validates the
+  IMMEDIATE mode IVM trigger path end-to-end, verifying that stream tables
+  maintained via statement-level AFTER triggers produce the same results as
+  a full recompute after RF1/RF2/RF3 mutations.
 
 - **SAST — Narrow `rust.panic-in-sql-path` scope** (`sast-review-2` branch):
   Semgrep cannot detect `#[cfg(test)]` block boundaries inside Rust files,
