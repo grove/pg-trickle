@@ -36,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install just
+        uses: taiki-e/install-action@just
+
       - name: Check version references are in sync
         run: just check-version-sync
 
