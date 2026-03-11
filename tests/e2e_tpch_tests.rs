@@ -570,11 +570,12 @@ async fn test_tpch_differential_correctness() {
         let st_name = format!("tpch_{}", q.name);
         let create_result = db
             .try_execute(&format!(
-                // NULL schedule — disables background auto-refresh so the
-                // scheduler worker cannot race with the test's explicit refreshes,
-                // which would cause "refresh already in progress" errors and
-                // trigger repeated large temp-file creation on the disk.
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                // '24h' schedule — time-based check never fires during the test
+                // window, so the background scheduler does NOT race with the
+                // test's explicit per-cycle refreshes.
+                // ('calculated' = CALCULATED mode = auto-refresh on pending CDC
+                // changes — the opposite of what we want here.)
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -940,17 +941,19 @@ async fn test_tpch_full_vs_differential() {
         let st_full = format!("tpch_f_{}", q.name);
         let st_diff = format!("tpch_d_{}", q.name);
 
-        // Create both STs — NULL schedule prevents background auto-refresh
-        // from racing with the explicit per-cycle refresh calls below.
+        // Create both STs — '24h' schedule means the time-based check never
+        // fires during the test window, so the background scheduler does NOT
+        // race with the explicit per-cycle refresh calls below.
+        // ('calculated' = CALCULATED mode = auto-refresh on pending CDC changes.)
         let full_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, 'calculated', 'FULL')",
+                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, '24h', 'FULL')",
                 sql = q.sql,
             ))
             .await;
         let diff_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '24h', 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -1103,10 +1106,12 @@ async fn test_tpch_q07_isolation() {
     let q07_sql = include_str!("tpch/queries/q07.sql");
     let st_name = "tpch_q07_iso";
 
-    // Create Q07 ST only — NULL schedule prevents background auto-refresh
-    // from racing with the per-cycle explicit refreshes below.
+    // Create Q07 ST only — '24h' schedule means the time-based check never
+    // fires during the test window, so the background scheduler does NOT race
+    // with the per-cycle explicit refreshes below.
+    // ('calculated' = CALCULATED mode = auto-refresh on pending CDC changes.)
     db.try_execute(&format!(
-        "SELECT pgtrickle.create_stream_table('{st_name}', $${q07_sql}$$, 'calculated', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('{st_name}', $${q07_sql}$$, '24h', 'DIFFERENTIAL')",
     ))
     .await
     .expect("Q07 create failed");
@@ -1206,17 +1211,18 @@ async fn test_tpch_performance_comparison() {
         let st_full = format!("perf_f_{}", q.name);
         let st_diff = format!("perf_d_{}", q.name);
 
-        // NULL schedule prevents background auto-refresh from racing with
+        // '24h' schedule prevents background auto-refresh from racing with
         // the explicit per-cycle refresh calls in the performance loop.
+        // ('calculated' = CALCULATED mode = auto-refresh on pending CDC changes.)
         let full_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, 'calculated', 'FULL')",
+                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, '24h', 'FULL')",
                 sql = q.sql,
             ))
             .await;
         let diff_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '24h', 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -2147,9 +2153,10 @@ async fn test_tpch_differential_vs_immediate() {
 
         let diff_ok = db
             .try_execute(&format!(
-                // NULL schedule prevents background auto-refresh from racing
+                // '24h' schedule prevents background auto-refresh from racing
                 // with this test's explicit per-cycle checks.
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, 'calculated', 'DIFFERENTIAL')",
+                // ('calculated' = CALCULATED mode = auto-refresh on pending CDC changes.)
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '24h', 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
