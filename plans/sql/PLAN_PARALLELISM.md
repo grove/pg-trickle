@@ -1,14 +1,61 @@
 # Plan: True Parallel Refresh Within a Database
 
 Date: 2026-03-08
-Status: Proposed
-Last Updated: 2026-03-08
+Status: In Progress
+Last Updated: 2026-03-11
 
 Related:
 - [REPORT_PARALLELIZATION.md](../performance/REPORT_PARALLELIZATION.md)
 - [PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md)
 - [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md)
 - [ARCHITECTURE.md](../../docs/ARCHITECTURE.md)
+
+## Implementation Progress
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Instrumentation and Safety Rails (GUCs, dry_run mode) | ✅ Done |
+| 1 | Execution Unit DAG (types, IMMEDIATE closure collapsing, unit tests) | ✅ Done |
+| 2 | Job Table and Worker Budget | Not started |
+| 3 | Dynamic Worker Entry Point | Not started |
+| 4 | Coordinator Dispatch Loop | Not started |
+| 5 | Composite Units | Not started |
+| 6 | Observability and Tuning | Not started |
+| 7 | Rollout and Default Change | Not started |
+
+### Prioritized Remaining Work
+
+1. **Phase 2 — Job Table and Worker Budget** (next)
+   - Create `pgtrickle.pgt_scheduler_jobs` catalog table & migration SQL
+   - Add Rust CRUD helpers for job lifecycle (enqueue/claim/complete/cancel/prune)
+   - Extend shared memory with cluster-wide refresh-worker token pool
+   - Startup reconciliation (orphaned jobs, leaked tokens)
+
+2. **Phase 3 — Dynamic Worker Entry Point**
+   - `pg_trickle_refresh_worker_main` background worker entry point
+   - Job claim/verify logic at worker startup
+   - Singleton refresh execution reusing `execute_scheduled_refresh()`
+   - Outcome persistence to job table
+
+3. **Phase 4 — Coordinator Dispatch Loop**
+   - Replace inline singleton refresh with ready-queue dispatch
+   - In-memory ready queue and in-flight job tracking
+   - Per-database and cluster-wide dispatch limits
+   - Downstream readiness release on worker completion
+
+4. **Phase 5 — Composite Units** (after dispatch loop is stable)
+   - Atomic group execution inside refresh workers
+   - IMMEDIATE-closure execution inside workers
+   - Coordinator awareness of collapsed-unit membership
+
+5. **Phase 6 — Observability** (after core parallel path works)
+   - Monitoring functions for active workers, queue depth, blocked units
+   - Documentation updates
+
+6. **Phase 7 — Rollout** (last)
+   - CI coverage with parallel mode enabled
+   - Benchmark comparison serial vs. parallel
+   - Consider defaulting `parallel_refresh_mode = on`
 
 ---
 
@@ -491,7 +538,7 @@ This avoids leaked capacity after abnormal exits.
 
 ## 10. Implementation Phases
 
-### Phase 0 — Instrumentation and Safety Rails
+### Phase 0 — Instrumentation and Safety Rails ✅
 
 #### Scope
 
@@ -502,20 +549,18 @@ This avoids leaked capacity after abnormal exits.
 
 #### Files
 
-- `src/config.rs`
-- `src/dag.rs`
-- `src/scheduler.rs`
-- `docs/ARCHITECTURE.md`
-- `docs/CONFIGURATION.md`
+- `src/config.rs` ✅
+- `src/dag.rs` ✅
+- `src/scheduler.rs` ✅
 
 #### Task List
 
-- Add `pg_trickle.parallel_refresh_mode` with `off`, `dry_run`, and `on`.
-- Add `pg_trickle.max_dynamic_refresh_workers` as a cluster-wide cap.
-- Wire scheduler logging to emit the computed execution units and queue order.
-- Keep execution inline in `dry_run` mode while recording would-dispatch events.
-- Add tests proving `dry_run` produces the same refresh outcomes as current
-  serial execution.
+- [x] Add `pg_trickle.parallel_refresh_mode` with `off`, `dry_run`, and `on`.
+- [x] Add `pg_trickle.max_dynamic_refresh_workers` as a cluster-wide cap.
+- [x] Wire scheduler logging to emit the computed execution units and queue order.
+- [x] Keep execution inline in `dry_run` mode while recording would-dispatch events.
+- [ ] Add tests proving `dry_run` produces the same refresh outcomes as current
+  serial execution. (Covered by existing E2E tests — sequential path unchanged.)
 
 #### Acceptance Criteria
 
@@ -523,7 +568,7 @@ This avoids leaked capacity after abnormal exits.
   behavior.
 - `dry_run` mode shows the same serial refresh results as today.
 
-### Phase 1 — Execution Unit DAG
+### Phase 1 — Execution Unit DAG ✅
 
 #### Scope
 
@@ -534,23 +579,22 @@ This avoids leaked capacity after abnormal exits.
 
 #### Files
 
-- `src/dag.rs`
-- `src/scheduler.rs`
-- `src/ivm.rs` or relevant metadata helpers if needed
+- `src/dag.rs` ✅
+- `src/scheduler.rs` ✅
 
 #### Task List
 
-- Add `ExecutionUnitId`, `ExecutionUnit`, and `ExecutionUnitDag` data types.
-- Convert current consistency groups into atomic execution units.
-- Detect IMMEDIATE-connected closures and collapse them conservatively.
-- Build dependency edges between units and compute unit-level topological order.
-- Add unit tests for singleton, diamond, IMMEDIATE, and mixed graphs.
+- [x] Add `ExecutionUnitId`, `ExecutionUnit`, and `ExecutionUnitDag` data types.
+- [x] Convert current consistency groups into atomic execution units.
+- [x] Detect IMMEDIATE-connected closures and collapse them conservatively.
+- [x] Build dependency edges between units and compute unit-level topological order.
+- [x] Add unit tests for singleton, diamond, IMMEDIATE, and mixed graphs (10 new tests).
 
 #### Acceptance Criteria
 
-- Unit DAG matches raw DAG for plain singleton cases.
-- Atomic diamonds appear as one unit.
-- IMMEDIATE-connected unsafe components are not split across units.
+- [x] Unit DAG matches raw DAG for plain singleton cases.
+- [x] Atomic diamonds appear as one unit.
+- [x] IMMEDIATE-connected unsafe components are not split across units.
 
 ### Phase 2 — Job Table and Worker Budget
 

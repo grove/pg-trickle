@@ -538,6 +538,11 @@ remains the options-analysis precursor.
 | P2 | Phase 2–4: job table, worker budget, dynamic refresh workers, and ready-queue dispatch | 16–28h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
 | P3 | Phase 5–7: composite units, observability, rollout gating, and CI validation | 12–24h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
 
+**Progress:**
+- [x] **P1 — Phase 0 + Phase 1** (done): GUCs (`parallel_refresh_mode`, `max_dynamic_refresh_workers`), `ExecutionUnit`/`ExecutionUnitDag` types in `dag.rs`, IMMEDIATE-closure collapsing, dry-run logging in scheduler, 10 new unit tests (1211 total).
+- [ ] **P2** — Next priority: job table, shared-memory worker budget, dynamic refresh worker entry point, ready-queue dispatch loop.
+- [ ] **P3** — After P2: composite unit execution, observability functions, rollout gating.
+
 > **Parallel refresh subtotal: ~40–72 hours**
 
 ### Statement-Level CDC Triggers

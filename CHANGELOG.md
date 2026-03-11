@@ -7,6 +7,41 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+#### Parallel Refresh — Phase 0 + Phase 1 (Foundation)
+
+Infrastructure for true parallel refresh within a database. This is the first
+step toward dispatching refresh work to multiple dynamic background workers
+(Phases 2–7 follow). No runtime behavior change — the sequential refresh path
+remains the default.
+
+- **New GUCs:**
+  - `pg_trickle.parallel_refresh_mode` (`off` | `dry_run` | `on`, default `off`)
+    Controls whether the scheduler computes and dispatches parallel execution units.
+  - `pg_trickle.max_dynamic_refresh_workers` (default `4`)
+    Cluster-wide cap on concurrent pg_trickle refresh workers.
+- **Execution Unit DAG** (`ExecutionUnitDag` in `dag.rs`):
+  - `ExecutionUnit`, `ExecutionUnitId`, `ExecutionUnitKind` types.
+  - Transforms `StDag` consistency groups into schedulable execution units.
+  - Conservative IMMEDIATE-trigger closure collapsing — IMMEDIATE-connected
+    stream tables are merged into a single execution unit to prevent unsafe
+    cross-worker interactions.
+  - Ready-queue computation and topological ordering.
+- **Dry-run mode:** When `parallel_refresh_mode = 'dry_run'`, the scheduler
+  logs execution units, dispatch order, and ready-queue contents without
+  changing any runtime behavior.
+- **Updated `max_concurrent_refreshes` GUC description** — now documented as
+  the per-database dispatch cap (takes effect when parallel mode is enabled).
+- **10 new unit tests** covering singleton, diamond, IMMEDIATE closure, mixed
+  graph, empty DAG, and summary/log formatting.
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+---
+
 ## [0.3.0] — 2026-03-11
 
 ### Fixed
