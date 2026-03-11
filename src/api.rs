@@ -1907,9 +1907,13 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     // G-N3 optimization: source OIDs are fetched once and reused.
     let source_oids = get_source_oids_for_manual_refresh(st.pgt_id)?;
 
-    // Phase 10: Advisory lock to prevent concurrent refresh
+    // Phase 10: Advisory lock to prevent concurrent refresh.
+    // Use the transaction-scoped variant so the lock is automatically
+    // released when the transaction commits or rolls back — including on
+    // error-triggered rollbacks where a subsequent session-level
+    // pg_advisory_unlock() SPI call would silently no-op.
     let got_lock =
-        Spi::get_one_with_args::<bool>("SELECT pg_try_advisory_lock($1)", &[st.pgt_id.into()])
+        Spi::get_one_with_args::<bool>("SELECT pg_try_advisory_xact_lock($1)", &[st.pgt_id.into()])
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
             .unwrap_or(false);
 
@@ -1920,13 +1924,9 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
         )));
     }
 
-    // Ensure advisory lock is released even on error
-    let result = execute_manual_refresh(&st, &schema, &table_name, &source_oids);
-
-    // Release the lock
-    let _ = Spi::get_one_with_args::<bool>("SELECT pg_advisory_unlock($1)", &[st.pgt_id.into()]);
-
-    result
+    // Transaction-level advisory lock is released automatically at
+    // transaction end (commit or rollback); no explicit unlock needed.
+    execute_manual_refresh(&st, &schema, &table_name, &source_oids)
 }
 
 /// Inner function for manual refresh, called while advisory lock is held.

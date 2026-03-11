@@ -419,7 +419,7 @@ impl E2eDb {
             .with_label("com.pgtrickle.test", "true")
             .with_label("com.pgtrickle.suite", "full-e2e")
             .with_label("com.pgtrickle.repo", "pg-stream")
-            .with_shm_size(268_435_456); // 256 MB shared memory
+            .with_shm_size(536_870_912); // 512 MB — headroom for work_mem×max_connections
 
         if let Some(run_id) = run_id {
             image = image.with_label("com.pgtrickle.run-id", run_id);
@@ -460,7 +460,10 @@ impl E2eDb {
 
         // Apply runtime PostgreSQL tuning for stable benchmarks.
         // These are SIGHUP-level parameters that take effect after reload.
-        db.execute("ALTER SYSTEM SET work_mem = '64MB'").await;
+        // 256 MB: large enough for q05/q07/q08/q09 multi-CTE join deltas
+        // at SF=0.01 without spilling to disk (SF=0.01 delta CTEs peak
+        // ~180–220 MB for the 8-table join in q08).
+        db.execute("ALTER SYSTEM SET work_mem = '256MB'").await;
         db.execute("ALTER SYSTEM SET effective_cache_size = '512MB'")
             .await;
         db.execute("ALTER SYSTEM SET maintenance_work_mem = '128MB'")
@@ -470,9 +473,10 @@ impl E2eDb {
         db.execute("ALTER SYSTEM SET max_wal_size = '1GB'").await;
         // Cap temp file usage per query to prevent runaway disk
         // consumption from CTE materialisation and sort spills.
-        // The L₀ via EXCEPT ALL approach for join children ≤ 3 tables
-        // stays within 4GB at SF=0.01. Larger join chains (5+ tables)
-        // use L₁ + Part 3 correction to avoid temp spills.
+        // q05/q07/q08/q09 are known DVM-limited — the L₁+correction delta
+        // SQL for 5+ table joins exceeds this regardless of work_mem.
+        // Keeping the limit low makes those queries fail fast each cycle
+        // rather than writing tens of GB to disk before aborting.
         db.execute("ALTER SYSTEM SET temp_file_limit = '4GB'").await;
         // Aggressive autovacuum: change-buffer tables and stream tables
         // accumulate dead tuples rapidly during differential refreshes.
