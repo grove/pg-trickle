@@ -416,20 +416,11 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     }
 
     // Execute the unit.
-    // For Phase 3, only singleton units are supported.
-    // Composite units (atomic_group, immediate_closure) will be added in Phase 5.
     let outcome = BackgroundWorker::transaction(AssertUnwindSafe(|| -> RefreshOutcome {
         match job.unit_kind.as_str() {
             "singleton" => execute_worker_singleton(&job),
-            "atomic_group" | "immediate_closure" => {
-                // Phase 5 placeholder — for now, execute each member serially
-                // as if it were a sequence of singletons.
-                log!(
-                    "pg_trickle refresh worker: composite unit '{}' — executing members serially",
-                    job.unit_kind
-                );
-                execute_worker_composite(&job)
-            }
+            "atomic_group" => execute_worker_atomic_group(&job),
+            "immediate_closure" => execute_worker_immediate_closure(&job),
             _ => {
                 warning!(
                     "pg_trickle refresh worker: unknown unit_kind '{}' for job {}",
@@ -513,10 +504,31 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
     execute_scheduled_refresh(&st, action)
 }
 
-/// Execute a composite unit (atomic_group or immediate_closure) by refreshing
-/// each member in order. For Phase 3, this is a simple serial execution.
-/// Phase 5 will add proper sub-transaction / SAVEPOINT handling.
-fn execute_worker_composite(job: &SchedulerJob) -> RefreshOutcome {
+/// Execute an atomic group unit: refresh all members serially inside a
+/// sub-transaction.  If any member fails, the entire group is rolled back.
+///
+/// Uses the C-level internal sub-transaction API (`BeginInternalSubTransaction`
+/// / `ReleaseCurrentSubTransaction` / `RollbackAndReleaseCurrentSubTransaction`)
+/// because PostgreSQL rejects transaction-control SQL via SPI.
+fn execute_worker_atomic_group(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: atomic group — {} members (job {})",
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    // SAFETY: Save memory context and resource owner so we can restore them
+    // after the sub-transaction commits or rolls back.  These are always valid
+    // inside a worker transaction.
+    let old_cxt = unsafe { pg_sys::CurrentMemoryContext };
+    let old_owner = unsafe { pg_sys::CurrentResourceOwner };
+
+    // SAFETY: BeginInternalSubTransaction sets up a sub-transaction within the
+    // current worker transaction using PostgreSQL's resource-owner mechanism.
+    unsafe { pg_sys::BeginInternalSubTransaction(std::ptr::null()) };
+
+    let mut refreshed_count: usize = 0;
+
     for &pgt_id in &job.member_pgt_ids {
         let st = match load_st_by_id(pgt_id) {
             Some(st) => st,
@@ -524,6 +536,11 @@ fn execute_worker_composite(job: &SchedulerJob) -> RefreshOutcome {
         };
 
         if st.status != StStatus::Active && st.status != StStatus::Initializing {
+            continue;
+        }
+
+        // Check advisory lock — if another refresh is in progress, skip.
+        if check_skip_needed(&st) {
             continue;
         }
 
@@ -537,19 +554,89 @@ fn execute_worker_composite(job: &SchedulerJob) -> RefreshOutcome {
 
         let result = execute_scheduled_refresh(&st, action);
         match result {
-            RefreshOutcome::Success => continue,
+            RefreshOutcome::Success => {
+                refreshed_count += 1;
+            }
             RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
                 log!(
-                    "pg_trickle refresh worker: composite unit member {}.{} failed in job {}",
+                    "pg_trickle refresh worker: atomic group rollback — member {}.{} failed (job {})",
                     st.pgt_schema,
                     st.pgt_name,
                     job.job_id,
                 );
+                // SAFETY: Rolls back the sub-transaction and restores context.
+                unsafe {
+                    pg_sys::RollbackAndReleaseCurrentSubTransaction();
+                    pg_sys::MemoryContextSwitchTo(old_cxt);
+                    pg_sys::CurrentResourceOwner = old_owner;
+                }
                 return result;
             }
         }
     }
+
+    // All members succeeded — commit the sub-transaction.
+    // SAFETY: Commits the sub-transaction and restores context.
+    unsafe {
+        pg_sys::ReleaseCurrentSubTransaction();
+        pg_sys::MemoryContextSwitchTo(old_cxt);
+        pg_sys::CurrentResourceOwner = old_owner;
+    }
+
+    log!(
+        "pg_trickle refresh worker: atomic group committed ({} members, job {})",
+        refreshed_count,
+        job.job_id,
+    );
     RefreshOutcome::Success
+}
+
+/// Execute an IMMEDIATE-closure unit: refresh only the root stream table.
+///
+/// Downstream IMMEDIATE-mode stream tables fire their refresh triggers
+/// synchronously within the same transaction, so they do not need to be
+/// explicitly refreshed by the worker.  The coordinator must not independently
+/// schedule any member of the closure.
+fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: immediate closure — root pgt_id={} ({} members, job {})",
+        job.root_pgt_id,
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    // Only refresh the root; IMMEDIATE triggers propagate downstream.
+    let st = match load_st_by_id(job.root_pgt_id) {
+        Some(st) => st,
+        None => {
+            log!(
+                "pg_trickle refresh worker: root pgt_id={} not found for immediate closure (job {})",
+                job.root_pgt_id,
+                job.job_id,
+            );
+            return RefreshOutcome::PermanentFailure;
+        }
+    };
+
+    if st.status != StStatus::Active && st.status != StStatus::Initializing {
+        log!(
+            "pg_trickle refresh worker: {}.{} is not active (status={}), skipping immediate closure",
+            st.pgt_schema,
+            st.pgt_name,
+            st.status.as_str(),
+        );
+        return RefreshOutcome::RetryableFailure;
+    }
+
+    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let has_st_changes = has_stream_table_source_changes(&st);
+    let action = if has_changes && has_st_changes {
+        RefreshAction::Full
+    } else {
+        refresh::determine_refresh_action(&st, has_changes)
+    };
+
+    execute_scheduled_refresh(&st, action)
 }
 
 // ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
