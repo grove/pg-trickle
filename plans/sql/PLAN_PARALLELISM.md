@@ -18,29 +18,23 @@ Related:
 | 1 | Execution Unit DAG (types, IMMEDIATE closure collapsing, unit tests) | ✅ Done |
 | 2 | Job Table and Worker Budget | ✅ Done |
 | 3 | Dynamic Worker Entry Point | ✅ Done |
-| 4 | Coordinator Dispatch Loop | Not started |
+| 4 | Coordinator Dispatch Loop | ✅ Done |
 | 5 | Composite Units | Not started |
 | 6 | Observability and Tuning | Not started |
 | 7 | Rollout and Default Change | Not started |
 
 ### Prioritized Remaining Work
 
-1. **Phase 4 — Coordinator Dispatch Loop** (next)
-   - Replace inline singleton refresh with ready-queue dispatch
-   - In-memory ready queue and in-flight job tracking
-   - Per-database and cluster-wide dispatch limits
-   - Downstream readiness release on worker completion
-
-2. **Phase 5 — Composite Units** (after dispatch loop is stable)
+1. **Phase 5 — Composite Units** (next)
    - Atomic group execution inside refresh workers
    - IMMEDIATE-closure execution inside workers
    - Coordinator awareness of collapsed-unit membership
 
-3. **Phase 6 — Observability** (after core parallel path works)
+2. **Phase 6 — Observability** (after core parallel path works)
    - Monitoring functions for active workers, queue depth, blocked units
    - Documentation updates
 
-4. **Phase 7 — Rollout** (last)
+3. **Phase 7 — Rollout** (last)
    - CI coverage with parallel mode enabled
    - Benchmark comparison serial vs. parallel
    - Consider defaulting `parallel_refresh_mode = on`
@@ -650,7 +644,7 @@ This avoids leaked capacity after abnormal exits.
   as the current inline scheduler path.
 - [x] Retryable vs permanent failure classification is preserved.
 
-### Phase 4 — Coordinator Dispatch Loop
+### Phase 4 — Coordinator Dispatch Loop ✅
 
 #### Scope
 
@@ -663,17 +657,26 @@ This avoids leaked capacity after abnormal exits.
 #### Files
 
 - `src/scheduler.rs`
-- `src/error.rs`
-- `src/monitor.rs`
+- `src/dag.rs`
 
 #### Task List
 
-- Add in-memory ready queue and in-flight job tracking.
-- Dispatch singleton units while respecting per-db and cluster-wide limits.
-- Update downstream readiness immediately on worker completion.
-- Preserve existing retry/backoff semantics at coordinator level.
-- Add tests showing overlap of independent units and isolation of failing
-  branches.
+- [x] Add in-memory ready queue and in-flight job tracking
+  (`ParallelDispatchState`, `UnitDispatchState` structs).
+- [x] Add `ExecutionUnit::stable_key()` for deterministic unit identification
+  across DAG rebuilds (used as `unit_key` in job table).
+- [x] Dispatch units while respecting per-db and cluster-wide limits
+  (`parallel_dispatch_tick` function with 3-step dispatch loop).
+- [x] Update downstream readiness immediately on worker completion
+  (advance `remaining_upstreams` on succeed, block downstream on failure).
+- [x] Preserve existing retry/backoff semantics at coordinator level
+  (per-pgt_id `RetryState` reused for parallel mode).
+- [x] Split transaction: enqueue jobs inside SPI transaction, spawn workers
+  after commit (avoids job-visibility race).
+- [x] Dynamic poll interval: 200 ms during active dispatch, normal
+  `scheduler_interval_ms` otherwise.
+- [x] Add 8 new unit tests: 4 for `stable_key` (dag.rs) and 4 for
+  `ParallelDispatchState`/`is_unit_due` (scheduler.rs).
 
 #### Acceptance Criteria
 

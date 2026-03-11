@@ -66,6 +66,31 @@ parallel refresh. Still behind `parallel_refresh_mode = 'off'` (default).
   against live `pg_stat_activity`, and prune old completed jobs.
 - **15 new unit tests** for JobStatus (7) and parse_worker_extra (8).
 
+#### Parallel Refresh — Phase 4 (Coordinator Dispatch Loop)
+
+Coordinator ready-queue dispatch loop that replaces the inline sequential
+refresh path when `parallel_refresh_mode = 'on'`. This is the core scheduling
+engine for true parallel refresh.
+
+- **Coordinator dispatch state** (`ParallelDispatchState`, `UnitDispatchState`
+  in `scheduler.rs`): in-memory ready queue, per-unit upstream tracking,
+  in-flight job tracking, DAG-version-aware rebuilds.
+- **Ready-queue dispatch** (`parallel_dispatch_tick`): 3-step dispatch loop —
+  poll completed jobs → build ready queue in topological order → dispatch
+  within per-db and cluster-wide budgets.
+- **Downstream readiness release**: on worker completion, immediately
+  decrements `remaining_upstreams` on downstream units, enabling dispatch in
+  the same tick.
+- **Transaction-split spawning**: jobs enqueued inside SPI transaction, workers
+  spawned after commit to avoid job-visibility races.
+- **Dynamic poll interval**: 200 ms during active dispatch (in-flight jobs),
+  reverts to normal `scheduler_interval_ms` when idle.
+- **Stable unit keys** (`ExecutionUnit::stable_key()` in `dag.rs`):
+  deterministic `s:<id>`, `a:<ids>`, `i:<ids>` keys for deduplication across
+  DAG rebuilds.
+- **8 new unit tests** for `stable_key` (4) and `ParallelDispatchState` /
+  `is_unit_due` (4). Total: 1233 unit tests.
+
 See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
 
 ---
