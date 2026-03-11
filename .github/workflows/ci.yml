@@ -222,6 +222,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Check version references are in sync
+        run: just check-version-sync
+
       - name: Validate upgrade script completeness
         run: |
           # Check each upgrade step in the chain
