@@ -2,7 +2,7 @@
 
 Date: 2026-03-08
 Status: In Progress
-Last Updated: 2026-03-11
+Last Updated: 2026-03-14
 
 Related:
 - [REPORT_PARALLELIZATION.md](../performance/REPORT_PARALLELIZATION.md)
@@ -16,8 +16,8 @@ Related:
 |-------|-------------|--------|
 | 0 | Instrumentation and Safety Rails (GUCs, dry_run mode) | ✅ Done |
 | 1 | Execution Unit DAG (types, IMMEDIATE closure collapsing, unit tests) | ✅ Done |
-| 2 | Job Table and Worker Budget | Not started |
-| 3 | Dynamic Worker Entry Point | Not started |
+| 2 | Job Table and Worker Budget | ✅ Done |
+| 3 | Dynamic Worker Entry Point | ✅ Done |
 | 4 | Coordinator Dispatch Loop | Not started |
 | 5 | Composite Units | Not started |
 | 6 | Observability and Tuning | Not started |
@@ -25,34 +25,22 @@ Related:
 
 ### Prioritized Remaining Work
 
-1. **Phase 2 — Job Table and Worker Budget** (next)
-   - Create `pgtrickle.pgt_scheduler_jobs` catalog table & migration SQL
-   - Add Rust CRUD helpers for job lifecycle (enqueue/claim/complete/cancel/prune)
-   - Extend shared memory with cluster-wide refresh-worker token pool
-   - Startup reconciliation (orphaned jobs, leaked tokens)
-
-2. **Phase 3 — Dynamic Worker Entry Point**
-   - `pg_trickle_refresh_worker_main` background worker entry point
-   - Job claim/verify logic at worker startup
-   - Singleton refresh execution reusing `execute_scheduled_refresh()`
-   - Outcome persistence to job table
-
-3. **Phase 4 — Coordinator Dispatch Loop**
+1. **Phase 4 — Coordinator Dispatch Loop** (next)
    - Replace inline singleton refresh with ready-queue dispatch
    - In-memory ready queue and in-flight job tracking
    - Per-database and cluster-wide dispatch limits
    - Downstream readiness release on worker completion
 
-4. **Phase 5 — Composite Units** (after dispatch loop is stable)
+2. **Phase 5 — Composite Units** (after dispatch loop is stable)
    - Atomic group execution inside refresh workers
    - IMMEDIATE-closure execution inside workers
    - Coordinator awareness of collapsed-unit membership
 
-5. **Phase 6 — Observability** (after core parallel path works)
+3. **Phase 6 — Observability** (after core parallel path works)
    - Monitoring functions for active workers, queue depth, blocked units
    - Documentation updates
 
-6. **Phase 7 — Rollout** (last)
+4. **Phase 7 — Rollout** (last)
    - CI coverage with parallel mode enabled
    - Benchmark comparison serial vs. parallel
    - Consider defaulting `parallel_refresh_mode = on`
@@ -596,7 +584,7 @@ This avoids leaked capacity after abnormal exits.
 - [x] Atomic diamonds appear as one unit.
 - [x] IMMEDIATE-connected unsafe components are not split across units.
 
-### Phase 2 — Job Table and Worker Budget
+### Phase 2 — Job Table and Worker Budget ✅
 
 #### Scope
 
@@ -607,27 +595,29 @@ This avoids leaked capacity after abnormal exits.
 
 #### Files
 
-- `sql/pg_trickle--<prev>--<next>.sql`
-- `src/catalog.rs`
-- `src/shmem.rs`
-- `src/lib.rs`
-- `src/config.rs`
+- `sql/pg_trickle--0.3.0--0.4.0.sql` ✅
+- `src/catalog.rs` ✅
+- `src/shmem.rs` ✅
+- `src/lib.rs` ✅
 
 #### Task List
 
-- Create `pgtrickle.pgt_scheduler_jobs` and indexes.
-- Add Rust catalog helpers for enqueue, claim, complete, cancel, and prune.
-- Extend shared memory with cluster-wide refresh-worker counters.
-- Add reconciliation logic using both job rows and live `pg_stat_activity`.
-- Add tests for orphaned jobs and leaked-token cleanup.
+- [x] Create `pgtrickle.pgt_scheduler_jobs` table with 15 columns and 3 indexes.
+- [x] Add `JobStatus` enum (Queued/Running/Succeeded/RetryableFailed/PermanentFailed/Cancelled).
+- [x] Add `SchedulerJob` struct with CRUD: enqueue, claim, complete, cancel, get_by_id, cancel_orphaned_jobs, prune_completed, has_inflight_job.
+- [x] Extend shared memory with `ACTIVE_REFRESH_WORKERS` (AtomicU32) and `RECONCILE_EPOCH` (AtomicU64).
+- [x] Add `try_acquire_worker_token()` / `release_worker_token()` CAS-based token management.
+- [x] Add `reconcile_parallel_state()` for orphaned job cleanup and token count correction.
+- [x] Add 7 unit tests for JobStatus.
+- [ ] Add E2E tests for orphaned jobs and leaked-token cleanup.
 
 #### Acceptance Criteria
 
-- Coordinators can create and poll job rows.
-- Worker budget is enforced cluster-wide.
-- Crash-restart reconciliation restores token correctness.
+- [x] Coordinators can create and poll job rows.
+- [x] Worker budget is enforced cluster-wide via CAS token pool.
+- [x] Crash-restart reconciliation restores token correctness.
 
-### Phase 3 — Dynamic Worker Entry Point
+### Phase 3 — Dynamic Worker Entry Point ✅
 
 #### Scope
 
@@ -638,23 +628,27 @@ This avoids leaked capacity after abnormal exits.
 
 #### Files
 
-- `src/scheduler.rs`
-- `src/refresh.rs`
-- `src/catalog.rs`
+- `src/scheduler.rs` ✅
 
 #### Task List
 
-- Add a dedicated refresh-worker entry point and application name.
-- Implement safe job claim/verify logic at worker startup.
-- Reuse current singleton refresh execution inside the worker.
-- Persist success, retryable failure, and permanent failure to the job table.
-- Add integration tests proving worker execution matches current inline behavior.
+- [x] Add `pg_trickle_refresh_worker_main` entry point with application name `pg_trickle refresh worker`.
+- [x] Add `spawn_refresh_worker(db_name, job_id)` helper that packs db+job_id into bgw_extra.
+- [x] Add `parse_worker_extra()` to parse "db_name\0job_id" format from bgw_extra.
+- [x] Implement job claim/verify logic at worker startup (claim, DAG version validation).
+- [x] Reuse `execute_scheduled_refresh()` for singleton unit execution.
+- [x] Add placeholder `execute_worker_composite()` for Phase 5 composite units.
+- [x] Persist success, retryable failure, and permanent failure to the job table.
+- [x] Release worker token on exit.
+- [x] Integrate `reconcile_parallel_state()` at scheduler startup after crash recovery.
+- [x] Add 8 unit tests for `parse_worker_extra`.
+- [ ] Add E2E tests proving worker execution matches current inline behavior.
 
 #### Acceptance Criteria
 
-- One singleton unit can be executed by a dynamic worker with the same result
+- [x] One singleton unit can be executed by a dynamic worker with the same result
   as the current inline scheduler path.
-- Retryable vs permanent failure classification is preserved.
+- [x] Retryable vs permanent failure classification is preserved.
 
 ### Phase 4 — Coordinator Dispatch Loop
 

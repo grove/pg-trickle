@@ -38,6 +38,34 @@ remains the default.
 - **10 new unit tests** covering singleton, diamond, IMMEDIATE closure, mixed
   graph, empty DAG, and summary/log formatting.
 
+#### Parallel Refresh — Phase 2 + Phase 3 (Job Table & Worker Entry Point)
+
+Job dispatch infrastructure and dynamic background worker entry point for
+parallel refresh. Still behind `parallel_refresh_mode = 'off'` (default).
+
+- **New catalog table:** `pgtrickle.pgt_scheduler_jobs` with 15 columns
+  (job_id, dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id,
+  status, scheduler_pid, worker_pid, attempt_no, enqueued_at, started_at,
+  finished_at, outcome_detail, retryable) and 3 indexes.
+- **Migration SQL:** `pg_trickle--0.3.0--0.4.0.sql` for existing installations.
+- **Catalog CRUD:** `JobStatus` enum (Queued/Running/Succeeded/RetryableFailed/
+  PermanentFailed/Cancelled) and `SchedulerJob` struct with enqueue, claim,
+  complete, cancel, get_by_id, cancel_orphaned_jobs, prune_completed,
+  has_inflight_job operations.
+- **Shared-memory token pool:** `ACTIVE_REFRESH_WORKERS` (AtomicU32) with
+  CAS-based `try_acquire_worker_token()` / `release_worker_token()`.
+  `RECONCILE_EPOCH` (AtomicU64) for coordinator synchronization.
+- **Dynamic refresh worker:** `pg_trickle_refresh_worker_main` entry point
+  spawned via `BackgroundWorkerBuilder::load_dynamic()`. Workers claim a job,
+  validate DAG version, execute the refresh unit, persist outcome, and
+  release the worker token on exit.
+- **Worker spawning:** `spawn_refresh_worker(db_name, job_id)` packs database
+  name and job ID into bgw_extra ("db\0id" format).
+- **Coordinator reconciliation:** `reconcile_parallel_state()` runs at
+  scheduler startup to cancel orphaned jobs, correct leaked worker tokens
+  against live `pg_stat_activity`, and prune old completed jobs.
+- **15 new unit tests** for JobStatus (7) and parse_worker_extra (8).
+
 See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
 
 ---
