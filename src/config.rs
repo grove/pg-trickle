@@ -189,6 +189,36 @@ pub static PGS_BUFFER_PARTITIONING: GucSetting<Option<std::ffi::CString>> =
 /// deltas against the previous snapshot.
 pub static PGS_FOREIGN_TABLE_POLLING: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// CDC trigger granularity.
+///
+/// - `"statement"` (default): Use statement-level AFTER triggers with transition
+///   tables (`NEW TABLE AS __pgt_new` / `OLD TABLE AS __pgt_old`). A single
+///   trigger invocation per statement processes all affected rows via a bulk
+///   `INSERT … SELECT FROM __pgt_new/old`, giving 50–80% less write-side
+///   overhead for bulk DML. Zero change for single-row DML.
+/// - `"row"`: Legacy per-row AFTER triggers — one trigger invocation and one
+///   change-buffer INSERT per affected row. Equivalent to pg_trickle < 0.4.0.
+///
+/// Changing this GUC takes effect for newly created stream tables. To migrate
+/// existing stream tables call `SELECT pgtrickle.rebuild_cdc_triggers()`.
+pub static PGS_CDC_TRIGGER_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"statement"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CdcTriggerMode {
+    Statement,
+    Row,
+}
+
+impl CdcTriggerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CdcTriggerMode::Statement => "statement",
+            CdcTriggerMode::Row => "row",
+        }
+    }
+}
+
 /// CSS1: Cap CDC consumption to the WAL LSN captured at scheduler tick start.
 ///
 /// When enabled (default), each scheduler tick calls `pg_current_wal_lsn()`
@@ -472,6 +502,21 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_string_guc(
+        c"pg_trickle.cdc_trigger_mode",
+        c"CDC trigger granularity: statement (default) or row.",
+        c"'statement' uses statement-level AFTER triggers with transition tables \
+           (NEW TABLE / OLD TABLE). A single invocation per DML statement processes \
+           all affected rows in one bulk INSERT … SELECT, giving 50–80% less \
+           write-side overhead for bulk UPDATE/DELETE. Single-row DML is unaffected. \
+           'row' uses legacy per-row triggers (pg_trickle < 0.4.0 behaviour). \
+           Changing this setting takes effect for newly installed CDC triggers. \
+           Call pgtrickle.rebuild_cdc_triggers() to migrate existing stream tables.",
+        &PGS_CDC_TRIGGER_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_bool_guc(
         c"pg_trickle.tick_watermark_enabled",
         c"Cap CDC consumption to the WAL LSN at scheduler tick start.",
@@ -620,6 +665,18 @@ pub fn pg_trickle_foreign_table_polling() -> bool {
 /// Returns whether the tick watermark (CSS1) feature is enabled.
 pub fn pg_trickle_tick_watermark_enabled() -> bool {
     PGS_TICK_WATERMARK_ENABLED.get()
+}
+
+/// Returns the CDC trigger granularity mode.
+pub fn pg_trickle_cdc_trigger_mode() -> CdcTriggerMode {
+    match PGS_CDC_TRIGGER_MODE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(str::to_ascii_lowercase))
+        .as_deref()
+    {
+        Some("row") => CdcTriggerMode::Row,
+        _ => CdcTriggerMode::Statement,
+    }
 }
 
 /// Returns the maximum recursion depth for WITH RECURSIVE in IMMEDIATE mode.

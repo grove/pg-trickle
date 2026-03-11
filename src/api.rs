@@ -2295,6 +2295,56 @@ fn _signal_launcher_rescan() {
     crate::shmem::signal_dag_rebuild();
 }
 
+/// Rebuild all CDC triggers (function body + trigger DDL) for every source
+/// table tracked by pg_trickle.
+///
+/// Called automatically during `ALTER EXTENSION pg_trickle UPDATE` (0.3.0 →
+/// 0.4.0) to migrate existing row-level CDC triggers to statement-level.
+/// Can also be called manually after changing `pg_trickle.cdc_trigger_mode`.
+///
+/// Returns `'done'` on success. Emits a `WARNING` per table on error and
+/// continues processing remaining sources.
+#[pg_extern(schema = "pgtrickle")]
+fn rebuild_cdc_triggers() -> &'static str {
+    let change_schema = config::pg_trickle_change_buffer_schema();
+
+    let source_oids: Vec<pg_sys::Oid> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT DISTINCT source_relid \
+                 FROM pgtrickle.pgt_dependencies \
+                 WHERE source_type = 'TABLE'",
+                None,
+                &[],
+            )
+            .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?;
+        let mut oids = Vec::new();
+        for row in result {
+            let oid = row
+                .get::<pg_sys::Oid>(1)
+                .unwrap_or(None)
+                .unwrap_or(pg_sys::InvalidOid);
+            if oid != pg_sys::InvalidOid {
+                oids.push(oid);
+            }
+        }
+        Ok::<_, crate::error::PgTrickleError>(oids)
+    })
+    .unwrap_or_default();
+
+    for source_oid in source_oids {
+        if let Err(e) = cdc::rebuild_cdc_trigger(source_oid, &change_schema) {
+            pgrx::warning!(
+                "pg_trickle: rebuild_cdc_triggers: failed for OID {}: {}",
+                source_oid.to_u32(),
+                e
+            );
+        }
+    }
+
+    "done"
+}
+
 /// Parse a Prometheus/GNU-style duration string and return seconds.
 ///
 /// Used by SQL views to compare schedule. Returns NULL for invalid input
