@@ -138,9 +138,12 @@ test-tpch: build-e2e-image
     ./scripts/run_e2e_tests.sh --test e2e_tpch_tests -- --ignored --test-threads=1 --nocapture
 
 # Run TPC-H tests, skip Docker image rebuild
+# TPCH_CYCLES=2     — 2 mutations cycles per query (33% fewer than default 3)
+# TPCH_CHURN_CYCLES=20 — keep sustained-churn test fast
+# --skip test_tpch_performance_comparison — benchmarking only, covered by differential_correctness
 [group: "tpch"]
 test-tpch-fast:
-    ./scripts/run_e2e_tests.sh --test e2e_tpch_tests -- --ignored --test-threads=1 --nocapture
+    TPCH_CYCLES=2 TPCH_CHURN_CYCLES=20 ./scripts/run_e2e_tests.sh --test e2e_tpch_tests -- --ignored --test-threads=1 --nocapture --skip test_tpch_performance_comparison
 
 # Run TPC-H tests at larger scale: SF-0.1 (~5 min, rebuilds Docker image)
 [group: "tpch"]
@@ -168,12 +171,12 @@ check-upgrade from to:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.1.3" to="0.2.3": build-e2e-image
+build-upgrade-image from="0.1.3" to="0.3.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.1.3" to="0.2.3": (build-upgrade-image from to)
+test-upgrade from="0.1.3" to="0.3.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests -- --ignored --test-threads=1 --nocapture
