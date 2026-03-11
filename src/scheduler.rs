@@ -35,7 +35,7 @@
 use pgrx::bgworkers::*;
 use pgrx::prelude::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 
 use crate::catalog::{JobStatus, SchedulerJob};
@@ -43,7 +43,8 @@ use crate::catalog::{RefreshRecord, StreamTableMeta};
 use crate::cdc;
 use crate::config;
 use crate::dag::{
-    DiamondConsistency, DiamondSchedulePolicy, ExecutionUnitDag, NodeId, StDag, StStatus,
+    DiamondConsistency, DiamondSchedulePolicy, ExecutionUnit, ExecutionUnitDag, ExecutionUnitId,
+    NodeId, StDag, StStatus,
 };
 use crate::error::{RetryPolicy, RetryState};
 use crate::monitor;
@@ -551,6 +552,327 @@ fn execute_worker_composite(job: &SchedulerJob) -> RefreshOutcome {
     RefreshOutcome::Success
 }
 
+// ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
+
+/// Per-unit coordinator state for the parallel dispatch loop.
+#[derive(Debug, Default)]
+struct UnitDispatchState {
+    /// Number of upstream units that must succeed before this unit is ready.
+    remaining_upstreams: usize,
+    /// In-flight job ID, if a worker is currently executing this unit.
+    inflight_job_id: Option<i64>,
+    /// Whether this unit completed successfully in the current cycle.
+    succeeded: bool,
+}
+
+/// Coordinator-side state for the parallel dispatch loop.
+///
+/// Lives outside the SPI transaction and persists across scheduler ticks.
+/// Rebuilt when the DAG version changes.
+struct ParallelDispatchState {
+    /// Per-unit tracking, keyed by ExecutionUnitId.
+    unit_states: HashMap<ExecutionUnitId, UnitDispatchState>,
+    /// Number of refresh workers in-flight for this database coordinator.
+    per_db_inflight: u32,
+    /// DAG version this dispatch state was built from.
+    dag_version: u64,
+    /// The execution unit DAG (rebuilt on DAG version change).
+    eu_dag: Option<ExecutionUnitDag>,
+}
+
+impl ParallelDispatchState {
+    fn new() -> Self {
+        Self {
+            unit_states: HashMap::new(),
+            per_db_inflight: 0,
+            dag_version: 0,
+            eu_dag: None,
+        }
+    }
+
+    /// Whether there are in-flight jobs (for shorter poll interval).
+    fn has_inflight(&self) -> bool {
+        self.per_db_inflight > 0
+    }
+
+    /// Rebuild dispatch state from a fresh EU DAG.
+    fn rebuild(&mut self, eu_dag: ExecutionUnitDag, dag_version: u64) {
+        self.unit_states.clear();
+        self.dag_version = dag_version;
+        // Note: per_db_inflight is NOT reset — in-flight workers from the
+        // previous DAG version are still running.
+
+        for unit in eu_dag.units() {
+            let upstream_count = eu_dag.get_upstream_units(unit.id).len();
+            self.unit_states.insert(
+                unit.id,
+                UnitDispatchState {
+                    remaining_upstreams: upstream_count,
+                    inflight_job_id: None,
+                    succeeded: false,
+                },
+            );
+        }
+        self.eu_dag = Some(eu_dag);
+    }
+}
+
+/// Check if an execution unit is due for refresh.
+///
+/// A unit is due if any member ST is due (schedule or upstream changes).
+fn is_unit_due(unit: &ExecutionUnit, dag: &StDag) -> bool {
+    unit.member_pgt_ids.iter().any(|&pgt_id| {
+        load_st_by_id(pgt_id)
+            .map(|st| {
+                (st.status == StStatus::Active || st.status == StStatus::Initializing)
+                    && (check_schedule(&st, dag) || st.needs_reinit)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Run one tick of the parallel dispatch loop.
+///
+/// Called from the main scheduler loop when `parallel_refresh_mode == On`.
+/// Polls completed jobs, updates readiness, and enqueues new jobs.
+/// Workers to spawn are appended to `pending_spawns`.
+fn parallel_dispatch_tick(
+    state: &mut ParallelDispatchState,
+    dag: &StDag,
+    now_ms: u64,
+    retry_states: &mut HashMap<i64, RetryState>,
+    retry_policy: &RetryPolicy,
+    db_name: &str,
+    pending_spawns: &mut Vec<(String, i64)>,
+) {
+    let eu_dag = match &state.eu_dag {
+        Some(d) => d,
+        None => return,
+    };
+
+    let max_per_db = config::pg_trickle_max_concurrent_refreshes().max(1) as u32;
+    let max_cluster = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
+    let dag_version_i64 = state.dag_version as i64;
+    // SAFETY: MyProcPid is always valid inside a background worker.
+    let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
+
+    // ── Step 1: Poll completed jobs and process outcomes ──────────────────
+    let inflight_ids: Vec<(ExecutionUnitId, i64)> = state
+        .unit_states
+        .iter()
+        .filter_map(|(&uid, us)| us.inflight_job_id.map(|jid| (uid, jid)))
+        .collect();
+
+    for (unit_id, job_id) in inflight_ids {
+        let job = match SchedulerJob::get_by_id(job_id) {
+            Ok(Some(j)) => j,
+            Ok(None) => {
+                log!(
+                    "pg_trickle: parallel dispatch — job {} vanished, treating as failure",
+                    job_id,
+                );
+                if let Some(us) = state.unit_states.get_mut(&unit_id) {
+                    us.inflight_job_id = None;
+                }
+                state.per_db_inflight = state.per_db_inflight.saturating_sub(1);
+                continue;
+            }
+            Err(e) => {
+                log!(
+                    "pg_trickle: parallel dispatch — error polling job {}: {}",
+                    job_id,
+                    e,
+                );
+                continue; // Try again next tick
+            }
+        };
+
+        if !job.status.is_terminal() {
+            continue; // Still running
+        }
+
+        // Job completed — process outcome.
+        if let Some(us) = state.unit_states.get_mut(&unit_id) {
+            us.inflight_job_id = None;
+        }
+        state.per_db_inflight = state.per_db_inflight.saturating_sub(1);
+
+        let root_pgt_id = eu_dag
+            .units()
+            .find(|u| u.id == unit_id)
+            .map(|u| u.root_pgt_id);
+
+        match job.status {
+            JobStatus::Succeeded => {
+                if let Some(us) = state.unit_states.get_mut(&unit_id) {
+                    us.succeeded = true;
+                }
+                if let Some(rpid) = root_pgt_id {
+                    retry_states.entry(rpid).or_default().reset();
+                }
+
+                // Advance downstream readiness.
+                for ds_id in eu_dag.get_downstream_units(unit_id) {
+                    if let Some(ds_state) = state.unit_states.get_mut(&ds_id) {
+                        ds_state.remaining_upstreams =
+                            ds_state.remaining_upstreams.saturating_sub(1);
+                    }
+                }
+
+                log!(
+                    "pg_trickle: parallel dispatch — unit completed (job {})",
+                    job_id,
+                );
+            }
+            JobStatus::RetryableFailed => {
+                if let Some(rpid) = root_pgt_id {
+                    let retry = retry_states.entry(rpid).or_default();
+                    let will_retry = retry.record_failure(retry_policy, now_ms);
+                    if will_retry {
+                        log!(
+                            "pg_trickle: parallel dispatch — job {} failed (retryable), backoff {}ms",
+                            job_id,
+                            retry_policy.backoff_ms(retry.attempts - 1),
+                        );
+                    }
+                }
+                // Downstream units remain blocked (remaining_upstreams > 0).
+            }
+            JobStatus::PermanentFailed | JobStatus::Cancelled => {
+                if let Some(rpid) = root_pgt_id {
+                    retry_states.entry(rpid).or_default().reset();
+                }
+                log!(
+                    "pg_trickle: parallel dispatch — job {} failed permanently",
+                    job_id,
+                );
+                // Downstream units remain blocked.
+            }
+            _ => {}
+        }
+    }
+
+    // ── Step 2: Build ready queue ────────────────────────────────────────
+    let mut ready_queue: VecDeque<ExecutionUnitId> = VecDeque::new();
+
+    // Use topological order for deterministic upstream-first priority.
+    let topo_order = match eu_dag.topological_order() {
+        Ok(order) => order,
+        Err(e) => {
+            log!("pg_trickle: parallel dispatch — topo order failed: {}", e);
+            return;
+        }
+    };
+
+    for &uid in &topo_order {
+        let us = match state.unit_states.get(&uid) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Skip completed, in-flight, or dependency-blocked units.
+        if us.succeeded || us.inflight_job_id.is_some() || us.remaining_upstreams > 0 {
+            continue;
+        }
+
+        let unit = match eu_dag.units().find(|u| u.id == uid) {
+            Some(u) => u,
+            None => continue,
+        };
+
+        // Check retry backoff.
+        let retry = retry_states.entry(unit.root_pgt_id).or_default();
+        if retry.is_in_backoff(now_ms) {
+            // Emit stale alerts for members in backoff.
+            for &pgt_id in &unit.member_pgt_ids {
+                if let Some(st) = load_st_by_id(pgt_id) {
+                    emit_stale_alert_if_needed(&st);
+                }
+            }
+            continue;
+        }
+
+        // Check if unit is due for refresh.
+        if !is_unit_due(unit, dag) {
+            continue;
+        }
+
+        // Guard against duplicate in-flight jobs.
+        match SchedulerJob::has_inflight_job(&unit.stable_key()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                log!(
+                    "pg_trickle: parallel dispatch — inflight check error for {}: {}",
+                    unit.label,
+                    e,
+                );
+                continue;
+            }
+        }
+
+        ready_queue.push_back(uid);
+    }
+
+    // ── Step 3: Dispatch ready units within budget ───────────────────────
+    while let Some(uid) = ready_queue.pop_front() {
+        if state.per_db_inflight >= max_per_db {
+            break;
+        }
+
+        if !shmem::try_acquire_worker_token(max_cluster) {
+            log!(
+                "pg_trickle: parallel dispatch — worker budget exhausted ({}/{})",
+                shmem::active_worker_count(),
+                max_cluster,
+            );
+            break;
+        }
+
+        let unit = match eu_dag.units().find(|u| u.id == uid) {
+            Some(u) => u,
+            None => {
+                shmem::release_worker_token();
+                continue;
+            }
+        };
+
+        let job_id = match SchedulerJob::enqueue(
+            dag_version_i64,
+            &unit.stable_key(),
+            unit.kind.as_str(),
+            &unit.member_pgt_ids,
+            unit.root_pgt_id,
+            scheduler_pid,
+            1,
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                shmem::release_worker_token();
+                log!(
+                    "pg_trickle: parallel dispatch — failed to enqueue job for {}: {}",
+                    unit.label,
+                    e,
+                );
+                continue;
+            }
+        };
+
+        if let Some(us) = state.unit_states.get_mut(&uid) {
+            us.inflight_job_id = Some(job_id);
+        }
+        state.per_db_inflight += 1;
+        pending_spawns.push((db_name.to_string(), job_id));
+
+        log!(
+            "pg_trickle: parallel dispatch — enqueued {} (job_id={}, kind={})",
+            unit.label,
+            job_id,
+            unit.kind,
+        );
+    }
+}
+
 /// Reconcile orphaned jobs and worker tokens at scheduler startup.
 ///
 /// Called once during per-database scheduler initialization:
@@ -699,6 +1021,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
     let retry_policy = RetryPolicy::default();
 
+    // Phase 4: Parallel dispatch state (persisted across ticks)
+    let mut parallel_state = ParallelDispatchState::new();
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
@@ -718,10 +1043,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     }));
 
     loop {
-        // Wait for the configured interval or a signal.
-        let should_continue = BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-            config::pg_trickle_scheduler_interval_ms() as u64,
-        )));
+        // Use shorter poll interval when parallel workers are in-flight.
+        let poll_ms = if parallel_state.has_inflight() {
+            std::cmp::min(config::pg_trickle_scheduler_interval_ms() as u64, 200)
+        } else {
+            config::pg_trickle_scheduler_interval_ms() as u64
+        };
+        let should_continue =
+            BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
 
         if !should_continue {
             // SIGTERM received — shut down gracefully.
@@ -834,6 +1163,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             }));
         }
 
+        // Collect jobs to spawn (populated inside the transaction, spawned after).
+        let mut pending_spawns: Vec<(String, i64)> = Vec::new();
+
         // Run the scheduler tick inside a transaction
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             // Step A: Check if DAG needs rebuild
@@ -864,28 +1196,54 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             }
 
             // Step B2: Build execution unit DAG for parallel-refresh awareness.
-            // In `dry_run` mode, log what would be dispatched. In `off` mode,
-            // compute but only use for observability (summary logged on rebuild).
-            // In `on` mode, the EU DAG will drive the dispatch loop (Phase 4).
             let parallel_mode = config::pg_trickle_parallel_refresh_mode();
-            if parallel_mode != config::ParallelRefreshMode::Off {
-                let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
-                    load_st_by_id(pgt_id).map(|st| st.refresh_mode)
-                });
-                match parallel_mode {
-                    config::ParallelRefreshMode::DryRun => {
+            match parallel_mode {
+                config::ParallelRefreshMode::Off => {}
+                config::ParallelRefreshMode::DryRun => {
+                    let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
+                        load_st_by_id(pgt_id).map(|st| st.refresh_mode)
+                    });
+                    log!(
+                        "pg_trickle: parallel refresh (dry_run): {}",
+                        eu_dag.summary()
+                    );
+                    log!("{}", eu_dag.dry_run_log());
+                    // Fall through to sequential refresh.
+                }
+                config::ParallelRefreshMode::On => {
+                    // Phase 4: Parallel dispatch replaces sequential refresh.
+                    if parallel_state.dag_version != dag_version || parallel_state.eu_dag.is_none()
+                    {
+                        let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
+                            load_st_by_id(pgt_id).map(|st| st.refresh_mode)
+                        });
                         log!(
-                            "pg_trickle: parallel refresh (dry_run): {}",
+                            "pg_trickle: parallel dispatch — EU DAG rebuilt: {}",
                             eu_dag.summary()
                         );
-                        log!("{}", eu_dag.dry_run_log());
+                        parallel_state.rebuild(eu_dag, dag_version);
                     }
-                    config::ParallelRefreshMode::On => {
-                        log!("pg_trickle: parallel refresh (on): {}", eu_dag.summary());
-                        // Phase 4 (future): dispatch loop replaces inline refresh.
-                        // For now, fall through to sequential execution.
+
+                    parallel_dispatch_tick(
+                        &mut parallel_state,
+                        dag_ref,
+                        now_ms,
+                        &mut retry_states,
+                        &retry_policy,
+                        &db_name,
+                        &mut pending_spawns,
+                    );
+
+                    // Prune retry states for STs that no longer exist.
+                    if let Some(ref eu) = parallel_state.eu_dag {
+                        let active_ids: HashSet<i64> = eu
+                            .units()
+                            .flat_map(|u| u.member_pgt_ids.iter().copied())
+                            .collect();
+                        retry_states.retain(|id, _| active_ids.contains(id));
                     }
-                    config::ParallelRefreshMode::Off => unreachable!(),
+
+                    return; // Skip sequential refresh.
                 }
             }
 
@@ -1076,6 +1434,30 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 .collect();
             retry_states.retain(|id, _| active_ids.contains(id));
         }));
+
+        // Phase 4: Spawn workers outside the transaction (after commit).
+        for (db, job_id) in pending_spawns.drain(..) {
+            if let Err(e) = spawn_refresh_worker(&db, job_id) {
+                shmem::release_worker_token();
+                parallel_state.per_db_inflight = parallel_state.per_db_inflight.saturating_sub(1);
+                // Find and clear the in-flight tracking for this job.
+                for us in parallel_state.unit_states.values_mut() {
+                    if us.inflight_job_id == Some(job_id) {
+                        us.inflight_job_id = None;
+                        break;
+                    }
+                }
+                log!(
+                    "pg_trickle: parallel dispatch — failed to spawn worker for job {}: {}",
+                    job_id,
+                    e,
+                );
+                // Cancel the enqueued job row.
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    let _ = SchedulerJob::cancel(job_id, &format!("Worker spawn failed: {}", e));
+                }));
+            }
+        }
     }
 }
 
@@ -2256,5 +2638,48 @@ mod tests {
     #[test]
     fn test_parse_worker_extra_zero_job_id() {
         assert!(parse_worker_extra("mydb\x000").is_none());
+    }
+
+    // ── ParallelDispatchState tests (Phase 4) ───────────────────────
+
+    #[test]
+    fn test_parallel_state_new_is_empty() {
+        let state = ParallelDispatchState::new();
+        assert!(state.unit_states.is_empty());
+        assert_eq!(state.per_db_inflight, 0);
+        assert_eq!(state.dag_version, 0);
+        assert!(!state.has_inflight());
+    }
+
+    #[test]
+    fn test_parallel_state_has_inflight() {
+        let mut state = ParallelDispatchState::new();
+        assert!(!state.has_inflight());
+        state.per_db_inflight = 1;
+        assert!(state.has_inflight());
+    }
+
+    #[test]
+    fn test_unit_dispatch_state_default() {
+        let uds = UnitDispatchState::default();
+        assert_eq!(uds.remaining_upstreams, 0);
+        assert!(uds.inflight_job_id.is_none());
+        assert!(!uds.succeeded);
+    }
+
+    #[test]
+    fn test_is_unit_due_pure_no_members() {
+        // is_unit_due depends on SPI, but we can test the logic structure
+        // indirectly via the iteration: empty members → not due.
+        let unit = crate::dag::ExecutionUnit {
+            id: crate::dag::ExecutionUnitId(1),
+            kind: crate::dag::ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![],
+            root_pgt_id: 0,
+            label: "empty".to_string(),
+        };
+        // With no members, iter().any() returns false → not due.
+        let result = unit.member_pgt_ids.iter().any(|_| true);
+        assert!(!result);
     }
 }

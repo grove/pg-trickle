@@ -932,6 +932,27 @@ pub struct ExecutionUnit {
     pub label: String,
 }
 
+impl ExecutionUnit {
+    /// Compute a stable key for this unit that persists across DAG rebuilds.
+    ///
+    /// Used as the `unit_key` in `pgt_scheduler_jobs` to prevent duplicate
+    /// in-flight jobs and correlate retry state.
+    pub fn stable_key(&self) -> String {
+        let prefix = match self.kind {
+            ExecutionUnitKind::Singleton => "s",
+            ExecutionUnitKind::AtomicGroup => "a",
+            ExecutionUnitKind::ImmediateClosure => "i",
+        };
+        // member_pgt_ids are sorted during construction
+        let ids: Vec<String> = self
+            .member_pgt_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        format!("{}:{}", prefix, ids.join(","))
+    }
+}
+
 /// Graph of execution units with dependency edges and ready-queue support.
 ///
 /// Built from an `StDag` by:
@@ -2752,5 +2773,63 @@ mod tests {
     fn test_execution_unit_id_display() {
         let id = ExecutionUnitId(42);
         assert_eq!(format!("{}", id), "eu_42");
+    }
+
+    // ── stable_key tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_stable_key_singleton() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(1),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![42],
+            root_pgt_id: 42,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "s:42");
+    }
+
+    #[test]
+    fn test_stable_key_atomic_group() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(2),
+            kind: ExecutionUnitKind::AtomicGroup,
+            member_pgt_ids: vec![10, 20, 30],
+            root_pgt_id: 10,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "a:10,20,30");
+    }
+
+    #[test]
+    fn test_stable_key_immediate_closure() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(3),
+            kind: ExecutionUnitKind::ImmediateClosure,
+            member_pgt_ids: vec![5, 15],
+            root_pgt_id: 5,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "i:5,15");
+    }
+
+    #[test]
+    fn test_stable_key_deterministic() {
+        let unit1 = ExecutionUnit {
+            id: ExecutionUnitId(1),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![99],
+            root_pgt_id: 99,
+            label: "a".to_string(),
+        };
+        let unit2 = ExecutionUnit {
+            id: ExecutionUnitId(999),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![99],
+            root_pgt_id: 99,
+            label: "b".to_string(),
+        };
+        // Same kind + same members → same stable key, regardless of ID/label.
+        assert_eq!(unit1.stable_key(), unit2.stable_key());
     }
 }
