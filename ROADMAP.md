@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-03-11
-> **Latest release:** 0.2.3 (scheduled)
-> **Current milestone:** v0.3.0 — DVM Correctness, SAST & Test Coverage
+> **Latest release:** 0.3.0 (2026-03-11)
+> **Current milestone:** v0.4.0 — Parallel Refresh & Performance Hardening
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -20,13 +20,13 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
 1.0 and beyond.
 
 ```
-                                                                    We are here
-                                                                     │
-                                                                     ▼
+                                                                               We are here
+                                                                                │
+                                                                                ▼
  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
  │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 0.6.0  │
- │Released│─│Released│─│Released│─│Released│─│Mode & │─│DVM Fix │─│Parallel│─│  RLS & │─│Partn., │
- │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │Ops Gap│ │SAST&TPC│ │&Perf.  │ │Op.Ctrl │ │DDL&Fuse│
+ │Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Parallel│─│  RLS & │─│Partn., │
+ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │&Perf.  │ │Op.Ctrl │ │DDL&Fuse│
  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
       │
       └─ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
@@ -455,7 +455,7 @@ validations, resource leaks, and observability holes. Phased from quick wins
 - [x] Per-table `cdc_mode` override functional in SQL API and dbt adapter (G1)
 - [x] Extension upgrade path tested (`0.2.2 → 0.2.3`)
 
-**Status: Ready for release (tag pending).**
+**Status: Released (2026-03-09).**
 
 ---
 
@@ -511,7 +511,9 @@ with rollback, mode-comparison, single-row, and DAG tests.
 - [x] All 18 previously-ignored DVM correctness E2E tests re-enabled
 - [x] SAST Phases 1–3 deployed; unsafe baseline committed; CodeQL zero findings
 - [x] TPC-H T1–T6 implemented; rollback, differential-vs-immediate, single-row, and DAG tests pass
-- [ ] Extension upgrade path tested (`0.2.3 → 0.3.0`)
+- [x] Extension upgrade path tested (`0.2.3 → 0.3.0`)
+
+**Status: Released (2026-03-11).**
 
 ---
 
@@ -978,7 +980,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
 | v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | ✅ Released |
 | v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish | 45–66h | 165–222h | ✅ Released |
-| v0.3.0 — DVM Correctness, SAST & Test Coverage | ~20–30h | 185–252h | |
+| v0.3.0 — DVM Correctness, SAST & Test Coverage | ~20–30h | 185–252h | ✅ Released |
 | v0.4.0 — Parallel Refresh & Performance Hardening | ~60–94h | 245–346h | |
 | v0.5.0 — Row-Level Security & Operational Controls | ~21–27h | 266–373h | |
 | v0.6.0 — Partitioning, Idempotent DDL & Anomaly Detection | ~45–62h | 311–435h | |
