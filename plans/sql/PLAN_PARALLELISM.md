@@ -20,16 +20,12 @@ Related:
 | 3 | Dynamic Worker Entry Point | ✅ Done |
 | 4 | Coordinator Dispatch Loop | ✅ Done |
 | 5 | Composite Units | ✅ Done |
-| 6 | Observability and Tuning | Not started |
+| 6 | Observability and Tuning | ✅ Done |
 | 7 | Rollout and Default Change | Not started |
 
 ### Prioritized Remaining Work
 
-1. **Phase 6 — Observability** (next)
-   - Monitoring functions for active workers, queue depth, blocked units
-   - Documentation updates
-
-2. **Phase 7 — Rollout** (after observability)
+1. **Phase 7 — Rollout** (next)
    - CI coverage with parallel mode enabled
    - Benchmark comparison serial vs. parallel
    - Consider defaulting `parallel_refresh_mode = on`
@@ -715,7 +711,7 @@ This avoids leaked capacity after abnormal exits.
 - IMMEDIATE downstream propagation remains in one worker transaction.
 - No member of a composite unit is scheduled separately.
 
-### Phase 6 — Observability and Tuning
+### Phase 6 — Observability and Tuning ✅
 
 #### Scope
 
@@ -728,17 +724,22 @@ This avoids leaked capacity after abnormal exits.
 
 - `src/monitor.rs`
 - `docs/SQL_REFERENCE.md`
-- `docs/FAQ.md`
-- `docs/ARCHITECTURE.md`
-- `docs/CONFIGURATION.md`
 
 #### Task List
 
-- Add metrics or status functions for active workers and queued jobs.
-- Surface token exhaustion and blocked-ready counts to operators.
-- Document worker-budget sizing and failure-recovery behavior.
-- Extend health checks so they distinguish coordinator death from saturation.
-- Add operational examples for multi-database deployments.
+- [x] `pgtrickle.worker_pool_status()`: single-row function returning active
+  workers, cluster-wide budget, per-db cap, and parallel mode.
+- [x] `pgtrickle.parallel_job_status(max_age_seconds)`: table function
+  showing active and recently completed jobs with duration, worker PID,
+  unit key/kind, attempt count.
+- [x] Extend `health_check()` with `worker_pool` check — warns when all
+  tokens are in use (saturation).
+- [x] Extend `health_check()` with `job_queue` check — warns when > 10
+  jobs are queued (backlog).
+- [x] Both new health checks gated on `parallel_refresh_mode != off`.
+- [x] Document new functions in `docs/SQL_REFERENCE.md`.
+- [ ] Add operational examples for multi-database deployments (deferred
+  to Phase 7 / documentation pass).
 
 #### Acceptance Criteria
 

@@ -860,7 +860,9 @@ WHERE severity != 'OK';
 
 Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
 `consecutive_errors`, `buffer_growth` (> 10 000 pending rows), `slot_lag`
-(retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB).
+(retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB),
+`worker_pool` (all worker tokens in use — parallel mode only), `job_queue`
+(> 10 jobs queued — parallel mode only).
 
 ---
 
@@ -1084,6 +1086,64 @@ ORDER BY pending_rows DESC;
 Useful for spotting a source table whose CDC buffer is growing unexpectedly
 (which may indicate a stalled differential refresh or a high-write source that
 has outpaced the schedule).
+
+---
+
+### pgtrickle.worker_pool_status
+
+Snapshot of the parallel refresh worker pool. Returns a single row.
+
+```sql
+pgtrickle.worker_pool_status() → SETOF record(
+    active_workers  int,   -- workers currently executing refresh jobs
+    max_workers     int,   -- cluster-wide worker budget (GUC)
+    per_db_cap      int,   -- per-database dispatch cap (GUC)
+    parallel_mode   text   -- current parallel_refresh_mode value
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.worker_pool_status();
+```
+
+Returns `0` active workers when `parallel_refresh_mode = 'off'`.
+
+---
+
+### pgtrickle.parallel_job_status
+
+Active and recently completed scheduler jobs from the `pgt_scheduler_jobs`
+table. Shows jobs that are currently queued or running, plus jobs that
+finished within the last `max_age_seconds` (default 300).
+
+```sql
+pgtrickle.parallel_job_status(
+    max_age_seconds int  DEFAULT 300
+) → SETOF record(
+    job_id         bigint,
+    unit_key       text,        -- stable unit identifier (s:42, a:1,2, etc.)
+    unit_kind      text,        -- 'singleton', 'atomic_group', 'immediate_closure'
+    status         text,        -- 'QUEUED', 'RUNNING', 'SUCCEEDED', etc.
+    member_count   int,
+    attempt_no     int,
+    scheduler_pid  int,
+    worker_pid     int,         -- NULL if not yet claimed
+    enqueued_at    timestamptz,
+    started_at     timestamptz, -- NULL if still queued
+    finished_at    timestamptz, -- NULL if not finished
+    duration_ms    float8       -- NULL if not finished
+)
+```
+
+**Example — show running and recently failed jobs:**
+
+```sql
+SELECT job_id, unit_key, status, duration_ms
+FROM pgtrickle.parallel_job_status(60)
+WHERE status NOT IN ('SUCCEEDED');
+```
 
 ---
 

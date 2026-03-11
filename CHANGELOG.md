@@ -114,9 +114,25 @@ workers, replacing the Phase 3 serial placeholder.
 
 See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
 
----
+#### Parallel Refresh — Phase 6 (Observability and Tuning)
 
-## [0.3.0] — 2026-03-11
+Monitoring functions and health checks for the parallel refresh subsystem.
+
+- **`pgtrickle.worker_pool_status()`**: single-row function returning active
+  workers, cluster-wide budget (`max_workers`), per-db dispatch cap
+  (`per_db_cap`), and current `parallel_mode`.
+- **`pgtrickle.parallel_job_status(max_age_seconds)`**: table function listing
+  active and recently completed scheduler jobs with job ID, unit key/kind,
+  status, member count, attempt number, scheduler/worker PIDs, timestamps,
+  and computed `duration_ms`.
+- **`health_check()` extended** with two new checks (gated on
+  `parallel_refresh_mode != off`):
+  - `worker_pool` — WARN when all worker tokens are in use (saturation).
+  - `job_queue` — WARN when > 10 jobs are queued (backlog building up).
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+--- — 2026-03-11
 
 ### Fixed
 
