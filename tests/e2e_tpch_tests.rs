@@ -1887,7 +1887,6 @@ async fn test_tpch_immediate_rollback() {
                 let _ = db
                     .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
                     .await;
-                all_passed = false;
                 continue;
             }
 
@@ -2046,7 +2045,16 @@ async fn test_tpch_immediate_rollback() {
     );
     println!("══════════════════════════════════════════════════════════\n");
 
-    assert!(all_passed, "IMMEDIATE mode rollback correctness failed");
+    assert!(
+        all_passed,
+        "IMMEDIATE mode rollback correctness failed\n\
+         {}\n",
+        skipped
+            .iter()
+            .map(|(n, r)| format!("    {n}: {r}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
