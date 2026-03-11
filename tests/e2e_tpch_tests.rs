@@ -564,7 +564,11 @@ async fn test_tpch_differential_correctness() {
         let st_name = format!("tpch_{}", q.name);
         let create_result = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                // NULL schedule — disables background auto-refresh so the
+                // scheduler worker cannot race with the test's explicit refreshes,
+                // which would cause "refresh already in progress" errors and
+                // trigger repeated large temp-file creation on the disk.
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, NULL, 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -679,9 +683,13 @@ async fn test_tpch_differential_correctness() {
                 ct.elapsed().as_secs_f64() * 1000.0,
             );
 
-            // Reclaim dead-tuple bloat from change-buffer DELETEs and
-            // stream-table MERGEs before the next cycle.
-            db.execute("VACUUM").await;
+            // CHECKPOINT flushes WAL so it can be recycled.
+            // VACUUM FULL compacts table files and returns dead-tuple space
+            // to the OS — plain VACUUM only marks space as reusable within
+            // PostgreSQL's files, which causes the data directory to grow
+            // unboundedly across the 22-query loop.
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
         }
 
         if dvm_ok {
@@ -768,7 +776,9 @@ async fn test_tpch_cross_query_consistency() {
         let st_name = format!("tpch_x_{}", q.name);
         let result = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                // NULL schedule — prevents background worker from auto-refreshing
+                // these tables, which would race with the cross-query refresh loop.
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, NULL, 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -849,10 +859,11 @@ async fn test_tpch_cross_query_consistency() {
         }
         active = next_active;
 
-        // Reclaim dead-tuple bloat from change-buffer DELETEs and
-        // stream-table MERGEs before the next cycle. Without this the
-        // PostgreSQL data directory can grow to 100+ GB across cycles.
-        db.execute("VACUUM").await;
+        // CHECKPOINT flushes WAL; VACUUM FULL compacts table files and
+        // returns dead-tuple space to the OS.  Without this the PostgreSQL
+        // data directory can grow to 100+ GB across cycles.
+        db.execute("CHECKPOINT").await;
+        db.execute("VACUUM (FULL, ANALYZE)").await;
 
         println!(
             "  Cycle {}/{} — {} STs verified — {:.0}ms ✓",
@@ -909,16 +920,17 @@ async fn test_tpch_full_vs_differential() {
         let st_full = format!("tpch_f_{}", q.name);
         let st_diff = format!("tpch_d_{}", q.name);
 
-        // Create both STs
+        // Create both STs — NULL schedule prevents background auto-refresh
+        // from racing with the explicit per-cycle refresh calls below.
         let full_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, '1m', 'FULL')",
+                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, NULL, 'FULL')",
                 sql = q.sql,
             ))
             .await;
         let diff_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, NULL, 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -989,8 +1001,10 @@ async fn test_tpch_full_vs_differential() {
                 ))
                 .await;
 
-            // Reclaim dead-tuple bloat between cycles.
-            db.execute("VACUUM").await;
+            // Reclaim dead-tuple bloat between cycles. VACUUM FULL compacts
+            // files and returns space to the OS; plain VACUUM does not.
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
 
             if !matches {
                 let full_count: i64 = db
@@ -1069,9 +1083,10 @@ async fn test_tpch_q07_isolation() {
     let q07_sql = include_str!("tpch/queries/q07.sql");
     let st_name = "tpch_q07_iso";
 
-    // Create Q07 ST only
+    // Create Q07 ST only — NULL schedule prevents background auto-refresh
+    // from racing with the per-cycle explicit refreshes below.
     db.try_execute(&format!(
-        "SELECT pgtrickle.create_stream_table('{st_name}', $${q07_sql}$$, '1m', 'DIFFERENTIAL')",
+        "SELECT pgtrickle.create_stream_table('{st_name}', $${q07_sql}$$, NULL, 'DIFFERENTIAL')",
     ))
     .await
     .expect("Q07 create failed");
@@ -1118,7 +1133,8 @@ async fn test_tpch_q07_isolation() {
                 panic!("  cycle {cycle}/{n_cycles} — FAILED: {e}");
             }
         }
-        db.execute("VACUUM").await;
+        db.execute("CHECKPOINT").await;
+        db.execute("VACUUM (FULL, ANALYZE)").await;
     }
 
     let _ = db
@@ -1170,15 +1186,17 @@ async fn test_tpch_performance_comparison() {
         let st_full = format!("perf_f_{}", q.name);
         let st_diff = format!("perf_d_{}", q.name);
 
+        // NULL schedule prevents background auto-refresh from racing with
+        // the explicit per-cycle refresh calls in the performance loop.
         let full_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, '1m', 'FULL')",
+                "SELECT pgtrickle.create_stream_table('{st_full}', $${sql}$$, NULL, 'FULL')",
                 sql = q.sql,
             ))
             .await;
         let diff_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, NULL, 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -1232,7 +1250,8 @@ async fn test_tpch_performance_comparison() {
             }
             diff_times.push(t_diff.elapsed().as_secs_f64() * 1000.0);
 
-            db.execute("VACUUM").await;
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
         }
 
         if ok {
@@ -1364,7 +1383,9 @@ async fn test_tpch_sustained_churn() {
         let st_name = format!("churn_{name}");
         match db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                // NULL schedule prevents background auto-refresh from racing
+                // with the churn loop's explicit per-cycle refreshes.
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, NULL, 'DIFFERENTIAL')",
             ))
             .await
         {
@@ -1441,7 +1462,8 @@ async fn test_tpch_sustained_churn() {
                 "  cycle {cycle:>3}/{n_cycles} — {elapsed:>7.0}ms — buf≈{buf_total} — check {check_mark}",
             );
 
-            db.execute("VACUUM").await;
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
         } else if cycle % 5 == 0 {
             println!("  cycle {cycle:>3}/{n_cycles} — {elapsed:>7.0}ms");
         }
@@ -1721,7 +1743,8 @@ async fn test_tpch_immediate_correctness() {
                 ct.elapsed().as_secs_f64() * 1000.0,
             );
 
-            db.execute("VACUUM").await;
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
         }
 
         if ivm_ok {
@@ -2097,7 +2120,9 @@ async fn test_tpch_differential_vs_immediate() {
 
         let diff_ok = db
             .try_execute(&format!(
-                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, '1m', 'DIFFERENTIAL')",
+                // NULL schedule prevents background auto-refresh from racing
+                // with this test's explicit per-cycle checks.
+                "SELECT pgtrickle.create_stream_table('{st_diff}', $${sql}$$, NULL, 'DIFFERENTIAL')",
                 sql = q.sql,
             ))
             .await;
@@ -2195,7 +2220,8 @@ async fn test_tpch_differential_vs_immediate() {
                 ))
                 .await;
 
-            db.execute("VACUUM").await;
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM (FULL, ANALYZE)").await;
 
             if !agrees {
                 let diff_count: i64 = db
