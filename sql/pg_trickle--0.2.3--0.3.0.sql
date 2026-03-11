@@ -1,0 +1,27 @@
+-- pg_trickle 0.2.3 -> 0.3.0 upgrade script
+--
+-- v0.3.0 is a correctness and hardening release with no catalog schema changes:
+--
+--   DVM correctness fixes (DC1-DC4):
+--     - HAVING threshold-crossing differential correctness (COUNT(*) rewrite,
+--       per-group rescan on upward threshold crossing)
+--     - FULL OUTER JOIN differential correctness (row-id mismatch, compound
+--       GROUP BY expression resolution/quoting, SUM NULL semantics, rescan CTE)
+--     - Correlated EXISTS with HAVING differential correctness (parser GROUP BY
+--       /HAVING handling, SemiJoin row-id, diff_project recomputation)
+--     - Correlated scalar subquery differential correctness (rewrite to LEFT JOIN
+--       before DVM parsing; inner table qualifier stripping)
+--
+--   Scheduler hardening:
+--     - BGW detection uses backend_type instead of application_name (PG 18)
+--     - Launcher thundering-herd prevention on DAG signal
+--
+--   SAST program (Phases 1-3): CodeQL, cargo-deny, Semgrep, unsafe inventory
+--
+--   TPC-H test suite enhancements (T1-T6): rollback, mode-comparison,
+--     single-row mutations, DAG chain / multi-parent tests
+--
+-- No catalog tables, columns, functions, or views were added or removed.
+-- ALTER EXTENSION pg_trickle UPDATE is a no-op for schema objects.
+
+-- (intentionally empty — all changes are internal to the compiled .so)
