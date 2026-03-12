@@ -1,0 +1,68 @@
+version: 2
+
+seeds:
+  - name: departments
+    description: "Department hierarchy (self-referencing tree)"
+    columns:
+      - name: id
+        description: "Department PK"
+        tests: [not_null, unique]
+      - name: name
+        description: "Department display name"
+        tests: [not_null]
+
+  - name: employees
+    description: "Employee roster"
+    columns:
+      - name: id
+        description: "Employee PK"
+        tests: [not_null, unique]
+      - name: department_id
+        description: "FK to departments"
+        tests: [not_null]
+      - name: salary
+        description: "Annual salary"
+        tests: [not_null]
+
+models:
+  - name: stg_departments
+    description: "Thin pass-through view over the departments seed"
+
+  - name: stg_employees
+    description: "Thin pass-through view over the employees seed"
+
+  - name: department_tree
+    description: >
+      Recursive CTE that flattens the department hierarchy.
+      Maintained incrementally by pg_trickle (DIFFERENTIAL, CALCULATED schedule).
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: path
+        tests: [not_null]
+      - name: depth
+        tests: [not_null]
+
+  - name: department_stats
+    description: >
+      Per-department headcount and salary aggregates.
+      Reads from department_tree — demonstrates stream-table-to-stream-table chaining.
+    columns:
+      - name: department_id
+        tests: [not_null, unique]
+      - name: headcount
+        tests: [not_null]
+      - name: total_salary
+        tests: [not_null]
+
+  - name: department_report
+    description: >
+      Top-level division rollup driven by a 1-minute schedule.
+      Upstream CALCULATED tables inherit this cadence.
+    columns:
+      - name: division
+        tests: [not_null, unique]
+      - name: total_headcount
+        tests: [not_null]
+      - name: total_payroll
+        tests: [not_null]

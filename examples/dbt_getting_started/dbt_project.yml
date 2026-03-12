@@ -1,0 +1,56 @@
+name: 'pgtrickle_getting_started'
+version: '0.1.0'
+config-version: 2
+
+profile: 'getting_started'
+
+require-dbt-version: [">=1.9.0", "<2.0.0"]
+
+model-paths:  ["models"]
+seed-paths:   ["seeds"]
+test-paths:   ["tests"]
+
+seeds:
+  pgtrickle_getting_started:
+    departments:
+      +column_types:
+        id:        integer
+        parent_id: integer
+      +post-hook: |
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = to_regclass('{{ this }}') AND contype = 'p'
+          ) THEN
+            EXECUTE 'ALTER TABLE {{ this }} ADD PRIMARY KEY (id)';
+          END IF;
+        END
+        $$;
+    employees:
+      +column_types:
+        id:            integer
+        department_id: integer
+        salary:        numeric
+      +post-hook: |
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = to_regclass('{{ this }}') AND contype = 'p'
+          ) THEN
+            EXECUTE 'ALTER TABLE {{ this }} ADD PRIMARY KEY (id)';
+          END IF;
+        END
+        $$;
+
+models:
+  pgtrickle_getting_started:
+    staging:
+      +materialized: view          # thin pass-throughs, not stream tables
+    orgchart:
+      +materialized: stream_table  # default for all orgchart models
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
