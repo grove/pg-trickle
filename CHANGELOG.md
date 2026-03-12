@@ -7,7 +7,171 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [0.3.0] — 2026-03-11
+## [Unreleased]
+
+### Added
+
+#### Parallel Refresh — Phase 0 + Phase 1 (Foundation)
+
+Infrastructure for true parallel refresh within a database. This is the first
+step toward dispatching refresh work to multiple dynamic background workers
+(Phases 2–7 follow). No runtime behavior change — the sequential refresh path
+remains the default.
+
+- **New GUCs:**
+  - `pg_trickle.parallel_refresh_mode` (`off` | `dry_run` | `on`, default `off`)
+    Controls whether the scheduler computes and dispatches parallel execution units.
+  - `pg_trickle.max_dynamic_refresh_workers` (default `4`)
+    Cluster-wide cap on concurrent pg_trickle refresh workers.
+- **Execution Unit DAG** (`ExecutionUnitDag` in `dag.rs`):
+  - `ExecutionUnit`, `ExecutionUnitId`, `ExecutionUnitKind` types.
+  - Transforms `StDag` consistency groups into schedulable execution units.
+  - Conservative IMMEDIATE-trigger closure collapsing — IMMEDIATE-connected
+    stream tables are merged into a single execution unit to prevent unsafe
+    cross-worker interactions.
+  - Ready-queue computation and topological ordering.
+- **Dry-run mode:** When `parallel_refresh_mode = 'dry_run'`, the scheduler
+  logs execution units, dispatch order, and ready-queue contents without
+  changing any runtime behavior.
+- **Updated `max_concurrent_refreshes` GUC description** — now documented as
+  the per-database dispatch cap (takes effect when parallel mode is enabled).
+- **10 new unit tests** covering singleton, diamond, IMMEDIATE closure, mixed
+  graph, empty DAG, and summary/log formatting.
+
+#### Parallel Refresh — Phase 2 + Phase 3 (Job Table & Worker Entry Point)
+
+Job dispatch infrastructure and dynamic background worker entry point for
+parallel refresh. Still behind `parallel_refresh_mode = 'off'` (default).
+
+- **New catalog table:** `pgtrickle.pgt_scheduler_jobs` with 15 columns
+  (job_id, dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id,
+  status, scheduler_pid, worker_pid, attempt_no, enqueued_at, started_at,
+  finished_at, outcome_detail, retryable) and 3 indexes.
+- **Migration SQL:** `pg_trickle--0.3.0--0.4.0.sql` for existing installations.
+- **Catalog CRUD:** `JobStatus` enum (Queued/Running/Succeeded/RetryableFailed/
+  PermanentFailed/Cancelled) and `SchedulerJob` struct with enqueue, claim,
+  complete, cancel, get_by_id, cancel_orphaned_jobs, prune_completed,
+  has_inflight_job operations.
+- **Shared-memory token pool:** `ACTIVE_REFRESH_WORKERS` (AtomicU32) with
+  CAS-based `try_acquire_worker_token()` / `release_worker_token()`.
+  `RECONCILE_EPOCH` (AtomicU64) for coordinator synchronization.
+- **Dynamic refresh worker:** `pg_trickle_refresh_worker_main` entry point
+  spawned via `BackgroundWorkerBuilder::load_dynamic()`. Workers claim a job,
+  validate DAG version, execute the refresh unit, persist outcome, and
+  release the worker token on exit.
+- **Worker spawning:** `spawn_refresh_worker(db_name, job_id)` packs database
+  name and job ID into bgw_extra ("db\0id" format).
+- **Coordinator reconciliation:** `reconcile_parallel_state()` runs at
+  scheduler startup to cancel orphaned jobs, correct leaked worker tokens
+  against live `pg_stat_activity`, and prune old completed jobs.
+- **15 new unit tests** for JobStatus (7) and parse_worker_extra (8).
+
+#### Parallel Refresh — Phase 4 (Coordinator Dispatch Loop)
+
+Coordinator ready-queue dispatch loop that replaces the inline sequential
+refresh path when `parallel_refresh_mode = 'on'`. This is the core scheduling
+engine for true parallel refresh.
+
+- **Coordinator dispatch state** (`ParallelDispatchState`, `UnitDispatchState`
+  in `scheduler.rs`): in-memory ready queue, per-unit upstream tracking,
+  in-flight job tracking, DAG-version-aware rebuilds.
+- **Ready-queue dispatch** (`parallel_dispatch_tick`): 3-step dispatch loop —
+  poll completed jobs → build ready queue in topological order → dispatch
+  within per-db and cluster-wide budgets.
+- **Downstream readiness release**: on worker completion, immediately
+  decrements `remaining_upstreams` on downstream units, enabling dispatch in
+  the same tick.
+- **Transaction-split spawning**: jobs enqueued inside SPI transaction, workers
+  spawned after commit to avoid job-visibility races.
+- **Dynamic poll interval**: 200 ms during active dispatch (in-flight jobs),
+  reverts to normal `scheduler_interval_ms` when idle.
+- **Stable unit keys** (`ExecutionUnit::stable_key()` in `dag.rs`):
+  deterministic `s:<id>`, `a:<ids>`, `i:<ids>` keys for deduplication across
+  DAG rebuilds.
+- **8 new unit tests** for `stable_key` (4) and `ParallelDispatchState` /
+  `is_unit_due` (4). Total: 1233 unit tests.
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+#### Parallel Refresh — Phase 5 (Composite Unit Execution)
+
+Proper atomic-group and IMMEDIATE-closure execution inside dynamic refresh
+workers, replacing the Phase 3 serial placeholder.
+
+- **`execute_worker_atomic_group()`**: wraps all group members in a C-level
+  sub-transaction (`BeginInternalSubTransaction`). On any member failure the
+  entire group is rolled back (`RollbackAndReleaseCurrentSubTransaction`);
+  on success the sub-transaction is committed
+  (`ReleaseCurrentSubTransaction`). Retains all-or-nothing semantics.
+- **`execute_worker_immediate_closure()`**: refreshes only the root stream
+  table. Downstream IMMEDIATE-mode triggers fire synchronously within the
+  same worker transaction, so no explicit member iteration is needed.
+- **Worker dispatch routing**: the worker entry point now routes
+  `atomic_group` and `immediate_closure` to their dedicated functions
+  instead of the former serial `execute_worker_composite()` placeholder.
+- Coordinator already prevents double-scheduling of unit members via the
+  `ExecutionUnitDag` membership index.
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+#### Parallel Refresh — Phase 6 (Observability and Tuning)
+
+Monitoring functions and health checks for the parallel refresh subsystem.
+
+- **`pgtrickle.worker_pool_status()`**: single-row function returning active
+  workers, cluster-wide budget (`max_workers`), per-db dispatch cap
+  (`per_db_cap`), and current `parallel_mode`.
+- **`pgtrickle.parallel_job_status(max_age_seconds)`**: table function listing
+  active and recently completed scheduler jobs with job ID, unit key/kind,
+  status, member count, attempt number, scheduler/worker PIDs, timestamps,
+  and computed `duration_ms`.
+- **`health_check()` extended** with two new checks (gated on
+  `parallel_refresh_mode != off`):
+  - `worker_pool` — WARN when all worker tokens are in use (saturation).
+  - `job_queue` — WARN when > 10 jobs are queued (backlog building up).
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+#### Parallel Refresh — Phase 7 (Rollout and Default Change)
+
+Documentation, CI validation, and rollout gating for the parallel refresh
+feature. All seven implementation phases are now complete.
+
+- **GUC documentation** (`docs/CONFIGURATION.md`): Full reference for
+  `parallel_refresh_mode`, `max_dynamic_refresh_workers`, and updated
+  `max_concurrent_refreshes` (now documented as the per-database dispatch
+  cap). Includes worker-budget planning formula and tuning guidance.
+- **Architecture documentation** (`docs/ARCHITECTURE.md`): New "Parallel
+  Refresh" subsection describing the execution-unit DAG, ready queue,
+  dynamic worker lifecycle, and how it relates to `max_worker_processes`.
+- **CI coverage**: E2E test suite now runs a second pass with
+  `PGT_PARALLEL_MODE=on` to validate correctness under parallel dispatch.
+  The test harness (`tests/e2e/mod.rs`) reads the environment variable and
+  applies `ALTER SYSTEM SET pg_trickle.parallel_refresh_mode` accordingly.
+- **Default remains `off`**: The feature is gated behind the
+  `parallel_refresh_mode` GUC through initial releases. Defaulting to `on`
+  is deferred until real-world operational evidence is collected.
+
+See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
+
+#### Statement-Level CDC Triggers — B3 Write-Side Benchmark Harness
+
+Added a benchmark harness to measure the write-side overhead reduction from
+statement-level CDC triggers (v0.4.0 default) vs the legacy row-level triggers.
+
+- **`bench_stmt_vs_row_cdc_matrix`** (new `#[ignore]` test in `e2e_bench_tests.rs`):
+  Full 3×3×2 matrix — narrow/medium/wide table widths × bulk INSERT/UPDATE
+  + single-row INSERT × row/statement CDC mode. Prints avg/p50/p95 timings
+  and per-cell speedup ratios. Expected runtime: 15–20 min.
+- **`bench_stmt_vs_row_cdc_quick`** (new `#[ignore]` test): Narrow table,
+  bulk INSERT only, 5 iterations. Completes in ~60 s; useful as a quick smoke-
+  check.
+- Both tests use `alter_system_set_and_wait()` to switch `cdc_trigger_mode`
+  between runs and output a summary with per-width bulk-DML reduction
+  percentages and a single-row neutrality check (±10% target).
+- ROADMAP B3 and PLAN_PERFORMANCE_PART_9 §B-3 marked ✅ Done.
+
+--- — 2026-03-11
 
 ### Fixed
 

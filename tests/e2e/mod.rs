@@ -546,11 +546,29 @@ impl E2eDb {
     ///
     /// This creates all catalog tables, views, event triggers, and
     /// SQL functions in the `pg_trickle` schema.
+    ///
+    /// If the `PGT_PARALLEL_MODE` environment variable is set to `on` or
+    /// `dry_run`, the parallel refresh mode GUC is enabled for this
+    /// database after extension creation.
     pub async fn with_extension(self) -> Self {
         sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE")
             .execute(&self.pool)
             .await
             .expect("Failed to CREATE EXTENSION pg_trickle");
+
+        if let Ok(mode) = std::env::var("PGT_PARALLEL_MODE") {
+            let mode = mode.to_ascii_lowercase();
+            if mode == "on" || mode == "dry_run" {
+                let sql = format!(
+                    "ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = '{}'",
+                    mode
+                );
+                self.execute(&sql).await;
+                self.execute("SELECT pg_reload_conf()").await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+
         self
     }
 
@@ -683,6 +701,36 @@ impl E2eDb {
     pub async fn refresh_st(&self, name: &str) {
         self.execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
             .await;
+    }
+
+    /// Refresh a stream table, retrying when a concurrent background refresh holds the lock.
+    ///
+    /// The background scheduler may race with a manual refresh of a downstream ST
+    /// (e.g. after the test manually refreshes an upstream ST, the scheduler detects
+    /// staleness within its polling interval and acquires the session-level advisory
+    /// lock on the same `pgt_id`). When `refresh_stream_table` returns
+    /// "another refresh is already in progress", this helper sleeps 100 ms and retries
+    /// until the lock clears or 10 seconds elapse.
+    pub async fn refresh_st_with_retry(&self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match self
+                .try_execute(&format!("SELECT pgtrickle.refresh_stream_table('{name}')"))
+                .await
+            {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("already in progress") => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!(
+                            "refresh_st_with_retry: timed out waiting for \
+                             concurrent refresh of '{name}' to complete"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => panic!("refresh_stream_table('{name}') failed: {e:?}"),
+            }
+        }
     }
 
     /// Drop a stream table via `pgtrickle.drop_stream_table()`.

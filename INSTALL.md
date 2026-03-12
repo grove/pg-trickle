@@ -126,8 +126,13 @@ Add the following to `postgresql.conf` **before starting PostgreSQL**:
 # Required — loads the extension shared library at server start
 shared_preload_libraries = 'pg_trickle'
 
-# Recommended — must accommodate scheduler + refresh workers
-max_worker_processes = 8
+# Must accommodate scheduler + optional parallel refresh workers.
+# Default (8) is sufficient for sequential mode (1 slot per database).
+# For parallel refresh (pg_trickle.parallel_refresh_mode = 'on'), budget:
+#   1 (launcher) + N (scheduler per DB) + max_dynamic_refresh_workers
+#   + autovacuum workers + parallel query workers + other extensions
+# A 2-database deployment with 4 parallel workers typically needs ≥16.
+max_worker_processes = 16
 ```
 
 > **Note:** `wal_level = logical` and `max_replication_slots` are **not** required. The extension uses lightweight row-level triggers for CDC, not logical replication.
@@ -351,7 +356,9 @@ Ensure `shared_preload_libraries = 'pg_trickle'` is set and PostgreSQL has been 
 
 ### Background worker not starting
 
-Check that `max_worker_processes` is high enough to accommodate the scheduler worker plus any refresh workers. The default of 8 is usually sufficient.
+Check that `max_worker_processes` is high enough. In sequential mode (default) pg_trickle needs one slot per database with stream tables. With parallel refresh enabled (`pg_trickle.parallel_refresh_mode = 'on'`) it additionally needs `max_dynamic_refresh_workers` slots (default 4) shared across all databases.
+
+See the [worker-budget formula](docs/CONFIGURATION.md#pg_tricklemax_dynamic_refresh_workers) in CONFIGURATION.md for sizing guidance.
 
 ### Check logs for details
 

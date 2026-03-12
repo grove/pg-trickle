@@ -1341,7 +1341,7 @@ The scheduler builds a **directed acyclic graph (DAG)** of stream table dependen
 1. **Edge discovery.** For each stream table, the defining query's source tables are extracted. If a source table is itself a stream table, a dependency edge is added.
 2. **Cycle detection.** The DAG is checked for cycles. If a cycle is detected, the offending `create_stream_table` call is rejected with a clear error message listing the cycle path.
 3. **Topological sort.** A Kahn's algorithm topological sort produces the refresh order — leaf nodes (no stream table dependencies) are refreshed first, then their dependents, and so on.
-4. **Level assignment.** Each stream table is assigned a "level" (0 for leaves, max(parent levels) + 1 for dependents). Stream tables at the same level could theoretically be refreshed in parallel (not yet implemented).
+4. **Level assignment.** Each stream table is assigned a "level" (0 for leaves, max(parent levels) + 1 for dependents). Stream tables at the same level are refreshed concurrently when `pg_trickle.parallel_refresh_mode = 'on'`.
 
 The topological order is recalculated whenever the DAG changes. You can inspect it with:
 
@@ -1537,11 +1537,27 @@ When the number of pending changes exceeds `pg_trickle.differential_max_change_r
 
 ### How many concurrent refreshes can run?
 
-The `pg_trickle.max_concurrent_refreshes` GUC (default: 4, range: 1–32) controls the maximum number of stream tables that can be refreshed in parallel.
+By default (`parallel_refresh_mode = 'off'`) refreshes are processed **sequentially** within the scheduler's single background worker. This is safe and efficient for most deployments.
 
-In the current implementation, refreshes are actually processed **sequentially** within the scheduler's single background worker — this GUC reserves capacity for future parallel refresh support. Each concurrent refresh would use a separate background worker, so ensure `max_worker_processes` has enough room.
+Starting in v0.4.0, **true parallel refresh** is available via:
 
-For most deployments with fewer than 100 stream tables, sequential processing adds negligible latency (each differential refresh typically takes 5–50 ms).
+```sql
+ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on';
+ALTER SYSTEM SET pg_trickle.max_dynamic_refresh_workers = 4;  -- cluster-wide cap
+ALTER SYSTEM SET pg_trickle.max_concurrent_refreshes = 4;    -- per-database cap
+SELECT pg_reload_conf();
+```
+
+When enabled, independent stream tables at the same DAG level are refreshed concurrently in separate dynamic background workers. Each worker uses one `max_worker_processes` slot — see the [worker-budget formula](CONFIGURATION.md#pg_tricklemax_dynamic_refresh_workers) before enabling.
+
+Monitor parallel refresh with:
+
+```sql
+SELECT * FROM pgtrickle.worker_pool_status();
+SELECT * FROM pgtrickle.parallel_job_status(60);
+```
+
+For most deployments with fewer than 100 stream tables, sequential processing is still efficient (each differential refresh typically takes 5–50 ms).
 
 ### How do I check if my stream tables are keeping up?
 
@@ -2657,21 +2673,26 @@ The differential refresh path executes the delta query as a **single SQL stateme
 
 4. **Monitoring.** If `pg_stat_statements` is installed, pg_trickle logs a warning when the MERGE query writes temporary blocks to disk.
 
-### Why are refreshes processed sequentially?
+### Why are refreshes processed sequentially by default?
 
-The scheduler processes stream tables **sequentially** in topological (dependency) order within a single background worker process. Even though `pg_trickle.max_concurrent_refreshes` can be set up to 32, **parallel refresh of independent branches is not yet implemented**.
+The default (`parallel_refresh_mode = 'off'`) is sequential because it is simple, correct, and efficient for most workloads. Topological ordering guarantees upstream stream tables refresh before downstream ones with no coordination overhead.
 
-**Why sequential?**
+**When to consider enabling parallel refresh:**
 
-- **Correctness.** Topological ordering guarantees that upstream stream tables are refreshed before downstream ones. Parallel execution of independent DAG branches requires careful lock management to avoid read/write conflicts.
-- **Simplicity.** A single-worker model avoids connection pool exhaustion, advisory lock races, and prepared statement conflicts.
+- Your database has many **independent** stream tables (no shared dependencies).
+- Total cycle time = sum of all refresh durations and some refreshes are visibly blocking unrelated ones.
+- You have enough `max_worker_processes` headroom (each parallel worker uses one slot).
 
-**Impact:**
+**Enabling parallel refresh (v0.4.0+):**
 
-- For most deployments with <100 stream tables, sequential processing adds negligible latency (each differential refresh typically takes 5–50ms).
-- For large deployments with many independent stream tables, total cycle time = sum of all individual refresh times.
+```sql
+ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on';
+SELECT pg_reload_conf();
+```
 
-**Future:** Parallel refresh via multiple background workers is planned for a future release.
+With `parallel_refresh_mode = 'on'`, the scheduler builds an execution-unit DAG and dispatches independent units to dynamic background workers. Atomic consistency groups and IMMEDIATE-trigger closures remain single-worker for correctness.
+
+See [CONFIGURATION.md — Parallel Refresh](CONFIGURATION.md#parallel-refresh) for tuning guidance including the worker-budget formula.
 
 ### How many connections does pg_trickle use?
 

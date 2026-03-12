@@ -669,6 +669,13 @@ remains the options-analysis precursor.
 | P2 | Phase 2–4: job table, worker budget, dynamic refresh workers, and ready-queue dispatch | 16–28h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
 | P3 | Phase 5–7: composite units, observability, rollout gating, and CI validation | 12–24h | [PLAN_PARALLELISM.md §10](plans/sql/PLAN_PARALLELISM.md) |
 
+**Progress:**
+- [x] **P1 — Phase 0 + Phase 1** (done): GUCs (`parallel_refresh_mode`, `max_dynamic_refresh_workers`), `ExecutionUnit`/`ExecutionUnitDag` types in `dag.rs`, IMMEDIATE-closure collapsing, dry-run logging in scheduler, 10 new unit tests (1211 total).
+- [x] **P2 — Phase 2–4** (done): Job table (`pgt_scheduler_jobs`), catalog CRUD, shared-memory token pool (Phase 2). Dynamic worker entry point, spawn helper, reconciliation (Phase 3). Coordinator dispatch loop with ready-queue scheduling, per-db/cluster-wide budget enforcement, transaction-split spawning, dynamic poll interval, 8 new unit tests (Phase 4). 1233 unit tests total.
+- [x] **P3a — Phase 5** (done): Composite unit execution — `execute_worker_atomic_group()` with C-level sub-transaction rollback, `execute_worker_immediate_closure()` with root-only refresh (IMMEDIATE triggers propagate downstream). Replaces Phase 3 serial placeholder.
+- [x] **P3b — Phase 6** (done): Observability — `worker_pool_status()`, `parallel_job_status()` SQL functions; `health_check()` extended with `worker_pool` and `job_queue` checks; docs updated.
+- [x] **P3c — Phase 7** (done): Rollout — GUC documentation in `CONFIGURATION.md`, worker-budget guidance in `ARCHITECTURE.md`, CI E2E coverage with `PGT_PARALLEL_MODE=on`, feature stays gated behind `parallel_refresh_mode = 'off'` default.
+
 > **Parallel refresh subtotal: ~40–72 hours**
 
 ### Statement-Level CDC Triggers
@@ -688,9 +695,9 @@ trigger overhead reduction of 50–80% for bulk DML; neutral for single-row.
 |------|-------------|--------|-----|
 | ~~B1~~ | ~~Replace per-row triggers with statement-level triggers; INSERT/UPDATE/DELETE via set-based buffer fill~~ | ~~8h~~ | ✅ Done — `build_stmt_trigger_fn_sql` in cdc.rs; `REFERENCING NEW TABLE AS __pgt_new OLD TABLE AS __pgt_old FOR EACH STATEMENT` created by `create_change_trigger` |
 | ~~B2~~ | ~~`pg_trickle.cdc_trigger_mode = 'statement'\|'row'` GUC + migration to replace row-level triggers on `ALTER EXTENSION UPDATE`~~ | ~~4h~~ | ✅ Done — `CdcTriggerMode` enum in config.rs; `rebuild_cdc_triggers()` in api.rs; 0.3.0→0.4.0 upgrade script migrates existing triggers |
-| B3 | Write-side benchmark matrix (narrow/medium/wide tables × bulk/single DML) | 2h | [PLAN_PERFORMANCE_PART_9.md](plans/performance/PLAN_PERFORMANCE_PART_9.md) §Session 3 |
+| ~~B3~~ | ~~Write-side benchmark matrix (narrow/medium/wide tables × bulk/single DML)~~ | ~~2h~~ | ✅ Done — `bench_stmt_vs_row_cdc_matrix` + `bench_stmt_vs_row_cdc_quick` in e2e_bench_tests.rs; runs via `cargo test -- --ignored bench_stmt_vs_row_cdc_matrix` |
 
-> **Statement-level CDC subtotal: ~12h done, ~2h remaining (B3)**
+> **Statement-level CDC subtotal: ✅ All done (~14h)**
 
 ### Cross-Source Snapshot Consistency (Phase 1)
 
@@ -744,8 +751,8 @@ updated in the same transaction from producing an inconsistent stream table.
 
 **Exit criteria:**
 - [ ] `max_concurrent_refreshes` drives real parallel refresh via coordinator + dynamic refresh workers
-- [x] Statement-level CDC triggers implemented (B1/B2); write overhead benchmark (B3) pending
-- [ ] LSN tick watermark active by default; no interleaved-source inconsistency in E2E tests
+- [x] Statement-level CDC triggers implemented (B1/B2/B3); benchmark harness in `bench_stmt_vs_row_cdc_matrix`
+- [x] LSN tick watermark active by default; no interleaved-source inconsistency in E2E tests
 - [x] Codecov badge on README; coverage report uploading
 - [ ] Extension upgrade path tested (`0.3.0 → 0.4.0`)
 

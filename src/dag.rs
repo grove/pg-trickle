@@ -872,6 +872,504 @@ impl Default for StDag {
     }
 }
 
+// ── Execution Unit DAG (Phase 0 + Phase 1 of parallel refresh) ────────────
+
+/// Unique identifier for an execution unit in the parallel-refresh DAG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionUnitId(pub u64);
+
+impl std::fmt::Display for ExecutionUnitId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "eu_{}", self.0)
+    }
+}
+
+/// Kind of execution unit — determines how the unit is executed by a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionUnitKind {
+    /// A single stream table with no special grouping constraints.
+    Singleton,
+    /// An atomic consistency group — all members refreshed serially in one
+    /// worker transaction with SAVEPOINT rollback on failure.
+    AtomicGroup,
+    /// An IMMEDIATE-trigger closure — the root scheduled refresh fires
+    /// synchronous downstream updates inside the same transaction.
+    ImmediateClosure,
+}
+
+impl ExecutionUnitKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecutionUnitKind::Singleton => "singleton",
+            ExecutionUnitKind::AtomicGroup => "atomic_group",
+            ExecutionUnitKind::ImmediateClosure => "immediate_closure",
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutionUnitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// One schedulable piece of work for a refresh worker.
+///
+/// An execution unit wraps one or more stream tables that must be refreshed
+/// together (or individually for singletons) by a single worker.
+#[derive(Debug, Clone)]
+pub struct ExecutionUnit {
+    /// Unique identifier for this unit.
+    pub id: ExecutionUnitId,
+    /// What kind of unit this is.
+    pub kind: ExecutionUnitKind,
+    /// Stream table IDs contained in this unit (pgt_ids).
+    /// For singletons, this has exactly one element.
+    pub member_pgt_ids: Vec<i64>,
+    /// Primary stream table ID (for singleton-like units, the first element).
+    pub root_pgt_id: i64,
+    /// Human-readable label for logging.
+    pub label: String,
+}
+
+impl ExecutionUnit {
+    /// Compute a stable key for this unit that persists across DAG rebuilds.
+    ///
+    /// Used as the `unit_key` in `pgt_scheduler_jobs` to prevent duplicate
+    /// in-flight jobs and correlate retry state.
+    pub fn stable_key(&self) -> String {
+        let prefix = match self.kind {
+            ExecutionUnitKind::Singleton => "s",
+            ExecutionUnitKind::AtomicGroup => "a",
+            ExecutionUnitKind::ImmediateClosure => "i",
+        };
+        // member_pgt_ids are sorted during construction
+        let ids: Vec<String> = self
+            .member_pgt_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        format!("{}:{}", prefix, ids.join(","))
+    }
+}
+
+/// Graph of execution units with dependency edges and ready-queue support.
+///
+/// Built from an `StDag` by:
+/// 1. Computing consistency groups (diamond collapse).
+/// 2. Detecting IMMEDIATE-trigger closures and collapsing them.
+/// 3. Building unit-to-unit dependency edges.
+/// 4. Computing topological order.
+pub struct ExecutionUnitDag {
+    /// All execution units, keyed by ID.
+    units: HashMap<ExecutionUnitId, ExecutionUnit>,
+    /// Forward edges: unit → list of downstream unit IDs.
+    edges: HashMap<ExecutionUnitId, Vec<ExecutionUnitId>>,
+    /// Reverse edges: unit → list of upstream unit IDs.
+    reverse_edges: HashMap<ExecutionUnitId, Vec<ExecutionUnitId>>,
+    /// pgt_id → ExecutionUnitId mapping for fast lookup.
+    pgt_to_unit: HashMap<i64, ExecutionUnitId>,
+}
+
+impl ExecutionUnitDag {
+    /// Build an execution unit DAG from an `StDag` and a function that resolves
+    /// the refresh mode for each stream table pgt_id.
+    ///
+    /// The `resolve_mode` closure returns `Some(RefreshMode)` for known STs
+    /// or `None` for unknown ones. In a real scheduler context, this calls into
+    /// the catalog. In tests, it can be a simple HashMap lookup.
+    pub fn build_from_st_dag<F>(st_dag: &StDag, resolve_mode: F) -> Self
+    where
+        F: Fn(i64) -> Option<RefreshMode>,
+    {
+        let mut eu_dag = ExecutionUnitDag {
+            units: HashMap::new(),
+            edges: HashMap::new(),
+            reverse_edges: HashMap::new(),
+            pgt_to_unit: HashMap::new(),
+        };
+
+        let mut next_id: u64 = 1;
+        let mut alloc_id = || {
+            let id = ExecutionUnitId(next_id);
+            next_id += 1;
+            id
+        };
+
+        // Step 1: Compute consistency groups from the StDag.
+        let groups = st_dag.compute_consistency_groups();
+
+        // Step 2: Detect IMMEDIATE-mode stream tables for closure collapsing.
+        // Collect all ST pgt_ids that are in IMMEDIATE mode.
+        let immediate_pgt_ids: HashSet<i64> = st_dag
+            .get_all_st_nodes()
+            .iter()
+            .filter_map(|node| {
+                if let NodeId::StreamTable(id) = node.id
+                    && resolve_mode(id) == Some(RefreshMode::Immediate)
+                {
+                    return Some(id);
+                }
+                None
+            })
+            .collect();
+
+        // Step 3: Build execution units from groups, collapsing IMMEDIATE
+        // closures conservatively.
+        //
+        // Strategy: For each consistency group, check if any member triggers
+        // IMMEDIATE downstream propagation. If so, detect the full IMMEDIATE
+        // closure and merge into a single unit.
+        let mut assigned_pgt_ids: HashSet<i64> = HashSet::new();
+
+        for group in &groups {
+            let pgt_ids: Vec<i64> = group
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    NodeId::StreamTable(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+
+            // Skip already-assigned (merged into an IMMEDIATE closure).
+            let pgt_ids: Vec<i64> = pgt_ids
+                .into_iter()
+                .filter(|id| !assigned_pgt_ids.contains(id))
+                .collect();
+            if pgt_ids.is_empty() {
+                continue;
+            }
+
+            // Check if this group has any IMMEDIATE downstream that should
+            // be collapsed into the same unit.
+            let mut closure_ids: Vec<i64> = Vec::new();
+            let mut has_immediate_closure = false;
+
+            for &pgt_id in &pgt_ids {
+                let node = NodeId::StreamTable(pgt_id);
+                // Check downstream nodes for IMMEDIATE mode
+                for downstream in st_dag.get_downstream(node) {
+                    if let NodeId::StreamTable(ds_id) = downstream
+                        && immediate_pgt_ids.contains(&ds_id)
+                        && !assigned_pgt_ids.contains(&ds_id)
+                    {
+                        has_immediate_closure = true;
+                        // Recursively collect the full closure
+                        collect_immediate_closure(
+                            st_dag,
+                            &immediate_pgt_ids,
+                            &assigned_pgt_ids,
+                            ds_id,
+                            &mut closure_ids,
+                        );
+                    }
+                }
+            }
+
+            if has_immediate_closure {
+                // Merge the group members + IMMEDIATE closure into one unit.
+                let mut all_ids: Vec<i64> = pgt_ids.clone();
+                all_ids.extend(closure_ids);
+                all_ids.sort();
+                all_ids.dedup();
+
+                let id = alloc_id();
+                let root = all_ids[0];
+                let label = if all_ids.len() == 1 {
+                    format_unit_label(st_dag, all_ids[0])
+                } else {
+                    format!(
+                        "immediate_closure({})",
+                        format_unit_members(st_dag, &all_ids)
+                    )
+                };
+
+                for &pid in &all_ids {
+                    assigned_pgt_ids.insert(pid);
+                    eu_dag.pgt_to_unit.insert(pid, id);
+                }
+
+                eu_dag.units.insert(
+                    id,
+                    ExecutionUnit {
+                        id,
+                        kind: ExecutionUnitKind::ImmediateClosure,
+                        member_pgt_ids: all_ids,
+                        root_pgt_id: root,
+                        label,
+                    },
+                );
+            } else if pgt_ids.len() == 1 {
+                // Singleton unit.
+                let pgt_id = pgt_ids[0];
+                let id = alloc_id();
+                let label = format_unit_label(st_dag, pgt_id);
+
+                assigned_pgt_ids.insert(pgt_id);
+                eu_dag.pgt_to_unit.insert(pgt_id, id);
+
+                eu_dag.units.insert(
+                    id,
+                    ExecutionUnit {
+                        id,
+                        kind: ExecutionUnitKind::Singleton,
+                        member_pgt_ids: vec![pgt_id],
+                        root_pgt_id: pgt_id,
+                        label,
+                    },
+                );
+            } else {
+                // Multi-member atomic group.
+                let id = alloc_id();
+                let root = pgt_ids[0];
+                let label = format!("atomic_group({})", format_unit_members(st_dag, &pgt_ids));
+
+                for &pid in &pgt_ids {
+                    assigned_pgt_ids.insert(pid);
+                    eu_dag.pgt_to_unit.insert(pid, id);
+                }
+
+                eu_dag.units.insert(
+                    id,
+                    ExecutionUnit {
+                        id,
+                        kind: ExecutionUnitKind::AtomicGroup,
+                        member_pgt_ids: pgt_ids,
+                        root_pgt_id: root,
+                        label,
+                    },
+                );
+            }
+        }
+
+        // Step 4: Build inter-unit dependency edges.
+        // For each ST, look at its upstream edges. If an upstream ST belongs
+        // to a different execution unit, add a unit→unit edge.
+        let mut edge_set: HashSet<(ExecutionUnitId, ExecutionUnitId)> = HashSet::new();
+
+        for (&pgt_id, &unit_id) in &eu_dag.pgt_to_unit {
+            let node = NodeId::StreamTable(pgt_id);
+            for upstream in st_dag.get_upstream(node) {
+                if let NodeId::StreamTable(up_id) = upstream
+                    && let Some(&up_unit_id) = eu_dag.pgt_to_unit.get(&up_id)
+                    && up_unit_id != unit_id
+                    && edge_set.insert((up_unit_id, unit_id))
+                {
+                    eu_dag.edges.entry(up_unit_id).or_default().push(unit_id);
+                    eu_dag
+                        .reverse_edges
+                        .entry(unit_id)
+                        .or_default()
+                        .push(up_unit_id);
+                }
+            }
+        }
+
+        eu_dag
+    }
+
+    /// Return all execution units.
+    pub fn units(&self) -> impl Iterator<Item = &ExecutionUnit> {
+        self.units.values()
+    }
+
+    /// Return the number of execution units.
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Look up the execution unit for a given pgt_id.
+    pub fn unit_for_pgt(&self, pgt_id: i64) -> Option<&ExecutionUnit> {
+        self.pgt_to_unit
+            .get(&pgt_id)
+            .and_then(|id| self.units.get(id))
+    }
+
+    /// Return the upstream execution unit IDs for a given unit.
+    pub fn get_upstream_units(&self, unit_id: ExecutionUnitId) -> Vec<ExecutionUnitId> {
+        self.reverse_edges
+            .get(&unit_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Return the downstream execution unit IDs for a given unit.
+    pub fn get_downstream_units(&self, unit_id: ExecutionUnitId) -> Vec<ExecutionUnitId> {
+        self.edges.get(&unit_id).cloned().unwrap_or_default()
+    }
+
+    /// Return execution units in topological order (upstream-first).
+    ///
+    /// Uses Kahn's algorithm. Returns an error if cycles are detected
+    /// (which shouldn't happen if built from a valid StDag).
+    pub fn topological_order(&self) -> Result<Vec<ExecutionUnitId>, PgTrickleError> {
+        let mut in_degree: HashMap<ExecutionUnitId, usize> = HashMap::new();
+        for &uid in self.units.keys() {
+            in_degree.entry(uid).or_insert(0);
+        }
+        for targets in self.edges.values() {
+            for &t in targets {
+                *in_degree.entry(t).or_insert(0) += 1;
+            }
+        }
+
+        let mut queue: VecDeque<ExecutionUnitId> = in_degree
+            .iter()
+            .filter(|&(_, &d)| d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let mut order = Vec::new();
+        while let Some(uid) = queue.pop_front() {
+            order.push(uid);
+            if let Some(downstream) = self.edges.get(&uid) {
+                for &ds in downstream {
+                    if let Some(deg) = in_degree.get_mut(&ds) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(ds);
+                        }
+                    }
+                }
+            }
+        }
+
+        if order.len() < self.units.len() {
+            Err(PgTrickleError::CycleDetected(vec![
+                "execution unit DAG".to_string(),
+            ]))
+        } else {
+            Ok(order)
+        }
+    }
+
+    /// Compute the initial ready set — units with no upstream dependencies.
+    pub fn initial_ready_set(&self) -> Vec<ExecutionUnitId> {
+        self.units
+            .keys()
+            .filter(|uid| self.reverse_edges.get(uid).is_none_or(|ups| ups.is_empty()))
+            .copied()
+            .collect()
+    }
+
+    /// Format a human-readable summary of the execution unit DAG for logging.
+    pub fn summary(&self) -> String {
+        let mut singletons = 0u32;
+        let mut atomic_groups = 0u32;
+        let mut immediate_closures = 0u32;
+        let mut total_sts = 0usize;
+
+        for unit in self.units.values() {
+            total_sts += unit.member_pgt_ids.len();
+            match unit.kind {
+                ExecutionUnitKind::Singleton => singletons += 1,
+                ExecutionUnitKind::AtomicGroup => atomic_groups += 1,
+                ExecutionUnitKind::ImmediateClosure => immediate_closures += 1,
+            }
+        }
+
+        let ready = self.initial_ready_set().len();
+        let edges: usize = self.edges.values().map(|v| v.len()).sum();
+
+        format!(
+            "{} units ({} singleton, {} atomic, {} immediate), {} STs, {} edges, {} initially ready",
+            self.units.len(),
+            singletons,
+            atomic_groups,
+            immediate_closures,
+            total_sts,
+            edges,
+            ready,
+        )
+    }
+
+    /// Format a detailed log of all units and their dependencies for dry-run mode.
+    pub fn dry_run_log(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Execution Unit DAG (dry_run):\n");
+
+        match self.topological_order() {
+            Ok(order) => {
+                for (pos, uid) in order.iter().enumerate() {
+                    if let Some(unit) = self.units.get(uid) {
+                        let upstream = self.get_upstream_units(*uid);
+                        let up_labels: Vec<String> = upstream
+                            .iter()
+                            .filter_map(|up| self.units.get(up).map(|u| u.label.clone()))
+                            .collect();
+
+                        out.push_str(&format!(
+                            "  [{}] {} ({}) pgt_ids={:?} upstream=[{}]\n",
+                            pos,
+                            unit.label,
+                            unit.kind,
+                            unit.member_pgt_ids,
+                            up_labels.join(", "),
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                out.push_str(&format!("  ERROR: {}\n", e));
+            }
+        }
+
+        let ready = self.initial_ready_set();
+        let ready_labels: Vec<String> = ready
+            .iter()
+            .filter_map(|uid| self.units.get(uid).map(|u| u.label.clone()))
+            .collect();
+        out.push_str(&format!("  Ready queue: [{}]\n", ready_labels.join(", ")));
+
+        out
+    }
+}
+
+/// Recursively collect IMMEDIATE-mode stream tables reachable from `start`.
+fn collect_immediate_closure(
+    st_dag: &StDag,
+    immediate_ids: &HashSet<i64>,
+    assigned: &HashSet<i64>,
+    start: i64,
+    result: &mut Vec<i64>,
+) {
+    if result.contains(&start) || assigned.contains(&start) {
+        return;
+    }
+    result.push(start);
+
+    // Also collect further downstream IMMEDIATE nodes
+    let node = NodeId::StreamTable(start);
+    for downstream in st_dag.get_downstream(node) {
+        if let NodeId::StreamTable(ds_id) = downstream
+            && immediate_ids.contains(&ds_id)
+        {
+            collect_immediate_closure(st_dag, immediate_ids, assigned, ds_id, result);
+        }
+    }
+}
+
+/// Format a human-readable label for a single ST unit.
+fn format_unit_label(st_dag: &StDag, pgt_id: i64) -> String {
+    let node = NodeId::StreamTable(pgt_id);
+    for n in st_dag.get_all_st_nodes() {
+        if n.id == node {
+            return n.name.clone();
+        }
+    }
+    format!("pgt_{}", pgt_id)
+}
+
+/// Format a comma-separated list of ST names for compound unit labels.
+fn format_unit_members(st_dag: &StDag, pgt_ids: &[i64]) -> String {
+    pgt_ids
+        .iter()
+        .map(|&id| format_unit_label(st_dag, id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2046,5 +2544,292 @@ mod tests {
             let parsed = DiamondSchedulePolicy::from_sql_str(s);
             assert_eq!(Some(p), parsed);
         }
+    }
+
+    // ── ExecutionUnitDag tests ───────────────────────────────────────
+
+    /// Helper to create a simple DagNode.
+    fn make_st_node(id: i64, name: &str) -> DagNode {
+        DagNode {
+            id: NodeId::StreamTable(id),
+            schedule: Some(Duration::from_secs(60)),
+            effective_schedule: Duration::from_secs(60),
+            name: name.to_string(),
+            status: StStatus::Active,
+            schedule_raw: None,
+        }
+    }
+
+    /// Default mode resolver: everything is DIFFERENTIAL.
+    fn all_differential(id: i64) -> Option<RefreshMode> {
+        let _ = id;
+        Some(RefreshMode::Differential)
+    }
+
+    #[test]
+    fn test_eu_dag_singleton_chain() {
+        // base -> st1 -> st2
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+
+        assert_eq!(eu.unit_count(), 2);
+        // Both should be singletons
+        for unit in eu.units() {
+            assert_eq!(unit.kind, ExecutionUnitKind::Singleton);
+            assert_eq!(unit.member_pgt_ids.len(), 1);
+        }
+        // st2 depends on st1
+        let u1 = eu.unit_for_pgt(1).unwrap();
+        let u2 = eu.unit_for_pgt(2).unwrap();
+        let downstream = eu.get_downstream_units(u1.id);
+        assert!(downstream.contains(&u2.id));
+
+        // Topological order: st1 before st2
+        let order = eu.topological_order().unwrap();
+        let pos1 = order.iter().position(|&id| id == u1.id).unwrap();
+        let pos2 = order.iter().position(|&id| id == u2.id).unwrap();
+        assert!(pos1 < pos2);
+    }
+
+    #[test]
+    fn test_eu_dag_independent_singletons() {
+        // base1 -> st1, base2 -> st2 (no dependency between them)
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::BaseTable(200), NodeId::StreamTable(2));
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+
+        assert_eq!(eu.unit_count(), 2);
+        // Both initially ready (no upstream dependencies)
+        let ready = eu.initial_ready_set();
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[test]
+    fn test_eu_dag_diamond_atomic_group() {
+        // Diamond: base -> st1 -> st3, base -> st2 -> st3
+        // With diamond_consistency = atomic on st3
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_st_node(make_st_node(3, "public.st3"));
+
+        let base = NodeId::BaseTable(100);
+        dag.add_edge(base, NodeId::StreamTable(1));
+        dag.add_edge(base, NodeId::StreamTable(2));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(3));
+        dag.add_edge(NodeId::StreamTable(2), NodeId::StreamTable(3));
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+
+        // The diamond should create a multi-member group containing {st1, st2, st3}
+        // and then any remaining singletons. Since all are in the diamond group,
+        // we expect either one atomic group or individual singletons depending on
+        // whether DiamondConsistency is Atomic. Since compute_consistency_groups
+        // groups diamond members but the scheduler checks for Atomic opt-in,
+        // the consistency group will have members [st1, st2, st3].
+        // The EU DAG just wraps consistency groups, so this should be an
+        // AtomicGroup with 3 members.
+        let has_multi_member = eu.units().any(|u| u.member_pgt_ids.len() > 1);
+        assert!(has_multi_member, "Expected a multi-member unit for diamond");
+
+        let multi = eu.units().find(|u| u.member_pgt_ids.len() > 1).unwrap();
+        assert_eq!(multi.kind, ExecutionUnitKind::AtomicGroup);
+        assert!(multi.member_pgt_ids.contains(&1));
+        assert!(multi.member_pgt_ids.contains(&2));
+        assert!(multi.member_pgt_ids.contains(&3));
+    }
+
+    #[test]
+    fn test_eu_dag_immediate_closure_collapse() {
+        // base -> st1(DIFFERENTIAL) -> st2(IMMEDIATE) -> st3(IMMEDIATE)
+        // st2 and st3 are IMMEDIATE, so they should be collapsed with st1
+        // into a single ImmediateClosure unit.
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_st_node(make_st_node(3, "public.st3"));
+
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+        dag.add_edge(NodeId::StreamTable(2), NodeId::StreamTable(3));
+
+        let mode_fn = |id: i64| -> Option<RefreshMode> {
+            match id {
+                1 => Some(RefreshMode::Differential),
+                2 | 3 => Some(RefreshMode::Immediate),
+                _ => None,
+            }
+        };
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, mode_fn);
+
+        // st1, st2, st3 should all be in one ImmediateClosure unit
+        assert_eq!(eu.unit_count(), 1);
+        let unit = eu.units().next().unwrap();
+        assert_eq!(unit.kind, ExecutionUnitKind::ImmediateClosure);
+        assert_eq!(unit.member_pgt_ids.len(), 3);
+    }
+
+    #[test]
+    fn test_eu_dag_mixed_immediate_and_independent() {
+        // base1 -> st1 -> st2(IMMEDIATE)
+        // base2 -> st3 (independent)
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_st_node(make_st_node(3, "public.st3"));
+
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+        dag.add_edge(NodeId::BaseTable(200), NodeId::StreamTable(3));
+
+        let mode_fn = |id: i64| -> Option<RefreshMode> {
+            match id {
+                2 => Some(RefreshMode::Immediate),
+                _ => Some(RefreshMode::Differential),
+            }
+        };
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, mode_fn);
+
+        // Should have 2 units: ImmediateClosure(st1, st2) + Singleton(st3)
+        assert_eq!(eu.unit_count(), 2);
+
+        let closure = eu.unit_for_pgt(1).unwrap();
+        assert_eq!(closure.kind, ExecutionUnitKind::ImmediateClosure);
+        assert!(closure.member_pgt_ids.contains(&1));
+        assert!(closure.member_pgt_ids.contains(&2));
+
+        let singleton = eu.unit_for_pgt(3).unwrap();
+        assert_eq!(singleton.kind, ExecutionUnitKind::Singleton);
+
+        // Both should be initially ready (independent)
+        let ready = eu.initial_ready_set();
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[test]
+    fn test_eu_dag_summary_format() {
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::BaseTable(200), NodeId::StreamTable(2));
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+        let summary = eu.summary();
+
+        assert!(summary.contains("2 units"));
+        assert!(summary.contains("2 singleton"));
+        assert!(summary.contains("2 initially ready"));
+    }
+
+    #[test]
+    fn test_eu_dag_dry_run_log() {
+        let mut dag = StDag::new();
+        dag.add_st_node(make_st_node(1, "public.st1"));
+        dag.add_st_node(make_st_node(2, "public.st2"));
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+        let log = eu.dry_run_log();
+
+        assert!(log.contains("Execution Unit DAG (dry_run)"));
+        assert!(log.contains("public.st1"));
+        assert!(log.contains("public.st2"));
+        assert!(log.contains("Ready queue"));
+    }
+
+    #[test]
+    fn test_eu_dag_empty() {
+        let dag = StDag::new();
+        let eu = ExecutionUnitDag::build_from_st_dag(&dag, all_differential);
+        assert_eq!(eu.unit_count(), 0);
+        assert!(eu.initial_ready_set().is_empty());
+        assert!(eu.topological_order().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execution_unit_kind_display() {
+        assert_eq!(ExecutionUnitKind::Singleton.as_str(), "singleton");
+        assert_eq!(ExecutionUnitKind::AtomicGroup.as_str(), "atomic_group");
+        assert_eq!(
+            ExecutionUnitKind::ImmediateClosure.as_str(),
+            "immediate_closure"
+        );
+    }
+
+    #[test]
+    fn test_execution_unit_id_display() {
+        let id = ExecutionUnitId(42);
+        assert_eq!(format!("{}", id), "eu_42");
+    }
+
+    // ── stable_key tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_stable_key_singleton() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(1),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![42],
+            root_pgt_id: 42,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "s:42");
+    }
+
+    #[test]
+    fn test_stable_key_atomic_group() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(2),
+            kind: ExecutionUnitKind::AtomicGroup,
+            member_pgt_ids: vec![10, 20, 30],
+            root_pgt_id: 10,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "a:10,20,30");
+    }
+
+    #[test]
+    fn test_stable_key_immediate_closure() {
+        let unit = ExecutionUnit {
+            id: ExecutionUnitId(3),
+            kind: ExecutionUnitKind::ImmediateClosure,
+            member_pgt_ids: vec![5, 15],
+            root_pgt_id: 5,
+            label: "test".to_string(),
+        };
+        assert_eq!(unit.stable_key(), "i:5,15");
+    }
+
+    #[test]
+    fn test_stable_key_deterministic() {
+        let unit1 = ExecutionUnit {
+            id: ExecutionUnitId(1),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![99],
+            root_pgt_id: 99,
+            label: "a".to_string(),
+        };
+        let unit2 = ExecutionUnit {
+            id: ExecutionUnitId(999),
+            kind: ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![99],
+            root_pgt_id: 99,
+            label: "b".to_string(),
+        };
+        // Same kind + same members → same stable key, regardless of ID/label.
+        assert_eq!(unit1.stable_key(), unit2.stable_key());
     }
 }

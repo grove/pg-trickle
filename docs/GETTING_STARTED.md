@@ -614,6 +614,37 @@ SELECT pg_reload_conf();
 
 pg_trickle will automatically transition each stream table from trigger-based to WAL-based capture after the first successful refresh — reducing per-write overhead from ~2–15 μs (triggers) to near-zero (WAL-based capture adds no synchronous overhead to your DML). The transition is transparent; your queries and the refresh schedule are unaffected.
 
+### Optional: Parallel Refresh (v0.4.0+)
+
+By default the scheduler refreshes stream tables **sequentially** in topological order within a single background worker. This is correct and efficient for most workloads.
+
+For deployments with many independent stream tables, enable parallel refresh:
+
+```sql
+ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'on';
+ALTER SYSTEM SET pg_trickle.max_dynamic_refresh_workers = 4;  -- cluster-wide cap
+SELECT pg_reload_conf();
+```
+
+Independent stream tables at the same DAG level will then refresh concurrently in separate dynamic background workers. Refresh pairs with IMMEDIATE-trigger connections and atomic consistency groups still run in a single worker for correctness.
+
+**Before enabling,** ensure `max_worker_processes` has enough room:
+```
+max_worker_processes >= 1 (launcher)
+                      + number of databases with stream tables
+                      + max_dynamic_refresh_workers (default 4)
+                      + autovacuum and other extension workers
+```
+
+Monitor parallel refresh:
+
+```sql
+SELECT * FROM pgtrickle.worker_pool_status();        -- live worker budget
+SELECT * FROM pgtrickle.parallel_job_status(60);     -- recent jobs
+```
+
+See [CONFIGURATION.md — Parallel Refresh](CONFIGURATION.md#parallel-refresh) for the complete tuning reference.
+
 ---
 
 ## Step 6: Understanding the Refresh Modes and IVM Strategies
@@ -745,6 +776,7 @@ DROP TABLE departments;
 | **Diamond consistency** | Atomic refresh groups for diamond-shaped dependency graphs via `diamond_consistency = 'atomic'` |
 | **Downstream propagation** | A single base table write cascades through an entire chain of stream tables, automatically, in the right order |
 | **Trigger-based CDC** | Lightweight row-level triggers by default (no WAL configuration needed); optional transition to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` |
+| **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (v0.4.0+, default off) |
 | **Monitoring** | `pgt_status()`, `health_check()`, `dependency_tree()`, `pg_stat_stream_tables`, and more for freshness, timing, and error history |
 
 The key takeaway: you write to base tables — **pg_trickle does the rest**. Data flows downstream automatically, each layer doing the minimum work proportional to what changed, in dependency order.

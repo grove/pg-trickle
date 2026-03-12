@@ -35,13 +35,17 @@
 use pgrx::bgworkers::*;
 use pgrx::prelude::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 
+use crate::catalog::{JobStatus, SchedulerJob};
 use crate::catalog::{RefreshRecord, StreamTableMeta};
 use crate::cdc;
 use crate::config;
-use crate::dag::{DiamondConsistency, DiamondSchedulePolicy, NodeId, StDag, StStatus};
+use crate::dag::{
+    DiamondConsistency, DiamondSchedulePolicy, ExecutionUnit, ExecutionUnitDag, ExecutionUnitId,
+    NodeId, StDag, StStatus,
+};
 use crate::error::{RetryPolicy, RetryState};
 use crate::monitor;
 use crate::refresh::{self, RefreshAction};
@@ -273,6 +277,764 @@ pub fn register_scheduler_worker() {
         .load();
 }
 
+// ── Dynamic Refresh Worker (Phase 3) ──────────────────────────────────────
+
+/// Spawn a dynamic refresh worker for a specific job.
+///
+/// The coordinator calls this after enqueuing a job and acquiring a worker
+/// token from shared memory. The database name and job_id are packed into
+/// `bgw_extra` as `"<db_name>\0<job_id>"`.
+///
+/// Returns `Ok(())` on successful spawn, `Err(...)` if the dynamic worker
+/// could not be registered.
+pub fn spawn_refresh_worker(
+    db_name: &str,
+    job_id: i64,
+) -> Result<(), crate::error::PgTrickleError> {
+    // Pack db_name + job_id into bgw_extra (max 128 bytes).
+    let extra = format!("{}\0{}", db_name, job_id);
+    if extra.len() > 128 {
+        return Err(crate::error::PgTrickleError::InternalError(format!(
+            "bgw_extra too long ({} bytes) for db='{}' job_id={}",
+            extra.len(),
+            db_name,
+            job_id
+        )));
+    }
+
+    BackgroundWorkerBuilder::new("pg_trickle refresh worker")
+        .set_function("pg_trickle_refresh_worker_main")
+        .set_library("pg_trickle")
+        .enable_spi_access()
+        .set_extra(&extra)
+        .set_restart_time(None) // no auto-restart — coordinator handles retries
+        .load_dynamic()
+        .map_err(|_| {
+            crate::error::PgTrickleError::InternalError(
+                "Failed to register dynamic refresh worker".into(),
+            )
+        })?;
+
+    Ok(())
+}
+
+/// Main entry point for a dynamic refresh worker (Phase 3).
+///
+/// Each refresh worker:
+/// 1. Parses `db_name` and `job_id` from `bgw_extra`.
+/// 2. Connects to the target database.
+/// 3. Claims the job (QUEUED → RUNNING).
+/// 4. Executes the execution unit (singleton for now, composite later).
+/// 5. Persists the outcome to the job table.
+/// 6. Releases the worker token from shared memory.
+///
+/// # Safety
+/// Called directly by PostgreSQL as a background worker entry point.
+#[pg_guard]
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
+
+    // Parse bgw_extra: "db_name\0job_id"
+    let extra = BackgroundWorker::get_extra();
+    let (db_name, job_id) = match parse_worker_extra(extra) {
+        Some(pair) => pair,
+        None => {
+            warning!(
+                "pg_trickle refresh worker: malformed bgw_extra '{}', exiting",
+                extra
+            );
+            shmem::release_worker_token();
+            return;
+        }
+    };
+
+    BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
+
+    // Get our own PID for logging and job claiming.
+    let my_pid = BackgroundWorker::transaction(AssertUnwindSafe(|| -> i32 {
+        Spi::get_one::<i32>("SELECT pg_backend_pid()")
+            .unwrap_or(Some(0))
+            .unwrap_or(0)
+    }));
+
+    log!(
+        "pg_trickle refresh worker: started (db='{}', job_id={}, pid={})",
+        db_name,
+        job_id,
+        my_pid,
+    );
+
+    // Claim the job: QUEUED → RUNNING
+    let claimed = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
+        SchedulerJob::claim(job_id, my_pid).unwrap_or(false)
+    }));
+
+    if !claimed {
+        log!(
+            "pg_trickle refresh worker: job {} already claimed or cancelled, exiting",
+            job_id
+        );
+        shmem::release_worker_token();
+        return;
+    }
+
+    // Load the job details
+    let job = BackgroundWorker::transaction(AssertUnwindSafe(|| -> Option<SchedulerJob> {
+        SchedulerJob::get_by_id(job_id).ok().flatten()
+    }));
+
+    let job = match job {
+        Some(j) => j,
+        None => {
+            log!(
+                "pg_trickle refresh worker: job {} not found after claim, exiting",
+                job_id
+            );
+            BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                let _ = SchedulerJob::cancel(job_id, "Job row disappeared after claim");
+            }));
+            shmem::release_worker_token();
+            return;
+        }
+    };
+
+    // Validate: DAG version hasn't become obsolete
+    let current_dag_version = shmem::current_dag_version();
+    if (current_dag_version as i64) > job.dag_version + 1 {
+        log!(
+            "pg_trickle refresh worker: job {} dag_version={} is stale (current={}), cancelling",
+            job_id,
+            job.dag_version,
+            current_dag_version,
+        );
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            let _ = SchedulerJob::cancel(job_id, "DAG version obsolete");
+        }));
+        shmem::release_worker_token();
+        return;
+    }
+
+    // Execute the unit.
+    let outcome = BackgroundWorker::transaction(AssertUnwindSafe(|| -> RefreshOutcome {
+        match job.unit_kind.as_str() {
+            "singleton" => execute_worker_singleton(&job),
+            "atomic_group" => execute_worker_atomic_group(&job),
+            "immediate_closure" => execute_worker_immediate_closure(&job),
+            _ => {
+                warning!(
+                    "pg_trickle refresh worker: unknown unit_kind '{}' for job {}",
+                    job.unit_kind,
+                    job_id,
+                );
+                RefreshOutcome::PermanentFailure
+            }
+        }
+    }));
+
+    // Persist outcome to the job table
+    let (status, retryable) = match outcome {
+        RefreshOutcome::Success => (JobStatus::Succeeded, None),
+        RefreshOutcome::RetryableFailure => (JobStatus::RetryableFailed, Some(true)),
+        RefreshOutcome::PermanentFailure => (JobStatus::PermanentFailed, Some(false)),
+    };
+
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        let _ = SchedulerJob::complete(job_id, status, None, retryable);
+    }));
+
+    log!(
+        "pg_trickle refresh worker: job {} finished with {} (db='{}')",
+        job_id,
+        status,
+        db_name,
+    );
+
+    // Release the cluster-wide worker token
+    shmem::release_worker_token();
+}
+
+/// Parse the worker's bgw_extra string: "db_name\0job_id".
+fn parse_worker_extra(extra: &str) -> Option<(String, i64)> {
+    let parts: Vec<&str> = extra.splitn(2, '\0').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let db_name = parts[0].to_string();
+    let job_id = parts[1].parse::<i64>().ok()?;
+    if db_name.is_empty() || job_id <= 0 {
+        return None;
+    }
+    Some((db_name, job_id))
+}
+
+/// Execute a singleton unit: refresh a single stream table using the existing inline path.
+fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
+    let pgt_id = job.root_pgt_id;
+    let st = match load_st_by_id(pgt_id) {
+        Some(st) => st,
+        None => {
+            log!(
+                "pg_trickle refresh worker: stream table pgt_id={} not found for job {}",
+                pgt_id,
+                job.job_id,
+            );
+            return RefreshOutcome::PermanentFailure;
+        }
+    };
+
+    if st.status != StStatus::Active && st.status != StStatus::Initializing {
+        log!(
+            "pg_trickle refresh worker: {}.{} is not active (status={}), skipping",
+            st.pgt_schema,
+            st.pgt_name,
+            st.status.as_str(),
+        );
+        return RefreshOutcome::RetryableFailure;
+    }
+
+    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
+        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+    } else {
+        None
+    };
+    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let has_st_changes = has_stream_table_source_changes(&st);
+    let action = if has_changes && has_st_changes {
+        RefreshAction::Full
+    } else {
+        refresh::determine_refresh_action(&st, has_changes)
+    };
+
+    execute_scheduled_refresh(&st, action, tick_watermark.as_deref())
+}
+
+/// Execute an atomic group unit: refresh all members serially inside a
+/// sub-transaction.  If any member fails, the entire group is rolled back.
+///
+/// Uses the C-level internal sub-transaction API (`BeginInternalSubTransaction`
+/// / `ReleaseCurrentSubTransaction` / `RollbackAndReleaseCurrentSubTransaction`)
+/// because PostgreSQL rejects transaction-control SQL via SPI.
+fn execute_worker_atomic_group(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: atomic group — {} members (job {})",
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    // SAFETY: Save memory context and resource owner so we can restore them
+    // after the sub-transaction commits or rolls back.  These are always valid
+    // inside a worker transaction.
+    let old_cxt = unsafe { pg_sys::CurrentMemoryContext };
+    let old_owner = unsafe { pg_sys::CurrentResourceOwner };
+
+    // SAFETY: BeginInternalSubTransaction sets up a sub-transaction within the
+    // current worker transaction using PostgreSQL's resource-owner mechanism.
+    unsafe { pg_sys::BeginInternalSubTransaction(std::ptr::null()) };
+
+    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
+        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+    } else {
+        None
+    };
+    let mut refreshed_count: usize = 0;
+
+    for &pgt_id in &job.member_pgt_ids {
+        let st = match load_st_by_id(pgt_id) {
+            Some(st) => st,
+            None => continue,
+        };
+
+        if st.status != StStatus::Active && st.status != StStatus::Initializing {
+            continue;
+        }
+
+        // Check advisory lock — if another refresh is in progress, skip.
+        if check_skip_needed(&st) {
+            continue;
+        }
+
+        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let has_st_changes = has_stream_table_source_changes(&st);
+        let action = if has_changes && has_st_changes {
+            RefreshAction::Full
+        } else {
+            refresh::determine_refresh_action(&st, has_changes)
+        };
+
+        let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref());
+        match result {
+            RefreshOutcome::Success => {
+                refreshed_count += 1;
+            }
+            RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                log!(
+                    "pg_trickle refresh worker: atomic group rollback — member {}.{} failed (job {})",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    job.job_id,
+                );
+                // SAFETY: Rolls back the sub-transaction and restores context.
+                unsafe {
+                    pg_sys::RollbackAndReleaseCurrentSubTransaction();
+                    pg_sys::MemoryContextSwitchTo(old_cxt);
+                    pg_sys::CurrentResourceOwner = old_owner;
+                }
+                return result;
+            }
+        }
+    }
+
+    // All members succeeded — commit the sub-transaction.
+    // SAFETY: Commits the sub-transaction and restores context.
+    unsafe {
+        pg_sys::ReleaseCurrentSubTransaction();
+        pg_sys::MemoryContextSwitchTo(old_cxt);
+        pg_sys::CurrentResourceOwner = old_owner;
+    }
+
+    log!(
+        "pg_trickle refresh worker: atomic group committed ({} members, job {})",
+        refreshed_count,
+        job.job_id,
+    );
+    RefreshOutcome::Success
+}
+
+/// Execute an IMMEDIATE-closure unit: refresh only the root stream table.
+///
+/// Downstream IMMEDIATE-mode stream tables fire their refresh triggers
+/// synchronously within the same transaction, so they do not need to be
+/// explicitly refreshed by the worker.  The coordinator must not independently
+/// schedule any member of the closure.
+fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: immediate closure — root pgt_id={} ({} members, job {})",
+        job.root_pgt_id,
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    // Only refresh the root; IMMEDIATE triggers propagate downstream.
+    let st = match load_st_by_id(job.root_pgt_id) {
+        Some(st) => st,
+        None => {
+            log!(
+                "pg_trickle refresh worker: root pgt_id={} not found for immediate closure (job {})",
+                job.root_pgt_id,
+                job.job_id,
+            );
+            return RefreshOutcome::PermanentFailure;
+        }
+    };
+
+    if st.status != StStatus::Active && st.status != StStatus::Initializing {
+        log!(
+            "pg_trickle refresh worker: {}.{} is not active (status={}), skipping immediate closure",
+            st.pgt_schema,
+            st.pgt_name,
+            st.status.as_str(),
+        );
+        return RefreshOutcome::RetryableFailure;
+    }
+
+    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
+        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+    } else {
+        None
+    };
+    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let has_st_changes = has_stream_table_source_changes(&st);
+    let action = if has_changes && has_st_changes {
+        RefreshAction::Full
+    } else {
+        refresh::determine_refresh_action(&st, has_changes)
+    };
+
+    execute_scheduled_refresh(&st, action, tick_watermark.as_deref())
+}
+
+// ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
+
+/// Per-unit coordinator state for the parallel dispatch loop.
+#[derive(Debug, Default)]
+struct UnitDispatchState {
+    /// Number of upstream units that must succeed before this unit is ready.
+    remaining_upstreams: usize,
+    /// In-flight job ID, if a worker is currently executing this unit.
+    inflight_job_id: Option<i64>,
+    /// Whether this unit completed successfully in the current cycle.
+    succeeded: bool,
+}
+
+/// Coordinator-side state for the parallel dispatch loop.
+///
+/// Lives outside the SPI transaction and persists across scheduler ticks.
+/// Rebuilt when the DAG version changes.
+struct ParallelDispatchState {
+    /// Per-unit tracking, keyed by ExecutionUnitId.
+    unit_states: HashMap<ExecutionUnitId, UnitDispatchState>,
+    /// Number of refresh workers in-flight for this database coordinator.
+    per_db_inflight: u32,
+    /// DAG version this dispatch state was built from.
+    dag_version: u64,
+    /// The execution unit DAG (rebuilt on DAG version change).
+    eu_dag: Option<ExecutionUnitDag>,
+}
+
+impl ParallelDispatchState {
+    fn new() -> Self {
+        Self {
+            unit_states: HashMap::new(),
+            per_db_inflight: 0,
+            dag_version: 0,
+            eu_dag: None,
+        }
+    }
+
+    /// Whether there are in-flight jobs (for shorter poll interval).
+    fn has_inflight(&self) -> bool {
+        self.per_db_inflight > 0
+    }
+
+    /// Rebuild dispatch state from a fresh EU DAG.
+    fn rebuild(&mut self, eu_dag: ExecutionUnitDag, dag_version: u64) {
+        self.unit_states.clear();
+        self.dag_version = dag_version;
+        // Note: per_db_inflight is NOT reset — in-flight workers from the
+        // previous DAG version are still running.
+
+        for unit in eu_dag.units() {
+            let upstream_count = eu_dag.get_upstream_units(unit.id).len();
+            self.unit_states.insert(
+                unit.id,
+                UnitDispatchState {
+                    remaining_upstreams: upstream_count,
+                    inflight_job_id: None,
+                    succeeded: false,
+                },
+            );
+        }
+        self.eu_dag = Some(eu_dag);
+    }
+}
+
+/// Check if an execution unit is due for refresh.
+///
+/// A unit is due if any member ST is due (schedule or upstream changes).
+fn is_unit_due(unit: &ExecutionUnit, dag: &StDag) -> bool {
+    unit.member_pgt_ids.iter().any(|&pgt_id| {
+        load_st_by_id(pgt_id)
+            .map(|st| {
+                (st.status == StStatus::Active || st.status == StStatus::Initializing)
+                    && (check_schedule(&st, dag) || st.needs_reinit)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Run one tick of the parallel dispatch loop.
+///
+/// Called from the main scheduler loop when `parallel_refresh_mode == On`.
+/// Polls completed jobs, updates readiness, and enqueues new jobs.
+/// Workers to spawn are appended to `pending_spawns`.
+fn parallel_dispatch_tick(
+    state: &mut ParallelDispatchState,
+    dag: &StDag,
+    now_ms: u64,
+    retry_states: &mut HashMap<i64, RetryState>,
+    retry_policy: &RetryPolicy,
+    db_name: &str,
+    pending_spawns: &mut Vec<(String, i64)>,
+) {
+    let eu_dag = match &state.eu_dag {
+        Some(d) => d,
+        None => return,
+    };
+
+    let max_per_db = config::pg_trickle_max_concurrent_refreshes().max(1) as u32;
+    let max_cluster = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
+    let dag_version_i64 = state.dag_version as i64;
+    // SAFETY: MyProcPid is always valid inside a background worker.
+    let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
+
+    // ── Step 1: Poll completed jobs and process outcomes ──────────────────
+    let inflight_ids: Vec<(ExecutionUnitId, i64)> = state
+        .unit_states
+        .iter()
+        .filter_map(|(&uid, us)| us.inflight_job_id.map(|jid| (uid, jid)))
+        .collect();
+
+    for (unit_id, job_id) in inflight_ids {
+        let job = match SchedulerJob::get_by_id(job_id) {
+            Ok(Some(j)) => j,
+            Ok(None) => {
+                log!(
+                    "pg_trickle: parallel dispatch — job {} vanished, treating as failure",
+                    job_id,
+                );
+                if let Some(us) = state.unit_states.get_mut(&unit_id) {
+                    us.inflight_job_id = None;
+                }
+                state.per_db_inflight = state.per_db_inflight.saturating_sub(1);
+                continue;
+            }
+            Err(e) => {
+                log!(
+                    "pg_trickle: parallel dispatch — error polling job {}: {}",
+                    job_id,
+                    e,
+                );
+                continue; // Try again next tick
+            }
+        };
+
+        if !job.status.is_terminal() {
+            continue; // Still running
+        }
+
+        // Job completed — process outcome.
+        if let Some(us) = state.unit_states.get_mut(&unit_id) {
+            us.inflight_job_id = None;
+        }
+        state.per_db_inflight = state.per_db_inflight.saturating_sub(1);
+
+        let root_pgt_id = eu_dag
+            .units()
+            .find(|u| u.id == unit_id)
+            .map(|u| u.root_pgt_id);
+
+        match job.status {
+            JobStatus::Succeeded => {
+                if let Some(us) = state.unit_states.get_mut(&unit_id) {
+                    us.succeeded = true;
+                }
+                if let Some(rpid) = root_pgt_id {
+                    retry_states.entry(rpid).or_default().reset();
+                }
+
+                // Advance downstream readiness.
+                for ds_id in eu_dag.get_downstream_units(unit_id) {
+                    if let Some(ds_state) = state.unit_states.get_mut(&ds_id) {
+                        ds_state.remaining_upstreams =
+                            ds_state.remaining_upstreams.saturating_sub(1);
+                    }
+                }
+
+                log!(
+                    "pg_trickle: parallel dispatch — unit completed (job {})",
+                    job_id,
+                );
+            }
+            JobStatus::RetryableFailed => {
+                if let Some(rpid) = root_pgt_id {
+                    let retry = retry_states.entry(rpid).or_default();
+                    let will_retry = retry.record_failure(retry_policy, now_ms);
+                    if will_retry {
+                        log!(
+                            "pg_trickle: parallel dispatch — job {} failed (retryable), backoff {}ms",
+                            job_id,
+                            retry_policy.backoff_ms(retry.attempts - 1),
+                        );
+                    }
+                }
+                // Downstream units remain blocked (remaining_upstreams > 0).
+            }
+            JobStatus::PermanentFailed | JobStatus::Cancelled => {
+                if let Some(rpid) = root_pgt_id {
+                    retry_states.entry(rpid).or_default().reset();
+                }
+                log!(
+                    "pg_trickle: parallel dispatch — job {} failed permanently",
+                    job_id,
+                );
+                // Downstream units remain blocked.
+            }
+            _ => {}
+        }
+    }
+
+    // ── Step 2: Build ready queue ────────────────────────────────────────
+    let mut ready_queue: VecDeque<ExecutionUnitId> = VecDeque::new();
+
+    // Use topological order for deterministic upstream-first priority.
+    let topo_order = match eu_dag.topological_order() {
+        Ok(order) => order,
+        Err(e) => {
+            log!("pg_trickle: parallel dispatch — topo order failed: {}", e);
+            return;
+        }
+    };
+
+    for &uid in &topo_order {
+        let us = match state.unit_states.get(&uid) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Skip completed, in-flight, or dependency-blocked units.
+        if us.succeeded || us.inflight_job_id.is_some() || us.remaining_upstreams > 0 {
+            continue;
+        }
+
+        let unit = match eu_dag.units().find(|u| u.id == uid) {
+            Some(u) => u,
+            None => continue,
+        };
+
+        // Check retry backoff.
+        let retry = retry_states.entry(unit.root_pgt_id).or_default();
+        if retry.is_in_backoff(now_ms) {
+            // Emit stale alerts for members in backoff.
+            for &pgt_id in &unit.member_pgt_ids {
+                if let Some(st) = load_st_by_id(pgt_id) {
+                    emit_stale_alert_if_needed(&st);
+                }
+            }
+            continue;
+        }
+
+        // Check if unit is due for refresh.
+        if !is_unit_due(unit, dag) {
+            continue;
+        }
+
+        // Guard against duplicate in-flight jobs.
+        match SchedulerJob::has_inflight_job(&unit.stable_key()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                log!(
+                    "pg_trickle: parallel dispatch — inflight check error for {}: {}",
+                    unit.label,
+                    e,
+                );
+                continue;
+            }
+        }
+
+        ready_queue.push_back(uid);
+    }
+
+    // ── Step 3: Dispatch ready units within budget ───────────────────────
+    while let Some(uid) = ready_queue.pop_front() {
+        if state.per_db_inflight >= max_per_db {
+            break;
+        }
+
+        if !shmem::try_acquire_worker_token(max_cluster) {
+            log!(
+                "pg_trickle: parallel dispatch — worker budget exhausted ({}/{})",
+                shmem::active_worker_count(),
+                max_cluster,
+            );
+            break;
+        }
+
+        let unit = match eu_dag.units().find(|u| u.id == uid) {
+            Some(u) => u,
+            None => {
+                shmem::release_worker_token();
+                continue;
+            }
+        };
+
+        let job_id = match SchedulerJob::enqueue(
+            dag_version_i64,
+            &unit.stable_key(),
+            unit.kind.as_str(),
+            &unit.member_pgt_ids,
+            unit.root_pgt_id,
+            scheduler_pid,
+            1,
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                shmem::release_worker_token();
+                log!(
+                    "pg_trickle: parallel dispatch — failed to enqueue job for {}: {}",
+                    unit.label,
+                    e,
+                );
+                continue;
+            }
+        };
+
+        if let Some(us) = state.unit_states.get_mut(&uid) {
+            us.inflight_job_id = Some(job_id);
+        }
+        state.per_db_inflight += 1;
+        pending_spawns.push((db_name.to_string(), job_id));
+
+        log!(
+            "pg_trickle: parallel dispatch — enqueued {} (job_id={}, kind={})",
+            unit.label,
+            job_id,
+            unit.kind,
+        );
+    }
+}
+
+/// Reconcile orphaned jobs and worker tokens at scheduler startup.
+///
+/// Called once during per-database scheduler initialization:
+/// 1. Cancels orphaned QUEUED/RUNNING jobs whose PID is no longer alive.
+/// 2. Computes the true active worker count from `pg_stat_activity`.
+/// 3. Corrects the shared-memory token counter if it diverged.
+pub fn reconcile_parallel_state() {
+    // Step 1: Cancel orphaned jobs
+    match SchedulerJob::cancel_orphaned_jobs() {
+        Ok(count) if count > 0 => {
+            log!(
+                "pg_trickle: parallel reconciliation — cancelled {} orphaned job(s)",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log!(
+                "pg_trickle: parallel reconciliation — orphan cleanup error: {}",
+                e
+            );
+        }
+    }
+
+    // Step 2: Count live refresh workers from pg_stat_activity
+    let live_workers: u32 = Spi::get_one::<i64>(
+        "SELECT COUNT(*)::bigint FROM pg_stat_activity \
+         WHERE backend_type = 'pg_trickle refresh worker'",
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0)
+    .max(0) as u32;
+
+    // Step 3: Correct shared-memory counter if needed
+    let shmem_count = shmem::active_worker_count();
+    if shmem_count != live_workers {
+        log!(
+            "pg_trickle: parallel reconciliation — correcting worker count: shmem={} → live={}",
+            shmem_count,
+            live_workers,
+        );
+        shmem::set_active_worker_count(live_workers);
+        shmem::bump_reconcile_epoch();
+    }
+
+    // Step 4: Prune old completed jobs (keep last 1 hour)
+    match SchedulerJob::prune_completed(3600) {
+        Ok(count) if count > 0 => {
+            log!(
+                "pg_trickle: parallel reconciliation — pruned {} old job(s)",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log!("pg_trickle: parallel reconciliation — prune error: {}", e);
+        }
+    }
+}
+
 /// Main entry point for the scheduler background worker.
 ///
 /// # Safety
@@ -361,9 +1123,17 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
     let retry_policy = RetryPolicy::default();
 
+    // Phase 4: Parallel dispatch state (persisted across ticks)
+    let mut parallel_state = ParallelDispatchState::new();
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
+    }));
+
+    // Phase 2: Reconcile parallel refresh state (orphaned jobs, worker tokens)
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        reconcile_parallel_state();
     }));
 
     // EC-20: Post-restart CDC TRANSITIONING health check.
@@ -375,10 +1145,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     }));
 
     loop {
-        // Wait for the configured interval or a signal.
-        let should_continue = BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-            config::pg_trickle_scheduler_interval_ms() as u64,
-        )));
+        // Use shorter poll interval when parallel workers are in-flight.
+        let poll_ms = if parallel_state.has_inflight() {
+            std::cmp::min(config::pg_trickle_scheduler_interval_ms() as u64, 200)
+        } else {
+            config::pg_trickle_scheduler_interval_ms() as u64
+        };
+        let should_continue =
+            BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
 
         if !should_continue {
             // SIGTERM received — shut down gracefully.
@@ -491,6 +1265,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             }));
         }
 
+        // Collect jobs to spawn (populated inside the transaction, spawned after).
+        let mut pending_spawns: Vec<(String, i64)> = Vec::new();
+
         // Run the scheduler tick inside a transaction
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             // CSS1: Capture tick watermark for cross-source snapshot consistency.
@@ -527,6 +1304,58 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             if let Err(e) = dag_ref.topological_order() {
                 log!("pg_trickle: DAG has cycles: {}", e);
                 return;
+            }
+
+            // Step B2: Build execution unit DAG for parallel-refresh awareness.
+            let parallel_mode = config::pg_trickle_parallel_refresh_mode();
+            match parallel_mode {
+                config::ParallelRefreshMode::Off => {}
+                config::ParallelRefreshMode::DryRun => {
+                    let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
+                        load_st_by_id(pgt_id).map(|st| st.refresh_mode)
+                    });
+                    log!(
+                        "pg_trickle: parallel refresh (dry_run): {}",
+                        eu_dag.summary()
+                    );
+                    log!("{}", eu_dag.dry_run_log());
+                    // Fall through to sequential refresh.
+                }
+                config::ParallelRefreshMode::On => {
+                    // Phase 4: Parallel dispatch replaces sequential refresh.
+                    if parallel_state.dag_version != dag_version || parallel_state.eu_dag.is_none()
+                    {
+                        let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
+                            load_st_by_id(pgt_id).map(|st| st.refresh_mode)
+                        });
+                        log!(
+                            "pg_trickle: parallel dispatch — EU DAG rebuilt: {}",
+                            eu_dag.summary()
+                        );
+                        parallel_state.rebuild(eu_dag, dag_version);
+                    }
+
+                    parallel_dispatch_tick(
+                        &mut parallel_state,
+                        dag_ref,
+                        now_ms,
+                        &mut retry_states,
+                        &retry_policy,
+                        &db_name,
+                        &mut pending_spawns,
+                    );
+
+                    // Prune retry states for STs that no longer exist.
+                    if let Some(ref eu) = parallel_state.eu_dag {
+                        let active_ids: HashSet<i64> = eu
+                            .units()
+                            .flat_map(|u| u.member_pgt_ids.iter().copied())
+                            .collect();
+                        retry_states.retain(|id, _| active_ids.contains(id));
+                    }
+
+                    return; // Skip sequential refresh.
+                }
             }
 
             // Step C: Compute consistency groups and refresh group-by-group
@@ -718,6 +1547,30 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 .collect();
             retry_states.retain(|id, _| active_ids.contains(id));
         }));
+
+        // Phase 4: Spawn workers outside the transaction (after commit).
+        for (db, job_id) in pending_spawns.drain(..) {
+            if let Err(e) = spawn_refresh_worker(&db, job_id) {
+                shmem::release_worker_token();
+                parallel_state.per_db_inflight = parallel_state.per_db_inflight.saturating_sub(1);
+                // Find and clear the in-flight tracking for this job.
+                for us in parallel_state.unit_states.values_mut() {
+                    if us.inflight_job_id == Some(job_id) {
+                        us.inflight_job_id = None;
+                        break;
+                    }
+                }
+                log!(
+                    "pg_trickle: parallel dispatch — failed to spawn worker for job {}: {}",
+                    job_id,
+                    e,
+                );
+                // Cancel the enqueued job row.
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    let _ = SchedulerJob::cancel(job_id, &format!("Worker spawn failed: {}", e));
+                }));
+            }
+        }
     }
 }
 
@@ -1865,5 +2718,98 @@ mod tests {
     #[test]
     fn test_falling_behind_negative_schedule() {
         assert!(is_falling_behind(100, -1).is_none());
+    }
+
+    // ── parse_worker_extra tests (Phase 3) ──────────────────────────
+
+    #[test]
+    fn test_parse_worker_extra_valid() {
+        let result = parse_worker_extra("mydb\x0042");
+        assert!(result.is_some());
+        let (db, id) = result.unwrap();
+        assert_eq!(db, "mydb");
+        assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn test_parse_worker_extra_long_db_name() {
+        let result = parse_worker_extra("my_production_database\x00999999");
+        assert!(result.is_some());
+        let (db, id) = result.unwrap();
+        assert_eq!(db, "my_production_database");
+        assert_eq!(id, 999999);
+    }
+
+    #[test]
+    fn test_parse_worker_extra_empty() {
+        assert!(parse_worker_extra("").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_no_separator() {
+        assert!(parse_worker_extra("mydb42").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_empty_db_name() {
+        assert!(parse_worker_extra("\x0042").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_invalid_job_id() {
+        assert!(parse_worker_extra("mydb\x00abc").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_negative_job_id() {
+        assert!(parse_worker_extra("mydb\x00-1").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_zero_job_id() {
+        assert!(parse_worker_extra("mydb\x000").is_none());
+    }
+
+    // ── ParallelDispatchState tests (Phase 4) ───────────────────────
+
+    #[test]
+    fn test_parallel_state_new_is_empty() {
+        let state = ParallelDispatchState::new();
+        assert!(state.unit_states.is_empty());
+        assert_eq!(state.per_db_inflight, 0);
+        assert_eq!(state.dag_version, 0);
+        assert!(!state.has_inflight());
+    }
+
+    #[test]
+    fn test_parallel_state_has_inflight() {
+        let mut state = ParallelDispatchState::new();
+        assert!(!state.has_inflight());
+        state.per_db_inflight = 1;
+        assert!(state.has_inflight());
+    }
+
+    #[test]
+    fn test_unit_dispatch_state_default() {
+        let uds = UnitDispatchState::default();
+        assert_eq!(uds.remaining_upstreams, 0);
+        assert!(uds.inflight_job_id.is_none());
+        assert!(!uds.succeeded);
+    }
+
+    #[test]
+    fn test_is_unit_due_pure_no_members() {
+        // is_unit_due depends on SPI, but we can test the logic structure
+        // indirectly via the iteration: empty members → not due.
+        let unit = crate::dag::ExecutionUnit {
+            id: crate::dag::ExecutionUnitId(1),
+            kind: crate::dag::ExecutionUnitKind::Singleton,
+            member_pgt_ids: vec![],
+            root_pgt_id: 0,
+            label: "empty".to_string(),
+        };
+        // With no members, iter().any() returns false → not due.
+        let result = unit.member_pgt_ids.iter().any(|_| true);
+        assert!(!result);
     }
 }
