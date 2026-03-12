@@ -404,6 +404,71 @@ jobs:
         if: always()
         run: docker rm -f pgtrickle-dbt-test 2>/dev/null || true
 
+  # ── dbt Getting Started example (Linux only) ─────────────────────────────
+  # Validates the examples/getting_started/ project against the E2E image.
+  # Runs on push-to-main, weekly schedule, and manual dispatch only.
+  dbt-getting-started:
+    name: dbt getting-started example
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Start PostgreSQL with pg_trickle
+        run: |
+          docker run -d \
+            --name pgtrickle-getting-started \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 15433:5432 \
+            pg_trickle_e2e:latest
+
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in $(seq 1 30); do
+            if docker exec pgtrickle-getting-started \
+              pg_isready -U postgres -q 2>/dev/null; then
+              echo "PostgreSQL is ready (attempt $i)"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Create pg_trickle extension
+        run: |
+          docker exec pgtrickle-getting-started \
+            psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_trickle;"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Run Getting Started example (dbt 1.10)
+        env:
+          PGHOST: localhost
+          PGPORT: '15433'
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          pip install "dbt-core~=1.10.0" "dbt-postgres~=1.10.0"
+          echo "=== dbt version ==="
+          dbt --version
+          cd examples/getting_started
+          dbt deps
+          dbt seed
+          dbt run
+          ./scripts/wait_for_populated.sh public.department_tree 30
+          ./scripts/wait_for_populated.sh public.department_stats 30
+          ./scripts/wait_for_populated.sh public.department_report 30
+          dbt test
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f pgtrickle-getting-started 2>/dev/null || true
+
   # ── CloudNativePG smoke test (non-blocking, Linux only) ─────────────────
   # Runs on weekly schedule and manual dispatch only (requires kind cluster).
   #

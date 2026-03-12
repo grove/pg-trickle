@@ -162,6 +162,16 @@ test-dbt:
 test-dbt-fast:
     ./dbt-pgtrickle/integration_tests/scripts/run_dbt_tests.sh --skip-build
 
+# Run the dbt Getting Started example project against a local pg_trickle container
+[group: "dbt"]
+test-dbt-getting-started:
+    ./examples/getting_started/scripts/run_example.sh
+
+# Run the dbt Getting Started example, skip Docker image rebuild
+[group: "dbt"]
+test-dbt-getting-started-fast:
+    SKIP_BUILD=1 ./examples/getting_started/scripts/run_example.sh
+
 # ── Upgrade Tests ─────────────────────────────────────────────────────────
 
 # Validate upgrade script covers all new SQL objects (no Docker needed)

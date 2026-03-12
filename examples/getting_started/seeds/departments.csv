@@ -1,0 +1,8 @@
+id,name,parent_id
+1,Company,
+2,Engineering,1
+3,Sales,1
+4,Operations,1
+5,Backend,2
+6,Frontend,2
+7,Platform,2

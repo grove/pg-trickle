@@ -1,0 +1,6 @@
+packages:
+  - git: "https://github.com/grove/pg-trickle"
+    subdirectory: "dbt-pgtrickle"
+    revision: main   # pin to a release tag (e.g. v0.4.0) for production use
+    # To test local changes without pushing, temporarily switch to:
+    # local: ../../dbt-pgtrickle
