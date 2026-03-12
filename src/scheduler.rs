@@ -283,7 +283,14 @@ pub fn register_scheduler_worker() {
 ///
 /// The coordinator calls this after enqueuing a job and acquiring a worker
 /// token from shared memory. The database name and job_id are packed into
-/// `bgw_extra` as `"<db_name>\0<job_id>"`.
+/// `bgw_extra` as `"<db_name>|<job_id>"`.
+///
+/// **Why `|` and not `\0`?** pgrx's `BackgroundWorker::get_extra()` uses
+/// `CStr::from_ptr` internally, which treats the first null byte as the
+/// string terminator. A null-byte separator would therefore cause the
+/// job_id portion to be silently dropped when the worker reads the extra.
+/// The pipe character `|` is not a valid PostgreSQL identifier character
+/// (without quoting) and is safe to use as a delimiter here.
 ///
 /// Returns `Ok(())` on successful spawn, `Err(...)` if the dynamic worker
 /// could not be registered.
@@ -292,7 +299,8 @@ pub fn spawn_refresh_worker(
     job_id: i64,
 ) -> Result<(), crate::error::PgTrickleError> {
     // Pack db_name + job_id into bgw_extra (max 128 bytes).
-    let extra = format!("{}\0{}", db_name, job_id);
+    // Use '|' as separator — see doc comment above for why not '\0'.
+    let extra = format!("{db_name}|{job_id}");
     if extra.len() > 128 {
         return Err(crate::error::PgTrickleError::InternalError(format!(
             "bgw_extra too long ({} bytes) for db='{}' job_id={}",
@@ -456,7 +464,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
 
 /// Parse the worker's bgw_extra string: "db_name\0job_id".
 fn parse_worker_extra(extra: &str) -> Option<(String, i64)> {
-    let parts: Vec<&str> = extra.splitn(2, '\0').collect();
+    // Format is "<db_name>|<job_id>" — see spawn_refresh_worker for why '|'
+    // is used instead of '\0' (pgrx's get_extra() truncates at null bytes).
+    let parts: Vec<&str> = extra.splitn(2, '|').collect();
     if parts.len() != 2 {
         return None;
     }
