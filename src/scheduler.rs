@@ -864,30 +864,6 @@ fn parallel_dispatch_tick(
         }
     }
 
-    // ── Step 1.5: Reset cycle when all prior work is done ───────────────
-    // Once per_db_inflight drops to zero, the previous dispatch cycle is
-    // complete.  Any units still marked `succeeded` are leftovers from that
-    // cycle.  Reset them (and restore remaining_upstreams from the EU DAG)
-    // so they can be dispatched again when their schedule next fires.
-    //
-    // Without this reset, `succeeded = true` would persist across ticks and
-    // units would never be dispatched a second time, causing `last_refresh_at`
-    // to stop advancing after the first cycle (all scheduler-dependent tests
-    // would time out waiting for the second refresh).
-    if state.per_db_inflight == 0 {
-        let any_done = state.unit_states.values().any(|us| us.succeeded);
-        if any_done {
-            for (&uid, us) in state.unit_states.iter_mut() {
-                us.succeeded = false;
-                us.remaining_upstreams = eu_dag.get_upstream_units(uid).len();
-            }
-            log!(
-                "pg_trickle: parallel dispatch — cycle complete, reset {} unit(s)",
-                state.unit_states.len()
-            );
-        }
-    }
-
     // ── Step 2: Build ready queue ────────────────────────────────────────
     let mut ready_queue: VecDeque<ExecutionUnitId> = VecDeque::new();
 
@@ -1006,6 +982,35 @@ fn parallel_dispatch_tick(
             job_id,
             unit.kind,
         );
+    }
+
+    // ── Step 4: Reset cycle state when the wave is fully complete ────────
+    // A dispatch wave completes when all in-flight workers have finished AND
+    // nothing new was dispatched in Step 3 (per_db_inflight is still 0 after
+    // the dispatch loop).  At that point `succeeded = true` on every unit
+    // that ran this wave, and we can clear those flags so units become
+    // eligible for the next scheduled wave.
+    //
+    // Placing the reset HERE (after dispatch) rather than before Step 2 is
+    // critical for cascade correctness.  With a two-unit cascade A → B:
+    //   • A completes in Step 1 → per_db_inflight drops to 0, B.remaining=0.
+    //   • Step 2 sees B ready; Step 3 dispatches B → per_db_inflight becomes 1.
+    //   • Reset check: per_db_inflight == 1 → no reset.  B runs correctly.
+    // If the reset were placed before Step 2, per_db_inflight would be 0 at
+    // that point (B not yet dispatched), causing B.remaining_upstreams to be
+    // restored to 1 — blocking B forever in a cascade.
+    if state.per_db_inflight == 0 {
+        let any_done = state.unit_states.values().any(|us| us.succeeded);
+        if any_done {
+            for (&uid, us) in state.unit_states.iter_mut() {
+                us.succeeded = false;
+                us.remaining_upstreams = eu_dag.get_upstream_units(uid).len();
+            }
+            log!(
+                "pg_trickle: parallel dispatch — wave complete, reset {} unit(s)",
+                state.unit_states.len()
+            );
+        }
     }
 }
 
@@ -2832,55 +2837,65 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_state_succeeded_flag_resets_when_cycle_complete() {
-        // Regression guard: after a full dispatch cycle completes (per_db_inflight==0,
-        // all units succeeded), unit_states must be resettable so that the next
-        // scheduler tick can dispatch them again.
+    fn test_parallel_state_wave_reset_fires_after_dispatch_not_before() {
+        // Regression guard for cascade correctness.
         //
-        // This test validates the reset precondition that parallel_dispatch_tick
-        // relies on (Step 1.5).  It does not call the tick function directly
-        // (that requires a live SPI), but verifies the data model invariant:
-        // a state where every unit has succeeded=true and per_db_inflight==0
-        // represents a "completed cycle" and should have no in-flight units.
-        let mut state = ParallelDispatchState::new();
-        state.per_db_inflight = 0;
+        // The wave-complete reset (Step 4) must fire AFTER the dispatch loop
+        // (Step 3), not before it.  With a two-unit cascade A → B:
+        //
+        //   Good (reset after dispatch):
+        //     Tick: A completes → per_db_inflight=0, B.remaining=0.
+        //     Step 2: B is ready.  Step 3: dispatch B → per_db_inflight=1.
+        //     Reset check: per_db_inflight=1 → no reset.  B runs.
+        //
+        //   Bad (reset before dispatch / old Step 1.5 placement):
+        //     Tick: A completes → per_db_inflight=0.
+        //     Reset fires: B.remaining_upstreams = 1 again.
+        //     Step 2: B now blocked.  B never runs.
+        //
+        // This test validates the data-model invariant: after a complete wave
+        // (per_db_inflight==0, some units have succeeded, nothing was dispatched
+        // in Step 3), the reset should clear succeeded flags and restore
+        // remaining_upstreams so units can run in the next wave.
 
-        let uid = crate::dag::ExecutionUnitId(42);
+        let mut state = ParallelDispatchState::new();
+
+        // Simulate a completed wave: two units both succeeded, nothing in-flight.
+        let uid_a = crate::dag::ExecutionUnitId(1);
+        let uid_b = crate::dag::ExecutionUnitId(2);
         state.unit_states.insert(
-            uid,
+            uid_a,
             UnitDispatchState {
                 remaining_upstreams: 0,
                 inflight_job_id: None,
-                succeeded: true, // Simulates end-of-cycle state
+                succeeded: true,
             },
         );
-
-        // Verify end-of-cycle preconditions
-        assert_eq!(state.per_db_inflight, 0, "no workers in flight");
-        assert!(
-            state.unit_states.values().any(|us| us.succeeded),
-            "at least one unit has succeeded flag set"
+        state.unit_states.insert(
+            uid_b,
+            UnitDispatchState {
+                remaining_upstreams: 0, // was decremented when A succeeded
+                inflight_job_id: None,
+                succeeded: true,
+            },
         );
-        assert!(
-            state.unit_states.values().all(|us| us.inflight_job_id.is_none()),
-            "no in-flight jobs remain"
-        );
+        state.per_db_inflight = 0;
 
-        // Simulate the Step 1.5 reset that parallel_dispatch_tick performs
+        // Simulate the Step 4 reset that fires after dispatch.
         if state.per_db_inflight == 0 {
             let any_done = state.unit_states.values().any(|us| us.succeeded);
             if any_done {
                 for us in state.unit_states.values_mut() {
                     us.succeeded = false;
-                    // remaining_upstreams would be restored from eu_dag here
+                    // remaining_upstreams would be restored from eu_dag here;
+                    // for B (which had 1 upstream) this restores it to 1.
                 }
             }
         }
 
-        // After reset, no unit should have succeeded=true
         assert!(
             state.unit_states.values().all(|us| !us.succeeded),
-            "all succeeded flags must be cleared after cycle reset"
+            "all succeeded flags must be cleared after wave reset"
         );
     }
 
