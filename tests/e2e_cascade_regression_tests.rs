@@ -627,10 +627,13 @@ async fn test_three_layer_cascade_insert_propagates() {
     db.execute("INSERT INTO items (category, price) VALUES ('C', 50)")
         .await;
 
-    // Refresh all three layers in topological order
+    // Refresh all three layers in topological order.
+    // Use refresh_st_with_retry for the deepest layer: the background scheduler
+    // may detect category_flags.data_timestamp has advanced and start a
+    // concurrent refresh of big_categories before the test's explicit call.
     db.refresh_st("category_totals").await;
     db.refresh_st("category_flags").await;
-    db.refresh_st("big_categories").await;
+    db.refresh_st_with_retry("big_categories").await;
 
     // C has total=50 > 25, so it should appear in big_categories
     assert_eq!(
@@ -705,7 +708,9 @@ async fn test_three_layer_cascade_update_propagates() {
 
     db.refresh_st("prod_summary").await;
     db.refresh_st("prod_labels").await;
-    db.refresh_st("premium_categories").await;
+    // Use refresh_st_with_retry: background scheduler may start a concurrent
+    // refresh of premium_categories after prod_labels.data_timestamp advances.
+    db.refresh_st_with_retry("premium_categories").await;
 
     // Both X (300) and Y (250) should now be premium
     assert_eq!(
