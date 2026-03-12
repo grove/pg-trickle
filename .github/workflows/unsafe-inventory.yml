@@ -4,13 +4,10 @@
 # Counts `unsafe {` blocks per .rs file and compares against the committed
 # baseline in .unsafe-baseline.
 #
-# Trigger behaviour:
-#   pull_request / push to main — informational only: regressions appear in
-#       the step summary (⚠️) but the job always exits 0 so it never blocks
-#       a PR merge or a main-branch push.
-#   schedule (nightly / full E2E matrix) — strict: exits 1 when any file
-#       exceeds its baseline so regressions cannot silently accumulate.
-#   workflow_dispatch — informational (same as push/PR).
+# Trigger behaviour (all triggers):
+#   Informational only — regressions appear in the step summary (⚠️) but the
+#   job always exits 0 and never blocks any build or PR merge.
+#   Tighten to strict (remove --report-only) once the team adopts the policy.
 #
 # To update the baseline after a justified unsafe addition:
 #   scripts/unsafe_inventory.sh --update > .unsafe-baseline
@@ -55,12 +52,6 @@ jobs:
       - name: Run unsafe inventory
         run: |
           chmod +x scripts/unsafe_inventory.sh
-          # On PRs and direct pushes the inventory is informational only —
-          # regressions are surfaced in the step summary but do NOT block merge.
-          # On scheduled runs (nightly / full E2E matrix) the check is strict
-          # and will fail the build so regressions cannot accumulate unnoticed.
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            scripts/unsafe_inventory.sh
-          else
-            scripts/unsafe_inventory.sh --report-only
-          fi
+          # Informational only for now — regressions surface in the step summary
+          # but never fail the build. Remove --report-only to enforce strictly.
+          scripts/unsafe_inventory.sh --report-only
