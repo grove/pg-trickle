@@ -8,9 +8,10 @@ and merged into branch `dbt-getting-started-project` (PR #165).
 Commits:
 - `5bac78c` — plans: add dbt Getting Started example project plan
 - `90e392c` — feat: implement dbt Getting Started example project (GS-1-GS-19)
+- `7196a95` — plans: update dbt Getting Started plan with implementation status
+- `<next>` — docs: add dbt callout to GETTING_STARTED.md; plan complete
 
-Remaining open item: add a "Try with dbt" callout to `docs/GETTING_STARTED.md`
-(see Exit Criteria below).
+All Exit Criteria met. Plan fully implemented.
 
 ---
 
@@ -728,4 +729,4 @@ correctly with the getting-started models.
 - [x] All four custom tests return empty result sets (no failures)
 - [x] `just test-dbt-getting-started` is documented in the justfile and works
 - [x] CI job passes on push-to-main
-- [ ] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `examples/getting_started/`
+- [x] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `examples/getting_started/`
