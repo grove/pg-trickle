@@ -527,6 +527,11 @@ work begins.
 
 ### Parallel Refresh
 
+> **In plain terms:** Right now the scheduler refreshes stream tables one at
+> a time. This feature lets multiple stream tables refresh simultaneously —
+> like running several errands at once instead of in a queue. When you have
+> dozens of stream tables, this can cut total refresh latency dramatically.
+
 Detailed implementation is tracked in
 [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md). The older
 [REPORT_PARALLELIZATION.md](plans/performance/REPORT_PARALLELIZATION.md)
@@ -542,6 +547,13 @@ remains the options-analysis precursor.
 
 ### Statement-Level CDC Triggers
 
+> **In plain terms:** Previously, when you updated 1,000 rows in a source
+> table, the database fired a "row changed" notification 1,000 times — once
+> per row. Now it fires once per statement, handing off all 1,000 changed
+> rows in a single batch. For bulk operations like data imports or batch
+> updates this is 50–80% cheaper; for single-row changes you won't notice a
+> difference.
+
 Replace per-row AFTER triggers with statement-level triggers using
 `NEW TABLE AS __pgt_new` / `OLD TABLE AS __pgt_old`. Expected write-side
 trigger overhead reduction of 50–80% for bulk DML; neutral for single-row.
@@ -556,6 +568,14 @@ trigger overhead reduction of 50–80% for bulk DML; neutral for single-row.
 
 ### Cross-Source Snapshot Consistency (Phase 1)
 
+> **In plain terms:** Imagine a stream table that joins `orders` and
+> `customers`. If a single transaction updates both tables, the old scheduler
+> could read the new `orders` data but the old `customers` data — a
+> half-applied, internally inconsistent snapshot. This fix takes a "freeze
+> frame" of the change log at the start of each scheduler tick and only
+> processes changes up to that point, so all sources are always read from the
+> same moment in time. Zero configuration required.
+
 At start of each scheduler tick, snapshot `pg_current_wal_lsn()` as a
 `tick_watermark` and cap all CDC consumption to that LSN. Zero user
 configuration — prevents interleaved reads from two sources that were
@@ -569,6 +589,12 @@ updated in the same transaction from producing an inconsistent stream table.
 
 ### Ergonomic Hardening
 
+> **In plain terms:** Added helpful warning messages for common mistakes:
+> "your WAL level isn't configured for logical replication", "this source
+> table has no primary key — duplicate rows may appear", "this change will
+> trigger a full re-scan of all source data". Think of these as friendly
+> guardrails that explain *why* something might not work as expected.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | ~~ERG-B~~ | ~~Warn at `_PG_init` when `cdc_mode='auto'` but `wal_level != 'logical'` — prevents silent trigger-only operation~~ | ~~30min~~ | ✅ Done |
@@ -578,6 +604,11 @@ updated in the same transaction from producing an inconsistent stream table.
 > **Ergonomic hardening subtotal: ✅ All done**
 
 ### Code Coverage
+
+> **In plain terms:** Every pull request now automatically reports what
+> percentage of the code is exercised by tests, and which specific lines are
+> never touched. It's like a map that highlights the unlit corners — helpful
+> for spotting blind spots before they become bugs.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
@@ -602,6 +633,15 @@ small ergonomic improvements.
 
 ### Row-Level Security (RLS) Support
 
+> **In plain terms:** Row-level security lets you write policies like "user
+> Alice can only see rows where `tenant_id = 'alice'`". Stream tables already
+> honour these policies when users query them. What this work fixes is the
+> *machinery behind the scenes* — the triggers and refresh functions that
+> build the stream table need to see *all* rows regardless of who is running
+> them, otherwise they'd produce an incomplete result. This phase hardens
+> those internal components so they always have full visibility, while
+> end-users still see only their filtered slice.
+
 Stream tables materialize the full result set (like `MATERIALIZED VIEW`). RLS
 is applied on the stream table itself for read-side filtering. Phase 1
 hardens the security context; Phase 2 adds a tutorial; Phase 3 completes DDL
@@ -624,6 +664,14 @@ tracking. Phase 4 (per-role `security_invoker`) is deferred to post-1.0.
 
 ### Bootstrap Source Gating
 
+> **In plain terms:** A pause/resume switch for individual source tables.
+> If you're bulk-loading 10 million rows into a source table (a nightly ETL
+> import, for example), you can "gate" it first — the scheduler will skip
+> refreshing any stream table that reads from it. Once the load is done you
+> "ungate" it and a single clean refresh runs. Without gating, the CDC system
+> would frantically process millions of intermediate changes during the load,
+> most of which get immediately overwritten anyway.
+
 Allow operators to pause CDC consumption for specific source tables (e.g.
 during bulk loads or ETL windows) without dropping and recreating stream
 tables. The scheduler skips any stream table whose transitive source set
@@ -640,6 +688,15 @@ intersects the current gated set.
 > **Bootstrap source gating subtotal: ~7–9 hours**
 
 ### Ergonomics & API Polish
+
+> **In plain terms:** A handful of quality-of-life improvements: track when
+> someone manually triggered a refresh and log it in the history table; a
+> one-row `quick_health` view that tells you at a glance whether the
+> extension is healthy (total tables, any errors, any stale tables, scheduler
+> running); a `create_stream_table_if_not_exists()` helper so deployment
+> scripts don't crash if the table was already created; and `CALL` syntax
+> wrappers so the functions feel like native PostgreSQL commands rather than
+> extension functions.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
