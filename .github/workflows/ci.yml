@@ -3,8 +3,8 @@
 #
 # Automatic triggers (with path filters on Rust/test files):
 #   push/PR → main : unit (Linux) + integration tests (~15 min gate)
-#   push → main    : + E2E tests, + coverage upload
-#   Weekly (Mon)   : full unit matrix (Linux + macOS), dbt, CNPG smoke
+#   push → main    : + light E2E tests, + coverage upload
+#   Weekly (Mon)   : full unit matrix (Linux + macOS), E2E, dbt, CNPG smoke
 #   Manual         : all jobs, all platforms (including Windows + benchmarks)
 # =============================================================================
 name: CI
@@ -172,11 +172,11 @@ jobs:
 
   # ── E2E tests (full extension in Docker, Linux only) ────────────────────
   # Skipped on PRs (takes ~20 min to build the Docker image). Runs on
-  # every push to main so a merge never goes unvalidated end-to-end.
+  # schedule and manual dispatch only (not push-to-main — too slow).
   e2e-tests:
     name: E2E tests
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
@@ -241,7 +241,7 @@ jobs:
           scripts/check_upgrade_completeness.sh 0.2.3 0.3.0
           scripts/check_upgrade_completeness.sh 0.3.0 0.4.0
 
-  # ── Upgrade E2E tests (push-to-main + daily) ───────────────────────────
+  # ── Upgrade E2E tests (daily + manual) ─────────────────────────────────
   # True version-to-version upgrade tests: install old version, populate
   # data, run ALTER EXTENSION UPDATE, verify everything works.
   # Matrix covers every supported upgrade hop so regressions in any path
@@ -249,7 +249,7 @@ jobs:
   upgrade-e2e-tests:
     name: Upgrade E2E tests (${{ matrix.from }} → ${{ matrix.to }})
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: [e2e-tests]
     timeout-minutes: 35
     strategy:
