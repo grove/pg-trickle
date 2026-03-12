@@ -2734,7 +2734,7 @@ mod tests {
 
     #[test]
     fn test_parse_worker_extra_valid() {
-        let result = parse_worker_extra("mydb\x0042");
+        let result = parse_worker_extra("mydb|42");
         assert!(result.is_some());
         let (db, id) = result.unwrap();
         assert_eq!(db, "mydb");
@@ -2743,7 +2743,7 @@ mod tests {
 
     #[test]
     fn test_parse_worker_extra_long_db_name() {
-        let result = parse_worker_extra("my_production_database\x00999999");
+        let result = parse_worker_extra("my_production_database|999999");
         assert!(result.is_some());
         let (db, id) = result.unwrap();
         assert_eq!(db, "my_production_database");
@@ -2762,22 +2762,22 @@ mod tests {
 
     #[test]
     fn test_parse_worker_extra_empty_db_name() {
-        assert!(parse_worker_extra("\x0042").is_none());
+        assert!(parse_worker_extra("|42").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_invalid_job_id() {
-        assert!(parse_worker_extra("mydb\x00abc").is_none());
+        assert!(parse_worker_extra("mydb|abc").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_negative_job_id() {
-        assert!(parse_worker_extra("mydb\x00-1").is_none());
+        assert!(parse_worker_extra("mydb|-1").is_none());
     }
 
     #[test]
     fn test_parse_worker_extra_zero_job_id() {
-        assert!(parse_worker_extra("mydb\x000").is_none());
+        assert!(parse_worker_extra("mydb|0").is_none());
     }
 
     // ── ParallelDispatchState tests (Phase 4) ───────────────────────
