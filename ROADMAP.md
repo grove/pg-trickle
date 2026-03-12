@@ -728,6 +728,15 @@ foundation for circular stream table DAGs.
 
 ### Partitioning Support (Source Tables)
 
+> **In plain terms:** PostgreSQL lets you split large tables into smaller
+> "partitions" — for example one partition per month for an `orders` table.
+> This is a common technique for managing very large datasets. This work
+> teaches pg_trickle to track all those partitions as a unit, so adding a
+> new monthly partition doesn't silently break stream tables that depend on
+> `orders`. It also handles the special case of foreign tables (tables that
+> live in another database), restricting them to full-scan refresh since they
+> can't be change-tracked the normal way.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | PT1 | E2E tests for partitioned source tables (RANGE, basic CRUD, differential refresh) | 8–12h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §7 |
@@ -739,6 +748,16 @@ foundation for circular stream table DAGs.
 > **Partitioning subtotal: ~18–32 hours**
 
 ### Idempotent DDL (`create_or_replace`)
+
+> **In plain terms:** Right now if you run `create_stream_table()` twice with
+> the same name it errors out, and changing the query means
+> `drop_stream_table()` followed by `create_stream_table()` — which loses all
+> the data in between. `create_or_replace_stream_table()` does the right
+> thing automatically: if nothing changed it's a no-op, if only settings
+> changed it updates in place, if the query changed it rebuilds. This is the
+> same pattern as `CREATE OR REPLACE FUNCTION` in PostgreSQL — and it's
+> exactly what the dbt materialization macro needs so every `dbt run` doesn't
+> drop and recreate tables from scratch.
 
 `create_or_replace_stream_table()` performs a smart diff: no-op if identical,
 in-place alter for config-only changes, schema migration for ADD/DROP column,
@@ -755,6 +774,16 @@ pattern used by the dbt materialization macro.
 > **Idempotent DDL subtotal: ~12–13 hours**
 
 ### Anomalous Change Detection (Fuse)
+
+> **In plain terms:** Imagine a source table suddenly receives a
+> million-row batch delete — a bug, runaway script, or intentional purge.
+> Without a fuse, pg_trickle would try to process all of it and potentially
+> overload the database. This adds a circuit breaker: you set a ceiling
+> (e.g. "never process more than 50,000 changes at once"), and if that
+> limit is hit the stream table pauses and sends a notification. You
+> investigate, fix the root cause, then resume with `reset_fuse()` and
+> choose how to recover (apply the changes, reinitialize from scratch, or
+> skip them entirely).
 
 Per-stream-table fuse that blows when the change buffer row count exceeds a
 configurable fixed ceiling or an adaptive μ+kσ threshold derived from
@@ -774,6 +803,14 @@ action.
 > **Anomalous change detection subtotal: ~10–14 hours**
 
 ### Circular Dependency Foundation
+
+> **In plain terms:** Normally stream tables form a one-way chain: A feeds
+> B, B feeds C. A circular dependency means A feeds B which feeds A —
+> usually a mistake, but occasionally useful for iterative computations like
+> graph reachability or recursive aggregations. This lays the groundwork —
+> the algorithms, catalog columns, and GUC settings — to eventually allow
+> controlled circular stream tables. The actual live execution is completed
+> in v0.7.0.
 
 Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 
@@ -806,6 +843,13 @@ scheduler for circular stream table DAGs.
 
 ### PostgreSQL Backward Compatibility (PG 16–18)
 
+> **In plain terms:** pg_trickle currently only targets PostgreSQL 18. This
+> work adds support for PG 16 and PG 17 so teams that haven't yet upgraded
+> can still use the extension. Each PostgreSQL major version has subtly
+> different internal APIs — especially around query parsing and the WAL
+> format used for change-data-capture — so each version needs its own
+> feature flags, build path, and CI test run.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | BC1 | Cargo.toml feature flags (`pg16`, `pg17`, `pg18`) + `cfg_aliases` | 4–8h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 1 |
@@ -817,6 +861,15 @@ scheduler for circular stream table DAGs.
 > **Backward compatibility subtotal: ~38–56 hours**
 
 ### Watermark Gating
+
+> **In plain terms:** A scheduling control for ETL pipelines where multiple
+> source tables are populated by separate jobs that finish at different
+> times. For example, `orders` might be loaded by a job that finishes at
+> 02:00 and `products` by one that finishes at 03:00. Without watermarks,
+> the scheduler might refresh a stream table that joins the two at 02:30,
+> producing a half-complete result. Watermarks let each ETL job declare "I'm
+> done up to timestamp X", and the scheduler waits until all sources are
+> caught up within a configurable tolerance before proceeding.
 
 Let producers signal their progress so the scheduler only refreshes stream
 tables when all contributing sources are aligned within a configurable
@@ -835,6 +888,14 @@ source tables are populated on different schedules.
 > **Watermark gating subtotal: ~17–20 hours**
 
 ### Circular Dependencies — Scheduler Integration
+
+> **In plain terms:** Completes the circular DAG work started in v0.6.0.
+> When stream tables reference each other in a cycle (A → B → A), the
+> scheduler now runs them repeatedly until the result stabilises — no more
+> changes flowing through the cycle. This is called "fixpoint iteration",
+> like solving a system of equations by re-running it until the numbers stop
+> moving. If it doesn't converge within a configurable number of rounds
+> (default 100) it surfaces an error rather than looping forever.
 
 Completes the SCC foundation from v0.6.0 with a working fixpoint iteration
 loop. Stream tables in a monotone cycle are refreshed repeatedly until
@@ -871,6 +932,15 @@ to PostgreSQL tooling (pg_dump, ORMs, `\dm`). Requires
 
 ### Connection Pooler Compatibility
 
+> **In plain terms:** PgBouncer is the most widely used PostgreSQL connection
+> pooler — it sits in front of the database and reuses connections across
+> many application threads. In its common "transaction mode" it hands a
+> different physical connection to each transaction, which breaks anything
+> that assumes the same connection persists between calls (session locks,
+> prepared statements). This work replaces all such session-scoped state in
+> pg_trickle so it works correctly in cloud deployments — Supabase, Railway,
+> Neon, and similar platforms that route through PgBouncer by default.
+
 pg_trickle uses session-level advisory locks and `PREPARE` statements that are
 incompatible with PgBouncer transaction-mode pooling. This section replaces all
 session-scoped state with transaction-scoped equivalents.
@@ -885,6 +955,14 @@ session-scoped state with transaction-scoped equivalents.
 
 ### External Test Suite Integration
 
+> **In plain terms:** pg_trickle's own tests were written by the pg_trickle
+> team, which means they can have the same blind spots as the code. This
+> adds validation against three independent public benchmarks: PostgreSQL's
+> own SQL conformance suite (sqllogictest), the Join Order Benchmark (a
+> realistic analytical query workload), and Nexmark (a streaming data
+> benchmark). If pg_trickle produces a different answer than PostgreSQL does
+> on the same query, these external suites will catch it.
+
 Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
@@ -896,6 +974,14 @@ Validate correctness against independent query corpora beyond TPC-H.
 > **External test suites subtotal: ~4–7 days**
 
 ### Native DDL Syntax
+
+> **In plain terms:** Currently you create stream tables by calling a
+> function: `SELECT pgtrickle.create_stream_table(...)`. This adds support
+> for standard PostgreSQL DDL syntax: `CREATE MATERIALIZED VIEW my_view
+> WITH (pgtrickle.stream = true) AS SELECT ...`. That single change means
+> `pg_dump` can back them up properly, `\dm` in psql lists them, ORMs can
+> introspect them, and migration tools like Flyway treat them like ordinary
+> database objects. Stream tables finally look native to PostgreSQL tooling.
 
 Intercept `CREATE/DROP/REFRESH MATERIALIZED VIEW` via `ProcessUtility_hook`
 and route stream-table variants through the existing internal implementations.
@@ -929,6 +1015,13 @@ visible and monitored.
 
 ### Observability
 
+> **In plain terms:** Adds ready-made dashboards and metrics exports so you
+> can see pg_trickle's health in existing monitoring systems without
+> building them yourself. The Grafana dashboard gives you a live graph of
+> refresh latency, how "stale" each stream table is, and how far behind CDC
+> is — the same kind of operational visibility you'd expect from any
+> production component.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | M1 | Prometheus exporter configuration guide | 4–6h | [PLAN_ECO_SYSTEM.md](plans/ecosystem/PLAN_ECO_SYSTEM.md) §1 |
@@ -936,12 +1029,25 @@ visible and monitored.
 
 ### Integration & Release prep
 
+> **In plain terms:** Ships the dbt integration as a proper
+> pip-installable Python package on PyPI so `pip install dbt-pgtrickle`
+> works — no manual git cloning required. Alongside that, a full
+> documentation review polishes everything so the product is ready to be
+> announced to the wider PostgreSQL community.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | I1 | dbt-pgtrickle 0.1.0 formal release (PyPI) | 2–3h | [dbt-pgtrickle/](dbt-pgtrickle/) · [PLAN_DBT_MACRO.md](plans/dbt/PLAN_DBT_MACRO.md) |
 | I2 | Complete documentation review & polish | 4–6h | [docs/](docs/) |
 
 ### pg_dump / pg_restore Support
+
+> **In plain terms:** `pg_dump` is the standard PostgreSQL backup tool.
+> Without this, a dump of a database containing stream tables may not
+> capture them correctly — and restoring from that dump would require
+> manually recreating them by hand. This teaches `pg_dump` to emit valid
+> SQL for every stream table, and adds logic to automatically re-link
+> orphaned catalog entries when restoring an extension from a backup.
 
 Complete the native DDL story: teach pg_dump to emit `CREATE MATERIALIZED VIEW
 … WITH (pgtrickle.stream = true)` for stream tables and add an event trigger
@@ -973,6 +1079,14 @@ distribution — getting pg_trickle onto package registries.
 
 ### Release engineering
 
+> **In plain terms:** The 1.0 release is the official "we stand behind this
+> API" declaration — from this point on the function names, catalog schema,
+> and configuration settings won't change without a major version bump. The
+> practical work is getting pg_trickle onto standard package registries
+> (PGXN, apt, rpm) so it can be installed with the same commands as any
+> other PostgreSQL extension, and hardening the CloudNativePG integration
+> for Kubernetes deployments.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | R1 | Semantic versioning policy + compatibility guarantees | 2–3h | [PLAN_VERSIONING.md](plans/infra/PLAN_VERSIONING.md) |
@@ -997,6 +1111,14 @@ These are not gated on 1.0 but represent the longer-term horizon.
 
 ### Ecosystem expansion
 
+> **In plain terms:** Building first-class integrations with the tools most
+> data teams already use — a proper dbt adapter (beyond just a
+> materialization macro), an Airflow provider so you can trigger stream
+> table refreshes from Airflow DAGs, a `pgtrickle` command-line tool for
+> managing stream tables without writing SQL, and integration guides for
+> popular ORMs and migration frameworks like Django, SQLAlchemy, Flyway, and
+> Liquibase.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | E1 | dbt full adapter (`dbt-pgtrickle` extending `dbt-postgres`) | 20–30h | [PLAN_DBT_ADAPTER.md](plans/dbt/PLAN_DBT_ADAPTER.md) |
@@ -1007,6 +1129,13 @@ These are not gated on 1.0 but represent the longer-term horizon.
 
 ### Scale
 
+> **In plain terms:** When you have hundreds of stream tables or a very
+> large cluster, the single background worker that drives pg_trickle today
+> can become a bottleneck. These items explore running the scheduler as an
+> external sidecar process (outside the database itself), distributing
+> stream tables across Citus shards for horizontal scale-out, and managing
+> stream tables that span multiple databases in the same PostgreSQL cluster.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | S1 | External orchestrator sidecar for 100+ STs | 20–40h | [REPORT_PARALLELIZATION.md](plans/performance/REPORT_PARALLELIZATION.md) §D |
@@ -1014,6 +1143,15 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | S3 | Multi-database support (beyond `postgres` DB) | TBD | [PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md) |
 
 ### Advanced SQL
+
+> **In plain terms:** A collection of longer-horizon features that each
+> require significant research and implementation — full circular dependency
+> execution, the remaining pieces of true in-transaction IVM (C-level
+> triggers, transition table sharing), backward-compatibility all the way to
+> PG 14/15, forward-compatibility with PostgreSQL 19, partitioned stream
+> table storage, and several query-planner improvements that reduce the cost
+> of computing incremental updates for wide tables and functions with many
+> columns.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
