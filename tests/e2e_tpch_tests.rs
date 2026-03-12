@@ -1147,10 +1147,11 @@ async fn test_tpch_q07_isolation() {
                 );
                 break;
             }
-            Err(e) if e.contains("error communicating with database")
-                || e.contains("got 0 bytes at EOF")
-                || e.contains("unexpected EOF")
-                || e.contains("connection closed") =>
+            Err(e)
+                if e.contains("error communicating with database")
+                    || e.contains("got 0 bytes at EOF")
+                    || e.contains("unexpected EOF")
+                    || e.contains("connection closed") =>
             {
                 // Transient Docker container connection drop — q07 is the heaviest
                 // multi-join query and can cause PostgreSQL to close the connection
