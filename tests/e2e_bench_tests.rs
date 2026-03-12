@@ -1178,3 +1178,522 @@ async fn bench_cdc_trigger_overhead() {
     println!("└───────────────────────────────────────────────────────────┘");
     println!();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// B3: Statement-Level vs Row-Level CDC Trigger Write-Side Benchmark
+//
+// Measures the write-side overhead reduction from statement-level triggers
+// (v0.4.0 default) vs the legacy row-level triggers.
+//
+// Matrix: 3 table widths × 3 DML types × bulk + single-row = 18 cells.
+//
+// Table widths:
+//   narrow  — 3 columns (id PK, grp TEXT, val INT)
+//   medium  — 8 columns (id PK, a–f TEXT/INT, val INT)
+//   wide    — 20 columns (id PK + 19 data columns)
+//
+// DML types: bulk INSERT (5 000 rows), bulk UPDATE (5 000 rows), single-row
+// INSERT (1 row).
+//
+// Expected outcome: 50–80% write overhead reduction for bulk DML with
+// statement-level triggers; neutral for single-row DML.
+//
+// Run explicitly:
+//   cargo test --test e2e_bench_tests -- --ignored bench_stmt_vs_row_cdc_matrix --nocapture
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Schema descriptor for one table-width variant.
+struct TableWidth {
+    name: &'static str,
+    cols: usize,
+    create_ddl: &'static str,
+    insert_bulk_sql: &'static str,
+    /// Stream-table defining query (must be a SELECT on the source).
+    st_query: &'static str,
+}
+
+fn table_widths() -> Vec<TableWidth> {
+    vec![
+        TableWidth {
+            name: "narrow",
+            cols: 3,
+            create_ddl: "CREATE TABLE {src} (id SERIAL PRIMARY KEY, grp TEXT NOT NULL, val INT NOT NULL)",
+            insert_bulk_sql: "INSERT INTO {src} (grp, val) \
+                SELECT CASE (i%5) WHEN 0 THEN 'a' WHEN 1 THEN 'b' WHEN 2 THEN 'c' \
+                WHEN 3 THEN 'd' ELSE 'e' END, (i*17)%10000 \
+                FROM generate_series(1,{n}) AS s(i)",
+            st_query: "SELECT id, grp, val FROM {src}",
+        },
+        TableWidth {
+            name: "medium",
+            cols: 8,
+            create_ddl: "CREATE TABLE {src} (id SERIAL PRIMARY KEY, \
+                a TEXT NOT NULL, b TEXT NOT NULL, c TEXT NOT NULL, \
+                d INT NOT NULL, e INT NOT NULL, f INT NOT NULL, val INT NOT NULL)",
+            insert_bulk_sql: "INSERT INTO {src} (a,b,c,d,e,f,val) \
+                SELECT CASE (i%3) WHEN 0 THEN 'x' WHEN 1 THEN 'y' ELSE 'z' END, \
+                       CASE (i%4) WHEN 0 THEN 'p' WHEN 1 THEN 'q' WHEN 2 THEN 'r' ELSE 's' END, \
+                       CASE (i%5) WHEN 0 THEN 'a' WHEN 1 THEN 'b' WHEN 2 THEN 'c' WHEN 3 THEN 'd' ELSE 'e' END, \
+                       (i*3)%100, (i*7)%100, (i*13)%100, (i*17)%10000 \
+                FROM generate_series(1,{n}) AS s(i)",
+            st_query: "SELECT id, a, b, c, d, e, f, val FROM {src}",
+        },
+        TableWidth {
+            name: "wide",
+            cols: 20,
+            create_ddl: "CREATE TABLE {src} (id SERIAL PRIMARY KEY, \
+                c1 TEXT, c2 TEXT, c3 TEXT, c4 TEXT, c5 TEXT, \
+                c6 INT, c7 INT, c8 INT, c9 INT, c10 INT, \
+                c11 TEXT, c12 TEXT, c13 TEXT, c14 TEXT, c15 TEXT, \
+                c16 INT, c17 INT, c18 INT, c19 INT)",
+            insert_bulk_sql: "INSERT INTO {src} (c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15,c16,c17,c18,c19) \
+                SELECT CASE (i%3) WHEN 0 THEN 'x' WHEN 1 THEN 'y' ELSE 'z' END, \
+                       CASE (i%4) WHEN 0 THEN 'p' WHEN 1 THEN 'q' WHEN 2 THEN 'r' ELSE 's' END, \
+                       CASE (i%5) WHEN 0 THEN 'a' WHEN 1 THEN 'b' WHEN 2 THEN 'c' WHEN 3 THEN 'd' ELSE 'e' END, \
+                       CASE (i%2) WHEN 0 THEN 'foo' ELSE 'bar' END, \
+                       CASE (i%6) WHEN 0 THEN 'alpha' WHEN 1 THEN 'beta' WHEN 2 THEN 'gamma' \
+                       WHEN 3 THEN 'delta' WHEN 4 THEN 'epsilon' ELSE 'zeta' END, \
+                       (i*2)%100, (i*3)%100, (i*5)%100, (i*7)%100, (i*11)%100, \
+                       CASE (i%3) WHEN 0 THEN 'u' WHEN 1 THEN 'v' ELSE 'w' END, \
+                       CASE (i%4) WHEN 0 THEN 'i' WHEN 1 THEN 'j' WHEN 2 THEN 'k' ELSE 'l' END, \
+                       CASE (i%5) WHEN 0 THEN 'f' WHEN 1 THEN 'g' WHEN 2 THEN 'h' WHEN 3 THEN 'i' ELSE 'j' END, \
+                       CASE (i%2) WHEN 0 THEN 'cat' ELSE 'dog' END, \
+                       CASE (i%3) WHEN 0 THEN 'red' WHEN 1 THEN 'green' ELSE 'blue' END, \
+                       (i*13)%100, (i*17)%100, (i*19)%100, (i*23)%100 \
+                FROM generate_series(1,{n}) AS s(i)",
+            st_query: "SELECT id, c1, c6, c11, c16 FROM {src}",
+        },
+    ]
+}
+
+/// A single CDC trigger mode benchmark cell result.
+#[derive(Clone)]
+struct TriggerBenchResult {
+    width: String,
+    mode: String,
+    dml: String,
+    batch_size: usize,
+    timings_ms: Vec<f64>,
+}
+
+impl TriggerBenchResult {
+    fn avg(&self) -> f64 {
+        self.timings_ms.iter().sum::<f64>() / self.timings_ms.len() as f64
+    }
+    fn p50(&self) -> f64 {
+        let mut v = self.timings_ms.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        percentile(&v, 50.0)
+    }
+    fn p95(&self) -> f64 {
+        let mut v = self.timings_ms.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        percentile(&v, 95.0)
+    }
+}
+
+fn speedup_str(row_avg: f64, stmt_avg: f64) -> String {
+    if row_avg <= 0.0 || stmt_avg <= 0.0 {
+        return "   n/a".to_string();
+    }
+    let ratio = row_avg / stmt_avg;
+    if ratio >= 1.0 {
+        format!("{:.2}x⬇", ratio)
+    } else {
+        format!("{:.2}x⬆", ratio)
+    }
+}
+
+/// Run the full B3 benchmark matrix.
+///
+/// For each table width, enables row-level mode and statement-level mode in
+/// turn, measures bulk INSERT / bulk UPDATE / single INSERT, then prints the
+/// comparison table.
+async fn run_stmt_vs_row_matrix() {
+    const BASE_ROWS: usize = 50_000;
+    const BULK_BATCH: usize = 5_000;
+    const SINGLE_BATCH: usize = 1;
+    const ITERATIONS: usize = 10;
+    const WARMUP: usize = 2;
+
+    let mut all_results: Vec<TriggerBenchResult> = Vec::new();
+
+    for width in table_widths() {
+        eprintln!(
+            "▶ B3: {} table ({} cols) — row vs statement mode ...",
+            width.name, width.cols
+        );
+
+        for trigger_mode in &["row", "statement"] {
+            let db = E2eDb::new_bench().await.with_extension().await;
+
+            // Switch to the requested trigger mode
+            db.alter_system_set_and_wait(
+                "pg_trickle.cdc_trigger_mode",
+                &format!("'{trigger_mode}'"),
+                trigger_mode,
+            )
+            .await;
+
+            let src = format!("cdc_b3_{}", width.name);
+            let st_name = format!("b3_st_{}", width.name);
+
+            // Create source table
+            let ddl = width.create_ddl.replace("{src}", &src);
+            db.execute(&ddl).await;
+
+            // Populate base rows
+            let ins = width
+                .insert_bulk_sql
+                .replace("{src}", &src)
+                .replace("{n}", &BASE_ROWS.to_string());
+            db.execute(&ins).await;
+            db.execute(&format!("ANALYZE {src}")).await;
+
+            // Create stream table (installs CDC trigger in current mode)
+            let st_query = width.st_query.replace("{src}", &src);
+            db.create_st(&st_name, &st_query, "1m", "DIFFERENTIAL")
+                .await;
+
+            // ── DML helper closures ─────────────────────────────────────
+
+            // bulk INSERT
+            let bulk_ins = |n: usize| {
+                width
+                    .insert_bulk_sql
+                    .replace("{src}", &src)
+                    .replace("{n}", &n.to_string())
+            };
+
+            // bulk UPDATE of the first `n` rows — update c6/d/val depending on width
+            let bulk_upd_sql = format!(
+                "UPDATE {src} SET id = id WHERE id IN \
+                 (SELECT id FROM {src} ORDER BY id LIMIT {BULK_BATCH})"
+            );
+
+            // ── Warm-up ─────────────────────────────────────────────────
+            for _ in 0..WARMUP {
+                db.execute(&bulk_ins(BULK_BATCH)).await;
+                db.execute(&bulk_upd_sql).await;
+                db.refresh_st(&st_name).await;
+            }
+
+            // ── Bulk INSERT timings ──────────────────────────────────────
+            let mut bulk_insert_ms = Vec::new();
+            for _ in 0..ITERATIONS {
+                let sql = bulk_ins(BULK_BATCH);
+                let start = Instant::now();
+                db.execute(&sql).await;
+                bulk_insert_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+                db.refresh_st(&st_name).await; // drain buffer
+            }
+
+            // ── Bulk UPDATE timings ──────────────────────────────────────
+            let mut bulk_update_ms = Vec::new();
+            for _ in 0..ITERATIONS {
+                let start = Instant::now();
+                db.execute(&bulk_upd_sql).await;
+                bulk_update_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+                db.refresh_st(&st_name).await;
+            }
+
+            // ── Single-row INSERT timings ────────────────────────────────
+            let mut single_insert_ms = Vec::new();
+            for _ in 0..ITERATIONS {
+                let sql = bulk_ins(SINGLE_BATCH);
+                let start = Instant::now();
+                db.execute(&sql).await;
+                single_insert_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+                db.refresh_st(&st_name).await;
+            }
+
+            all_results.push(TriggerBenchResult {
+                width: width.name.to_string(),
+                mode: trigger_mode.to_string(),
+                dml: "bulk_insert".to_string(),
+                batch_size: BULK_BATCH,
+                timings_ms: bulk_insert_ms,
+            });
+            all_results.push(TriggerBenchResult {
+                width: width.name.to_string(),
+                mode: trigger_mode.to_string(),
+                dml: "bulk_update".to_string(),
+                batch_size: BULK_BATCH,
+                timings_ms: bulk_update_ms,
+            });
+            all_results.push(TriggerBenchResult {
+                width: width.name.to_string(),
+                mode: trigger_mode.to_string(),
+                dml: "single_insert".to_string(),
+                batch_size: SINGLE_BATCH,
+                timings_ms: single_insert_ms,
+            });
+        }
+    }
+
+    // ── Print comparison table ─────────────────────────────────────────────
+
+    println!();
+    println!(
+        "┌───────────────────────────────────────────────────────────────────────────────────────────────────┐"
+    );
+    println!(
+        "│  B3: Statement-Level vs Row-Level CDC Trigger — Write-Side Benchmark                              │"
+    );
+    println!(
+        "│  Base rows: 50 000 · Bulk batch: 5 000 · Iterations: 10                                          │"
+    );
+    println!(
+        "├──────────┬───────────────┬───────────────┬──────────────────────────────────────────────────────┤"
+    );
+    println!(
+        "│ Width    │ DML           │ Batch         │ row avg   row p50   row p95  stmt avg  stmt p50  stmt p95  Speedup │"
+    );
+    println!(
+        "├──────────┼───────────────┼───────────────┼──────────────────────────────────────────────────────┤"
+    );
+
+    let widths = ["narrow", "medium", "wide"];
+    let dmls = ["bulk_insert", "bulk_update", "single_insert"];
+
+    for w in &widths {
+        for dml in &dmls {
+            let find = |mode: &str| {
+                all_results
+                    .iter()
+                    .find(|r| r.width == *w && r.dml == *dml && r.mode == mode)
+            };
+            let row_r = find("row");
+            let stmt_r = find("statement");
+
+            match (row_r, stmt_r) {
+                (Some(row), Some(stmt)) => {
+                    let batch = row.batch_size;
+                    let speedup = speedup_str(row.avg(), stmt.avg());
+                    println!(
+                        "│ {:8} │ {:13} │ {:>13} │ {:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}  {:>8.2}  {:>7} │",
+                        w,
+                        dml,
+                        batch,
+                        row.avg(),
+                        row.p50(),
+                        row.p95(),
+                        stmt.avg(),
+                        stmt.p50(),
+                        stmt.p95(),
+                        speedup,
+                    );
+                }
+                _ => {
+                    println!(
+                        "│ {:8} │ {:13} │         n/a │ (data missing)                                                       │",
+                        w, dml
+                    );
+                }
+            }
+        }
+        println!(
+            "├──────────┼───────────────┼───────────────┼──────────────────────────────────────────────────────┤"
+        );
+    }
+
+    println!(
+        "└──────────┴───────────────┴───────────────┴──────────────────────────────────────────────────────┘"
+    );
+
+    // ── Summary verdict ────────────────────────────────────────────────────
+    println!();
+    println!("Summary (bulk DML speedup):");
+    for w in &widths {
+        for dml in &["bulk_insert", "bulk_update"] {
+            let row_r = all_results
+                .iter()
+                .find(|r| r.width == *w && r.dml == *dml && r.mode == "row");
+            let stmt_r = all_results
+                .iter()
+                .find(|r| r.width == *w && r.dml == *dml && r.mode == "statement");
+            if let (Some(row), Some(stmt)) = (row_r, stmt_r) {
+                let reduction_pct = if row.avg() > 0.0 {
+                    (row.avg() - stmt.avg()) / row.avg() * 100.0
+                } else {
+                    0.0
+                };
+                let verdict = if reduction_pct >= 50.0 {
+                    "✅ ≥50% reduction (better than target)"
+                } else if reduction_pct >= 20.0 {
+                    "✅ 20–50% reduction (within target)"
+                } else if reduction_pct >= 0.0 {
+                    "⚠️  <20% reduction (below target)"
+                } else {
+                    "❌ regression (statement slower than row)"
+                };
+                println!(
+                    "  {w:6} × {dml:12} → row {:.2}ms  stmt {:.2}ms  {:+.1}%  {verdict}",
+                    row.avg(),
+                    stmt.avg(),
+                    reduction_pct,
+                );
+            }
+        }
+    }
+    println!();
+
+    // Single-row DML: statement should be neutral (within ±10%)
+    println!("Single-row INSERT neutrality check:");
+    for w in &widths {
+        let row_r = all_results
+            .iter()
+            .find(|r| r.width == *w && r.dml == "single_insert" && r.mode == "row");
+        let stmt_r = all_results
+            .iter()
+            .find(|r| r.width == *w && r.dml == "single_insert" && r.mode == "statement");
+        if let (Some(row), Some(stmt)) = (row_r, stmt_r) {
+            let delta_pct = if row.avg() > 0.0 {
+                (stmt.avg() - row.avg()) / row.avg() * 100.0
+            } else {
+                0.0
+            };
+            let verdict = if delta_pct.abs() <= 10.0 {
+                "✅ neutral (±10%)"
+            } else if delta_pct > 0.0 {
+                "⚠️  statement slower for single-row"
+            } else {
+                "✅ statement faster for single-row"
+            };
+            println!(
+                "  {w:6} → row {:.2}ms  stmt {:.2}ms  {:+.1}%  {verdict}",
+                row.avg(),
+                stmt.avg(),
+                delta_pct,
+            );
+        }
+    }
+    println!();
+}
+
+/// B3: Statement-Level vs Row-Level CDC trigger write-side benchmark matrix.
+///
+/// Compares write-side overhead of `pg_trickle.cdc_trigger_mode = 'row'`
+/// (legacy) vs `'statement'` (v0.4.0 default) across narrow/medium/wide
+/// tables and bulk/single-row DML.
+///
+/// Run explicitly:
+/// ```bash
+/// cargo test --test e2e_bench_tests -- --ignored bench_stmt_vs_row_cdc_matrix --nocapture
+/// ```
+#[tokio::test]
+#[ignore]
+async fn bench_stmt_vs_row_cdc_matrix() {
+    run_stmt_vs_row_matrix().await;
+}
+
+/// B3 quick: narrowing smoke-check — narrow table, bulk INSERT only.
+///
+/// Completes in ~60s instead of the full 15–20 min matrix run.
+///
+/// Run explicitly:
+/// ```bash
+/// cargo test --test e2e_bench_tests -- --ignored bench_stmt_vs_row_cdc_quick --nocapture
+/// ```
+#[tokio::test]
+#[ignore]
+async fn bench_stmt_vs_row_cdc_quick() {
+    const BASE_ROWS: usize = 20_000;
+    const BULK_BATCH: usize = 2_000;
+    const ITERATIONS: usize = 5;
+    const WARMUP: usize = 1;
+
+    let widths = table_widths();
+    let narrow = &widths[0]; // narrow only
+
+    let mut results: [Option<TriggerBenchResult>; 2] = [None, None];
+
+    for (idx, trigger_mode) in ["row", "statement"].iter().enumerate() {
+        let db = E2eDb::new_bench().await.with_extension().await;
+
+        db.alter_system_set_and_wait(
+            "pg_trickle.cdc_trigger_mode",
+            &format!("'{trigger_mode}'"),
+            trigger_mode,
+        )
+        .await;
+
+        let src = "b3q_src".to_string();
+        let st_name = "b3q_st".to_string();
+        let ddl = narrow.create_ddl.replace("{src}", &src);
+        db.execute(&ddl).await;
+        let ins_base = narrow
+            .insert_bulk_sql
+            .replace("{src}", &src)
+            .replace("{n}", &BASE_ROWS.to_string());
+        db.execute(&ins_base).await;
+        db.execute(&format!("ANALYZE {src}")).await;
+        let st_query = narrow.st_query.replace("{src}", &src);
+        db.create_st(&st_name, &st_query, "1m", "DIFFERENTIAL")
+            .await;
+
+        // warm-up
+        for _ in 0..WARMUP {
+            let s = narrow
+                .insert_bulk_sql
+                .replace("{src}", &src)
+                .replace("{n}", &BULK_BATCH.to_string());
+            db.execute(&s).await;
+            db.refresh_st(&st_name).await;
+        }
+
+        let mut ms = Vec::new();
+        for _ in 0..ITERATIONS {
+            let s = narrow
+                .insert_bulk_sql
+                .replace("{src}", &src)
+                .replace("{n}", &BULK_BATCH.to_string());
+            let start = Instant::now();
+            db.execute(&s).await;
+            ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            db.refresh_st(&st_name).await;
+        }
+
+        results[idx] = Some(TriggerBenchResult {
+            width: "narrow".to_string(),
+            mode: trigger_mode.to_string(),
+            dml: "bulk_insert".to_string(),
+            batch_size: BULK_BATCH,
+            timings_ms: ms,
+        });
+    }
+
+    let row = results[0].as_ref().unwrap();
+    let stmt = results[1].as_ref().unwrap();
+    let reduction_pct = if row.avg() > 0.0 {
+        (row.avg() - stmt.avg()) / row.avg() * 100.0
+    } else {
+        0.0
+    };
+
+    println!();
+    println!("┌──────────────────────────────────────────────────────────┐");
+    println!("│  B3 Quick: Statement vs Row CDC — Narrow Bulk INSERT      │");
+    println!("├──────────────────────────────────────────────────────────┤");
+    println!(
+        "│  row mode  avg: {:>8.2} ms  p95: {:>8.2} ms              │",
+        row.avg(),
+        row.p95()
+    );
+    println!(
+        "│  stmt mode avg: {:>8.2} ms  p95: {:>8.2} ms              │",
+        stmt.avg(),
+        stmt.p95()
+    );
+    println!(
+        "│  Reduction: {:>+.1}%  {}                   │",
+        reduction_pct,
+        if reduction_pct >= 20.0 {
+            "✅"
+        } else {
+            "⚠️ "
+        },
+    );
+    println!("└──────────────────────────────────────────────────────────┘");
+    println!();
+}

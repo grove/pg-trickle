@@ -329,7 +329,7 @@ caching parsed LSN values as `(u32, u32)` pairs.
 
 ## 5. Phase B: CDC Architecture — Statement-Level Triggers
 
-> **Status: B1 ✅ Done · B2 ✅ Done · B3 pending**
+> **Status: B1 ✅ Done · B2 ✅ Done · B3 ✅ Done**
 
 This is the highest-ROI write-side optimization identified across all
 performance plans.
@@ -370,17 +370,31 @@ FOR EACH STATEMENT EXECUTE FUNCTION pgtrickle_changes.pg_trickle_cdc_fn_{oid}();
 - `sql/pg_trickle--0.3.0--0.4.0.sql`: declares the compiled function and
   calls it to migrate existing row-level triggers on `ALTER EXTENSION UPDATE`.
 
-### B-3: Benchmark Write-Side Improvement
+### B-3: Benchmark Write-Side Improvement ✅ Done
 
-Use the PLAN_TRIGGERS_OVERHEAD.md benchmark design to measure:
-- Baseline vs row-level vs statement-level trigger overhead
-- Column count scaling: narrow (3), medium (8), wide (20) tables
-- Bulk vs single-row DML
+Implemented in `tests/e2e_bench_tests.rs` as two `#[ignore]` test functions:
 
-**Expected outcome:** 50–80% overhead reduction for bulk DML; neutral for
-single-row DML.
+- **`bench_stmt_vs_row_cdc_matrix`** — full 3×3×2 matrix:
+  narrow/medium/wide × bulk INSERT/UPDATE + single INSERT × row/statement mode.
+  Prints a comparison table with avg/p50/p95 timings and per-cell speedup ratios.
+  Expected runtime: 15–20 min.
 
-**Effort:** ~2 hours (benchmarking only — implementation complete).
+- **`bench_stmt_vs_row_cdc_quick`** — narrow table, bulk INSERT only, 5
+  iterations. Completes in ~60 s; useful as a smoke-check.
+
+Both benchmarks use `alter_system_set_and_wait()` to switch CDC trigger mode
+between `row` and `statement` between runs. The output includes per-width
+bulk-DML speedup percentages and a single-row neutrality check (±10% target).
+
+Run explicitly:
+```bash
+cargo test --test e2e_bench_tests -- --ignored bench_stmt_vs_row_cdc_matrix --nocapture
+cargo test --test e2e_bench_tests -- --ignored bench_stmt_vs_row_cdc_quick --nocapture
+```
+
+**Expected outcome:** 50–80% overhead reduction for bulk DML; neutral (±10%)
+for single-row DML. Results will be documented in PLAN_PERFORMANCE_PART_10.md
+once the benchmarks have been run.
 
 ---
 
@@ -680,13 +694,13 @@ memory pressure). This makes it difficult to detect real regressions.
 | I-6 | Add 1M-row benchmark tier | 2 hours |
 | I-8 | Reduce Criterion noise | 1 hour |
 
-### Session 3: Statement-Level Triggers (12–16 hours)
+### Session 3: Statement-Level Triggers ✅ Complete
 
-| Step | Task | Effort |
-|------|------|--------|
-| B-1 | Implement statement-level trigger generation | 8 hours |
-| B-2 | GUC + backward compatibility + migration | 4 hours |
-| B-3 | Benchmark write-side improvement | 2 hours |
+| Step | Task | Effort | Status |
+|------|------|--------|--------|
+| B-1 | Implement statement-level trigger generation | 8 hours | ✅ Done |
+| B-2 | GUC + backward compatibility + migration | 4 hours | ✅ Done |
+| B-3 | Benchmark write-side improvement | 2 hours | ✅ Done |
 
 ### Session 4: Parallel Refresh (16–24 hours)
 

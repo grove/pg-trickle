@@ -154,6 +154,23 @@ feature. All seven implementation phases are now complete.
 
 See [PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) for the full design.
 
+#### Statement-Level CDC Triggers — B3 Write-Side Benchmark Harness
+
+Added a benchmark harness to measure the write-side overhead reduction from
+statement-level CDC triggers (v0.4.0 default) vs the legacy row-level triggers.
+
+- **`bench_stmt_vs_row_cdc_matrix`** (new `#[ignore]` test in `e2e_bench_tests.rs`):
+  Full 3×3×2 matrix — narrow/medium/wide table widths × bulk INSERT/UPDATE
+  + single-row INSERT × row/statement CDC mode. Prints avg/p50/p95 timings
+  and per-cell speedup ratios. Expected runtime: 15–20 min.
+- **`bench_stmt_vs_row_cdc_quick`** (new `#[ignore]` test): Narrow table,
+  bulk INSERT only, 5 iterations. Completes in ~60 s; useful as a quick smoke-
+  check.
+- Both tests use `alter_system_set_and_wait()` to switch `cdc_trigger_mode`
+  between runs and output a summary with per-width bulk-DML reduction
+  percentages and a single-row neutrality check (±10% target).
+- ROADMAP B3 and PLAN_PERFORMANCE_PART_9 §B-3 marked ✅ Done.
+
 --- — 2026-03-11
 
 ### Fixed
