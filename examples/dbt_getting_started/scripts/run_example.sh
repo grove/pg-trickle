@@ -6,9 +6,9 @@
 # for stream tables to populate, runs dbt tests, and cleans up.
 #
 # Usage:
-#   ./examples/getting_started/scripts/run_example.sh
-#   ./examples/getting_started/scripts/run_example.sh --skip-build
-#   ./examples/getting_started/scripts/run_example.sh --keep-container
+#   ./examples/dbt_getting_started/scripts/run_example.sh
+#   ./examples/dbt_getting_started/scripts/run_example.sh --skip-build
+#   ./examples/dbt_getting_started/scripts/run_example.sh --keep-container
 #
 # Environment variables:
 #   DBT_VERSION     dbt-core version to install (default: 1.10)

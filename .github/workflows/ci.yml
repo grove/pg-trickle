@@ -405,7 +405,7 @@ jobs:
         run: docker rm -f pgtrickle-dbt-test 2>/dev/null || true
 
   # ── dbt Getting Started example (Linux only) ─────────────────────────────
-  # Validates the examples/getting_started/ project against the E2E image.
+  # Validates the examples/dbt_getting_started/ project against the E2E image.
   # Runs on push-to-main, weekly schedule, and manual dispatch only.
   dbt-getting-started:
     name: dbt getting-started example
@@ -456,7 +456,7 @@ jobs:
           pip install "dbt-core~=1.10.0" "dbt-postgres~=1.10.0"
           echo "=== dbt version ==="
           dbt --version
-          cd examples/getting_started
+          cd examples/dbt_getting_started
           dbt deps
           dbt seed
           dbt run

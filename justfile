@@ -165,12 +165,12 @@ test-dbt-fast:
 # Run the dbt Getting Started example project against a local pg_trickle container
 [group: "dbt"]
 test-dbt-getting-started:
-    ./examples/getting_started/scripts/run_example.sh
+    ./examples/dbt_getting_started/scripts/run_example.sh
 
 # Run the dbt Getting Started example, skip Docker image rebuild
 [group: "dbt"]
 test-dbt-getting-started-fast:
-    SKIP_BUILD=1 ./examples/getting_started/scripts/run_example.sh
+    SKIP_BUILD=1 ./examples/dbt_getting_started/scripts/run_example.sh
 
 # ── Upgrade Tests ─────────────────────────────────────────────────────────
 

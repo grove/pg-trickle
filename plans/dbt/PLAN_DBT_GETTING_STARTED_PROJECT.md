@@ -18,7 +18,7 @@ All Exit Criteria met. Plan fully implemented.
 ## Overview
 
 Create a self-contained dbt example project at
-`examples/getting_started/` (repo root level) that mirrors every SQL step in
+`examples/dbt_getting_started/` (repo root level) that mirrors every SQL step in
 `docs/GETTING_STARTED.md` using dbt models and seeds.  
 The project serves three purposes:
 
@@ -34,7 +34,7 @@ The project serves three purposes:
 ## File Layout
 
 ```
-examples/getting_started/
+examples/dbt_getting_started/
 ├── dbt_project.yml
 ├── profiles.yml
 ├── packages.yml
@@ -525,8 +525,8 @@ WHERE consecutive_errors > 0
 # for stream tables to populate, runs dbt tests, and cleans up.
 #
 # Usage:
-#   ./examples/getting_started/scripts/run_example.sh
-#   ./examples/getting_started/scripts/run_example.sh --keep-container
+#   ./examples/dbt_getting_started/scripts/run_example.sh
+#   ./examples/dbt_getting_started/scripts/run_example.sh --keep-container
 #
 # Environment variables (same as integration_tests):
 #   PGPORT          PostgreSQL port (default: 15433, avoids conflict with integration_tests)
@@ -597,11 +597,11 @@ Add to the root `justfile`:
 ```just
 # Run the dbt Getting Started example project against a local pg_trickle container
 test-dbt-getting-started:
-    ./examples/getting_started/scripts/run_example.sh
+    ./examples/dbt_getting_started/scripts/run_example.sh
 
 # Run without rebuilding the Docker image
 test-dbt-getting-started-fast:
-    SKIP_BUILD=1 ./examples/getting_started/scripts/run_example.sh
+    SKIP_BUILD=1 ./examples/dbt_getting_started/scripts/run_example.sh
 ```
 
 ---
@@ -624,7 +624,7 @@ dbt-getting-started:
     - name: Install dbt
       run: pip install dbt-postgres==1.10.*
     - name: Run getting-started example
-      run: ./examples/getting_started/scripts/run_example.sh
+      run: ./examples/dbt_getting_started/scripts/run_example.sh
 ```
 
 ---
@@ -652,7 +652,7 @@ dbt-getting-started:
 | GS-17 | `scripts/wait_for_populated.sh` | ✅ Done | Copied verbatim from integration_tests |
 | GS-18 | `justfile` | ✅ Done | `test-dbt-getting-started` + `-fast` targets |
 | GS-19 | `.github/workflows/ci.yml` | ✅ Done | `dbt-getting-started` job (push+schedule, skips PRs) |
-| NEW | `examples/getting_started/README.md` | ✅ Done | Usage guide, quickstart, project structure table |
+| NEW | `examples/dbt_getting_started/README.md` | ✅ Done | Usage guide, quickstart, project structure table |
 
 ---
 
@@ -729,4 +729,4 @@ correctly with the getting-started models.
 - [x] All four custom tests return empty result sets (no failures)
 - [x] `just test-dbt-getting-started` is documented in the justfile and works
 - [x] CI job passes on push-to-main
-- [x] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `examples/getting_started/`
+- [x] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `examples/dbt_getting_started/`

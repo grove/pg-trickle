@@ -40,7 +40,7 @@ containerised pg_trickle instance automatically.
 
 ```bash
 # From the repo root:
-./examples/getting_started/scripts/run_example.sh
+./examples/dbt_getting_started/scripts/run_example.sh
 ```
 
 This script:
@@ -53,16 +53,16 @@ This script:
 
 ```bash
 # Keep the container running after the script finishes (useful for exploration):
-./examples/getting_started/scripts/run_example.sh --keep-container
+./examples/dbt_getting_started/scripts/run_example.sh --keep-container
 
 # Skip rebuilding the Docker image (faster if already built):
-./examples/getting_started/scripts/run_example.sh --skip-build
+./examples/dbt_getting_started/scripts/run_example.sh --skip-build
 ```
 
 ## Quick start — manual (against an existing pg_trickle instance)
 
 ```bash
-cd examples/getting_started
+cd examples/dbt_getting_started
 
 # Install the pg_trickle dbt package
 dbt deps
@@ -91,7 +91,7 @@ just test-dbt-getting-started-fast   # skip image rebuild
 ## Project structure
 
 ```
-examples/getting_started/
+examples/dbt_getting_started/
 ├── dbt_project.yml       project metadata, seed post-hooks, model defaults
 ├── profiles.yml          connection config (env-var driven)
 ├── packages.yml          installs dbt-pgtrickle from GitHub

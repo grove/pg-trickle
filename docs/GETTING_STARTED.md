@@ -68,9 +68,9 @@ By the end you will have:
 > **Prefer dbt?** A runnable dbt companion project mirrors every step below.
 > Clone the repo and run:
 > ```bash
-> ./examples/getting_started/scripts/run_example.sh
+> ./examples/dbt_getting_started/scripts/run_example.sh
 > ```
-> See [examples/getting_started/](../examples/getting_started/) for full details.
+> See [examples/dbt_getting_started/](../examples/dbt_getting_started/) for full details.
 
 ## Prerequisites
 
@@ -800,4 +800,4 @@ The key takeaway: you write to base tables — **pg_trickle does the rest**. Dat
 - **[What Happens on UPDATE](tutorials/WHAT_HAPPENS_ON_UPDATE.md)** — How UPDATEs are split into D+I, group key changes, and net-effect computation
 - **[What Happens on DELETE](tutorials/WHAT_HAPPENS_ON_DELETE.md)** — Reference counting, group deletion, and INSERT+DELETE cancellation
 - **[What Happens on TRUNCATE](tutorials/WHAT_HAPPENS_ON_TRUNCATE.md)** — Why TRUNCATE bypasses triggers and how to recover
-- **[dbt Getting Started example](../examples/getting_started/)** — Everything above, expressed as dbt models and seeds with a one-command Docker runner
+- **[dbt Getting Started example](../examples/dbt_getting_started/)** — Everything above, expressed as dbt models and seeds with a one-command Docker runner
