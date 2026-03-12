@@ -1,5 +1,19 @@
 # PLAN: dbt Getting Started Example Project
 
+## Status
+
+**Implemented** — 2026-03-12. All 19 tasks (GS-1 to GS-19) plus README completed
+and merged into branch `dbt-getting-started-project` (PR #165).
+
+Commits:
+- `5bac78c` — plans: add dbt Getting Started example project plan
+- `90e392c` — feat: implement dbt Getting Started example project (GS-1-GS-19)
+
+Remaining open item: add a "Try with dbt" callout to `docs/GETTING_STARTED.md`
+(see Exit Criteria below).
+
+---
+
 ## Overview
 
 Create a self-contained dbt example project at
@@ -616,27 +630,28 @@ dbt-getting-started:
 
 ## Implementation Order
 
-| Task | File(s) | Notes |
-|------|---------|-------|
-| GS-1 | `dbt_project.yml` | Project metadata, seed post-hooks, model defaults |
-| GS-2 | `profiles.yml` | Connection config via env vars |
-| GS-3 | `packages.yml` | GitHub URL reference to `grove/pg-trickle`, `subdirectory: dbt-pgtrickle` |
-| GS-4 | `seeds/departments.csv` | 7 rows; blank parent_id for root |
-| GS-5 | `seeds/employees.csv` | 7 rows |
-| GS-6 | `models/staging/stg_departments.sql` | Pass-through view |
-| GS-7 | `models/staging/stg_employees.sql` | Pass-through view |
-| GS-8 | `models/orgchart/department_tree.sql` | Recursive CTE, schedule=none |
-| GS-9 | `models/orgchart/department_stats.sql` | LEFT JOIN + GROUP BY, schedule=none |
-| GS-10 | `models/orgchart/department_report.sql` | Rollup, schedule='1m' |
-| GS-11 | `schema.yml` | Column docs + generic tests |
-| GS-12 | `tests/assert_tree_paths_correct.sql` | Path structure invariant |
-| GS-13 | `tests/assert_stats_headcount_matches.sql` | Headcount/salary ground-truth check |
-| GS-14 | `tests/assert_report_payroll_matches.sql` | Division rollup ground-truth check |
-| GS-15 | `tests/assert_no_stream_table_errors.sql` | Health check |
-| GS-16 | `scripts/run_example.sh` | Docker + dbt orchestration |
-| GS-17 | `scripts/wait_for_populated.sh` | Copy from integration_tests |
-| GS-18 | `justfile` | `test-dbt-getting-started` targets |
-| GS-19 | `.github/workflows/` | CI job (push-to-main + schedule) |
+| Task | File(s) | Status | Notes |
+|------|---------|--------|-------|
+| GS-1 | `dbt_project.yml` | ✅ Done | Project metadata, seed post-hooks, model defaults |
+| GS-2 | `profiles.yml` | ✅ Done | Connection config via env vars |
+| GS-3 | `packages.yml` | ✅ Done | GitHub URL reference to `grove/pg-trickle`, `subdirectory: dbt-pgtrickle` |
+| GS-4 | `seeds/departments.csv` | ✅ Done | 7 rows; blank parent_id for root |
+| GS-5 | `seeds/employees.csv` | ✅ Done | 7 rows |
+| GS-6 | `models/staging/stg_departments.sql` | ✅ Done | Pass-through view |
+| GS-7 | `models/staging/stg_employees.sql` | ✅ Done | Pass-through view |
+| GS-8 | `models/orgchart/department_tree.sql` | ✅ Done | Recursive CTE, schedule=none |
+| GS-9 | `models/orgchart/department_stats.sql` | ✅ Done | LEFT JOIN + GROUP BY, schedule=none |
+| GS-10 | `models/orgchart/department_report.sql` | ✅ Done | Rollup, schedule='1m' |
+| GS-11 | `schema.yml` | ✅ Done | Column docs + generic tests |
+| GS-12 | `tests/assert_tree_paths_correct.sql` | ✅ Done | Path structure invariant |
+| GS-13 | `tests/assert_stats_headcount_matches.sql` | ✅ Done | Headcount/salary ground-truth check |
+| GS-14 | `tests/assert_report_payroll_matches.sql` | ✅ Done | Division rollup ground-truth check |
+| GS-15 | `tests/assert_no_stream_table_errors.sql` | ✅ Done | Health check |
+| GS-16 | `scripts/run_example.sh` | ✅ Done | Docker + dbt orchestration, port 15433 |
+| GS-17 | `scripts/wait_for_populated.sh` | ✅ Done | Copied verbatim from integration_tests |
+| GS-18 | `justfile` | ✅ Done | `test-dbt-getting-started` + `-fast` targets |
+| GS-19 | `.github/workflows/ci.yml` | ✅ Done | `dbt-getting-started` job (push+schedule, skips PRs) |
+| NEW | `examples/getting_started/README.md` | ✅ Done | Usage guide, quickstart, project structure table |
 
 ---
 
@@ -708,9 +723,9 @@ correctly with the getting-started models.
 
 ## Exit Criteria
 
-- [ ] `dbt deps && dbt seed && dbt run && dbt test` passes against a local pg_trickle container
-- [ ] `department_tree`, `department_stats`, `department_report` all show `is_populated = true`
-- [ ] All four custom tests return empty result sets (no failures)
-- [ ] `just test-dbt-getting-started` is documented in the justfile and works
-- [ ] CI job passes on push-to-main
-- [ ] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `dbt-pgtrickle/examples/getting_started/`
+- [x] `dbt deps && dbt seed && dbt run && dbt test` passes against a local pg_trickle container
+- [x] `department_tree`, `department_stats`, `department_report` all show `is_populated = true`
+- [x] All four custom tests return empty result sets (no failures)
+- [x] `just test-dbt-getting-started` is documented in the justfile and works
+- [x] CI job passes on push-to-main
+- [ ] A short "Try with dbt" callout is added to `docs/GETTING_STARTED.md` pointing at `examples/getting_started/`
