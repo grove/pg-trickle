@@ -75,7 +75,7 @@ async fn test_dml_between_layer_refreshes() {
         .await;
 
     // Refresh L2 — it should see L1's state (which includes 'c' but not 'd')
-    db.refresh_st("btw_l2").await;
+    db.refresh_st_with_retry("btw_l2").await;
 
     // L2 should match L1's current state (which doesn't include 'd' yet)
     // The ground truth for L2 is what L1 currently contains
@@ -84,7 +84,7 @@ async fn test_dml_between_layer_refreshes() {
 
     // Now complete the next cycle: refresh L1 (picks up 'd'), then L2
     db.refresh_st("btw_l1").await;
-    db.refresh_st("btw_l2").await;
+    db.refresh_st_with_retry("btw_l2").await;
 
     // Now everything converges with all data
     db.assert_st_matches_query("btw_l1", l1_q).await;
@@ -154,7 +154,7 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
     // Run 5 pipeline refresh cycles concurrently with the inserts
     for _ in 0..5 {
         db.refresh_st("conc_dag_l1").await;
-        db.refresh_st("conc_dag_l2").await;
+        db.refresh_st_with_retry("conc_dag_l2").await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -168,9 +168,9 @@ async fn test_concurrent_insert_during_pipeline_refresh() {
     //   Pass 2: L2 detects L1 changed (or L1 is already up-to-date and
     //           L2 was refreshed from L1 in a cycle that already had all data).
     db.refresh_st("conc_dag_l1").await;
-    db.refresh_st("conc_dag_l2").await;
+    db.refresh_st_with_retry("conc_dag_l2").await;
     db.refresh_st("conc_dag_l1").await;
-    db.refresh_st("conc_dag_l2").await;
+    db.refresh_st_with_retry("conc_dag_l2").await;
 
     // Verify full convergence
     db.assert_st_matches_query("conc_dag_l1", l1_q).await;
@@ -242,7 +242,7 @@ async fn test_rollback_between_refreshes() {
 
     // Refresh pipeline — the rolled-back insert should not appear
     db.refresh_st("rb_l1").await;
-    db.refresh_st("rb_l2").await;
+    db.refresh_st_with_retry("rb_l2").await;
 
     db.assert_st_matches_query("rb_l1", l1_q).await;
     db.assert_st_matches_query("rb_l2", l2_q).await;

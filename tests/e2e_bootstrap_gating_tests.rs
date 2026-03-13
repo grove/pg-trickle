@@ -232,12 +232,21 @@ async fn test_manual_refresh_not_blocked_by_gate() {
 async fn test_scheduler_logs_skip_when_source_gated() {
     let db = E2eDb::new_on_postgres_db().await;
 
-    // Lower scheduler cadence to speed up the test.
-    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 200")
+    // Install the extension so the launcher can discover this database
+    // and spawn a scheduler background worker for it.
+    db.execute("CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE")
+        .await;
+
+    // Lower scheduler cadence to speed up the test (matching bgworker tests).
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
     db.reload_config_and_wait().await;
+    db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
+        .await;
+    db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
+        .await;
 
     let sched_ok = db.wait_for_scheduler(Duration::from_secs(90)).await;
     assert!(sched_ok, "pg_trickle scheduler must be running");
@@ -254,6 +263,11 @@ async fn test_scheduler_logs_skip_when_source_gated() {
     )
     .await;
 
+    // Insert after ST creation so CDC captures a change and the scheduler
+    // has a reason to auto-refresh (advancing data_timestamp).
+    db.execute("INSERT INTO sched_gate_src VALUES (2, 'trigger')")
+        .await;
+
     // Wait for at least one COMPLETED scheduler refresh.
     let refreshed = db
         .wait_for_auto_refresh("sched_gate_st", Duration::from_secs(60))
@@ -268,7 +282,7 @@ async fn test_scheduler_logs_skip_when_source_gated() {
         .await;
 
     // Insert a row so the scheduler has a reason to fire (change detected).
-    db.execute("INSERT INTO sched_gate_src VALUES (2, 'world')")
+    db.execute("INSERT INTO sched_gate_src VALUES (3, 'world')")
         .await;
 
     // Wait up to 30 s for a SKIPPED record in pgt_refresh_history.
