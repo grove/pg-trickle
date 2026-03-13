@@ -58,6 +58,28 @@ scans ~100K rows instead of 10M — **100× reduction** in MERGE I/O.
 **Prior Art.** Flink's partitioned state backends; TimescaleDB hypertable
 chunk-scoped operations; Materialize's partitioned arrangements.
 
+**⚠️ Risk Analysis — Partition pruning does not flow through `__pgt_row_id`.**
+
+PostgreSQL partition pruning during MERGE activates only when the MERGE join
+predicate or a WHERE clause aligns with the partition key. In pg_trickle, the
+MERGE always joins on `__pgt_row_id` (a content hash unrelated to any user
+column). The planner has no basis to prune partitions from this join alone.
+
+Step 3 of the proposal (`WHERE partition_key BETWEEN ? AND ?`) would force
+pruning, but this predicate must be separately computed from the delta (via
+a `min/max` scan), and it must provably contain every delta row's partition
+key — otherwise correct rows are silently excluded from the MERGE. This means
+the implementation cannot simply target the partitioned parent table; it must
+either:
+- Issue one MERGE per affected child partition (partition-by-partition loop
+  in Rust), or
+- Inject a verified partition-key range predicate into the MERGE WHERE clause.
+
+Both approaches require the stream table's partition key to be a user-visible
+column derived from the defining query (not `__pgt_row_id`), which the current
+catalog does not track. The `P3` priority and `High` risk rating in the matrix
+are appropriate; this is not a quick win.
+
 ---
 
 ### A-2: Columnar Change Tracking (Column-Scoped Delta)
@@ -103,33 +125,112 @@ logic.
 
 **Proposal.** For specific operator tree shapes, bypass MERGE entirely:
 
-1. **Append-Only Stream Tables.** When the defining query references only
-   INSERT-only sources (e.g., event logs, append-only tables where CDC never
-   sees DELETE/UPDATE), skip the MERGE entirely and use a simple
-   `INSERT INTO st SELECT ... FROM delta`.
+1. **Append-Only Stream Tables.** ✅ **Recommended — do this.**
+   When the defining query references only INSERT-only sources (e.g., event
+   logs, append-only tables where CDC never sees DELETE/UPDATE), skip the
+   MERGE entirely and use a simple `INSERT INTO st SELECT ... FROM delta`.
+   This is the clear winner: removes MERGE entirely for append-only sources,
+   takes only `RowExclusiveLock` (same as a plain INSERT), and `IvmLockMode::
+   RowExclusive` already exists in the codebase. Detection strategy: expose
+   an explicit user declaration (`CREATE STREAM TABLE … APPEND ONLY`) as the
+   primary signal, with a CDC-observed heuristic fallback (no DELETE/UPDATE
+   seen yet → use fast path, fall back to MERGE on first non-insert). Low
+   risk, high payoff for event-sourced architectures.
 
-2. **Full-Replacement Window.** When the stream table has TopK semantics
-   (ORDER BY + LIMIT) with a small limit (< 10K), use
+2. **Full-Replacement Window.** ⚠️ **Not recommended — keep MERGE.**
+   When the stream table has TopK semantics (ORDER BY + LIMIT) with a small
+   limit (< 10K), use
    `TRUNCATE st; INSERT INTO st SELECT ... FROM (full_query) LIMIT N`.
-   This is faster than MERGE when the target is small and the delta can
-   recompute cheaply.
+   This is stated to be faster than MERGE when the target is small and the
+   delta can recompute cheaply.
 
-3. **Bulk COPY Path.** When the delta produces > 10K rows (high change rate
-   but below adaptive-FULL threshold), switch to:
-   ```
-   DELETE FROM st WHERE __pgt_row_id IN (SELECT __pgt_row_id FROM delta WHERE action='D');
-   COPY st FROM (SELECT ... FROM delta WHERE action='I');
-   ```
+   **Assessment:** `execute_topk_refresh` already uses MERGE correctly and
+   is not a measured bottleneck for TopK. The actual bottleneck for TopK
+   tables is the `full_query` re-scan of the base table, not the MERGE of a
+   handful of rows. The performance crossover where TRUNCATE+INSERT beats
+   MERGE only occurs at limits in the hundreds-of-thousands range — at which
+   point the query cost dwarfs everything. Meanwhile, the operational risks
+   are substantial (see Safety Analysis below). **Move to "Won't Do" unless
+   profiling demonstrates MERGE itself is the bottleneck for TopK.**
+
+3. **Bulk COPY Path.** ❌ **Not feasible as described — drop or rescope.**
+   When the delta produces > 10K rows, switch to a `COPY`-based bulk load.
    COPY is 2–5× faster than INSERT for bulk loads due to bypassing
    per-row executor overhead.
 
-**Expected Impact.** 30–70% MERGE time reduction for qualifying scenarios.
-Append-only path eliminates MERGE entirely for event-sourced architectures.
+   **Assessment:** The premise is flawed. `COPY FROM` inside pgrx via SPI
+   only reads from a file or stdin — `COPY st FROM (SELECT …)` is not valid
+   SQL. The quoted throughput advantage applies to the client-side `psql
+   \copy` or binary COPY protocol, neither of which is accessible from inside
+   the backend via SPI. The actual bulk path available via SPI is
+   `INSERT INTO st SELECT …`, which `execute_full_refresh` already does on
+   the adaptive-FULL threshold. There is no speedup to unlock here without a
+   fundamentally different data path outside SPI — a much larger investment.
+   This sub-path should be **dropped** unless re-scoped as a separate
+   low-level infrastructure feature.
 
-**Effort.** 2–3 weeks (path selection logic, template variants, benchmarks).
+**Expected Impact.** Append-only path eliminates MERGE entirely for
+event-sourced architectures; significant throughput gain for those workloads.
+The other two sub-paths have negligible or negative net impact.
+
+**Effort.** 1–2 weeks (append-only declaration, CDC heuristic, path
+selection logic, benchmarks). Scoping down from the original 2–3 weeks.
 
 **Prior Art.** Snowflake's MERGE vs INSERT OVERWRITE cost-based selection;
-DuckDB's bulk COPY path; Redshift's MERGE alternatives.
+DuckDB's bulk INSERT path; Redshift's MERGE alternatives.
+
+**Safety Analysis — Full-Replacement Window (TRUNCATE + INSERT).**
+
+The `TRUNCATE st; INSERT INTO st ...` pattern for TopK tables is
+**correct under PostgreSQL's MVCC** — external readers see the old
+snapshot until the transaction commits, so there is no "empty table"
+visibility window for concurrent sessions. The existing
+`execute_full_refresh` path in `refresh.rs` already uses this pattern
+and handles the required guard work:
+
+- Sets `SET LOCAL pg_trickle.internal_refresh = 'true'` before TRUNCATE
+  so DML-guard triggers allow the modification.
+- Disables user triggers via `DISABLE TRIGGER USER` / `ENABLE TRIGGER USER`
+  around the TRUNCATE + INSERT window.
+
+However, the following concerns must be addressed before implementing
+this path:
+
+1. **`ACCESS EXCLUSIVE` lock starvation.** `TRUNCATE` acquires
+   `ACCESS EXCLUSIVE` on the stream table, which blocks *all* concurrent
+   readers (`SELECT`) for the entire duration including the INSERT phase.
+   By contrast, MERGE acquires only row-level locks and allows reads to
+   proceed against the pre-MERGE snapshot. For TopK tables refreshed
+   sub-second this is a significant regression. **Mitigation:** gate
+   the TRUNCATE path on a minimum `refresh_interval` (e.g., ≥ 5 s), or
+   expose a GUC `pg_trickle.topk_bypass_mode = 'merge' | 'truncate'`
+   so operators can opt in explicitly.
+
+2. **Change-buffer LSN reset required.** After a TRUNCATE+INSERT full
+   replacement, buffered change-buffer entries for the source table must
+   not be applied in the next differential refresh — that would
+   double-count them. `execute_full_refresh` avoids this because the
+   scheduler resets the change-frontier LSN after a full refresh.
+   The TRUNCATE path for TopK must trigger the same LSN reset; omitting
+   it would silently corrupt the stream table.
+
+3. **No-op guard missing.** TRUNCATE+INSERT always rewrites the table and
+   holds `ACCESS EXCLUSIVE` even when the TopK result is unchanged.
+   MERGE's `WHEN MATCHED AND (IS DISTINCT FROM ...)` clause naturally
+   skips unchanged rows. The implementation should check whether the
+   source delta contains any changes before issuing the TRUNCATE, or
+   keep MERGE as the default and only fall back to TRUNCATE+INSERT when
+   the delta exceeds a size threshold where MERGE wins.
+
+4. **`__pgt_row_id` stability.** TRUNCATE+INSERT regenerates all row IDs.
+   Since `row_id_expr_for_query` produces a deterministic content hash,
+   IDs are stable across refreshes for unchanged rows. No correctness
+   issue, but this should be verified by tests that assert row-ID
+   continuity across a TRUNCATE-path refresh cycle.
+
+5. **No RETURNING from TRUNCATE.** TRUNCATE has no `RETURNING` clause,
+   so per-row counts for `pgtrickle_refresh` NOTIFY payloads and
+   monitoring metrics must be derived from the INSERT's row count only.
 
 ---
 
@@ -185,7 +286,7 @@ aggregates:
 | COUNT     | `old_count + Δcount` | Single counter |
 | SUM       | `old_sum + Δsum` | Single accumulator |
 | AVG       | `(old_sum + Δsum) / (old_count + Δcount)` | Sum + count |
-| MIN/MAX   | If deleted value ≠ current min/max → no rescan | Current min/max + count-at-min |
+| MIN/MAX   | If deleted value = current min/max → rescan; otherwise → O(1) update | Current min/max + count-at-min |
 | STDDEV    | Online Welford update | Mean + M2 + count |
 
 Implementation:
@@ -216,6 +317,22 @@ maintenance; Feldera's in-memory aggregate state; Noria's partial state.
 **Risk.** Auxiliary columns increase storage. Need migration story for
 existing stream tables. Floating-point aggregates may accumulate rounding
 errors over many cycles (periodic recomputation to reset).
+
+**⚠️ Risk Analysis — MIN/MAX rule stated backwards; correctness bug.**
+
+The table above originally stated: *"If deleted value ≠ current min/max → no
+rescan"*. This is the inverse of the correct condition and has been corrected
+above. The correct rule is:
+- Deleted value **equals** current min/max → **must rescan** the group
+  (the aggregate value may change).
+- Deleted value **does not equal** current min/max → safe to skip rescan
+  (the aggregate is unaffected).
+
+For `INSERT` changes the same logic applies in reverse for MAX. Getting
+this wrong would silently produce stale aggregate values as source rows
+are deleted — the most common OLTP pattern. Any implementation must have
+explicit property-based tests covering the boundary case (deleting the
+exact current min or max value).
 
 ---
 
@@ -305,6 +422,29 @@ correctness proofs for simultaneous changes).
 
 **Prior Art.** DBSP's simultaneous delta processing; DBToaster's factorized
 evaluation; Materialize's shared arrangements.
+
+**⚠️ Risk Analysis — Cross-delta deduplication via `DISTINCT ON` is a correctness bug.**
+
+Step 3 proposes: *"Add a final `DISTINCT ON (__pgt_row_id)` … when the
+optimizer detects diamond-shaped delta flow."*
+
+This is incorrect. When both ΔA and ΔB produce corrections to the same
+output row (e.g., both sides of a join changed in the same cycle), those
+corrections carry independent multiplicities (weights) in the DBSP Z-set
+algebra: the correct result requires summing them, not deduplicating. A
+`DISTINCT ON (__pgt_row_id)` arbitrarily keeps one correction and discards
+the other, silently producing wrong data for any query with a diamond delta
+flow — precisely the scenario this feature targets.
+
+The correct approach is algebraic combination: group by `__pgt_row_id` and
+aggregate the weight column (`SUM(weight)`), removing rows where the net
+weight is zero. This is how DBSP handles simultaneous deltas.
+
+Given that the merged-delta approach requires a correct implementation of
+weight aggregation to avoid silent data corruption, the risk rating for B-3
+should be **Very High** and it should not move out of Wave 4 until formal
+correctness proofs or property-based tests exist for simultaneous multi-source
+change scenarios.
 
 ---
 
@@ -404,6 +544,29 @@ Flink's idle source detection.
 **Risk.** Lazy refresh introduces latency on first read after changes. Need a
 `pg_trickle.lazy_refresh_timeout` GUC to bound maximum read latency.
 
+**⚠️ Risk Analysis — `pg_stat_user_tables` signal is polluted by internal refreshes.**
+
+The proposal tracks `seq_scan` / `idx_scan` from `pg_stat_user_tables` to
+determine how frequently a stream table is queried. However, pg_trickle's own
+refresh path reads the stream table during MERGE (the MERGE engine scans the
+target to match on `__pgt_row_id`) and during TopK refresh. These internal
+scans increment the same `seq_scan` / `idx_scan` counters. A stream table
+that has zero user reads but is refreshed every 10 seconds would accumulate
+6 seq_scans per minute — classifying it as **Warm** even though no application
+is reading it.
+
+Consequences: Cold/Frozen tier assignment may never trigger for actively
+refreshed STs, defeating the primary goal of reducing scheduler CPU.
+
+Mitigation options:
+- Track user reads via a separate mechanism (e.g., a custom `ExecutorStart`
+  / `ExecutorEnd` hook that filters for queries originating outside the
+  pg_trickle background worker).
+- Alternatively, compare `pg_stat_user_tables` deltas before and after each
+  refresh cycle: increment not caused by the refresh = user read.
+- Or expose explicit user-controlled tier setting only (no auto-classification),
+  which is simpler, safer, and already included in the proposal as a fallback.
+
 ---
 
 ### C-2: Incremental DAG Rebuild
@@ -430,6 +593,20 @@ O(1) for single-ST DDL changes. Reduces scheduler latency spike from
 
 **Prior Art.** Flink's incremental job graph updates; Spark's adaptive query
 re-optimization.
+
+**⚠️ Risk Analysis — Race condition when two DDL changes arrive before the scheduler ticks.**
+
+The proposal stores the affected `pgt_id` alongside the signal counter in
+shared memory. If two DDL changes occur in the gap between scheduler ticks,
+the second write of `pgt_id` overwrites the first. The scheduler then
+rebuilds only the second ST's subgraph, leaving the first ST with stale DAG
+state — silently, with no error.
+
+The fix requires storing a **set** of affected pgt_ids (e.g., a bounded
+ring buffer in shared memory), not a single scalar. If the ring overflows
+(more DDL changes than buffer capacity between any two scheduler ticks), fall
+back to a full rebuild. This is the safe default and should be the starting
+implementation; incremental rebuild is only an optimization on top.
 
 ---
 
@@ -525,6 +702,34 @@ Materialize's compaction of arrangements; HBase major/minor compaction.
 active refresh cycle (use advisory locks). Compaction on UNLOGGED tables is
 simpler but loses crash safety for intermediate states.
 
+**⚠️ Risk Analysis — `ctid` is not a stable row identifier; the proposed SQL will corrupt data.**
+
+The DELETE in step 3 uses:
+```sql
+DELETE FROM changes_<oid> WHERE ctid NOT IN (
+  SELECT ctid FROM ranked WHERE rn = 1
+)
+```
+`ctid` is a physical tuple pointer that changes whenever a row is
+HOT-updated. If autovacuum or a concurrent session causes any row in the
+buffer to be reorganized between the CTE evaluation and the DELETE, the
+`ctid` values in `ranked` may no longer point to the same rows. The DELETE
+would then silently remove the **wrong** rows — either keeping stale
+entries or deleting the freshest entries.
+
+The stable identifier in the change buffer is the `seq` column (the
+sequence-generated primary key). The DELETE must be rewritten as:
+```sql
+DELETE FROM changes_<oid> WHERE seq NOT IN (
+  SELECT seq FROM ranked WHERE rn = 1
+)
+```
+or equivalently using a CTE with `RETURNING` to atomically delete and
+re-insert, or using `DELETE … USING` with a joined subquery on `seq`.
+
+This is a **data-correctness bug** in the proposed SQL that must be
+fixed before implementation begins.
+
 ---
 
 ## Theme D — Reduce CDC Overhead
@@ -562,6 +767,29 @@ UNLOGGED tables; Oracle's NOLOGGING mode for materialized view logs.
 this is acceptable. Users who need crash-safe change buffers can set
 `pg_trickle.unlogged_buffers = false`.
 
+**⚠️ Risk Analysis — Standby promotion creates a stale-data window; UNLOGGED migration requires care.**
+
+**Standby promotion.** UNLOGGED tables are never streamed to physical
+standbys (PostgreSQL zeroes them on standby startup and crash recovery).
+On failover/promotion, the new primary has empty change buffers and will
+correctly trigger FULL refresh on the next scheduler tick — this is the
+same behaviour as after a crash on the primary, and is acceptable.
+
+However, operators using streaming replication for read scaling (queries
+against the standby) will see the stream tables on the standby as
+potentially stale if the primary's change buffers haven't been flushed
+recently. This is an existing limitation but becomes more visible once the
+buffers are UNLOGGED (previously data loss was crash-only; now it also
+happens on any standby restart). The documentation should call this out
+explicitly.
+
+**Migration for existing installations.** `ALTER TABLE ... SET UNLOGGED`
+transparently rewrites the table and acquires `ACCESS EXCLUSIVE`. For
+existing change buffer tables, the upgrade migration script must issue
+this ALTER per buffer table. During the ALTER window, CDC triggers on
+the source table will block — the migration must be scripted to minimize
+this window (e.g., run during low-traffic periods or per-table in batches).
+
 ---
 
 ### D-2: Async CDC via Logical Decoding Output Plugin
@@ -595,6 +823,27 @@ Debezium's custom output plugins; pg_logical's direct decoding.
 **Risk.** High complexity. C code in PostgreSQL output plugin requires careful
 memory management. Must handle transactions that span multiple WAL segments.
 Consider as a v1.0+ feature.
+
+**⚠️ Risk Analysis — SPI writes inside logical decoding `change` callbacks are not supported.**
+
+The proposal states: *"flush in batches … using `SPI_exec` within the plugin"*.
+Logical decoding output plugins run in a special decoding context where SPI
+is only accessible during the `commit` callback, and even then requires
+explicit setup (`SPI_connect` in the right memory context). Calling
+`SPI_exec` inside the `change` callback (where individual row changes are
+delivered) is not supported and will either crash the backend or produce
+corrupted data due to memory context violations.
+
+The correct architecture requires buffering decoded rows in-memory within
+the output plugin (using the plugin's `context` memory context), then
+flushing to the change buffer table via SPI only in the `commit` callback
+after the full transaction is decoded. This means:
+- In-memory buffer must handle arbitrarily large transactions without OOM.
+- The commit callback must tolerate SPI failures (e.g., if the target
+  table was concurrently dropped) without crashing the WAL sender process.
+
+This substantially increases complexity beyond the stated 6–8 week estimate.
+The `P4` priority is appropriate; treat as a research spike before committing.
 
 ---
 
@@ -634,6 +883,28 @@ operations. Larger gains for wide tables.
 **Prior Art.** pgaudit's minimal-overhead logging; Debezium's batched
 snapshot mode.
 
+**⚠️ Risk Analysis — Deferred hashing breaks the change buffer schema and differential refresh path.**
+
+Point 1's "bulk COPY path" suffix has the same SPI infeasibility as A-3c
+(`COPY FROM` cannot read from a subquery via SPI — see A-3 analysis).
+The set-returning INSERT (`INSERT INTO changes … SELECT … FROM new_table`)
+is already how current statement-level triggers work, so this is not a
+new optimization.
+
+More significantly, point 2 (deferred hashing) would be a **breaking schema
+change**. The change buffer currently stores `__pgt_row_id` (a pre-computed
+content hash) as the primary join key used by MERGE in differential refresh.
+Removing it from the buffer requires:
+- Altering every existing `changes_<oid>` table to drop the column.
+- Rewriting the differential refresh delta-scan CTE to recompute the hash
+  from raw column values at query time.
+- Invalidating the C-4 compaction proposal (which partitions by `__pgt_row_id`).
+- The 2–3 week estimate does not account for any of this.
+
+The safe sub-path here is point 3 (adaptive trigger complexity for narrow
+tables) only — it changes the trigger function body without altering the
+buffer schema.
+
 ---
 
 ### D-4: Shared Change Buffers (Multi-ST Deduplication)
@@ -665,6 +936,26 @@ column superset management).
 **Prior Art.** Kafka's shared topics with consumer groups;
 Materialize's shared arrangements; Flink's shared source state.
 
+**⚠️ Risk Analysis — Column superset schema requires ALTER TABLE when STs are added or removed.**
+
+The shared buffer stores the union of columns needed by all dependent STs.
+When a new ST is created that needs a column not yet in the superset, the
+buffer table must be altered (`ALTER TABLE … ADD COLUMN`), which requires
+`ACCESS EXCLUSIVE` on the change buffer table and will briefly block CDC
+trigger insertions into it.
+
+Furthermore, a reference-counting mechanism per column is needed: a column
+can only be dropped from the superset when no remaining ST depends on it.
+Adding/dropping STs must atomically update both the column reference counts
+and the trigger function body. This is not mentioned in the proposal but is
+a necessary part of the implementation.
+
+For deployments that frequently CREATE/DROP stream tables referencing the
+same source, this causes repeated ALTER TABLE cycles on a hot, actively-
+written table. Recommend gating this feature on a static-superset mode
+(columns fixed at first ST creation; never dropped) for the initial
+implementation, with dynamic column management as a follow-on.
+
 ---
 
 ## Prioritization Matrix
@@ -672,7 +963,9 @@ Materialize's shared arrangements; Flink's shared source state.
 | ID | Feature | Impact | Effort | Risk | Priority |
 |----|---------|--------|--------|------|----------|
 | D-1 | UNLOGGED Change Buffers | Medium | 1–2 wk | Low | **P0** |
-| A-3 | MERGE Bypass (INSERT OVERWRITE) | High | 2–3 wk | Low | **P0** |
+| A-3a | MERGE Bypass — Append-Only INSERT | High | 1–2 wk | Low | **P0** |
+| A-3b | MERGE Bypass — TopK TRUNCATE | Low | 2–3 wk | High | **Won't Do** |
+| A-3c | MERGE Bypass — Bulk COPY | Low | 4–6 wk | High | **Won't Do** |
 | B-2 | Delta Predicate Pushdown | High | 2–3 wk | Low | **P1** |
 | B-4 | Cost-Based Refresh Strategy | Medium | 2–3 wk | Low | **P1** |
 | A-2 | Columnar Change Tracking | High | 3–4 wk | Medium | **P1** |
@@ -681,18 +974,22 @@ Materialize's shared arrangements; Flink's shared source state.
 | A-4 | Index-Aware MERGE Planning | Medium | 1–2 wk | Low | **P2** |
 | C-1 | Tiered Refresh Scheduling | High | 3–4 wk | Medium | **P2** |
 | B-1 | Incremental Aggregate Maintenance | Very High | 4–6 wk | High | **P2** |
-| A-1 | Partitioned Stream Tables | Very High | 3–5 wk | High | **P3** |
-| C-2 | Incremental DAG Rebuild | Medium | 2–3 wk | Low | **P3** |
+| A-1 | Partitioned Stream Tables | Very High | 3–5 wk | **Very High** | **P3** |
+| C-2 | Incremental DAG Rebuild | Medium | 2–3 wk | **Medium** | **P3** |
 | C-3 | Multi-DB Scheduler Isolation | Medium | 2–3 wk | Low | **P3** |
-| B-3 | Multi-Table Delta Batching | High | 4–6 wk | High | **P3** |
-| D-2 | Async CDC Output Plugin | High | 6–8 wk | High | **P4** |
-| D-3 | Write-Batched CDC Triggers | Medium | 2–3 wk | Low | **P3** |
+| B-3 | Multi-Table Delta Batching | High | 4–6 wk | **Very High** | **P3** |
+| D-2 | Async CDC Output Plugin | High | 6–8 wk | **Very High** | **P4** |
+| D-3 | Write-Batched CDC Triggers | **Low** | 2–3 wk | **Medium** | **P3** |
 
 ### Recommended Implementation Order
 
 **Wave 1 (Quick Wins — v0.5.0):**
 - D-1: UNLOGGED Change Buffers ← Already planned (O-3 in TPC-H plan)
-- A-3: MERGE Bypass for append-only and TopK scenarios
+- A-3a: MERGE Bypass — Append-Only INSERT path only (1–2 wk, low risk)
+  - Expose `APPEND ONLY` declaration on `CREATE STREAM TABLE`
+  - CDC heuristic fallback: use fast path until first DELETE/UPDATE seen
+  - **Not** the TopK TRUNCATE sub-path (not worth doing — see A-3 analysis)
+  - **Not** the Bulk COPY sub-path (infeasible via SPI — see A-3 analysis)
 - A-4: Index-Aware MERGE Planning
 
 **Wave 2 (Core Optimizations — v0.6.0):**
