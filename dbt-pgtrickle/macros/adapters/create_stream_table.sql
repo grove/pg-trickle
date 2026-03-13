@@ -25,7 +25,7 @@
     SELECT pgtrickle.create_stream_table(
       {{ dbt.string_literal(name) }},
       $pgtrickle${{ query }}$pgtrickle$,
-      {% if schedule is none %}NULL{% else %}{{ dbt.string_literal(schedule) }}{% endif %},
+      {% if schedule is none %}'calculated'{% else %}{{ dbt.string_literal(schedule) }}{% endif %},
       {{ dbt.string_literal(refresh_mode) }},
       {{ initialize }},
       NULL,
