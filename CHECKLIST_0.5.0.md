@@ -63,7 +63,7 @@ All items are ≤ 2 h each and independent — fill gaps between the larger phas
 - [x] **ERG-E** — `pgtrickle.quick_health` view
   (`total_stream_tables`, `error_tables`, `stale_tables`, `scheduler_running`, `status`)
 - [x] **COR-2** — `create_stream_table_if_not_exists()` convenience wrapper
-- [x] **NAT-CALL** — `CREATE PROCEDURE` wrappers enabling `CALL pgtrickle.create_stream_table(…)` syntax
+- [ ] ~~**NAT-CALL**~~ — Deferred: PostgreSQL does not allow procedures and functions with the same name and argument types
 
 ---
 
@@ -72,7 +72,7 @@ All items are ≤ 2 h each and independent — fill gaps between the larger phas
 Scoped to the append-only fast path only. A-4, B-2, and C-4 are deferred to
 v0.6.0 where they fit better alongside the Wave 2 optimizations.
 
-- [ ] **A-3a** — Append-Only INSERT path (MERGE bypass)
+- [x] **A-3a** — Append-Only INSERT path (MERGE bypass)
   - `APPEND ONLY` declaration on `CREATE STREAM TABLE`
   - CDC heuristic fallback: use fast-path until first DELETE/UPDATE seen, then revert to MERGE
   - Catalog: `is_append_only BOOLEAN` column + upgrade SQL

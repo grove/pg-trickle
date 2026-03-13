@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     function_hashes TEXT,
     requested_cdc_mode TEXT
                      CHECK (requested_cdc_mode IN ('auto', 'trigger', 'wal')),
+    is_append_only  BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -420,94 +421,6 @@ SELECT
 "#,
     name = "pg_trickle_quick_health_view",
     requires = [parse_duration_seconds],
-);
-
-// ── CALL procedure wrappers (NAT-CALL) ────────────────────────────────
-
-extension_sql!(
-    r#"
--- NAT-CALL: Procedure wrappers enabling CALL syntax for the main API.
--- PostgreSQL resolves CALL to procedures and SELECT to functions,
--- so both syntaxes work without conflict.
-
-CREATE PROCEDURE pgtrickle.create_stream_table(
-    name          text,
-    query         text,
-    schedule      text DEFAULT 'calculated',
-    refresh_mode  text DEFAULT 'AUTO',
-    initialize    bool DEFAULT true,
-    diamond_consistency text DEFAULT NULL,
-    diamond_schedule_policy text DEFAULT NULL,
-    cdc_mode      text DEFAULT NULL
-)
-LANGUAGE sql
-AS $$
-    SELECT pgtrickle.create_stream_table(
-        name, query, schedule, refresh_mode, initialize,
-        diamond_consistency, diamond_schedule_policy, cdc_mode
-    );
-$$;
-
-CREATE PROCEDURE pgtrickle.create_stream_table_if_not_exists(
-    name          text,
-    query         text,
-    schedule      text DEFAULT 'calculated',
-    refresh_mode  text DEFAULT 'AUTO',
-    initialize    bool DEFAULT true,
-    diamond_consistency text DEFAULT NULL,
-    diamond_schedule_policy text DEFAULT NULL,
-    cdc_mode      text DEFAULT NULL
-)
-LANGUAGE sql
-AS $$
-    SELECT pgtrickle.create_stream_table_if_not_exists(
-        name, query, schedule, refresh_mode, initialize,
-        diamond_consistency, diamond_schedule_policy, cdc_mode
-    );
-$$;
-
-CREATE PROCEDURE pgtrickle.drop_stream_table(
-    name text
-)
-LANGUAGE sql
-AS $$
-    SELECT pgtrickle.drop_stream_table(name);
-$$;
-
-CREATE PROCEDURE pgtrickle.refresh_stream_table(
-    name text
-)
-LANGUAGE sql
-AS $$
-    SELECT pgtrickle.refresh_stream_table(name);
-$$;
-
-CREATE PROCEDURE pgtrickle.alter_stream_table(
-    name                    text,
-    query                   text DEFAULT NULL,
-    schedule                text DEFAULT NULL,
-    refresh_mode            text DEFAULT NULL,
-    status                  text DEFAULT NULL,
-    diamond_consistency     text DEFAULT NULL,
-    diamond_schedule_policy text DEFAULT NULL,
-    cdc_mode                text DEFAULT NULL
-)
-LANGUAGE sql
-AS $$
-    SELECT pgtrickle.alter_stream_table(
-        name, query, schedule, refresh_mode, status,
-        diamond_consistency, diamond_schedule_policy, cdc_mode
-    );
-$$;
-"#,
-    name = "pg_trickle_call_procedures",
-    requires = [
-        create_stream_table,
-        create_stream_table_if_not_exists,
-        drop_stream_table,
-        refresh_stream_table,
-        alter_stream_table,
-    ],
 );
 
 // ── Launcher notification (must be last) ──────────────────────────────
