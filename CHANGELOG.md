@@ -50,7 +50,6 @@ read time via RLS policies on the stream table itself.
   triggering reinit on downstream stream tables.
 - **R6: RLS tutorial.** New `docs/tutorials/ROW_LEVEL_SECURITY.md` showing
   per-tenant RLS policies on stream tables with step-by-step examples.
-
 ---
 
 ## [0.4.0] — 2026-03-12
