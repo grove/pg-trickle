@@ -266,9 +266,15 @@ pub fn setup_ivm_triggers(
     };
 
     let before_fn = &names.before_fn;
+    // R4: All IVM trigger functions are SECURITY DEFINER so the delta
+    // query always sees all rows regardless of the DML-issuing user's
+    // RLS policies. SET search_path prevents search_path hijacking.
     let create_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {before_fn}()
-         RETURNS trigger LANGUAGE plpgsql AS $$
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER
+         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+         AS $$
          BEGIN
              -- Lock stream table for IVM ({lock_mode:?} mode).
              {lock_body}
@@ -322,7 +328,10 @@ pub fn setup_ivm_triggers(
     // AFTER INSERT: only NEW table
     let create_after_ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql AS $$
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER
+         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+         AS $$
          BEGIN
              CREATE TEMP TABLE __pgt_newtable_{oid_u32} ON COMMIT DROP AS
                  SELECT * FROM __pgt_newtable;
@@ -356,7 +365,10 @@ pub fn setup_ivm_triggers(
     // AFTER UPDATE: both OLD and NEW tables
     let create_after_upd_fn = format!(
         "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql AS $$
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER
+         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+         AS $$
          BEGIN
              CREATE TEMP TABLE __pgt_newtable_{oid_u32} ON COMMIT DROP AS
                  SELECT * FROM __pgt_newtable;
@@ -393,7 +405,10 @@ pub fn setup_ivm_triggers(
     // AFTER DELETE: only OLD table
     let create_after_del_fn = format!(
         "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql AS $$
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER
+         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+         AS $$
          BEGIN
              CREATE TEMP TABLE __pgt_oldtable_{oid_u32} ON COMMIT DROP AS
                  SELECT * FROM __pgt_oldtable;
@@ -427,7 +442,10 @@ pub fn setup_ivm_triggers(
     // AFTER TRUNCATE: no transition tables, full refresh
     let create_after_trunc_fn = format!(
         "CREATE OR REPLACE FUNCTION {fn}()
-         RETURNS trigger LANGUAGE plpgsql AS $$
+         RETURNS trigger LANGUAGE plpgsql
+         SECURITY DEFINER
+         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+         AS $$
          BEGIN
              PERFORM pgtrickle.pgt_ivm_handle_truncate({pgt_id});
              RETURN NULL;

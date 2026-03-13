@@ -33,6 +33,7 @@ troubleshooting. Use the table of contents below to jump to a specific topic.
 - [Performance & Tuning](#performance--tuning) — Scheduler tuning, min schedule risks, disk space, adaptive fallback
 - [Interoperability](#interoperability) — Views, replication, connection poolers, triggers
 - [dbt Integration](#dbt-integration) — Materialization, commands, freshness checks
+- [Row-Level Security (RLS)](#row-level-security-rls) — Source vs stream table policies, SECURITY DEFINER triggers
 - [Deployment & Operations](#deployment--operations) — Workers, upgrades, replicas, Kubernetes
 - [Monitoring & Alerting](#monitoring--alerting) — Views, NOTIFY alerts, failure handling
 - [Configuration Reference](#configuration-reference) — All GUC parameters
@@ -1912,6 +1913,60 @@ dbt-pgtrickle is a pure Jinja SQL macro package that works with:
 - **dbt-postgres** adapter (required for PostgreSQL connection)
 
 There are no Python dependencies beyond dbt-core and dbt-postgres. The package is tested against dbt 1.7.x and 1.8.x in CI.
+
+---
+
+## Row-Level Security (RLS)
+
+### Does RLS on source tables affect stream table content?
+
+**No.** Stream tables always materialize the **full, unfiltered result set**,
+regardless of any RLS policies on source tables. This matches the behavior of
+PostgreSQL's built-in `REFRESH MATERIALIZED VIEW`.
+
+The scheduled refresh runs as a superuser background worker. Manual calls to
+`refresh_stream_table()` and IMMEDIATE-mode IVM triggers also bypass RLS
+internally (`SET LOCAL row_security = off` / `SECURITY DEFINER` trigger
+functions), ensuring the stream table content is always complete and
+deterministic.
+
+### Can I use RLS on a stream table to filter reads per role?
+
+**Yes.** Stream tables are regular PostgreSQL tables, so `ALTER TABLE …
+ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` work exactly as expected.
+This is the **recommended pattern** for multi-tenant filtering:
+
+```sql
+ALTER TABLE pgtrickle.order_totals ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON pgtrickle.order_totals
+    USING (tenant_id = current_setting('app.tenant_id')::INT);
+```
+
+One stream table serves all tenants. Per-tenant filtering happens at query
+time with zero storage duplication.
+
+### What happens when I ENABLE or DISABLE RLS on a source table?
+
+pg_trickle's DDL event trigger detects `ALTER TABLE … ENABLE ROW LEVEL
+SECURITY`, `DISABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY`, and
+`NO FORCE ROW LEVEL SECURITY` on source tables and marks all dependent
+stream tables for reinitialisation. The same applies to `CREATE POLICY`,
+`ALTER POLICY`, and `DROP POLICY`.
+
+### Why are IVM trigger functions SECURITY DEFINER?
+
+In IMMEDIATE mode, the IVM trigger fires in the DML-issuing user's context.
+If that user has restricted RLS visibility, the delta query could see only a
+subset of the base table rows, producing a corrupt stream table. Making the
+trigger function `SECURITY DEFINER` (owned by the extension installer, typically
+a superuser) ensures the delta query always has full visibility. The DML itself
+is still subject to the user's own RLS policies — only the stream table
+maintenance runs with elevated privileges.
+
+The trigger functions also set `search_path = pg_catalog, pgtrickle,
+pgtrickle_changes` to prevent search_path hijacking — a security best practice
+for all `SECURITY DEFINER` functions.
 
 ---
 

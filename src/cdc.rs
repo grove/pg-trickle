@@ -383,6 +383,17 @@ pub fn create_change_buffer_table(
         PgTrickleError::SpiError(format!("Failed to create change buffer table: {}", e))
     })?;
 
+    // R2: Explicitly disable RLS on change buffer tables so CDC trigger
+    // inserts always succeed, regardless of any schema-level RLS settings.
+    let disable_rls_sql = format!(
+        "ALTER TABLE {schema}.changes_{oid} DISABLE ROW LEVEL SECURITY",
+        schema = change_schema,
+        oid = source_oid.to_u32(),
+    );
+    Spi::run(&disable_rls_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!("Failed to disable RLS on change buffer: {}", e))
+    })?;
+
     // For partitioned tables, create a default partition to accept any LSN
     // values until the first refresh cycle creates a range partition.
     if use_partitioning {

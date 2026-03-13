@@ -60,6 +60,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Logical Replication of Stream Tables](#logical-replication-of-stream-tables)
   - [Known Delta Computation Limitations](#known-delta-computation-limitations)
   - [What Is NOT Allowed](#what-is-not-allowed)
+  - [Row-Level Security (RLS)](#row-level-security-rls)
 - [Views](#views)
   - [pgtrickle.stream\_tables\_info](#pgtricklestream_tables_info)
   - [pgtrickle.pg\_stat\_stream\_tables](#pgtricklepg_stat_stream_tables)
@@ -1845,6 +1846,49 @@ SELECT pgtrickle.create_stream_table(
 | `TRUNCATE` on a stream table | ❌ Not supported | Use `pgtrickle.refresh_stream_table()` to reset data. |
 
 > **Tip:** The `__pgt_row_id` column is visible but should be ignored by consuming queries — it is an implementation detail used for delta `MERGE` operations.
+
+### Row-Level Security (RLS)
+
+Stream tables follow the same RLS model as PostgreSQL's built-in
+`MATERIALIZED VIEW`: the **refresh always materializes the full, unfiltered
+result set**. Access control is applied at read time via RLS policies on the
+stream table itself.
+
+#### How It Works
+
+| Area | Behavior |
+|------|----------|
+| **RLS on source tables** | Ignored during refresh. The scheduler runs as superuser; manual `refresh_stream_table()` and IMMEDIATE-mode triggers bypass RLS via `SET LOCAL row_security = off` / `SECURITY DEFINER`. The stream table always contains all rows. |
+| **RLS on the stream table** | Works naturally. Enable RLS and create policies on the stream table to filter reads per role — exactly as you would on any regular table. |
+| **RLS policy changes on source tables** | `CREATE POLICY`, `ALTER POLICY`, and `DROP POLICY` on a source table are detected by pg_trickle's DDL event trigger and mark the stream table for reinitialisation. |
+| **ENABLE/DISABLE RLS on source tables** | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and `DISABLE ROW LEVEL SECURITY` on a source table mark the stream table for reinitialisation. |
+| **Change buffer tables** | RLS is explicitly disabled on all change buffer tables (`pgtrickle_changes.changes_*`) so CDC trigger inserts always succeed regardless of schema-level RLS settings. |
+| **IMMEDIATE mode** | IVM trigger functions are `SECURITY DEFINER` with a locked `search_path`, so the delta query always sees all rows. The DML issued by the calling user is still filtered by that user's RLS policies on the source table — only the stream table maintenance runs with elevated privileges. |
+
+#### Recommended Pattern: RLS on the Stream Table
+
+```sql
+-- 1. Create a stream table (materializes all rows)
+SELECT pgtrickle.create_stream_table(
+    name  => 'order_totals',
+    query => 'SELECT tenant_id, SUM(amount) AS total FROM orders GROUP BY tenant_id'
+);
+
+-- 2. Enable RLS on the stream table
+ALTER TABLE pgtrickle.order_totals ENABLE ROW LEVEL SECURITY;
+
+-- 3. Create per-tenant policies
+CREATE POLICY tenant_isolation ON pgtrickle.order_totals
+    USING (tenant_id = current_setting('app.tenant_id')::INT);
+
+-- 4. Each role sees only its own rows
+SET app.tenant_id = '42';
+SELECT * FROM pgtrickle.order_totals;  -- only tenant 42's rows
+```
+
+> **Note:** This is identical to how you would apply RLS to a regular
+> `MATERIALIZED VIEW`. One stream table serves all tenants; per-tenant
+> filtering happens at query time with zero storage duplication.
 
 ---
 
