@@ -189,7 +189,7 @@ async fn test_fanout_then_converge() {
     db.refresh_st("foc_sum").await;
     db.refresh_st("foc_cnt").await;
     db.refresh_st("foc_max").await;
-    db.refresh_st("foc_merged").await;
+    db.refresh_st_with_retry("foc_merged").await;
     db.assert_st_matches_query("foc_merged", l2_q).await;
 
     // DELETE
@@ -198,7 +198,7 @@ async fn test_fanout_then_converge() {
     db.refresh_st("foc_sum").await;
     db.refresh_st("foc_cnt").await;
     db.refresh_st("foc_max").await;
-    db.refresh_st("foc_merged").await;
+    db.refresh_st_with_retry("foc_merged").await;
     db.assert_st_matches_query("foc_merged", l2_q).await;
 }
 
@@ -301,12 +301,14 @@ async fn test_deep_linear_5_layers() {
     db.execute("INSERT INTO d5_src (grp, val) VALUES ('d', 100), ('d', 200)")
         .await;
 
-    // Refresh in topological order
+    // Refresh in topological order.
+    // Use refresh_st_with_retry for cascade layers: the scheduler may start
+    // a concurrent refresh when it sees upstream data_timestamp advance.
     db.refresh_st("d5_l1").await;
-    db.refresh_st("d5_l2").await;
-    db.refresh_st("d5_l3").await;
-    db.refresh_st("d5_l4").await;
-    db.refresh_st("d5_l5").await;
+    db.refresh_st_with_retry("d5_l2").await;
+    db.refresh_st_with_retry("d5_l3").await;
+    db.refresh_st_with_retry("d5_l4").await;
+    db.refresh_st_with_retry("d5_l5").await;
 
     db.assert_st_matches_query("d5_l3", l3_q).await;
     db.assert_st_matches_query("d5_l5", l5_q).await;
@@ -314,10 +316,10 @@ async fn test_deep_linear_5_layers() {
     // Mutate: DELETE — remove group 'd' completely
     db.execute("DELETE FROM d5_src WHERE grp = 'd'").await;
     db.refresh_st("d5_l1").await;
-    db.refresh_st("d5_l2").await;
-    db.refresh_st("d5_l3").await;
-    db.refresh_st("d5_l4").await;
-    db.refresh_st("d5_l5").await;
+    db.refresh_st_with_retry("d5_l2").await;
+    db.refresh_st_with_retry("d5_l3").await;
+    db.refresh_st_with_retry("d5_l4").await;
+    db.refresh_st_with_retry("d5_l5").await;
     db.assert_st_matches_query("d5_l3", l3_q).await;
     db.assert_st_matches_query("d5_l5", l5_q).await;
 }
@@ -401,8 +403,8 @@ async fn test_multi_source_diamond() {
     db.execute("INSERT INTO msd_left (key, lval) VALUES (2, 'b_extra')")
         .await;
     db.refresh_st("msd_l1").await;
-    db.refresh_st("msd_l2a").await;
-    db.refresh_st("msd_l2b").await;
+    db.refresh_st_with_retry("msd_l2a").await;
+    db.refresh_st_with_retry("msd_l2b").await;
     db.assert_st_matches_query("msd_l2a", l2a_q).await;
     db.assert_st_matches_query("msd_l2b", l2b_q).await;
 
@@ -410,8 +412,8 @@ async fn test_multi_source_diamond() {
     db.execute("INSERT INTO msd_right (key, rval) VALUES (3, 30)")
         .await;
     db.refresh_st("msd_l1").await;
-    db.refresh_st("msd_l2a").await;
-    db.refresh_st("msd_l2b").await;
+    db.refresh_st_with_retry("msd_l2a").await;
+    db.refresh_st_with_retry("msd_l2b").await;
     db.assert_st_matches_query("msd_l2a", l2a_q).await;
     db.assert_st_matches_query("msd_l2b", l2b_q).await;
 }

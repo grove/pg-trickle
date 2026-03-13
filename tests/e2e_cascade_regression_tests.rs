@@ -628,11 +628,11 @@ async fn test_three_layer_cascade_insert_propagates() {
         .await;
 
     // Refresh all three layers in topological order.
-    // Use refresh_st_with_retry for the deepest layer: the background scheduler
-    // may detect category_flags.data_timestamp has advanced and start a
-    // concurrent refresh of big_categories before the test's explicit call.
+    // Use refresh_st_with_retry for cascade layers: the background scheduler
+    // may detect upstream data_timestamp has advanced and start a concurrent
+    // refresh before the test's explicit call.
     db.refresh_st("category_totals").await;
-    db.refresh_st("category_flags").await;
+    db.refresh_st_with_retry("category_flags").await;
     db.refresh_st_with_retry("big_categories").await;
 
     // C has total=50 > 25, so it should appear in big_categories
