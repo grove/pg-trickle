@@ -70,16 +70,8 @@ All items are ≤ 2 h each and independent — fill gaps between the larger phas
 ## Phase 5 — Performance Wave 1
 
 Largest effort; tackle after Phases 1–4 are stable and the test suite is fuller.
-Within this phase, implement in the order listed: D-1 is the most mechanical,
-A-4 requires no schema change, A-3a touches the most components.
-
-- [ ] **D-1** — UNLOGGED change buffers
-  - `CREATE UNLOGGED TABLE` in `cdc.rs` for new buffers
-  - `pg_trickle.unlogged_buffers` GUC (default `true`)
-  - Crash-recovery path: empty buffer → FULL refresh on next tick
-  - Standby-promotion stale-data window documented
-  - Upgrade migration script: `ALTER TABLE … SET UNLOGGED` per existing buffer table
-    (batch/low-traffic window; blocks CDC triggers briefly per table)
+Within this phase, implement in the order listed: A-4 requires no schema change,
+A-3a touches the most components, B-2 and C-4 are optimizer/buffer improvements.
 
 - [ ] **A-4** — Index-aware MERGE planning
   - Auto-create covering index on `__pgt_row_id` at stream table creation
@@ -92,6 +84,19 @@ A-4 requires no schema change, A-3a touches the most components.
   - Catalog: `is_append_only BOOLEAN` column + upgrade SQL
   - Benchmark: INSERT vs MERGE throughput on event-sourced workload
 
+- [ ] **B-2** — Delta Predicate Pushdown
+  - Push WHERE predicates from defining query into change-buffer `delta_scan` CTE
+  - `OR old_col` handling for deletions
+  - 5–10× delta-row-volume reduction for selective queries
+  - [PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md)
+
+- [ ] **C-4** — Change Buffer Compaction
+  - Net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row)
+  - Run when buffer exceeds `pg_trickle.compact_threshold`
+  - Use advisory lock to serialise with refresh
+  - ⚠️ Must use `seq` (sequence PK) not `ctid` — see corrected SQL in
+    [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md)
+
 ---
 
 ## Phase 6 — Upgrade path & release
@@ -99,7 +104,7 @@ A-4 requires no schema change, A-3a touches the most components.
 - [ ] Write `sql/pg_trickle--0.4.0--0.5.0.sql` incrementally as each phase lands:
   - New catalog tables (`pgt_source_gates`, `is_append_only` column, etc.)
   - Updated function signatures
-  - `ALTER TABLE changes_<oid> SET UNLOGGED` for existing buffers (if D-1 included)
+  - Compaction catalog/GUC additions (if C-4 included)
 - [ ] Run `just check-upgrade` — completeness check must pass
 - [ ] E2E upgrade test: install at 0.4.0 → `ALTER EXTENSION pg_trickle UPDATE` →
   verify all stream tables, gates, and RLS configuration survive intact
