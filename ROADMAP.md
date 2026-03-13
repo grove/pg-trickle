@@ -868,7 +868,7 @@ intersects the current gated set.
 - [ ] RLS on stream table E2E-tested (DIFFERENTIAL + IMMEDIATE)
 - [ ] `gate_source` / `ungate_source` operational; scheduler skips gated sources correctly
 - [ ] `quick_health` view and `create_stream_table_if_not_exists` available
-- [ ] Manual refresh calls recorded in history with `initiated_by='MANUAL'`
+- [x] Manual refresh calls recorded in history with `initiated_by='MANUAL'`
 - [ ] A-3a: Append-Only INSERT path eliminates MERGE for event-sourced stream tables
 - [ ] Extension upgrade path tested (`0.4.0 → 0.5.0`)
 
