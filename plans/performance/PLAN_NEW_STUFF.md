@@ -103,33 +103,59 @@ logic.
 
 **Proposal.** For specific operator tree shapes, bypass MERGE entirely:
 
-1. **Append-Only Stream Tables.** When the defining query references only
-   INSERT-only sources (e.g., event logs, append-only tables where CDC never
-   sees DELETE/UPDATE), skip the MERGE entirely and use a simple
-   `INSERT INTO st SELECT ... FROM delta`.
+1. **Append-Only Stream Tables.** ✅ **Recommended — do this.**
+   When the defining query references only INSERT-only sources (e.g., event
+   logs, append-only tables where CDC never sees DELETE/UPDATE), skip the
+   MERGE entirely and use a simple `INSERT INTO st SELECT ... FROM delta`.
+   This is the clear winner: removes MERGE entirely for append-only sources,
+   takes only `RowExclusiveLock` (same as a plain INSERT), and `IvmLockMode::
+   RowExclusive` already exists in the codebase. Detection strategy: expose
+   an explicit user declaration (`CREATE STREAM TABLE … APPEND ONLY`) as the
+   primary signal, with a CDC-observed heuristic fallback (no DELETE/UPDATE
+   seen yet → use fast path, fall back to MERGE on first non-insert). Low
+   risk, high payoff for event-sourced architectures.
 
-2. **Full-Replacement Window.** When the stream table has TopK semantics
-   (ORDER BY + LIMIT) with a small limit (< 10K), use
+2. **Full-Replacement Window.** ⚠️ **Not recommended — keep MERGE.**
+   When the stream table has TopK semantics (ORDER BY + LIMIT) with a small
+   limit (< 10K), use
    `TRUNCATE st; INSERT INTO st SELECT ... FROM (full_query) LIMIT N`.
-   This is faster than MERGE when the target is small and the delta can
-   recompute cheaply.
+   This is stated to be faster than MERGE when the target is small and the
+   delta can recompute cheaply.
 
-3. **Bulk COPY Path.** When the delta produces > 10K rows (high change rate
-   but below adaptive-FULL threshold), switch to:
-   ```
-   DELETE FROM st WHERE __pgt_row_id IN (SELECT __pgt_row_id FROM delta WHERE action='D');
-   COPY st FROM (SELECT ... FROM delta WHERE action='I');
-   ```
+   **Assessment:** `execute_topk_refresh` already uses MERGE correctly and
+   is not a measured bottleneck for TopK. The actual bottleneck for TopK
+   tables is the `full_query` re-scan of the base table, not the MERGE of a
+   handful of rows. The performance crossover where TRUNCATE+INSERT beats
+   MERGE only occurs at limits in the hundreds-of-thousands range — at which
+   point the query cost dwarfs everything. Meanwhile, the operational risks
+   are substantial (see Safety Analysis below). **Move to "Won't Do" unless
+   profiling demonstrates MERGE itself is the bottleneck for TopK.**
+
+3. **Bulk COPY Path.** ❌ **Not feasible as described — drop or rescope.**
+   When the delta produces > 10K rows, switch to a `COPY`-based bulk load.
    COPY is 2–5× faster than INSERT for bulk loads due to bypassing
    per-row executor overhead.
 
-**Expected Impact.** 30–70% MERGE time reduction for qualifying scenarios.
-Append-only path eliminates MERGE entirely for event-sourced architectures.
+   **Assessment:** The premise is flawed. `COPY FROM` inside pgrx via SPI
+   only reads from a file or stdin — `COPY st FROM (SELECT …)` is not valid
+   SQL. The quoted throughput advantage applies to the client-side `psql
+   \copy` or binary COPY protocol, neither of which is accessible from inside
+   the backend via SPI. The actual bulk path available via SPI is
+   `INSERT INTO st SELECT …`, which `execute_full_refresh` already does on
+   the adaptive-FULL threshold. There is no speedup to unlock here without a
+   fundamentally different data path outside SPI — a much larger investment.
+   This sub-path should be **dropped** unless re-scoped as a separate
+   low-level infrastructure feature.
 
-**Effort.** 2–3 weeks (path selection logic, template variants, benchmarks).
+**Expected Impact.** Append-only path eliminates MERGE entirely for
+event-sourced architectures; significant throughput gain for those workloads.
+The other two sub-paths have negligible or negative net impact.
+
+**Effort.** 1–2 weeks (append-only declaration, CDC heuristic, path
+selection logic, benchmarks). Scoping down from the original 2–3 weeks.
 
 **Prior Art.** Snowflake's MERGE vs INSERT OVERWRITE cost-based selection;
-DuckDB's bulk COPY path; Redshift's MERGE alternatives.
+DuckDB's bulk INSERT path; Redshift's MERGE alternatives.
 
 **Safety Analysis — Full-Replacement Window (TRUNCATE + INSERT).**
 
@@ -725,7 +751,9 @@ Materialize's shared arrangements; Flink's shared source state.
 | ID | Feature | Impact | Effort | Risk | Priority |
 |----|---------|--------|--------|------|----------|
 | D-1 | UNLOGGED Change Buffers | Medium | 1–2 wk | Low | **P0** |
-| A-3 | MERGE Bypass (INSERT OVERWRITE) | High | 2–3 wk | Low | **P0** |
+| A-3a | MERGE Bypass — Append-Only INSERT | High | 1–2 wk | Low | **P0** |
+| A-3b | MERGE Bypass — TopK TRUNCATE | Low | 2–3 wk | High | **Won't Do** |
+| A-3c | MERGE Bypass — Bulk COPY | Low | 4–6 wk | High | **Won't Do** |
 | B-2 | Delta Predicate Pushdown | High | 2–3 wk | Low | **P1** |
 | B-4 | Cost-Based Refresh Strategy | Medium | 2–3 wk | Low | **P1** |
 | A-2 | Columnar Change Tracking | High | 3–4 wk | Medium | **P1** |
@@ -745,7 +773,11 @@ Materialize's shared arrangements; Flink's shared source state.
 
 **Wave 1 (Quick Wins — v0.5.0):**
 - D-1: UNLOGGED Change Buffers ← Already planned (O-3 in TPC-H plan)
-- A-3: MERGE Bypass for append-only and TopK scenarios
+- A-3a: MERGE Bypass — Append-Only INSERT path only (1–2 wk, low risk)
+  - Expose `APPEND ONLY` declaration on `CREATE STREAM TABLE`
+  - CDC heuristic fallback: use fast path until first DELETE/UPDATE seen
+  - **Not** the TopK TRUNCATE sub-path (not worth doing — see A-3 analysis)
+  - **Not** the Bulk COPY sub-path (infeasible via SPI — see A-3 analysis)
 - A-4: Index-Aware MERGE Planning
 
 **Wave 2 (Core Optimizations — v0.6.0):**
