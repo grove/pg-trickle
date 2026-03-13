@@ -854,13 +854,18 @@ intersects the current gated set.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| D-1 | UNLOGGED Change Buffers — create change buffers as `UNLOGGED` to halve CDC write amplification; `pg_trickle.unlogged_buffers` GUC (default `true`); crash recovery triggers FULL refresh | 1–2 wk | [PLAN_NEW_STUFF.md §D-1](plans/performance/PLAN_NEW_STUFF.md) |
 | A-3a | MERGE bypass — Append-Only INSERT path: expose `APPEND ONLY` declaration on `CREATE STREAM TABLE`; CDC heuristic fallback (fast-path until first DELETE/UPDATE seen) | 1–2 wk | [PLAN_NEW_STUFF.md §A-3](plans/performance/PLAN_NEW_STUFF.md) |
 | A-4 | Index-Aware MERGE Planning — planner hint injection (`enable_seqscan = off` for small-delta / large-target); covering index auto-creation on `__pgt_row_id` | 1–2 wk | [PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
+| B-2 | Delta Predicate Pushdown — push WHERE predicates from defining query into change-buffer `delta_scan` CTE; `OR old_col` handling for deletions; 5–10× delta-row-volume reduction for selective queries | 2–3 wk | [PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
+| C-4 | Change Buffer Compaction — net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row); run when buffer exceeds `pg_trickle.compact_threshold`; use advisory lock to serialise with refresh | 2–3 wk | [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
 
-> **Performance foundations subtotal: ~30–80h**
+> ⚠️ C-4: The compaction DELETE **must use `seq` (the sequence primary key) not `ctid`** as
+> the stable row identifier. `ctid` changes under VACUUM and will silently delete the wrong
+> rows. See the corrected SQL and risk analysis in PLAN_NEW_STUFF.md §C-4.
 
-> **v0.5.0 total: ~51–107h**
+> **Performance foundations subtotal: ~30–80h (A-3a, A-4) + ~40–80h (B-2, C-4)**
+
+> **v0.5.0 total: ~91–187h**
 
 **Exit criteria:**
 - [ ] RLS semantics documented; change buffers RLS-hardened; IVM triggers SECURITY DEFINER
@@ -868,9 +873,10 @@ intersects the current gated set.
 - [ ] `gate_source` / `ungate_source` operational; scheduler skips gated sources correctly
 - [ ] `quick_health` view and `create_stream_table_if_not_exists` available
 - [ ] Manual refresh calls recorded in history with `initiated_by='MANUAL'`
-- [ ] D-1: UNLOGGED change buffers active by default; crash-recovery FULL-refresh path tested
 - [ ] A-3a: Append-Only INSERT path eliminates MERGE for event-sourced stream tables
 - [ ] A-4: Covering index auto-created on `__pgt_row_id`; planner hint prevents seq-scan on small delta
+- [ ] B-2: Predicate pushdown reduces delta volume for selective queries (E2E benchmark)
+- [ ] C-4: Compaction uses `seq` PK; correct under concurrent VACUUM; serialised with advisory lock
 - [ ] Extension upgrade path tested (`0.4.0 → 0.5.0`)
 
 ---
@@ -981,27 +987,16 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 
 ### Core Refresh Optimizations (Wave 2)
 
-> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 2. Read risk
-> analyses before implementing — in particular the C-4 SQL bug note.
+> B-2 and C-4 moved to v0.5.0. Only B-4 remains here.
+> Read risk analyses in [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) before implementing.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| B-2 | Delta Predicate Pushdown — push WHERE predicates from defining query into change-buffer `delta_scan` CTE; `OR old_col` handling for deletions; 5–10× delta-row-volume reduction for selective queries | 2–3 wk | [PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
 | B-4 | Cost-Based Refresh Strategy — replace fixed `differential_max_change_ratio` with a history-driven cost model fitted on `pgt_refresh_history`; cold-start fallback to fixed threshold | 2–3 wk | [PLAN_NEW_STUFF.md §B-4](plans/performance/PLAN_NEW_STUFF.md) |
-| C-4 | Change Buffer Compaction — net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row); run when buffer exceeds `pg_trickle.compact_threshold`; use advisory lock to serialise with refresh | 2–3 wk | [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
 
-> ⚠️ C-4: The compaction DELETE **must use `seq` (the sequence primary key) not `ctid`** as
-> the stable row identifier. `ctid` changes under VACUUM and will silently delete the wrong
-> rows. See the corrected SQL and risk analysis in PLAN_NEW_STUFF.md §C-4.
+> **Core refresh optimizations subtotal: ~20–40h**
 
-> **Retraction consideration (C-4):** Keep in v0.6.0 but the plan document must be corrected
-> before any implementation starts. The proposed SQL contains a data-correctness bug (`ctid`
-> instability) that would silently corrupt the change buffer under VACUUM. Fix is known and
-> low-risk, but no code should be written against the current plan text.
-
-> **Core refresh optimizations subtotal: ~60–120h**
-
-> **v0.6.0 total: ~105–182h**
+> **v0.6.0 total: ~65–104h**
 
 **Exit criteria:**
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
@@ -1009,9 +1004,7 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 - [ ] `create_or_replace_stream_table` deployed; dbt macro updated
 - [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers
 - [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
-- [ ] B-2: Predicate pushdown reduces delta volume for selective queries (E2E benchmark)
 - [ ] B-4: Cost model self-calibrates from refresh history; correctly selects FULL for join_agg at 10% change rate
-- [ ] C-4: Compaction uses `seq` PK; correct under concurrent VACUUM; serialised with advisory lock
 - [ ] Extension upgrade path tested (`0.5.0 → 0.6.0`)
 
 ---
@@ -1464,12 +1457,25 @@ implementation.
 
 > **D-2 research spike subtotal: ~2–3 weeks**
 
-> **v0.12.0 total: ~7–11 weeks**
+### UNLOGGED Change Buffers — Opt-In (D-1)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| D-1 | UNLOGGED Change Buffers — create change buffers as `UNLOGGED` to reduce CDC WAL amplification; `pg_trickle.unlogged_buffers` GUC (default `false`, opt-in); crash recovery and standby promotion trigger FULL refresh | 1–2 wk | [PLAN_NEW_STUFF.md §D-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> Moved from v0.5.0. Default flipped to `false` (opt-in only) to avoid forced FULL
+> refreshes on all stream tables for users who have not explicitly accepted the
+> crash/standby tradeoff.
+
+> **D-1 subtotal: ~1–2 weeks**
+
+> **v0.12.0 total: ~8–13 weeks**
 
 **Exit criteria:**
 - [ ] Intra-query delta-branch pruning: zero-change sources produce no UNION ALL branch
 - [ ] Merged-delta path passes property-based correctness tests for simultaneous multi-source changes
 - [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
+- [ ] D-1: UNLOGGED change buffers opt-in (`unlogged_buffers = false` by default); crash-recovery FULL-refresh path tested
 - [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
 
 ---
