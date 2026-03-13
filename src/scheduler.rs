@@ -1533,6 +1533,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         continue;
                     }
 
+                    // BOOT-4: Skip if any source is gated.
+                    let gated_oids = load_gated_source_oids();
+                    if is_any_source_gated(pgt_id, &gated_oids) {
+                        log!(
+                            "pg_trickle: skipping {}.{} in atomic group — source gated",
+                            st.pgt_schema,
+                            st.pgt_name,
+                        );
+                        log_gated_skip(&st);
+                        continue;
+                    }
+
                     // Check retry backoff
                     let retry = retry_states.entry(pgt_id).or_default();
                     if retry.is_in_backoff(now_ms) {
@@ -2151,6 +2163,18 @@ fn refresh_single_st(
     };
 
     if st.status != StStatus::Active && st.status != StStatus::Initializing {
+        return;
+    }
+
+    // BOOT-4: Check bootstrap source gates — skip if any source is gated.
+    let gated_oids = load_gated_source_oids();
+    if is_any_source_gated(pgt_id, &gated_oids) {
+        log!(
+            "pg_trickle: skipping {}.{} — source gated",
+            st.pgt_schema,
+            st.pgt_name,
+        );
+        log_gated_skip(&st);
         return;
     }
 
