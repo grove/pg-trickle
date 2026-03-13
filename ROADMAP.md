@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-03-12
+> **Last updated:** 2026-03-13
 > **Latest release:** 0.4.0 (2026-03-12)
 > **Current milestone:** v0.5.0 — Row-Level Security & Operational Controls
 
@@ -29,11 +29,17 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
  │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │&Perf.  │ │Op.Ctrl │ │DDL&Fuse│
  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
       │
-      └─ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-         │ 0.7.0  │ │ 0.8.0  │ │ 0.9.0  │ │ 1.0.0  │ │ 1.x+   │
-         │PG16-18,│─│Pooler, │─│Observ. │─│Stable  │─│Scale & │
-         │WM,Cycl.│ │Ext,DDL │ │&Integ. │ │Release │ │Ecosys. │
-         └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
+      └─ ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+         │ 0.7.0  │ │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │
+         │PG16-18,│─│Pooler, │─│Observ. │─│Incr.Agg │─│Partn.   │─│Delta &  │
+         │WM,Cycl.│ │Ext,DDL │ │&Integ. │ │IVM      │ │&Scale   │ │CDC Res. │
+         └────────┘ └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘
+              │
+              └─ ┌────────┐ ┌────────┐
+                 │ 1.0.0  │ │ 1.x+   │
+                 │Stable  │─│Scale & │
+                 │Release │ │Ecosys. │
+                 └────────┘ └────────┘
 ```
 
 ---
@@ -840,7 +846,21 @@ intersects the current gated set.
 
 > **Ergonomics subtotal: ~5.5–6 hours**
 
-> **v0.5.0 total: ~21–27 hours**
+### Performance Foundations (Wave 1)
+
+> These quick-win items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) ship
+> alongside the RLS and operational work. Read the risk analyses in that document
+> before implementing any item.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| D-1 | UNLOGGED Change Buffers — create change buffers as `UNLOGGED` to halve CDC write amplification; `pg_trickle.unlogged_buffers` GUC (default `true`); crash recovery triggers FULL refresh | 1–2 wk | [PLAN_NEW_STUFF.md §D-1](plans/performance/PLAN_NEW_STUFF.md) |
+| A-3a | MERGE bypass — Append-Only INSERT path: expose `APPEND ONLY` declaration on `CREATE STREAM TABLE`; CDC heuristic fallback (fast-path until first DELETE/UPDATE seen) | 1–2 wk | [PLAN_NEW_STUFF.md §A-3](plans/performance/PLAN_NEW_STUFF.md) |
+| A-4 | Index-Aware MERGE Planning — planner hint injection (`enable_seqscan = off` for small-delta / large-target); covering index auto-creation on `__pgt_row_id` | 1–2 wk | [PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **Performance foundations subtotal: ~30–80h**
+
+> **v0.5.0 total: ~51–107h**
 
 **Exit criteria:**
 - [ ] RLS semantics documented; change buffers RLS-hardened; IVM triggers SECURITY DEFINER
@@ -848,6 +868,9 @@ intersects the current gated set.
 - [ ] `gate_source` / `ungate_source` operational; scheduler skips gated sources correctly
 - [ ] `quick_health` view and `create_stream_table_if_not_exists` available
 - [ ] Manual refresh calls recorded in history with `initiated_by='MANUAL'`
+- [ ] D-1: UNLOGGED change buffers active by default; crash-recovery FULL-refresh path tested
+- [ ] A-3a: Append-Only INSERT path eliminates MERGE for event-sourced stream tables
+- [ ] A-4: Covering index auto-created on `__pgt_row_id`; planner hint prevents seq-scan on small delta
 - [ ] Extension upgrade path tested (`0.4.0 → 0.5.0`)
 
 ---
@@ -956,7 +979,24 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 
 > **Circular dependency foundation subtotal: ~4.5 hours**
 
-> **v0.6.0 total: ~45–62 hours**
+### Core Refresh Optimizations (Wave 2)
+
+> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 2. Read risk
+> analyses before implementing — in particular the C-4 SQL bug note.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B-2 | Delta Predicate Pushdown — push WHERE predicates from defining query into change-buffer `delta_scan` CTE; `OR old_col` handling for deletions; 5–10× delta-row-volume reduction for selective queries | 2–3 wk | [PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
+| B-4 | Cost-Based Refresh Strategy — replace fixed `differential_max_change_ratio` with a history-driven cost model fitted on `pgt_refresh_history`; cold-start fallback to fixed threshold | 2–3 wk | [PLAN_NEW_STUFF.md §B-4](plans/performance/PLAN_NEW_STUFF.md) |
+| C-4 | Change Buffer Compaction — net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row); run when buffer exceeds `pg_trickle.compact_threshold`; use advisory lock to serialise with refresh | 2–3 wk | [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ C-4: The compaction DELETE **must use `seq` (the sequence primary key) not `ctid`** as
+> the stable row identifier. `ctid` changes under VACUUM and will silently delete the wrong
+> rows. See the corrected SQL and risk analysis in PLAN_NEW_STUFF.md §C-4.
+
+> **Core refresh optimizations subtotal: ~60–120h**
+
+> **v0.6.0 total: ~105–182h**
 
 **Exit criteria:**
 - [ ] Partitioned source tables E2E-tested; ATTACH PARTITION detected
@@ -964,6 +1004,9 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 - [ ] `create_or_replace_stream_table` deployed; dbt macro updated
 - [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers
 - [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
+- [ ] B-2: Predicate pushdown reduces delta volume for selective queries (E2E benchmark)
+- [ ] B-4: Cost model self-calibrates from refresh history; correctly selects FULL for join_agg at 10% change rate
+- [ ] C-4: Compaction uses `seq` PK; correct under concurrent VACUUM; serialised with advisory lock
 - [ ] Extension upgrade path tested (`0.5.0 → 0.6.0`)
 
 ---
@@ -1043,7 +1086,25 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 
 > **Circular dependencies subtotal: ~19 hours**
 
-> **v0.7.0 total: ~74–95 hours**
+### Scalability Foundations (Wave 3)
+
+> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 3. Read risk
+> analyses before implementing — particularly C-1's read-tracking pitfall.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A-2 | Columnar Change Tracking — per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
+| C-1 | Tiered Refresh Scheduling — Hot/Warm/Cold/Frozen tier classification; lazy refresh for Cold/Frozen STs; configurable per-ST tier override; 80% scheduler-CPU reduction in large deployments | 3–4 wk | [PLAN_NEW_STUFF.md §C-1](plans/performance/PLAN_NEW_STUFF.md) |
+| D-4 | Shared Change Buffers — single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ C-1: Do **not** use raw `pg_stat_user_tables` `seq_scan`/`idx_scan` counters for tier
+> classification — pg_trickle's own internal refresh reads inflate these counters, causing
+> actively-refreshed-but-unread STs to appear Warm. Use delta-based read tracking or
+> expose explicit per-ST tier overrides only. See PLAN_NEW_STUFF.md §C-1 risk analysis.
+
+> **Scalability foundations subtotal: ~60–120h**
+
+> **v0.7.0 total: ~134–215h**
 
 **Exit criteria:**
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
@@ -1051,6 +1112,9 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 - [ ] CI matrix covers PG 16, 17, 18
 - [ ] `advance_watermark` + scheduler gating operational; ETL E2E tests pass
 - [ ] Monotone circular DAGs converge to fixpoint; non-convergence surfaces as `ERROR`
+- [ ] A-2: Bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
+- [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
+- [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
 - [ ] Extension upgrade path tested (`0.6.0 → 0.7.0`)
 
 ---
@@ -1204,6 +1268,165 @@ that re-links orphaned catalog entries on extension restore.
 
 ---
 
+## v0.10.0 — Incremental Aggregate Maintenance
+
+**Goal:** Implement algebraic incremental maintenance for decomposable aggregates
+(COUNT, SUM, AVG, MIN, MAX, STDDEV), reducing per-group refresh from O(group_size)
+to O(1) for the common case. This is the highest-potential-payoff item in the
+performance plan — benchmarks show aggregate scenarios going from 2.5 ms to sub-1 ms
+per group.
+
+### Algebraic Aggregate Shortcuts (B-1)
+
+> **In plain terms:** When only one row changes in a group of 100,000, today
+> pg_trickle re-scans all 100,000 rows to recompute the aggregate. Algebraic
+> maintenance keeps running totals: `new_sum = old_sum + Δsum`, `new_count =
+> old_count + Δcount`. Only MIN/MAX needs a rescan — and only when the deleted
+> value *was* the current minimum or maximum.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B1-1 | Algebraic rules: COUNT, SUM, AVG, STDDEV (Welford online algorithm), MIN/MAX with rescan guard when deleted value equals current extremum | 3–4 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-2 | Auxiliary column management (`__pgt_aux_count`, `__pgt_aux_sum`, etc.); view wrapper to hide from user queries | 1–2 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-4 | Fallback to full-group recomputation for non-decomposable aggregates (`mode`, percentile, `string_agg` with ordering) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-5 | Property-based tests: MIN/MAX boundary case (deleting the exact current min or max value must trigger rescan) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
+> condition for triggering a rescan is: deleted value **equals** the current min/max
+> (not when it differs). Getting this backwards silently produces stale aggregates
+> on the most common OLTP delete pattern. See the corrected table and risk analysis
+> in PLAN_NEW_STUFF.md §B-1.
+
+> **Algebraic aggregates subtotal: ~7–9 weeks**
+
+> **v0.10.0 total: ~7–9 weeks**
+
+**Exit criteria:**
+- [ ] COUNT/SUM/AVG/STDDEV algebraic paths implemented and benchmarked vs. full-group recompute
+- [ ] MIN/MAX boundary case (delete-the-extremum) covered by property-based tests
+- [ ] Auxiliary columns hidden from user queries via view wrapper
+- [ ] Migration path for existing aggregate stream tables tested
+- [ ] Floating-point drift reset mechanism in place (periodic recompute)
+- [ ] Extension upgrade path tested (`0.9.0 → 0.10.0`)
+
+---
+
+## v0.11.0 — Partitioned Stream Tables & Operational Scale
+
+**Goal:** Enable stream table storage to be declaratively partitioned (scope MERGE
+to affected partitions for 100× I/O reduction on large tables), make the DAG
+rebuild incremental for large multi-ST deployments, and add per-database worker
+quotas for multi-tenant environments.
+
+### Partitioned Stream Tables — Storage (A-1)
+
+> **In plain terms:** A 10M-row stream table partitioned into 100 ranges means only
+> the 2–3 partitions that actually received changes are touched by MERGE — reducing
+> the MERGE scan from 10M rows to ~100K. The partition key must be a user-visible
+> column and the refresh path must inject a verified range predicate.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A1-1 | DDL: `CREATE STREAM TABLE … PARTITION BY` declaration; catalog column for partition key | 1–2 wk | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+| A1-2 | Delta inspection: extract min/max of partition key from delta CTE per scheduler tick | 1 wk | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+| A1-3 | MERGE rewrite: inject validated partition-key range predicate or issue per-partition MERGEs via Rust loop | 2–3 wk | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+| A1-4 | E2E benchmarks: 10M-row partitioned ST, 0.1% change rate concentrated in 2–3 partitions | 1 wk | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ MERGE joins on `__pgt_row_id` (a content hash unrelated to the partition key) —
+> partition pruning will **not** activate automatically. A predicate injection step
+> is mandatory. See PLAN_NEW_STUFF.md §A-1 risk analysis before starting.
+
+> **Partitioned stream tables subtotal: ~5–7 weeks**
+
+### Incremental DAG Rebuild (C-2)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| C2-1 | Replace single `pgt_id` scalar in shared memory with a bounded ring buffer of affected IDs; full-rebuild fallback on overflow | 1 wk | [PLAN_NEW_STUFF.md §C-2](plans/performance/PLAN_NEW_STUFF.md) |
+| C2-2 | Incremental topo-sort on affected subgraph; cache sorted schedule in shared memory | 1–2 wk | [PLAN_NEW_STUFF.md §C-2](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ A single `pgt_id` scalar in shared memory is vulnerable to overwrite when two DDL
+> changes arrive between scheduler ticks — use a ring buffer or fall back to full rebuild.
+> See PLAN_NEW_STUFF.md §C-2 risk analysis.
+
+> **Incremental DAG rebuild subtotal: ~2–3 weeks**
+
+### Multi-Database Scheduler Isolation (C-3)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| C3-1 | Per-database worker quotas (`pg_trickle.per_database_worker_quota`); priority ordering (IMMEDIATE > Hot > Warm > Cold); burst capacity up to 150% when other DBs are under budget | 2–3 wk | [PLAN_NEW_STUFF.md §C-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **Multi-DB isolation subtotal: ~2–3 weeks**
+
+> **v0.11.0 total: ~9–13 weeks**
+
+**Exit criteria:**
+- [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog
+- [ ] Partition-scoped MERGE benchmark: 10M-row ST, 0.1% change rate (expect ~100× I/O reduction)
+- [ ] Ring-buffer DAG invalidation safe under rapid consecutive DDL changes (property-based test)
+- [ ] Per-database worker quotas enforced; burst reclaimed within 1 scheduler cycle
+- [ ] Extension upgrade path tested (`0.10.0 → 0.11.0`)
+
+---
+
+## v0.12.0 — Multi-Source Delta Batching & CDC Research
+
+**Goal:** Implement multi-source delta merging for join queries where multiple
+source tables change simultaneously, and conduct a formal research spike for
+the custom logical decoding output plugin (D-2) before committing to a full
+implementation.
+
+### Multi-Table Delta Batching (B-3)
+
+> **In plain terms:** When a join query has three source tables and all three
+> change in the same cycle, today pg_trickle makes three separate passes through
+> the source tables. B-3 merges those passes into one and prunes UNION ALL
+> branches for sources with no changes.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B3-1 | Intra-query delta-branch pruning: skip UNION ALL branch entirely when a source has zero changes in this cycle | 1–2 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-2 | Merged-delta generation: weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) for cross-source deduplication; remove zero-weight rows | 3–4 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-3 | Property-based correctness tests for simultaneous multi-source changes; diamond-flow scenarios | 1–2 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ Cross-delta deduplication **must use weight aggregation (`SUM(weight)` grouped by
+> `__pgt_row_id`), not `DISTINCT ON`**. `DISTINCT ON` silently discards corrections
+> that should be summed and will produce wrong data for diamond-flow queries — the
+> exact scenario this feature targets. Do not merge B3-2 without passing property-based
+> correctness proofs. See PLAN_NEW_STUFF.md §B-3 risk analysis.
+
+> **Multi-source delta batching subtotal: ~5–8 weeks**
+
+### Async CDC — Research Spike (D-2)
+
+> **In plain terms:** A custom PostgreSQL logical decoding plugin could write changes
+> directly to change buffers without the polling round-trip, cutting CDC latency by
+> ~10× and WAL decoding CPU by 50–80%. This milestone scopes a research spike only —
+> not a full implementation — to validate the key technical constraints.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| D2-R | Research spike: prototype in-memory row buffering inside `pg_trickle_decoder`; validate SPI flush in `commit` callback; document memory-safety constraints and feasibility; produce a written RFC before any full implementation is started | 2–3 wk | [PLAN_NEW_STUFF.md §D-2](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ SPI writes inside logical decoding `change` callbacks are **not supported**.
+> All row buffering must occur in-memory within the plugin's memory context; flush
+> only in the `commit` callback. In-memory buffers must handle arbitrarily large
+> transactions. See PLAN_NEW_STUFF.md §D-2 risk analysis before writing any C code.
+
+> **D-2 research spike subtotal: ~2–3 weeks**
+
+> **v0.12.0 total: ~7–11 weeks**
+
+**Exit criteria:**
+- [ ] Intra-query delta-branch pruning: zero-change sources produce no UNION ALL branch
+- [ ] Merged-delta path passes property-based correctness tests for simultaneous multi-source changes
+- [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
+- [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
+
+---
+
 ## v1.0.0 — Stable Release
 
 **Goal:** First officially supported release. Semantic versioning locks in.
@@ -1233,7 +1456,7 @@ distribution — getting pg_trickle onto package registries.
 - [ ] Published on PGXN and Docker Hub
 - [x] CNPG extension image published to GHCR (`pg_trickle-ext`)
 - [x] CNPG cluster-example.yaml validated (Image Volume approach)
-- [ ] Upgrade path from v0.9.0 tested
+- [ ] Upgrade path from v0.12.0 tested
 - [ ] Semantic versioning policy in effect
 
 ---
@@ -1310,12 +1533,15 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish | 45–66h | 165–222h | ✅ Released |
 | v0.3.0 — DVM Correctness, SAST & Test Coverage | ~20–30h | 185–252h | ✅ Released |
 | v0.4.0 — Parallel Refresh & Performance Hardening | ~60–94h | 245–346h | |
-| v0.5.0 — Row-Level Security & Operational Controls | ~21–27h | 266–373h | |
-| v0.6.0 — Partitioning, Idempotent DDL & Anomaly Detection | ~45–62h | 311–435h | |
-| v0.7.0 — PostgreSQL Backward Compatibility, Watermarks & Circular DAGs | ~74–95h | 385–530h | |
-| v0.8.0 — Connection Pooler, External Tests & Native DDL Syntax | ~200–300h | 585–830h | |
-| v0.9.0 — Observability, Integration & pg_dump Support | ~54–77h | 639–907h | |
-| v1.0.0 — Stable release | 18–27h | 657–934h | |
+| v0.5.0 — RLS, Operational Controls + Perf Wave 1 | ~51–107h | 296–453h | |
+| v0.6.0 — Partitioning, Idempotent DDL, Anomaly Detection + Perf Wave 2 | ~105–182h | 401–635h | |
+| v0.7.0 — PG Backward Compat, Watermarks, Circular DAGs + Perf Wave 3 | ~134–215h | 535–850h | |
+| v0.8.0 — Connection Pooler, External Tests & Native DDL Syntax | ~200–300h | 735–1150h | |
+| v0.9.0 — Observability, Integration & pg_dump Support | ~54–77h | 789–1227h | |
+| v0.10.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
+| v0.11.0 — Partitioned Stream Tables & Operational Scale (A-1, C-2, C-3) | ~9–13 wk | — | |
+| v0.12.0 — Multi-Source Delta Batching & CDC Research (B-3, D-2 spike) | ~7–11 wk | — | |
+| v1.0.0 — Stable release | 18–27h | — | |
 | Post-1.0 (ecosystem) | 88–134h | 569–814h | |
 | Post-1.0 (scale) | 6+ months | — | |
 
