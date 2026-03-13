@@ -994,6 +994,11 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 > the stable row identifier. `ctid` changes under VACUUM and will silently delete the wrong
 > rows. See the corrected SQL and risk analysis in PLAN_NEW_STUFF.md §C-4.
 
+> **Retraction consideration (C-4):** Keep in v0.6.0 but the plan document must be corrected
+> before any implementation starts. The proposed SQL contains a data-correctness bug (`ctid`
+> instability) that would silently corrupt the change buffer under VACUUM. Fix is known and
+> low-risk, but no code should be written against the current plan text.
+
 > **Core refresh optimizations subtotal: ~60–120h**
 
 > **v0.6.0 total: ~105–182h**
@@ -1101,6 +1106,13 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 > classification — pg_trickle's own internal refresh reads inflate these counters, causing
 > actively-refreshed-but-unread STs to appear Warm. Use delta-based read tracking or
 > expose explicit per-ST tier overrides only. See PLAN_NEW_STUFF.md §C-1 risk analysis.
+
+> **Retraction consideration (C-1):** The auto-classification goal (80% scheduler-CPU
+> reduction) cannot be achieved with `pg_stat_user_tables` as the signal. Scope v0.7.0
+> to **manual-only tier assignment** (`ALTER STREAM TABLE … SET (tier = 'hot')`) only;
+> drop the Hot/Warm/Cold/Frozen auto-classification and the lazy-refresh trigger path.
+> Auto-classification requiring a custom `ExecutorStart/End` hook can be revisited
+> post-1.0. The effort estimate should drop from 3–4 wk to ~1 wk for the manual-only scope.
 
 > **Scalability foundations subtotal: ~60–120h**
 
@@ -1298,6 +1310,14 @@ per group.
 > on the most common OLTP delete pattern. See the corrected table and risk analysis
 > in PLAN_NEW_STUFF.md §B-1.
 
+> **Retraction consideration (B-1):** Keep in v0.10.0, but item B1-5 (property-based
+> tests covering the MIN/MAX boundary case) is a **hard prerequisite** for B1-1, not
+> optional follow-on work. The MIN/MAX rule was stated backwards in the original spec;
+> the corrected rule is now in PLAN_NEW_STUFF.md. Do not merge any MIN/MAX algebraic
+> path until property-based tests confirm: (a) deleting the exact current min triggers
+> a rescan and (b) deleting a non-min value does not. Floating-point drift reset
+> (B1-3) is also required before enabling persistent auxiliary columns.
+
 > **Algebraic aggregates subtotal: ~7–9 weeks**
 
 > **v0.10.0 total: ~7–9 weeks**
@@ -1336,6 +1356,16 @@ quotas for multi-tenant environments.
 > ⚠️ MERGE joins on `__pgt_row_id` (a content hash unrelated to the partition key) —
 > partition pruning will **not** activate automatically. A predicate injection step
 > is mandatory. See PLAN_NEW_STUFF.md §A-1 risk analysis before starting.
+
+> **Retraction consideration (A-1):** The 5–7 week effort estimate is optimistic. The
+> core assumption — that partition pruning can be activated via a `WHERE partition_key
+> BETWEEN ? AND ?` predicate — requires the partition key to be a tracked catalog column
+> (not currently the case) and a verified range derivation from the delta. The alternative
+> (per-partition MERGE loop in Rust) is architecturally sound but requires significant
+> catalog and refresh-path changes. A **design spike** (2–4 days) producing a written
+> implementation plan must be completed before A1-1 is started. The milestone is at P3 /
+> Very High risk and should not block the 1.0 release if the design spike reveals
+> additional complexity.
 
 > **Partitioned stream tables subtotal: ~5–7 weeks**
 
@@ -1397,6 +1427,14 @@ implementation.
 > exact scenario this feature targets. Do not merge B3-2 without passing property-based
 > correctness proofs. See PLAN_NEW_STUFF.md §B-3 risk analysis.
 
+> **Retraction candidate (B-3):** The spec contains a correctness bug at the design level
+> — the originally proposed `DISTINCT ON` deduplication produces silently wrong results
+> for diamond-flow delta paths. The corrected approach (Z-set weight aggregation) is
+> conceptually sound but requires formal correctness proofs or exhaustive property-based
+> tests before any code is written. The risk rating is **Very High**. Recommend moving
+> B-3 out of the numbered roadmap into a **post-1.0 research backlog** unless a formal
+> correctness proof for the weight-aggregation path exists prior to v0.12.0 scoping.
+
 > **Multi-source delta batching subtotal: ~5–8 weeks**
 
 ### Async CDC — Research Spike (D-2)
@@ -1414,6 +1452,15 @@ implementation.
 > All row buffering must occur in-memory within the plugin's memory context; flush
 > only in the `commit` callback. In-memory buffers must handle arbitrarily large
 > transactions. See PLAN_NEW_STUFF.md §D-2 risk analysis before writing any C code.
+
+> **Retraction candidate (D-2):** Even as a research spike, this item introduces C-level
+> complexity (custom output plugin memory management, commit-callback SPI failure
+> handling, arbitrarily large transaction buffering) that substantially exceeds the
+> stated 2–3 week estimate once the architectural constraints are respected. The risk
+> rating is **Very High** and the SPI-in-change-callback infeasibility makes the
+> originally proposed design non-functional. Recommend moving D-2 to a **post-1.0
+> research backlog** entirely; do not include it in a numbered milestone until a
+> separate feasibility study (outside the release cycle) produces a concrete RFC.
 
 > **D-2 research spike subtotal: ~2–3 weeks**
 
