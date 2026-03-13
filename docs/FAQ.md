@@ -31,7 +31,7 @@ troubleshooting. Use the table of contents below to jump to a specific topic.
 
 **Operations**
 - [Performance & Tuning](#performance--tuning) — Scheduler tuning, min schedule risks, disk space, adaptive fallback
-- [Interoperability](#interoperability) — Views, replication, connection poolers, triggers
+- [Interoperability](#interoperability) — Views, replication, connection poolers, triggers, pgvector
 - [dbt Integration](#dbt-integration) — Materialization, commands, freshness checks
 - [Row-Level Security (RLS)](#row-level-security-rls) — Source vs stream table policies, SECURITY DEFINER triggers
 - [Deployment & Operations](#deployment--operations) — Workers, upgrades, replicas, Kubernetes
@@ -1801,6 +1801,56 @@ SELECT pgtrickle.create_stream_table(
 - **Transaction-mode pooling** (`pool_mode = transaction`): **Not supported.** The scheduler requires a persistent session.
 
 **Tip:** If your infrastructure requires transaction-mode pooling (e.g., AWS RDS Proxy, Supabase), route the pg_trickle background worker through a direct connection while keeping application traffic on the pooler. Most connection poolers support per-database or per-user routing rules.
+
+### Does pg_trickle work with pgvector?
+
+**Partially — it depends on the refresh mode and what the defining query does.**
+
+**What works:**
+
+- **Source tables with `vector` columns.** CDC triggers are generated using PostgreSQL's `format_type()`, which returns the full type name (e.g. `vector(1536)`). Change buffer tables mirror the source schema correctly, so inserts, updates, and deletes on pgvector tables are captured and replayed without issue.
+- **Passing vector columns through in DIFFERENTIAL mode.** Stream tables that select, filter (on non-vector columns), or join sources that happen to contain `vector` columns work correctly — the vector data is treated as an opaque value and copied through unchanged.
+- **FULL mode with any pgvector expression.** Because FULL mode re-executes the entire defining query, all pgvector operators (`<->`, `<=>`, `<#>`) and functions (`cosine_distance`, `l2_normalize`, etc.) work exactly as they do in a regular query.
+
+**What does not work:**
+
+- **DIFFERENTIAL mode with pgvector distance operators in the query.** The DVM engine needs a differentiation rule for every SQL operator it encounters. Custom operators like `<->` (L2 distance) or `<=>` (cosine distance) are not in the built-in rule set. The engine will fall back automatically to FULL mode if such operators appear in the delta query path. Set `refresh_mode => 'FULL'` explicitly to make this intent clear.
+- **Incremental aggregation over vector columns.** There is no meaningful incremental form for aggregates over `vector` values (e.g. averaging embeddings). Use FULL mode for any aggregate that involves vector arithmetic.
+
+**Recommended pattern** for a nearest-neighbour cache or semantic search result set:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+SELECT pgtrickle.create_stream_table(
+    name         => 'top_similar_docs',
+    query        => $$
+        SELECT d.id, d.title, d.embedding,
+               d.embedding <=> '[0.1, 0.2, 0.3]'::vector AS distance
+        FROM documents d
+        ORDER BY distance
+        LIMIT 100
+    $$,
+    schedule     => '5m',
+    refresh_mode => 'FULL'
+);
+```
+
+For use-cases that only carry vector columns through without computing on them, DIFFERENTIAL mode works fine:
+
+```sql
+-- Vectors are not used in the delta computation — DIFFERENTIAL is safe here
+SELECT pgtrickle.create_stream_table(
+    name         => 'active_doc_embeddings',
+    query        => $$
+        SELECT id, embedding
+        FROM documents
+        WHERE status = 'published'
+    $$,
+    schedule     => '1m',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
 
 ---
 
