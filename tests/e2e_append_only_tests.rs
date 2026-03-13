@@ -39,7 +39,7 @@ async fn test_append_only_basic_insert_path() {
     assert!(is_ao, "is_append_only should be true after creation");
 
     // Initial data should be present
-    let count: i64 = db.count("pgtrickle.ao_basic").await;
+    let count: i64 = db.count("public.ao_basic").await;
     assert_eq!(count, 2, "initial population should have 2 rows");
 
     // Insert more data and refresh — should use append-only INSERT path
@@ -47,7 +47,7 @@ async fn test_append_only_basic_insert_path() {
         .await;
     db.refresh_st("ao_basic").await;
 
-    let count: i64 = db.count("pgtrickle.ao_basic").await;
+    let count: i64 = db.count("public.ao_basic").await;
     assert_eq!(count, 4, "after append-only refresh, should have 4 rows");
 }
 
@@ -77,13 +77,13 @@ async fn test_append_only_data_correctness() {
 
     // Verify all data present
     let sum: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0)::bigint FROM pgtrickle.ao_data")
+        sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0)::bigint FROM public.ao_data")
             .fetch_one(&db.pool)
             .await
             .unwrap();
     assert_eq!(sum, 1000, "sum of all amounts should be 1000");
 
-    let count: i64 = db.count("pgtrickle.ao_data").await;
+    let count: i64 = db.count("public.ao_data").await;
     assert_eq!(count, 4, "should have 4 rows total");
 }
 
@@ -121,7 +121,7 @@ async fn test_append_only_fallback_on_delete() {
     );
 
     // Verify data correctness after fallback
-    let count: i64 = db.count("pgtrickle.ao_fallback").await;
+    let count: i64 = db.count("public.ao_fallback").await;
     assert_eq!(
         count, 2,
         "should have 2 rows after delete and MERGE fallback"
@@ -163,7 +163,7 @@ async fn test_append_only_fallback_on_update() {
     );
 
     // Verify data correctness
-    let val: String = sqlx::query_scalar("SELECT val FROM pgtrickle.ao_upd WHERE id = 1")
+    let val: String = sqlx::query_scalar("SELECT val FROM public.ao_upd WHERE id = 1")
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn test_alter_enable_append_only() {
     db.execute("INSERT INTO ao_alter_src VALUES (2, 'y')").await;
     db.refresh_st("ao_alter").await;
 
-    let count: i64 = db.count("pgtrickle.ao_alter").await;
+    let count: i64 = db.count("public.ao_alter").await;
     assert_eq!(count, 2);
 }
 
@@ -337,6 +337,6 @@ async fn test_append_only_no_data_cycle() {
     // Refresh with no changes — should be no-op
     db.refresh_st("ao_nodata").await;
 
-    let count: i64 = db.count("pgtrickle.ao_nodata").await;
+    let count: i64 = db.count("public.ao_nodata").await;
     assert_eq!(count, 1, "no-data cycle should not change row count");
 }
