@@ -1948,6 +1948,13 @@ fn execute_manual_refresh(
     Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+    // R3: Bypass RLS for the refresh defining query so the stream table
+    // always materializes the full result set regardless of who called
+    // refresh_stream_table(). This mirrors REFRESH MATERIALIZED VIEW
+    // semantics and prevents the "who refreshed it?" correctness hazard.
+    Spi::run("SET LOCAL row_security = off")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
     // TopK tables use the scoped-recomputation refresh path regardless of
     // refresh_mode (they always do ORDER BY … LIMIT N via MERGE).
     if st.topk_limit.is_some() {

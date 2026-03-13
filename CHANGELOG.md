@@ -9,6 +9,34 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+#### Row-Level Security (RLS) Hardening — Phase 1 (v0.5.0)
+
+Security context hardening for stream tables. Stream tables now follow the
+same RLS model as PostgreSQL's `MATERIALIZED VIEW`: the refresh always
+materializes the full, unfiltered result set. Access control is applied at
+read time via RLS policies on the stream table itself.
+
+- **R2: Change buffer RLS disabled.** Change buffer tables
+  (`pgtrickle_changes.changes_*`) now explicitly `DISABLE ROW LEVEL SECURITY`
+  after creation, preventing CDC trigger insert failures if RLS is enabled
+  at the schema level.
+- **R3: Manual refresh bypasses RLS.** `refresh_stream_table()` now executes
+  `SET LOCAL row_security = off` to ensure the defining query always produces
+  the full result set regardless of the calling user's RLS policies. The
+  scheduler (already superuser) also sets this as defence-in-depth.
+- **R4: IVM triggers are SECURITY DEFINER.** All IMMEDIATE-mode IVM trigger
+  functions are now created with `SECURITY DEFINER` and a locked
+  `SET search_path = pg_catalog, pgtrickle, pgtrickle_changes` to prevent
+  partial-visibility delta corruption and search_path hijacking.
+- **R1: RLS semantics documented.** New "Row-Level Security" sections in
+  `SQL_REFERENCE.md` and `FAQ.md` covering source-table RLS bypass, stream-table
+  RLS patterns, SECURITY DEFINER rationale, and a per-tenant policy example.
+- **R5/R7/R8: E2E tests.** New `e2e_rls_tests.rs` with 6 tests covering:
+  RLS on source table (FULL + DIFFERENTIAL), RLS on stream table, IMMEDIATE
+  mode + RLS, change buffer RLS verification, and SECURITY DEFINER verification.
+
 ---
 
 ## [0.4.0] — 2026-03-12

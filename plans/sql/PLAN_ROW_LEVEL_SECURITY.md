@@ -1,9 +1,9 @@
 # PLAN: Row-Level Security (RLS) Support in pg_trickle
 
-**Status:** Plan
+**Status:** Phase 1 implemented (v0.5.0-phase-1)
 **Priority:** Low (P4) — niche feature, but important for pg_ivm parity
 **Effort:** ~12–20 hours total across 4 phases
-**Last updated:** 2026-03-03
+**Last updated:** 2026-03-13
 
 ---
 
@@ -225,7 +225,7 @@ CREATE OR REPLACE FUNCTION pgt_ivm_after_ins_<oid>()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, pgtrickle, pgtrickle_changes
+SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public
 AS $$ ... $$;
 ```
 

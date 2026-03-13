@@ -2314,6 +2314,12 @@ fn execute_scheduled_refresh(
     // allow the refresh executor to modify the storage table.
     let _ = Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'");
 
+    // R3: Bypass RLS as defence-in-depth. The background worker already
+    // runs as superuser, but this ensures the defining query always
+    // materializes the full result set even if pg_trickle is installed
+    // by a non-superuser role with BYPASSRLS.
+    let _ = Spi::run("SET LOCAL row_security = off");
+
     // Execute the refresh
     let result = if st.topk_limit.is_some() {
         // TopK tables bypass the normal Full/Differential refresh paths and use
