@@ -2726,7 +2726,7 @@ fn gate_source(source: &str) -> Result<(), PgTrickleError> {
     // Signal the scheduler that the gate set has changed.
     let payload = format!("{}", source_relid.to_u32());
     Spi::run(&format!(
-        "SELECT pg_notify('pgtrickle_source_gate', {})",
+        "SELECT pg_notify('pgtrickle_source_gate', '{}')",
         &payload
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -2751,7 +2751,7 @@ fn ungate_source(source: &str) -> Result<(), PgTrickleError> {
     // Signal the scheduler that the gate set has changed.
     let payload = format!("{}", source_relid.to_u32());
     Spi::run(&format!(
-        "SELECT pg_notify('pgtrickle_source_gate', {})",
+        "SELECT pg_notify('pgtrickle_source_gate', '{}')",
         &payload
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

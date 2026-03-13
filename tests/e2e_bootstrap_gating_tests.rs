@@ -209,7 +209,7 @@ async fn test_manual_refresh_not_blocked_by_gate() {
     // Manual refresh must succeed even though the source is gated.
     db.refresh_st("man_st").await;
 
-    let count: i64 = db.count("pgtrickle.man_st").await;
+    let count: i64 = db.count("public.man_st").await;
     assert_eq!(
         count, 2,
         "manual refresh must succeed even when source is gated"

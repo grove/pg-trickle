@@ -49,7 +49,7 @@ async fn test_rls_on_source_does_not_filter_stream_table() {
     // Refresh the stream table — should contain ALL rows despite RLS
     db.refresh_st("rls_src_st").await;
 
-    let count: i64 = db.count("pgtrickle.rls_src_st").await;
+    let count: i64 = db.count("public.rls_src_st").await;
     assert_eq!(
         count, 3,
         "stream table should contain all 3 rows despite RLS on source"
@@ -85,7 +85,7 @@ async fn test_rls_on_source_differential_mode() {
 
     db.refresh_st("rls_diff_st").await;
 
-    let count: i64 = db.count("pgtrickle.rls_diff_st").await;
+    let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
         count, 2,
         "DIFFERENTIAL stream table should contain all rows despite RLS"
@@ -96,7 +96,7 @@ async fn test_rls_on_source_differential_mode() {
         .await;
     db.refresh_st("rls_diff_st").await;
 
-    let count: i64 = db.count("pgtrickle.rls_diff_st").await;
+    let count: i64 = db.count("public.rls_diff_st").await;
     assert_eq!(
         count, 3,
         "DIFFERENTIAL refresh should see all rows including RLS-filtered ones"
@@ -129,23 +129,23 @@ async fn test_rls_on_stream_table_filters_reads() {
     db.refresh_st("rls_st_test").await;
 
     // Verify all rows present before RLS
-    let total: i64 = db.count("pgtrickle.rls_st_test").await;
+    let total: i64 = db.count("public.rls_st_test").await;
     assert_eq!(total, 4, "stream table should have all 4 rows");
 
     // Enable RLS on the stream table
-    db.execute("ALTER TABLE pgtrickle.rls_st_test ENABLE ROW LEVEL SECURITY")
+    db.execute("ALTER TABLE public.rls_st_test ENABLE ROW LEVEL SECURITY")
         .await;
 
     // Create a test role and grant access
     db.execute("CREATE ROLE rls_reader LOGIN").await;
-    db.execute("GRANT USAGE ON SCHEMA pgtrickle TO rls_reader")
+    db.execute("GRANT USAGE ON SCHEMA public TO rls_reader")
         .await;
-    db.execute("GRANT SELECT ON pgtrickle.rls_st_test TO rls_reader")
+    db.execute("GRANT SELECT ON public.rls_st_test TO rls_reader")
         .await;
 
     // Create a policy that only allows tenant_id = 10
     db.execute(
-        "CREATE POLICY tenant_filter ON pgtrickle.rls_st_test \
+        "CREATE POLICY tenant_filter ON public.rls_st_test \
          FOR SELECT TO rls_reader \
          USING (tenant_id = 10)",
     )
@@ -154,7 +154,7 @@ async fn test_rls_on_stream_table_filters_reads() {
     // Query as the restricted role — should only see tenant 10 rows
     let filtered_count: i64 = db
         .query_scalar(
-            "SELECT count(*) FROM pgtrickle.rls_st_test \
+            "SELECT count(*) FROM public.rls_st_test \
              WHERE current_user = current_user", // dummy where just to ensure query executes
         )
         .await;
@@ -198,16 +198,16 @@ async fn test_rls_on_stream_table_immediate_mode() {
     .await;
 
     // Verify the initial population
-    let count: i64 = db.count("pgtrickle.rls_imm_st").await;
+    let count: i64 = db.count("public.rls_imm_st").await;
     assert_eq!(count, 2, "initial population should have 2 rows");
 
     // Enable RLS on the stream table
-    db.execute("ALTER TABLE pgtrickle.rls_imm_st ENABLE ROW LEVEL SECURITY")
+    db.execute("ALTER TABLE public.rls_imm_st ENABLE ROW LEVEL SECURITY")
         .await;
 
     // Create a policy
     db.execute(
-        "CREATE POLICY imm_tenant ON pgtrickle.rls_imm_st \
+        "CREATE POLICY imm_tenant ON public.rls_imm_st \
          USING (tenant_id = 10)",
     )
     .await;
@@ -218,7 +218,7 @@ async fn test_rls_on_stream_table_immediate_mode() {
         .await;
 
     // As superuser, we bypass RLS and should see all 3 rows
-    let total: i64 = db.count("pgtrickle.rls_imm_st").await;
+    let total: i64 = db.count("public.rls_imm_st").await;
     assert_eq!(
         total, 3,
         "IMMEDIATE mode should propagate insert despite RLS on stream table"
@@ -228,7 +228,7 @@ async fn test_rls_on_stream_table_immediate_mode() {
     db.execute("INSERT INTO rls_imm_src VALUES (4, 20, 'd')")
         .await;
 
-    let total: i64 = db.count("pgtrickle.rls_imm_st").await;
+    let total: i64 = db.count("public.rls_imm_st").await;
     assert_eq!(
         total, 4,
         "all rows should be in stream table regardless of RLS policy"
@@ -343,7 +343,7 @@ async fn test_enable_rls_on_source_triggers_reinit() {
     // Initial refresh so the snapshot is stored.
     db.refresh_st("rls_ddl_st").await;
 
-    let count: i64 = db.count("pgtrickle.rls_ddl_st").await;
+    let count: i64 = db.count("public.rls_ddl_st").await;
     assert_eq!(count, 2, "initial refresh should populate 2 rows");
 
     // Verify not marked for reinit before the DDL.
@@ -372,7 +372,7 @@ async fn test_enable_rls_on_source_triggers_reinit() {
     // contain all rows (superuser context bypasses RLS).
     db.refresh_st("rls_ddl_st").await;
 
-    let count: i64 = db.count("pgtrickle.rls_ddl_st").await;
+    let count: i64 = db.count("public.rls_ddl_st").await;
     assert_eq!(
         count, 2,
         "stream table should still contain all rows after reinit"
