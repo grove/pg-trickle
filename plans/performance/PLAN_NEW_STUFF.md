@@ -752,7 +752,7 @@ workloads.
    - The next refresh cycle will fall back to FULL mode (no changes = no
      frontier advancement, triggering reinit).
    - Stream table data is still intact (it's a regular logged table).
-3. Add a `pg_trickle.unlogged_buffers` GUC (default: `true`) to control this.
+3. Add a `pg_trickle.unlogged_buffers` GUC (default: `false`) to control this — opt-in by operators who have measured WAL pressure and accept the crash/standby tradeoff.
 
 **Expected Impact.** **~30% reduction in WAL volume** from CDC triggers.
 For write-heavy workloads (> 10K writes/sec), this translates to measurably
@@ -763,9 +763,10 @@ lower replication lag and checkpoint pressure.
 **Prior Art.** Mentioned in PLAN_TPC_H_BENCHMARKING.md as O-3. PostgreSQL's
 UNLOGGED tables; Oracle's NOLOGGING mode for materialized view logs.
 
-**Risk.** After crash, one FULL refresh per ST is required. For most workloads
-this is acceptable. Users who need crash-safe change buffers can set
-`pg_trickle.unlogged_buffers = false`.
+**Risk.** After crash, one FULL refresh per ST is required. For large or expensive
+stream tables this can be a significant availability event. The GUC defaults to
+`false` (logged buffers, crash-safe) so only operators who have explicitly
+accepted the tradeoff enable it with `pg_trickle.unlogged_buffers = true`.
 
 **⚠️ Risk Analysis — Standby promotion creates a stale-data window; UNLOGGED migration requires care.**
 
@@ -984,18 +985,17 @@ implementation, with dynamic column management as a follow-on.
 ### Recommended Implementation Order
 
 **Wave 1 (Quick Wins — v0.5.0):**
-- D-1: UNLOGGED Change Buffers ← Already planned (O-3 in TPC-H plan)
 - A-3a: MERGE Bypass — Append-Only INSERT path only (1–2 wk, low risk)
   - Expose `APPEND ONLY` declaration on `CREATE STREAM TABLE`
   - CDC heuristic fallback: use fast path until first DELETE/UPDATE seen
   - **Not** the TopK TRUNCATE sub-path (not worth doing — see A-3 analysis)
   - **Not** the Bulk COPY sub-path (infeasible via SPI — see A-3 analysis)
 - A-4: Index-Aware MERGE Planning
+- B-2: Delta Predicate Pushdown (moved from Wave 2; Low risk, High impact)
+- C-4: Change Buffer Compaction (moved from Wave 2; fix `ctid` → `seq` bug before implementing)
 
 **Wave 2 (Core Optimizations — v0.6.0):**
-- B-2: Delta Predicate Pushdown
 - B-4: Cost-Based Refresh Strategy Selection
-- C-4: Change Buffer Compaction
 
 **Wave 3 (Scalability — v0.7.0):**
 - A-2: Columnar Change Tracking
