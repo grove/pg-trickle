@@ -924,10 +924,10 @@ pattern used by the dbt materialization macro.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| COR-1 | **The core function.** `create_or_replace_stream_table()` compares the new definition against the existing one and picks the cheapest path: no-op if identical, settings-only update if just config changed, column migration if columns were added/dropped, or full rebuild if the query is fundamentally different. One function call replaces the drop-and-recreate dance. | 4h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) |
-| COR-3 | **dbt just works.** Updates the `stream_table` dbt materialization macro to call `create_or_replace` instead of dropping and recreating on every `dbt run`. Existing data survives deployments; only genuinely changed stream tables get rebuilt. | 2h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) |
-| COR-4 | **Upgrade path and documentation.** Upgrade SQL script so existing installations get the new function via `ALTER EXTENSION UPDATE`. SQL Reference and FAQ updated with usage examples. | 2.5h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) |
-| COR-5 | **Thorough test coverage.** 13 end-to-end tests covering: identical no-op, config-only change, query change with compatible columns, query change with incompatible columns, mode switches, and error cases. | 4h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) |
+| COR-1 | **The core function.** `create_or_replace_stream_table()` compares the new definition against the existing one and picks the cheapest path: no-op if identical, settings-only update if just config changed, column migration if columns were added/dropped, or full rebuild if the query is fundamentally different. One function call replaces the drop-and-recreate dance. | 4h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) | ✅ Done |
+| COR-3 | **dbt just works.** Updates the `stream_table` dbt materialization macro to call `create_or_replace` instead of dropping and recreating on every `dbt run`. Existing data survives deployments; only genuinely changed stream tables get rebuilt. | 2h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) | ✅ Done |
+| COR-4 | **Upgrade path and documentation.** Upgrade SQL script so existing installations get the new function via `ALTER EXTENSION UPDATE`. SQL Reference and FAQ updated with usage examples. | 2.5h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) | ✅ Done |
+| COR-5 | **Thorough test coverage.** 13 end-to-end tests covering: identical no-op, config-only change, query change with compatible columns, query change with incompatible columns, mode switches, and error cases. | 4h | [PLAN_CREATE_OR_REPLACE.md](plans/sql/PLAN_CREATE_OR_REPLACE.md) | ✅ Done |
 
 > **Idempotent DDL subtotal: ~12–13 hours**
 
@@ -1064,7 +1064,7 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 **Exit criteria:**
 - [x] Partitioned source tables E2E-tested; ATTACH PARTITION detected
 - [x] WAL mode works with `publish_via_partition_root = true`
-- [ ] `create_or_replace_stream_table` deployed; dbt macro updated
+- [x] `create_or_replace_stream_table` deployed; dbt macro updated
 - [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
 - [ ] WAL + keyless without REPLICA IDENTITY FULL rejected at creation (EC-19)
 - [ ] `ALTER FUNCTION` body changes detected via `pg_proc` hash polling (EC-16)

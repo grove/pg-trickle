@@ -131,6 +131,242 @@ fn create_stream_table_if_not_exists_impl(
     }
 }
 
+/// Create or replace a stream table.
+///
+/// If the stream table does not exist, it is created (identical to
+/// [`create_stream_table`]).  If it already exists:
+///
+/// - **Identical definition** → no-op (INFO logged).
+/// - **Query identical, config differs** → delegates to `alter_stream_table_impl`.
+/// - **Query differs** → delegates to `alter_stream_table_impl` with query change
+///   (ALTER QUERY path), plus any config changes.
+///
+/// This is the declarative API for idempotent deployments (dbt, migrations,
+/// GitOps). Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_or_replace_stream_table(
+    name: &str,
+    query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    refresh_mode: default!(&str, "'AUTO'"),
+    initialize: default!(bool, true),
+    diamond_consistency: default!(Option<&str>, "NULL"),
+    diamond_schedule_policy: default!(Option<&str>, "NULL"),
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+) {
+    let result = create_or_replace_stream_table_impl(
+        name,
+        query,
+        schedule,
+        refresh_mode,
+        initialize,
+        diamond_consistency,
+        diamond_schedule_policy,
+        cdc_mode,
+        append_only,
+    );
+    if let Err(e) = result {
+        pgrx::error!("{}", e);
+    }
+}
+
+/// Tracks which config parameters differ between an existing stream table
+/// and a `create_or_replace` call.  Fields are `Some` only when changed.
+struct ConfigDiff<'a> {
+    schedule: Option<&'a str>,
+    refresh_mode: Option<&'a str>,
+    diamond_consistency: Option<&'a str>,
+    diamond_schedule_policy: Option<&'a str>,
+    cdc_mode: Option<&'a str>,
+    append_only: Option<bool>,
+}
+
+impl ConfigDiff<'_> {
+    fn is_empty(&self) -> bool {
+        self.schedule.is_none()
+            && self.refresh_mode.is_none()
+            && self.diamond_consistency.is_none()
+            && self.diamond_schedule_policy.is_none()
+            && self.cdc_mode.is_none()
+            && self.append_only.is_none()
+    }
+}
+
+/// Compare the requested config parameters against the existing catalog row.
+/// Returns `Some` only for parameters that differ from the stored values.
+fn compute_config_diff<'a>(
+    existing: &StreamTableMeta,
+    new_schedule: Option<&'a str>,
+    new_refresh_mode: &'a str,
+    new_dc: Option<&'a str>,
+    new_dsp: Option<&'a str>,
+    new_cdc_mode: Option<&'a str>,
+    new_append_only: bool,
+) -> ConfigDiff<'a> {
+    // Schedule: compare raw strings.  'calculated' in user input means NULL in catalog.
+    let schedule_changed = match new_schedule {
+        Some(s) if s.trim().eq_ignore_ascii_case("calculated") => existing.schedule.is_some(),
+        Some(s) => existing
+            .schedule
+            .as_deref()
+            .is_none_or(|cur| cur != s.trim()),
+        None => existing.schedule.is_some(),
+    };
+
+    // Refresh mode: compare enum values.  AUTO is resolved to DIFFERENTIAL by from_str.
+    let new_mode = RefreshMode::from_str(new_refresh_mode).unwrap_or(RefreshMode::Differential);
+    let mode_changed = existing.refresh_mode != new_mode;
+
+    // Diamond consistency: compare enum values.
+    let new_dc_val = match new_dc {
+        Some(s) => DiamondConsistency::from_sql_str(&s.to_lowercase()),
+        None => DiamondConsistency::Atomic,
+    };
+    let dc_changed = existing.diamond_consistency != new_dc_val;
+
+    // Diamond schedule policy: compare enum values.
+    let new_dsp_val = match new_dsp {
+        Some(s) => DiamondSchedulePolicy::from_sql_str(s).unwrap_or(DiamondSchedulePolicy::Fastest),
+        None => DiamondSchedulePolicy::Fastest,
+    };
+    let dsp_changed = existing.diamond_schedule_policy != new_dsp_val;
+
+    // CDC mode: compare Option<String>.
+    let new_cdc_normalized = new_cdc_mode.map(|m| m.trim().to_lowercase());
+    let cdc_changed = match (&existing.requested_cdc_mode, &new_cdc_normalized) {
+        (None, None) => false,
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    };
+
+    // Append-only: compare bools.
+    let ao_changed = existing.is_append_only != new_append_only;
+
+    ConfigDiff {
+        schedule: if schedule_changed {
+            new_schedule.or(Some("calculated"))
+        } else {
+            None
+        },
+        refresh_mode: if mode_changed {
+            Some(new_refresh_mode)
+        } else {
+            None
+        },
+        diamond_consistency: if dc_changed { new_dc } else { None },
+        diamond_schedule_policy: if dsp_changed { new_dsp } else { None },
+        cdc_mode: if cdc_changed { new_cdc_mode } else { None },
+        append_only: if ao_changed {
+            Some(new_append_only)
+        } else {
+            None
+        },
+    }
+}
+
+/// Collapse all runs of whitespace (spaces, tabs, newlines) into a single
+/// space and trim leading/trailing whitespace. Used for semantic query
+/// comparison so cosmetic SQL formatting differences are treated as no-ops.
+fn normalize_sql_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_or_replace_stream_table_impl(
+    name: &str,
+    query: &str,
+    schedule: Option<&str>,
+    refresh_mode_str: &str,
+    initialize: bool,
+    diamond_consistency: Option<&str>,
+    diamond_schedule_policy: Option<&str>,
+    cdc_mode: Option<&str>,
+    append_only: bool,
+) -> Result<(), PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+
+    match StreamTableMeta::get_by_name(&schema, &table_name) {
+        Ok(existing) => {
+            // Stream table exists — determine what changed.
+            let new_query_rewritten = run_query_rewrite_pipeline(query)?;
+
+            // TopK detection: if the new query is TopK, compare against the
+            // base query (ORDER BY/LIMIT stripped) since that's what is stored
+            // in `defining_query`.
+            let topk_info = crate::dvm::detect_topk_pattern(&new_query_rewritten)?;
+            let effective_new_query = match &topk_info {
+                Some(info) => &info.base_query,
+                None => &new_query_rewritten,
+            };
+
+            // Normalize whitespace before comparison so cosmetic differences
+            // (extra spaces, newlines, tabs) are treated as no-ops.
+            let query_changed = normalize_sql_whitespace(&existing.defining_query)
+                != normalize_sql_whitespace(effective_new_query);
+
+            let config_diff = compute_config_diff(
+                &existing,
+                schedule,
+                refresh_mode_str,
+                diamond_consistency,
+                diamond_schedule_policy,
+                cdc_mode,
+                append_only,
+            );
+
+            if !query_changed && config_diff.is_empty() {
+                pgrx::info!(
+                    "Stream table {}.{} already exists with identical definition — no changes made.",
+                    schema,
+                    table_name,
+                );
+                return Ok(());
+            }
+
+            // Delegate to alter_stream_table_impl with the appropriate
+            // combination of query + config changes.
+            alter_stream_table_impl(
+                name,
+                if query_changed { Some(query) } else { None },
+                config_diff.schedule,
+                config_diff.refresh_mode,
+                None, // status: keep current
+                config_diff.diamond_consistency,
+                config_diff.diamond_schedule_policy,
+                config_diff.cdc_mode,
+                config_diff.append_only,
+            )?;
+
+            pgrx::info!(
+                "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
+                schema,
+                table_name,
+                query_changed,
+                !config_diff.is_empty(),
+            );
+
+            Ok(())
+        }
+        Err(PgTrickleError::NotFound(_)) => {
+            // Does not exist — create from scratch.
+            create_stream_table_impl(
+                name,
+                query,
+                schedule,
+                refresh_mode_str,
+                initialize,
+                diamond_consistency,
+                diamond_schedule_policy,
+                cdc_mode,
+                append_only,
+            )
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Run the full query rewrite pipeline: view inlining, nested window
 /// expressions, DISTINCT ON, GROUPING SETS, scalar subqueries, SubLinks
 /// in OR, and ROWS FROM.
@@ -4835,5 +5071,184 @@ mod tests {
             ),
             CdcRefreshModeInteraction::None
         );
+    }
+
+    // ── compute_config_diff tests ──────────────────────────────────────
+
+    fn make_test_st() -> StreamTableMeta {
+        StreamTableMeta {
+            pgt_id: 1,
+            pgt_relid: pg_sys::Oid::from(12345u32),
+            pgt_name: "test_st".to_string(),
+            pgt_schema: "public".to_string(),
+            defining_query: "SELECT 1".to_string(),
+            original_query: None,
+            schedule: Some("1m".to_string()),
+            refresh_mode: RefreshMode::Differential,
+            status: StStatus::Active,
+            is_populated: true,
+            data_timestamp: None,
+            consecutive_errors: 0,
+            needs_reinit: false,
+            auto_threshold: None,
+            last_full_ms: None,
+            functions_used: None,
+            frontier: None,
+            topk_limit: None,
+            topk_order_by: None,
+            topk_offset: None,
+            diamond_consistency: DiamondConsistency::Atomic,
+            diamond_schedule_policy: DiamondSchedulePolicy::Fastest,
+            has_keyless_source: false,
+            function_hashes: None,
+            requested_cdc_mode: None,
+            is_append_only: false,
+            scc_id: None,
+        }
+    }
+
+    // ── normalize_sql_whitespace tests ─────────────────────────────────
+
+    #[test]
+    fn test_normalize_whitespace_collapses_spaces() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT  id,  val  FROM  t"),
+            "SELECT id, val FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_tabs_and_newlines() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT\tid\n\tFROM\tt"),
+            "SELECT id FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_trims() {
+        assert_eq!(
+            normalize_sql_whitespace("  SELECT id FROM t  "),
+            "SELECT id FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_identical() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT id FROM t"),
+            normalize_sql_whitespace("SELECT id FROM t")
+        );
+    }
+
+    #[test]
+    fn test_config_diff_all_identical() {
+        let st = make_test_st();
+        let diff = compute_config_diff(&st, Some("1m"), "DIFFERENTIAL", None, None, None, false);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_config_diff_schedule_changed() {
+        let st = make_test_st();
+        let diff = compute_config_diff(&st, Some("5m"), "DIFFERENTIAL", None, None, None, false);
+        assert!(!diff.is_empty());
+        assert_eq!(diff.schedule, Some("5m"));
+        assert!(diff.refresh_mode.is_none());
+    }
+
+    #[test]
+    fn test_config_diff_schedule_to_calculated() {
+        let st = make_test_st();
+        let diff = compute_config_diff(
+            &st,
+            Some("calculated"),
+            "DIFFERENTIAL",
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(!diff.is_empty());
+        assert_eq!(diff.schedule, Some("calculated"));
+    }
+
+    #[test]
+    fn test_config_diff_calculated_already_calculated() {
+        let mut st = make_test_st();
+        st.schedule = None; // NULL in catalog means CALCULATED
+        let diff = compute_config_diff(
+            &st,
+            Some("calculated"),
+            "DIFFERENTIAL",
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_config_diff_mode_changed() {
+        let st = make_test_st();
+        let diff = compute_config_diff(&st, Some("1m"), "FULL", None, None, None, false);
+        assert!(!diff.is_empty());
+        assert_eq!(diff.refresh_mode, Some("FULL"));
+    }
+
+    #[test]
+    fn test_config_diff_auto_vs_differential() {
+        // AUTO resolves to DIFFERENTIAL — should be same as existing DIFFERENTIAL
+        let st = make_test_st();
+        let diff = compute_config_diff(&st, Some("1m"), "AUTO", None, None, None, false);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_config_diff_diamond_consistency_changed() {
+        let st = make_test_st(); // existing: Atomic
+        let diff = compute_config_diff(
+            &st,
+            Some("1m"),
+            "DIFFERENTIAL",
+            Some("none"),
+            None,
+            None,
+            false,
+        );
+        assert!(!diff.is_empty());
+        assert_eq!(diff.diamond_consistency, Some("none"));
+    }
+
+    #[test]
+    fn test_config_diff_append_only_changed() {
+        let st = make_test_st(); // existing: false
+        let diff = compute_config_diff(&st, Some("1m"), "DIFFERENTIAL", None, None, None, true);
+        assert!(!diff.is_empty());
+        assert_eq!(diff.append_only, Some(true));
+    }
+
+    #[test]
+    fn test_config_diff_cdc_mode_changed() {
+        let st = make_test_st(); // existing: None
+        let diff = compute_config_diff(
+            &st,
+            Some("1m"),
+            "DIFFERENTIAL",
+            None,
+            None,
+            Some("wal"),
+            false,
+        );
+        assert!(!diff.is_empty());
+        assert_eq!(diff.cdc_mode, Some("wal"));
+    }
+
+    #[test]
+    fn test_config_diff_cdc_mode_both_none() {
+        let st = make_test_st(); // existing: None
+        let diff = compute_config_diff(&st, Some("1m"), "DIFFERENTIAL", None, None, None, false);
+        assert!(diff.is_empty());
     }
 }

@@ -11,6 +11,30 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
+#### Idempotent DDL (`create_or_replace`)
+
+- **`pgtrickle.create_or_replace_stream_table()`** — declarative, idempotent
+  stream table deployment. One function call replaces the drop-and-recreate
+  pattern used by dbt and migration scripts:
+  - **Creates** if the stream table does not exist.
+  - **No-op** if the query and all config parameters are identical (INFO logged).
+  - **Alters config** (schedule, refresh_mode, diamond settings, cdc_mode,
+    append_only) when only settings changed.
+  - **Replaces query** via the ALTER QUERY path when the defining query
+    changed — includes in-place schema migration and full refresh.
+  - Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
+  - Upgrade SQL migration: `sql/pg_trickle--0.5.0--0.6.0.sql`.
+- **dbt materialization uses `create_or_replace`** — the `stream_table`
+  materialization now calls `create_or_replace_stream_table()` when
+  pg_trickle ≥ 0.6.0 is detected, with automatic fallback to the legacy
+  check-then-decide pattern for older versions.
+- **13 E2E tests** covering create, no-op, config-only alter, query replace
+  (same schema, compatible schema, incompatible schema), combined changes,
+  mode switches, IMMEDIATE mode, whitespace normalization, and
+  `create_stream_table_if_not_exists` variants.
+- **Deployment docs** — FAQ section on idempotent deployment patterns;
+  Getting Started guide with SQL migration and dbt best practices.
+
 #### Partitioning Support (Source Tables)
 
 Stream tables now work with PostgreSQL's declarative table partitioning.
@@ -74,6 +98,15 @@ infrastructure.
     per SCC before declaring non-convergence and marking members as ERROR.
   - `pg_trickle.allow_circular` (default false) — master switch; circular
     dependencies are rejected unless explicitly enabled.
+
+### Fixed
+
+- **`create_or_replace` whitespace normalization.** Cosmetic SQL differences
+  (extra spaces, tabs, newlines) are now correctly treated as no-ops instead
+  of triggering unnecessary ALTER QUERY operations.
+- **`create_or_replace` incompatible schema test.** Fixed E2E test to use a
+  truly incompatible type change (same column name, text→integer) rather than
+  a column rename (which is a compatible add+remove migration).
 
 ---
 
