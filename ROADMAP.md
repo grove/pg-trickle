@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-03-13
+> **Last updated:** 2026-03-14
 > **Latest release:** 0.5.0 (2026-03-13)
 > **Current milestone:** v0.6.0 — Partitioning, Idempotent DDL, Edge Cases & Circular Dependency Foundation
 
@@ -1064,7 +1064,7 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 **Exit criteria:**
 - [x] Partitioned source tables E2E-tested; ATTACH PARTITION detected
 - [x] WAL mode works with `publish_via_partition_root = true`
-- [ ] `create_or_replace_stream_table` deployed; dbt macro updated
+- [x] `create_or_replace_stream_table` deployed; dbt macro updated
 - [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
 - [ ] WAL + keyless without REPLICA IDENTITY FULL rejected at creation (EC-19)
 - [ ] `ALTER FUNCTION` body changes detected via `pg_proc` hash polling (EC-16)
