@@ -471,6 +471,15 @@ Polling via `pg_proc` on each differential refresh:
 - On following calls: recompute hashes. If any differ → `mark_for_reinitialize` + NOTICE. The next scheduler cycle performs a full refresh.
 - Uses `md5(string_agg(prosrc || coalesce(probin::text,''), ',' ORDER BY oid))` to handle polymorphic overloads robustly.
 
+**Test coverage:** 3 E2E tests (`e2e_multi_cycle_tests.rs`):
+- `test_ec16_function_body_change_marks_reinit` — verifies that
+  `CREATE OR REPLACE FUNCTION` triggers `needs_reinit = true` on the next
+  differential refresh.
+- `test_ec16_function_change_full_refresh_recovery` — verifies that after
+  reinit, a full refresh produces correct results with the new function logic.
+- `test_ec16_no_functions_unaffected` — verifies that stream tables without
+  user-defined functions are never affected by the hash polling mechanism.
+
 ---
 
 ### EC-17 — Schema change during active refresh

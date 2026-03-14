@@ -970,7 +970,7 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| EC-16 | **Detect when someone silently changes a function your query uses.** If a stream table's query calls `calculate_discount()` and someone does `CREATE OR REPLACE FUNCTION calculate_discount(...)` with new logic, the stream table's cached computation plan becomes stale. This checks function body hashes on each refresh and triggers a rebuild when a change is detected. | 2 days | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-16 |
+| ~~EC-16~~ ✅ | ~~**Detect when someone silently changes a function your query uses.** If a stream table's query calls `calculate_discount()` and someone does `CREATE OR REPLACE FUNCTION calculate_discount(...)` with new logic, the stream table's cached computation plan becomes stale. This checks function body hashes on each refresh and triggers a rebuild when a change is detected.~~ | 2 days | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-16 |
 | EC-18 | **Explain why WAL mode isn't activating.** When `cdc_mode = 'auto'`, pg_trickle is supposed to upgrade from trigger-based to WAL-based change tracking when possible. If it stays stuck on triggers (e.g. because `wal_level` isn't set to `logical`), there's no feedback. This adds a periodic log message explaining the reason and surfaces it in the `health_check()` output. | 1 day | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-18 |
 | EC-34 | **Recover gracefully after restoring from backup.** When you restore a PostgreSQL server from `pg_basebackup`, replication slots are lost. pg_trickle's WAL decoder would fail trying to read from a slot that no longer exists. This detects the missing slot, automatically falls back to trigger-based tracking, and logs a WARNING so you know what happened. | 1 day | [PLAN_EDGE_CASES.md](plans/PLAN_EDGE_CASES.md) EC-34 |
 
@@ -1067,7 +1067,7 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 - [x] `create_or_replace_stream_table` deployed; dbt macro updated
 - [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
 - [x] WAL + keyless without REPLICA IDENTITY FULL rejected at creation (EC-19)
-- [ ] `ALTER FUNCTION` body changes detected via `pg_proc` hash polling (EC-16)
+- [x] `ALTER FUNCTION` body changes detected via `pg_proc` hash polling (EC-16)
 - [ ] Stuck `auto` CDC mode surfaces explanation in logs and health check (EC-18)
 - [ ] Missing WAL slot after restore auto-detected with TRIGGER fallback (EC-34)
 - [ ] Window functions in expressions supported via CTE extraction (EC-03)

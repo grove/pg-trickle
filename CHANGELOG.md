@@ -208,6 +208,19 @@ v0.4.0 and v0.5.0.
   keyless tables, leading to data corruption. Two new E2E tests verify both
   the rejection path and the acceptance path with REPLICA IDENTITY FULL set.
 
+#### Edge Case Hardening — P1 Operational Safety
+
+- **EC-16: Function body change detection via `pg_proc` hash polling.**
+  When a stream table's defining query calls user-defined functions,
+  pg_trickle now detects `CREATE OR REPLACE FUNCTION` changes automatically.
+  On each differential refresh, the MD5 hash of each referenced function's
+  source body (`pg_proc.prosrc`) is compared against a stored baseline. If
+  any hash differs, the stream table is marked `needs_reinit = true` and a
+  full reinitialization runs on the next scheduler cycle, ensuring the stream
+  table reflects the updated function logic. Three new E2E tests cover:
+  function body change triggers reinit, full refresh recovery with new
+  function logic, and no-function stream tables are unaffected.
+
 ### Fixed
 
 - **`create_or_replace` whitespace normalization.** Cosmetic SQL differences
