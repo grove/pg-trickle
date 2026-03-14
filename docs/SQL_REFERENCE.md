@@ -10,6 +10,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Core Lifecycle](#core-lifecycle)
     - [pgtrickle.create\_stream\_table](#pgtricklecreate_stream_table)
     - [pgtrickle.create\_stream\_table\_if\_not\_exists](#pgtricklecreate_stream_table_if_not_exists)
+    - [pgtrickle.create\_or\_replace\_stream\_table](#pgtricklecreate_or_replace_stream_table)
     - [pgtrickle.alter\_stream\_table](#pgtricklealter_stream_table)
     - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
     - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
@@ -680,6 +681,61 @@ SELECT pgtrickle.create_stream_table_if_not_exists(
 **Notes:**
 - Useful for deployment / migration scripts that should be safe to re-run.
 - If the stream table already exists, the provided `query`, `schedule`, and other parameters are ignored — the existing definition is preserved.
+
+---
+
+### pgtrickle.create_or_replace_stream_table
+
+Create a stream table if it does not exist, or replace the existing one if the definition changed. This is the **declarative, idempotent** API for deployment workflows (dbt, SQL migrations, GitOps).
+
+```sql
+pgtrickle.create_or_replace_stream_table(
+    name                    text,
+    query                   text,
+    schedule                text      DEFAULT 'calculated',
+    refresh_mode            text      DEFAULT 'AUTO',
+    initialize              bool      DEFAULT true,
+    diamond_consistency     text      DEFAULT NULL,
+    diamond_schedule_policy text      DEFAULT NULL,
+    cdc_mode                text      DEFAULT NULL,
+    append_only             bool      DEFAULT false
+) → void
+```
+
+**Parameters:** Same as [`create_stream_table`](#pgtricklecreate_stream_table).
+
+**Behavior:**
+
+| Current state | Action taken |
+|---|---|
+| Stream table does **not** exist | **Create** — identical to `create_stream_table(...)` |
+| Stream table exists, query **and** all config identical | **No-op** — logs INFO, returns immediately |
+| Stream table exists, query identical but config differs | **Alter config** — delegates to `alter_stream_table(...)` for schedule, refresh_mode, diamond settings, cdc_mode, append_only |
+| Stream table exists, query differs | **Replace query** — in-place ALTER QUERY migration plus any config changes; a full refresh is applied |
+
+The `initialize` parameter is honoured on **create** only. On replace, the stream table is always repopulated via a full refresh.
+
+Query comparison uses the post-rewrite (normalized) form of the SQL. Cosmetic differences such as whitespace, casing, and extra parentheses are ignored.
+
+**Example:**
+
+```sql
+-- Idempotent deployment — safe to run on every deploy:
+SELECT pgtrickle.create_or_replace_stream_table(
+    name         => 'order_totals',
+    query        => 'SELECT region, SUM(amount) AS total FROM orders GROUP BY region',
+    schedule     => '2m',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- If the query changed since last deploy, the stream table is
+-- migrated in place (no data gap). If nothing changed, it's a no-op.
+```
+
+**Notes:**
+- Mirrors PostgreSQL's `CREATE OR REPLACE` convention (`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE FUNCTION`).
+- Never drops the stream table — even for incompatible schema changes, the ALTER QUERY path rebuilds storage in place while preserving the catalog entry (`pgt_id`).
+- For migration scripts that should **not** modify an existing definition, use [`create_stream_table_if_not_exists`](#pgtricklecreate_stream_table_if_not_exists) instead.
 
 ---
 

@@ -9,6 +9,22 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+#### Idempotent DDL (`create_or_replace`)
+
+- **`pgtrickle.create_or_replace_stream_table()`** — declarative, idempotent
+  stream table deployment. One function call replaces the drop-and-recreate
+  pattern used by dbt and migration scripts:
+  - **Creates** if the stream table does not exist.
+  - **No-op** if the query and all config parameters are identical (INFO logged).
+  - **Alters config** (schedule, refresh_mode, diamond settings, cdc_mode,
+    append_only) when only settings changed.
+  - **Replaces query** via the ALTER QUERY path when the defining query
+    changed — includes in-place schema migration and full refresh.
+  - Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
+  - Upgrade SQL migration: `sql/pg_trickle--0.5.0--0.6.0.sql`.
+
 ---
 
 ## [0.5.0] — 2026-03-13
