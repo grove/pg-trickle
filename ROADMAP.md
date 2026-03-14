@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-03-14
-> **Latest release:** 0.5.0 (2026-03-13)
-> **Current milestone:** v0.6.0 — Partitioning, Idempotent DDL, Edge Cases & Circular Dependency Foundation
+> **Latest release:** 0.6.0 (2026-03-14)
+> **Current milestone:** v0.7.0 — Watermarks, Circular DAG Execution, Observability & Infrastructure
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -20,20 +20,20 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
 1.0 and beyond.
 
 ```
-                                                                                          We are here
-                                                                                               │
-                                                                                               ▼
- ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
- │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 0.6.0  │
- │Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Partn., │
- │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │DDL&EC  │
- └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
+                                                                                                            We are here
+                                                                                                                 │
+                                                                                                                 ▼
+ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+ │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 0.6.0  │ │ 0.7.0  │
+ │Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│WM &   │
+ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │Cycl.  │
+ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
       │
-      └─ ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-         │ 0.7.0  │ │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │
-         │WM &   │─│Pooler  │─│Observ.,│─│Incr.Agg │─│Partn.   │─│Delta,   │
-         │Cycl.  │ │Compat. │ │Fuse&Dmp│ │IVM      │ │&Scale   │ │CDC&PGBk │
-         └────────┘ └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘
+      └─ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+         │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │
+         │Pooler  │─│Observ.,│─│Incr.Agg │─│Partn.   │─│Delta,   │
+         │Compat. │ │Fuse&Dmp│ │IVM      │ │&Scale   │ │CDC&PGBk │
+         └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘
               │
               └─ ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐
                  │ 0.13.0  │ │ 0.14.0  │ │ 1.0.0  │ │ 1.x+   │
@@ -1065,18 +1065,20 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 - [x] Partitioned source tables E2E-tested; ATTACH PARTITION detected
 - [x] WAL mode works with `publish_via_partition_root = true`
 - [x] `create_or_replace_stream_table` deployed; dbt macro updated
-- [ ] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
+- [x] SCC algorithm in place; monotonicity checker rejects non-monotone cycles
 - [x] WAL + keyless without REPLICA IDENTITY FULL rejected at creation (EC-19)
 - [x] `ALTER FUNCTION` body changes detected via `pg_proc` hash polling (EC-16)
 - [x] Stuck `auto` CDC mode surfaces explanation in logs and health check (EC-18)
 - [x] Missing WAL slot after restore auto-detected with TRIGGER fallback (EC-34)
 - [x] Window functions in expressions supported via subquery-lift rewrite (EC-03)
 - [x] `ALL (subquery)` rewritten to NULL-safe anti-join (EC-32)
-- [ ] Ergonomics E2E tests for calculated schedule, warnings, and removed GUCs pass
+- [x] Ergonomics E2E tests for calculated schedule, warnings, and removed GUCs pass
 - [x] `gate_source()` idempotency and re-gating tested; `bootstrap_gate_status()` available
 - [x] dbt `stream_table_status()` and `refresh_all_stream_tables` macros shipped
 - [x] SQL Reference updated for EC-03, EC-32, and foreign table polling patterns
-- [ ] Extension upgrade path tested (`0.5.0 → 0.6.0`)
+- [x] Extension upgrade path tested (`0.5.0 → 0.6.0`)
+
+**Status: Released (2026-03-14).**
 
 ---
 

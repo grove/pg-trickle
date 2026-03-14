@@ -9,6 +9,12 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+No changes yet.
+
+---
+
+## [0.6.0] — 2026-03-14
+
 ### Added
 
 #### Idempotent DDL (`create_or_replace`)

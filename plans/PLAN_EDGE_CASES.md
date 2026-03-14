@@ -1005,14 +1005,14 @@ surfaces.
 - ✅ EC-11: `scheduler_falling_behind` alert (NOTIFY at 80% threshold)
 - ✅ EC-13: Default `diamond_consistency = 'atomic'` + scheduler SAVEPOINT → `pg_sys::BeginInternalSubTransaction` fix
 
-**Sprint 3 — Remaining P1 + P2 starts:**
-- EC-18: Rate-limited LOG for stuck auto mode (1 day)
-- EC-34: Auto-detect missing WAL slot (1 day)
-- EC-16: `pg_proc` hash polling for function changes (2 days)
-- EC-03: Window function CTE extraction (3–5 days)
+**Sprint 3 — Remaining P1 + P2 starts:** ✅ DONE (v0.6.0)
+- ✅ EC-18: Rate-limited LOG for stuck auto mode (1 day)
+- ✅ EC-34: Auto-detect missing WAL slot (1 day)
+- ✅ EC-16: `pg_proc` hash polling for function changes (2 days)
+- ✅ EC-03: Window function CTE extraction (3–5 days)
 
-**Sprint 4+ — P2 + P3 long-term:**
-- EC-05, EC-32: Foreign table change detection; `ALL (subquery)` → `NOT EXISTS (… EXCEPT …)` rewrite
+**Sprint 4+ — P2 + P3 long-term:** ✅ DONE (v0.6.0)
+- ✅ EC-05, EC-32: Foreign table change detection; `ALL (subquery)` → `NOT EXISTS (… EXCEPT …)` rewrite
 - EC-33: Statistical aggregates via auxiliary accumulator columns
 - Documentation sweep for all remaining P3 items
 
