@@ -36,6 +36,11 @@ Stream tables now work with PostgreSQL's declarative table partitioning.
   is used as a source, pg_trickle now emits a clear info message explaining
   that only FULL refresh mode or polling-based CDC is supported.
 
+- **Partitioned table tutorial.** New user-facing guide
+  (`docs/tutorials/PARTITIONED_TABLES.md`) covering RANGE, LIST, and HASH
+  partitioned source tables, ATTACH/DETACH PARTITION behavior, foreign
+  tables, and known caveats.
+
 ---
 
 ## [0.5.0] — 2026-03-13
