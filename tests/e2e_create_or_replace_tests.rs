@@ -396,12 +396,12 @@ async fn test_cor_replaces_query_incompatible() {
         )
         .await;
 
-    // Replace with a NUMERIC column instead of TEXT — incompatible type change
-    // (text → numeric has no implicit cast)
+    // Replace with val cast to INTEGER — truly incompatible type change
+    // (text → integer has no implicit cast) on the same column name
     create_or_replace(
         &db,
         "incompat_snap",
-        "SELECT id, num FROM incompat",
+        "SELECT id, num::integer AS val FROM incompat",
         "1m",
         "DIFFERENTIAL",
     )
@@ -412,7 +412,7 @@ async fn test_cor_replaces_query_incompatible() {
 
     // Verify the data is correct after rebuild
     let val: i64 = db
-        .query_scalar("SELECT num::bigint FROM public.incompat_snap WHERE id = 1")
+        .query_scalar("SELECT val::bigint FROM public.incompat_snap WHERE id = 1")
         .await;
     assert_eq!(val, 42);
 
@@ -425,7 +425,7 @@ async fn test_cor_replaces_query_incompatible() {
         .await;
     assert_eq!(pgt_id_count, 1, "Catalog entry should be preserved");
 
-    // OID may change for incompatible rebuilds
+    // OID changes for incompatible rebuilds (same column name, incompatible type)
     let oid_after: i64 = db
         .query_scalar(
             "SELECT pgt_relid::bigint FROM pgtrickle.pgt_stream_tables \

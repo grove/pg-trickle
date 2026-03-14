@@ -266,6 +266,13 @@ fn compute_config_diff<'a>(
     }
 }
 
+/// Collapse all runs of whitespace (spaces, tabs, newlines) into a single
+/// space and trim leading/trailing whitespace. Used for semantic query
+/// comparison so cosmetic SQL formatting differences are treated as no-ops.
+fn normalize_sql_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_or_replace_stream_table_impl(
     name: &str,
@@ -294,7 +301,10 @@ fn create_or_replace_stream_table_impl(
                 None => &new_query_rewritten,
             };
 
-            let query_changed = existing.defining_query != *effective_new_query;
+            // Normalize whitespace before comparison so cosmetic differences
+            // (extra spaces, newlines, tabs) are treated as no-ops.
+            let query_changed = normalize_sql_whitespace(&existing.defining_query)
+                != normalize_sql_whitespace(effective_new_query);
 
             let config_diff = compute_config_diff(
                 &existing,
@@ -5095,6 +5105,40 @@ mod tests {
             is_append_only: false,
             scc_id: None,
         }
+    }
+
+    // ── normalize_sql_whitespace tests ─────────────────────────────────
+
+    #[test]
+    fn test_normalize_whitespace_collapses_spaces() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT  id,  val  FROM  t"),
+            "SELECT id, val FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_tabs_and_newlines() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT\tid\n\tFROM\tt"),
+            "SELECT id FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_trims() {
+        assert_eq!(
+            normalize_sql_whitespace("  SELECT id FROM t  "),
+            "SELECT id FROM t"
+        );
+    }
+
+    #[test]
+    fn test_normalize_whitespace_identical() {
+        assert_eq!(
+            normalize_sql_whitespace("SELECT id FROM t"),
+            normalize_sql_whitespace("SELECT id FROM t")
+        );
     }
 
     #[test]

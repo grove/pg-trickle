@@ -99,6 +99,15 @@ infrastructure.
   - `pg_trickle.allow_circular` (default false) — master switch; circular
     dependencies are rejected unless explicitly enabled.
 
+### Fixed
+
+- **`create_or_replace` whitespace normalization.** Cosmetic SQL differences
+  (extra spaces, tabs, newlines) are now correctly treated as no-ops instead
+  of triggering unnecessary ALTER QUERY operations.
+- **`create_or_replace` incompatible schema test.** Fixed E2E test to use a
+  truly incompatible type change (same column name, text→integer) rather than
+  a column rename (which is a compatible add+remove migration).
+
 ---
 
 ## [0.5.0] — 2026-03-13
