@@ -220,6 +220,22 @@ v0.4.0 and v0.5.0.
   table reflects the updated function logic. Three new E2E tests cover:
   function body change triggers reinit, full refresh recovery with new
   function logic, and no-function stream tables are unaffected.
+- **EC-18: Auto CDC stuck-on-triggers visibility via `check_cdc_health()`.**
+  When `cdc_mode = 'auto'` and WAL prerequisites aren't met (no PK, wrong
+  `wal_level`, missing REPLICA IDENTITY FULL), the source stays on TRIGGER
+  mode indefinitely. The scheduler now emits a rate-limited LOG every ~60
+  ticks explaining the exact reason. `check_cdc_health()` explicitly reports
+  the source as TRIGGER mode so operators can diagnose why WAL hasn't
+  activated. Two new E2E tests verify the health-check output and confirm
+  `health_check()` does not flag TRIGGER-mode auto-CDC sources as errors.
+- **EC-34: Missing WAL slot after backup/restore auto-detected with TRIGGER
+  fallback.** When a replication slot is lost (e.g. after `pg_basebackup`
+  restore), the health check detects the missing slot and
+  `check_cdc_health()` surfaces a `replication_slot_missing` alert. The
+  scheduler automatically falls back to trigger-based CDC with a WARNING
+  log and NOTIFY. One new E2E test verifies the `check_cdc_health()` alert
+  detection, complementing the existing `test_wal_fallback_on_missing_slot`
+  E2E test covering the full fallback lifecycle.
 
 ### Fixed
 

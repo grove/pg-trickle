@@ -519,6 +519,15 @@ sneaks in between lock acquisition and first read.
 2. **Medium term:** Add a `check_cdc_health()` finding for "auto mode stuck
    in TRIGGER phase for > 1 hour".
 
+**Test coverage:** 2 E2E tests (`e2e_wal_cdc_tests.rs`) + 1 existing test:
+- `test_ec18_check_cdc_health_shows_trigger_for_stuck_auto` — verifies
+  `check_cdc_health()` reports TRIGGER mode for a keyless auto-CDC source
+  and no alert fires for healthy TRIGGER-mode sources.
+- `test_ec18_health_check_ok_with_trigger_auto_sources` — verifies
+  `health_check()` does not flag TRIGGER-mode auto-CDC sources as errors.
+- `test_wal_keyless_table_stays_on_triggers` (pre-existing) — verifies
+  keyless tables remain on TRIGGER mode in auto-CDC configuration.
+
 ---
 
 ### EC-19 — WAL mode + keyless tables need REPLICA IDENTITY FULL
@@ -855,6 +864,15 @@ insufficient for very large groups.
 2. **Medium term:** On scheduler startup, when a source's `cdc_phase` is
    `WAL` but the slot is missing, automatically fall back to TRIGGER mode
    with a WARNING log and a NOTIFY.
+
+**Test coverage:** 2 E2E tests (`e2e_wal_cdc_tests.rs`):
+- `test_wal_fallback_on_missing_slot` (pre-existing) — full lifecycle test:
+  creates WAL-mode ST, drops replication slot externally, waits for automatic
+  fallback to TRIGGER, verifies data integrity after fallback.
+- `test_ec34_check_cdc_health_detects_missing_slot` — verifies
+  `check_cdc_health()` surfaces `replication_slot_missing` alert immediately
+  after slot drop, then confirms fallback to TRIGGER and post-fallback
+  data integrity.
 
 ---
 
