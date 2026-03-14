@@ -57,6 +57,7 @@ LIGHT_E2E_TESTS=(
     e2e_coverage_error_tests
     e2e_coverage_parser_tests
     e2e_create_tests
+    e2e_create_or_replace_tests
     e2e_cte_tests
     e2e_dag_concurrent_tests
     e2e_dag_error_tests
