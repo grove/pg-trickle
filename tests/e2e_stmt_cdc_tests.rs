@@ -484,14 +484,26 @@ async fn test_stmt_cdc_mixed_dml_in_transaction() {
     db.execute(&format!("TRUNCATE {buf}")).await;
 
     // Mix of DML in a single transaction.
-    db.execute("BEGIN").await;
-    db.execute("DELETE FROM mixed_dml WHERE id IN (1, 2, 3)")
-        .await;
-    db.execute("UPDATE mixed_dml SET val = 'updated' WHERE id IN (4, 5)")
-        .await;
-    db.execute("INSERT INTO mixed_dml VALUES (11, 'new11'), (12, 'new12')")
-        .await;
-    db.execute("COMMIT").await;
+    // Use a dedicated connection so BEGIN/DML/COMMIT all run on the same
+    // session — pool.execute() could dispatch each call to a different
+    // connection, leaving some trigger change-buffer rows uncommitted.
+    {
+        let mut conn = db.pool.acquire().await.expect("acquire connection");
+        sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
+        sqlx::query("DELETE FROM mixed_dml WHERE id IN (1, 2, 3)")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mixed_dml SET val = 'updated' WHERE id IN (4, 5)")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mixed_dml VALUES (11, 'new11'), (12, 'new12')")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
+    }
 
     // 3 deletes + 2 updates + 2 inserts = 7 change rows.
     let total: i64 = db.count(&buf).await;
