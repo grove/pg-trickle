@@ -239,6 +239,15 @@ v0.4.0 and v0.5.0.
   Nine E2E tests cover CASE, COALESCE, arithmetic, CAST, deeply nested
   patterns, and data correctness with both FULL and DIFFERENTIAL refresh
   modes including incremental updates.
+- **EC-32: `ALL (subquery)` comparisons supported via NULL-safe anti-join.**
+  Queries like `WHERE price < ALL (SELECT price FROM competitors)` are now
+  accepted in both FULL and DIFFERENTIAL modes. The `parse_all_sublink()`
+  parser rewrites `ALL` into an anti-join with a NULL-safe condition
+  `(col IS NULL OR NOT (x op col))`, correctly handling NULL values in the
+  subquery per SQL standard semantics. Supported operators: `>`, `>=`, `<`,
+  `<=`, `=`, `<>`. Eight new E2E tests cover basic filtering, differential
+  refresh after inner/outer table changes, NULL handling, empty subquery
+  semantics, FULL refresh mode, and `=`/`<>` operator variants.
 - **EC-34: Missing WAL slot after backup/restore auto-detected with TRIGGER
   fallback.** When a replication slot is lost (e.g. after `pg_basebackup`
   restore), the health check detects the missing slot and

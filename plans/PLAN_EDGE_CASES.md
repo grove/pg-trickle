@@ -819,6 +819,21 @@ wrong results. Fixed by changing the condition to
 `(col IS NULL OR NOT (x op col))`, which correctly excludes the outer row
 whenever any subquery row is NULL or fails the comparison.
 
+**Test coverage:** 8 E2E tests (`e2e_all_subquery_tests.rs`):
+- `test_all_subquery_less_than_differential` — basic `price < ALL` filter
+  matching the SQL Reference worked example.
+- `test_all_subquery_differential_inner_insert` — differential refresh after
+  inserting a cheaper competitor price that disqualifies a product.
+- `test_all_subquery_differential_outer_change` — outer INSERT + inner DELETE
+  with recomputation.
+- `test_all_subquery_null_in_inner` — NULL-safety: ALL returns false when
+  subquery contains NULL; removing NULL re-qualifies rows.
+- `test_all_subquery_empty_inner` — empty subquery: ALL against empty set
+  yields true (SQL standard); inserting reduces result.
+- `test_all_subquery_full_refresh` — `>= ALL` with FULL refresh mode.
+- `test_all_subquery_equals_operator` — `= ALL` (value equals every row).
+- `test_all_subquery_not_equals_operator` — `<> ALL` (equivalent to NOT IN).
+
 ---
 
 ### EC-33 — Statistical aggregates (CORR, COVAR_*, REGR_*)
