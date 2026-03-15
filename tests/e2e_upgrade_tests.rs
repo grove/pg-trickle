@@ -387,6 +387,7 @@ async fn test_upgrade_chain_new_functions_exist() {
         "SELECT * FROM pgtrickle.refresh_timeline(50)",
         "SELECT pgtrickle.version()",
         "SELECT * FROM pgtrickle.diamond_groups()",
+        "SELECT * FROM pgtrickle.pgt_scc_status()",
     ];
 
     for func_call in &new_functions {

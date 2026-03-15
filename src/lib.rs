@@ -338,7 +338,9 @@ SELECT
     stats.last_status,
     (SELECT array_agg(DISTINCT d.cdc_mode ORDER BY d.cdc_mode)
      FROM pgtrickle.pgt_dependencies d
-     WHERE d.pgt_id = st.pgt_id AND d.source_type = 'TABLE') AS cdc_modes
+     WHERE d.pgt_id = st.pgt_id AND d.source_type = 'TABLE') AS cdc_modes,
+    st.scc_id,
+    st.last_fixpoint_iterations
 FROM pgtrickle.pgt_stream_tables st
 LEFT JOIN LATERAL (
     SELECT

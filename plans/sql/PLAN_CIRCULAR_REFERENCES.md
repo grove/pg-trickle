@@ -558,7 +558,11 @@ fn check_for_cycles(source_relids: &[(Oid, String)]) -> Result<(), PgTrickleErro
 
 ---
 
-### Part 7 — Monitoring and Observability
+### Part 7 — Monitoring and Observability ✅ Done
+
+> **Implemented in CYC-7 commit.** `pg_stat_stream_tables` view now includes
+> `scc_id` and `last_fixpoint_iterations`. `pgt_status()` returns `scc_id`.
+> New `pgt_scc_status()` function exposes SCC topology and convergence metrics.
 
 Surface cycle and convergence information in the monitoring infrastructure.
 

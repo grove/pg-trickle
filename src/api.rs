@@ -2866,6 +2866,7 @@ fn pgt_status() -> TableIterator<
         name!(schedule, Option<String>),
         name!(data_timestamp, Option<TimestampWithTimeZone>),
         name!(staleness, Option<pgrx::datum::Interval>),
+        name!(scc_id, Option<i32>),
     ),
 > {
     let rows: Vec<_> = Spi::connect(|client| {
@@ -2873,7 +2874,7 @@ fn pgt_status() -> TableIterator<
             .select(
                 "SELECT pgt_schema || '.' || pgt_name, status, refresh_mode, \
                  is_populated, consecutive_errors, schedule, data_timestamp, \
-                 now() - data_timestamp AS staleness \
+                 now() - data_timestamp AS staleness, scc_id \
                  FROM pgtrickle.pgt_stream_tables ORDER BY pgt_schema, pgt_name",
                 None,
                 &[],
@@ -2891,8 +2892,68 @@ fn pgt_status() -> TableIterator<
             let schedule = row.get::<String>(6).unwrap_or(None);
             let data_ts = row.get::<TimestampWithTimeZone>(7).unwrap_or(None);
             let staleness = row.get::<pgrx::datum::Interval>(8).unwrap_or(None);
+            let scc_id = row.get::<i32>(9).unwrap_or(None);
             out.push((
-                name, status, mode, populated, errors, schedule, data_ts, staleness,
+                name, status, mode, populated, errors, schedule, data_ts, staleness, scc_id,
+            ));
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
+/// CYC-7: Show the status of all cyclic strongly connected components.
+///
+/// Returns one row per SCC, summarising its members, most recent fixpoint
+/// iteration count, and last convergence time.
+#[pg_extern(schema = "pgtrickle", name = "pgt_scc_status")]
+#[allow(clippy::type_complexity)]
+fn pgt_scc_status() -> TableIterator<
+    'static,
+    (
+        name!(scc_id, i32),
+        name!(member_count, i32),
+        name!(members, Vec<String>),
+        name!(last_iterations, Option<i32>),
+        name!(last_converged_at, Option<TimestampWithTimeZone>),
+    ),
+> {
+    let rows: Vec<_> = Spi::connect(|client| {
+        let result = client
+            .select(
+                "SELECT \
+                     st.scc_id, \
+                     count(*)::int AS member_count, \
+                     array_agg(st.pgt_schema || '.' || st.pgt_name ORDER BY st.pgt_name) AS members, \
+                     max(st.last_fixpoint_iterations) AS last_iterations, \
+                     max(st.last_refresh_at) AS last_converged_at \
+                 FROM pgtrickle.pgt_stream_tables st \
+                 WHERE st.scc_id IS NOT NULL \
+                 GROUP BY st.scc_id \
+                 ORDER BY st.scc_id",
+                None,
+                &[],
+            )
+            .map_err(|e| pgrx::error!("pgt_scc_status: SPI select failed: {e}"))
+            .expect("unreachable after error!()");
+
+        let mut out = Vec::new();
+        for row in result {
+            let scc_id = row.get::<i32>(1).unwrap_or(None).unwrap_or(0);
+            let member_count = row.get::<i32>(2).unwrap_or(None).unwrap_or(0);
+            let members = row
+                .get::<Vec<String>>(3)
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let last_iterations = row.get::<i32>(4).unwrap_or(None);
+            let last_converged_at = row.get::<TimestampWithTimeZone>(5).unwrap_or(None);
+            out.push((
+                scc_id,
+                member_count,
+                members,
+                last_iterations,
+                last_converged_at,
             ));
         }
         out

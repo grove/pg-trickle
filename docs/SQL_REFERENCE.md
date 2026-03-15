@@ -30,6 +30,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Dependency & Inspection](#dependency--inspection)
     - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
     - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
+    - [pgtrickle.pgt\_scc\_status](#pgtricklepgt_scc_status)
     - [pgtrickle.explain\_st](#pgtrickleexplain_st)
     - [pgtrickle.list\_sources](#pgtricklelist_sources)
   - [Utilities](#utilities)
@@ -1383,6 +1384,49 @@ SELECT * FROM pgtrickle.diamond_groups();
 
 ---
 
+### pgtrickle.pgt\_scc\_status
+
+List all cyclic strongly connected components (SCCs) and their convergence status.
+
+When stream tables form circular dependencies (with `pg_trickle.allow_circular = true`), they are grouped into SCCs and iterated to a fixed point. This function exposes those groups for monitoring and debugging.
+
+```sql
+pgtrickle.pgt_scc_status() → SETOF record(
+    scc_id              int4,
+    member_count        int4,
+    members             text[],
+    last_iterations     int4,
+    last_converged_at   timestamptz
+)
+```
+
+**Return columns:**
+
+| Column | Type | Description |
+|---|---|---|
+| `scc_id` | `int4` | SCC group identifier (1-based). |
+| `member_count` | `int4` | Number of stream tables in this SCC. |
+| `members` | `text[]` | Array of `schema.name` for each member. |
+| `last_iterations` | `int4` | Number of fixpoint iterations in the last convergence (NULL if never iterated). |
+| `last_converged_at` | `timestamptz` | Timestamp of the most recent refresh among SCC members (NULL if never refreshed). |
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.pgt_scc_status();
+```
+
+| scc_id | member_count | members | last_iterations | last_converged_at |
+|---|---|---|---|---|
+| 1 | 2 | {public.reach_a,public.reach_b} | 3 | 2026-03-15 12:00:00+00 |
+
+**Notes:**
+- Only cyclic SCCs (with `scc_id IS NOT NULL`) are returned. Acyclic stream tables are omitted.
+- `last_iterations` reflects the maximum `last_fixpoint_iterations` across SCC members.
+- Results are queried from the catalog on each call.
+
+---
+
 ### pgtrickle.explain_st
 
 Explain the DVM plan for a stream table's defining query.
@@ -2230,6 +2274,8 @@ Key columns:
 | `avg_duration_ms` | `float8` | Average refresh duration |
 | `consecutive_errors` | `int` | Current error streak |
 | `cdc_modes` | `text[]` | Distinct CDC modes across TABLE-type sources (e.g. `{wal}`, `{trigger,wal}`, `{transitioning,wal}`) |
+| `scc_id` | `int` | SCC group identifier for circular dependencies (`NULL` if not in a cycle) |
+| `last_fixpoint_iterations` | `int` | Number of fixpoint iterations in the last SCC convergence (`NULL` if not cyclic) |
 
 ---
 

@@ -153,6 +153,13 @@ reducing the surface area where memory-safety bugs could theoretically hide.
   automatically assigned to cycle members and recomputed when members are
   dropped or queries are altered.
 
+- **Circular dependency monitoring (CYC-7).** The `pg_stat_stream_tables`
+  view now includes `scc_id` and `last_fixpoint_iterations` columns.
+  `pgtrickle.pgt_status()` includes `scc_id`. New
+  `pgtrickle.pgt_scc_status()` function returns one row per cyclic SCC
+  with member count, member names, last iteration count, and last
+  convergence time.
+
 - **`last_fixpoint_iterations` catalog column.** New column on
   `pgtrickle.pgt_stream_tables` that records how many fixpoint iterations the
   last SCC convergence took. Useful for monitoring convergence speed and
