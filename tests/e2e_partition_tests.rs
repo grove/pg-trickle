@@ -382,26 +382,19 @@ async fn test_foreign_table_full_refresh_works() {
     db.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
         .await;
 
-    let conn_info: String = db
+    // Build server options (host, port, dbname) — `user` is a USER MAPPING
+    // option, not a SERVER option in postgres_fdw.
+    let server_opts: String = db
         .query_scalar(
-            "SELECT format('host=%s port=%s dbname=%s user=%s',
+            "SELECT format('host ''%s'', port ''%s'', dbname ''%s''',
                 inet_server_addr()::text,
                 inet_server_port()::text,
-                current_database(),
-                current_user)",
+                current_database())",
         )
         .await;
 
     db.execute(&format!(
-        "CREATE SERVER IF NOT EXISTS loopback FOREIGN DATA WRAPPER postgres_fdw OPTIONS ({})",
-        conn_info
-            .split_whitespace()
-            .map(|kv| {
-                let (k, v) = kv.split_once('=').unwrap();
-                format!("{k} '{v}'")
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        "CREATE SERVER IF NOT EXISTS loopback FOREIGN DATA WRAPPER postgres_fdw OPTIONS ({server_opts})",
     ))
     .await;
 

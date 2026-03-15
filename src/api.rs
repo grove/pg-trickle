@@ -2377,6 +2377,17 @@ fn execute_manual_refresh(
             );
             (ins, del)
         })
+    } else if st.needs_reinit {
+        // When needs_reinit is set (e.g. by DDL hooks for ATTACH/DETACH
+        // PARTITION, or EC-16 function body change detection), force a
+        // FULL refresh regardless of the ST's refresh_mode.  This mirrors
+        // the scheduler's RefreshAction::Reinitialize path.
+        pgrx::info!(
+            "Stream table {}.{}: needs_reinit is set, performing FULL reinitialization",
+            schema,
+            table_name,
+        );
+        execute_manual_full_refresh(st, schema, table_name, source_oids).map(|_| (0i64, 0i64))
     } else {
         match st.refresh_mode {
             RefreshMode::Full => execute_manual_full_refresh(st, schema, table_name, source_oids)
