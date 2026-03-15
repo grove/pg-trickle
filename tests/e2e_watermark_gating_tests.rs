@@ -620,6 +620,7 @@ async fn test_watermark_intermediate_refreshes_freely() {
 /// 3. Create a watermark group with strict tolerance.
 /// 4. Advance watermarks to misaligned timestamps.
 /// 5. Wait for scheduler to log SKIPPED in pgt_refresh_history.
+#[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
 async fn test_scheduler_skips_misaligned_watermark() {
     let db = E2eDb::new_on_postgres_db().await;
@@ -719,6 +720,7 @@ async fn test_scheduler_skips_misaligned_watermark() {
 /// 1. Set up misaligned watermarks (scheduler starts skipping).
 /// 2. Align watermarks.
 /// 3. Wait for a new COMPLETED refresh.
+#[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
 async fn test_scheduler_resumes_after_watermark_alignment() {
     let db = E2eDb::new_on_postgres_db().await;
@@ -816,6 +818,7 @@ async fn test_scheduler_resumes_after_watermark_alignment() {
 /// WM-4: Tolerance allows refresh when lag is within bounds.
 ///
 /// Creates a group with 120s tolerance and 60s lag → aligned → refreshes.
+#[cfg(not(feature = "light-e2e"))]
 #[tokio::test]
 async fn test_scheduler_respects_tolerance() {
     let db = E2eDb::new_on_postgres_db().await;
