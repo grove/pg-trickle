@@ -1522,6 +1522,418 @@ pub fn set_ungated(source_relid: pg_sys::Oid) -> Result<(), PgTrickleError> {
     .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))
 }
 
+// ── Watermark Gating (v0.7.0) ─────────────────────────────────────────────
+
+/// Per-source watermark state, mirrors `pgtrickle.pgt_watermarks`.
+#[derive(Debug, Clone)]
+pub struct WatermarkState {
+    pub source_relid: pg_sys::Oid,
+    pub watermark: TimestampWithTimeZone,
+    pub updated_at: TimestampWithTimeZone,
+    pub advanced_by: Option<String>,
+    pub wal_lsn_at_advance: Option<String>,
+}
+
+/// Watermark group definition, mirrors `pgtrickle.pgt_watermark_groups`.
+#[derive(Debug, Clone)]
+pub struct WatermarkGroup {
+    pub group_id: i32,
+    pub group_name: String,
+    pub source_relids: Vec<pg_sys::Oid>,
+    pub tolerance_secs: f64,
+    pub created_at: TimestampWithTimeZone,
+}
+
+/// Advance (or insert) the watermark for a source table.
+///
+/// Enforces monotonicity: the new watermark must be >= the current value.
+/// Records `pg_current_wal_insert_lsn()` alongside the watermark for
+/// future hold-back support.
+pub fn advance_watermark(
+    source_relid: pg_sys::Oid,
+    watermark: TimestampWithTimeZone,
+    advanced_by: Option<&str>,
+) -> Result<(), PgTrickleError> {
+    // Check monotonicity: reject backward movement.
+    let current: Option<TimestampWithTimeZone> = Spi::get_one_with_args(
+        "SELECT watermark FROM pgtrickle.pgt_watermarks WHERE source_relid = $1",
+        &[source_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    if let Some(current_wm) = current {
+        // Compare via SQL to use PostgreSQL's TIMESTAMPTZ comparison.
+        let is_backward: bool = Spi::get_one_with_args(
+            "SELECT $1::timestamptz < $2::timestamptz",
+            &[watermark.into(), current_wm.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+
+        if is_backward {
+            return Err(PgTrickleError::WatermarkBackwardMovement(format!(
+                "new watermark is older than current for source OID {}",
+                source_relid.to_u32()
+            )));
+        }
+
+        // Same value is a no-op (idempotent).
+        let is_equal: bool = Spi::get_one_with_args(
+            "SELECT $1::timestamptz = $2::timestamptz",
+            &[watermark.into(), current_wm.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or(false);
+
+        if is_equal {
+            return Ok(());
+        }
+    }
+
+    Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_watermarks \
+             (source_relid, watermark, updated_at, advanced_by, wal_lsn_at_advance) \
+         VALUES ($1, $2, now(), $3, pg_current_wal_insert_lsn()::text) \
+         ON CONFLICT (source_relid) DO UPDATE SET \
+             watermark = EXCLUDED.watermark, \
+             updated_at = EXCLUDED.updated_at, \
+             advanced_by = EXCLUDED.advanced_by, \
+             wal_lsn_at_advance = EXCLUDED.wal_lsn_at_advance",
+        &[source_relid.into(), watermark.into(), advanced_by.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+/// Get all current watermark states.
+pub fn get_all_watermarks() -> Result<Vec<WatermarkState>, PgTrickleError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT source_relid, watermark, updated_at, advanced_by, wal_lsn_at_advance \
+                 FROM pgtrickle.pgt_watermarks \
+                 ORDER BY source_relid",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for row in table {
+            let source_relid = row
+                .get::<pg_sys::Oid>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(pg_sys::Oid::from(0u32));
+            let watermark = row
+                .get::<TimestampWithTimeZone>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL watermark in pgt_watermarks".into())
+                })?;
+            let updated_at = row
+                .get::<TimestampWithTimeZone>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL updated_at in pgt_watermarks".into())
+                })?;
+            let advanced_by = row
+                .get::<String>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let wal_lsn_at_advance = row
+                .get::<String>(5)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            out.push(WatermarkState {
+                source_relid,
+                watermark,
+                updated_at,
+                advanced_by,
+                wal_lsn_at_advance,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// Get the watermark for a specific source OID.
+pub fn get_watermark_for_source(
+    source_relid: pg_sys::Oid,
+) -> Result<Option<WatermarkState>, PgTrickleError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT source_relid, watermark, updated_at, advanced_by, wal_lsn_at_advance \
+                 FROM pgtrickle.pgt_watermarks WHERE source_relid = $1",
+                None,
+                &[source_relid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        if let Some(row) = table.into_iter().next() {
+            let watermark = row
+                .get::<TimestampWithTimeZone>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL watermark in pgt_watermarks".into())
+                })?;
+            let updated_at = row
+                .get::<TimestampWithTimeZone>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL updated_at in pgt_watermarks".into())
+                })?;
+            let advanced_by = row
+                .get::<String>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            let wal_lsn_at_advance = row
+                .get::<String>(5)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            return Ok(Some(WatermarkState {
+                source_relid,
+                watermark,
+                updated_at,
+                advanced_by,
+                wal_lsn_at_advance,
+            }));
+        }
+        Ok(None)
+    })
+}
+
+/// Create a new watermark group.
+pub fn create_watermark_group(
+    group_name: &str,
+    source_relids: &[pg_sys::Oid],
+    tolerance_secs: f64,
+) -> Result<i32, PgTrickleError> {
+    // Check for duplicate name.
+    let exists: Option<bool> = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_watermark_groups WHERE group_name = $1)",
+        &[group_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    if exists == Some(true) {
+        return Err(PgTrickleError::WatermarkGroupAlreadyExists(
+            group_name.to_string(),
+        ));
+    }
+
+    // Build an OID array literal for SQL.
+    let oid_strs: Vec<String> = source_relids
+        .iter()
+        .map(|o| o.to_u32().to_string())
+        .collect();
+    let array_literal = format!("ARRAY[{}]::oid[]", oid_strs.join(","));
+
+    let sql = format!(
+        "INSERT INTO pgtrickle.pgt_watermark_groups \
+             (group_name, source_relids, tolerance_secs) \
+         VALUES ($1, {}, $2) \
+         RETURNING group_id",
+        array_literal
+    );
+    let group_id: i32 = Spi::get_one_with_args(&sql, &[group_name.into(), tolerance_secs.into()])
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+        .ok_or_else(|| {
+            PgTrickleError::InternalError(
+                "create_watermark_group: INSERT RETURNING returned NULL".into(),
+            )
+        })?;
+    Ok(group_id)
+}
+
+/// Drop a watermark group by name.
+pub fn drop_watermark_group(group_name: &str) -> Result<(), PgTrickleError> {
+    let deleted: Option<i64> = Spi::get_one_with_args(
+        "WITH d AS (\
+             DELETE FROM pgtrickle.pgt_watermark_groups WHERE group_name = $1 RETURNING 1\
+         ) SELECT count(*) FROM d",
+        &[group_name.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    if deleted == Some(0) || deleted.is_none() {
+        return Err(PgTrickleError::WatermarkGroupNotFound(
+            group_name.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Get all watermark groups.
+pub fn get_all_watermark_groups() -> Result<Vec<WatermarkGroup>, PgTrickleError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT group_id, group_name, source_relids, tolerance_secs, created_at \
+                 FROM pgtrickle.pgt_watermark_groups \
+                 ORDER BY group_name",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for row in table {
+            let group_id = row
+                .get::<i32>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(0);
+            let group_name = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            // source_relids is OID[] — fetch as a Vec<pg_sys::Oid>.
+            let source_relids: Vec<pg_sys::Oid> = row
+                .get::<Vec<pg_sys::Oid>>(3)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            let tolerance_secs = row
+                .get::<f64>(4)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(0.0);
+            let created_at = row
+                .get::<TimestampWithTimeZone>(5)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError("NULL created_at in pgt_watermark_groups".into())
+                })?;
+            out.push(WatermarkGroup {
+                group_id,
+                group_name,
+                source_relids,
+                tolerance_secs,
+                created_at,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// Check watermark alignment for a stream table's source OIDs.
+///
+/// Returns `true` if all overlapping watermark groups are aligned (or no
+/// groups apply). Returns `false` if any group's watermarks are misaligned
+/// beyond tolerance.
+///
+/// A group is considered aligned when:
+///   max(watermark) - min(watermark) <= tolerance
+/// among all source OIDs that belong to both the group and the ST's source set.
+///
+/// Sources that have never had a watermark advanced are ignored (they don't
+/// participate in gating until their first `advance_watermark()` call).
+pub fn check_watermark_alignment(
+    source_oids: &[pg_sys::Oid],
+) -> Result<(bool, Option<String>), PgTrickleError> {
+    let groups = get_all_watermark_groups()?;
+    if groups.is_empty() {
+        return Ok((true, None));
+    }
+
+    let source_set: std::collections::HashSet<pg_sys::Oid> = source_oids.iter().copied().collect();
+
+    for group in &groups {
+        // Find the intersection: group sources that are also ST sources.
+        let overlapping: Vec<pg_sys::Oid> = group
+            .source_relids
+            .iter()
+            .filter(|oid| source_set.contains(oid))
+            .copied()
+            .collect();
+
+        // If fewer than 2 of this group's sources are in the ST's source
+        // set, the group is irrelevant for this ST.
+        if overlapping.len() < 2 {
+            continue;
+        }
+
+        // Collect watermarks for overlapping sources.
+        let mut timestamps: Vec<TimestampWithTimeZone> = Vec::new();
+        let mut missing_count = 0usize;
+        for oid in &overlapping {
+            match get_watermark_for_source(*oid)? {
+                Some(wm) => timestamps.push(wm.watermark),
+                None => missing_count += 1,
+            }
+        }
+
+        // If any overlapping source has no watermark yet, skip gating for
+        // this group (watermarks not fully set up yet).
+        if missing_count > 0 {
+            continue;
+        }
+
+        // All sources have watermarks — check alignment.
+        if timestamps.len() >= 2 {
+            let lag_secs: Option<f64> = Spi::get_one_with_args(
+                "SELECT EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))::float8",
+                &[timestamps[0].into(), timestamps[1].into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+            // For >2 sources, compute max and min via SQL for robustness.
+            let (max_wm, min_wm) = if timestamps.len() == 2 {
+                // Determine which is max and which is min.
+                let first_is_greater: bool = Spi::get_one_with_args(
+                    "SELECT $1::timestamptz >= $2::timestamptz",
+                    &[timestamps[0].into(), timestamps[1].into()],
+                )
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or(true);
+
+                if first_is_greater {
+                    (timestamps[0], timestamps[1])
+                } else {
+                    (timestamps[1], timestamps[0])
+                }
+            } else {
+                // For 3+ sources, build SQL to find max/min.
+                let mut max = timestamps[0];
+                let mut min = timestamps[0];
+                for ts in &timestamps[1..] {
+                    let is_greater: bool = Spi::get_one_with_args(
+                        "SELECT $1::timestamptz > $2::timestamptz",
+                        &[(*ts).into(), max.into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false);
+                    if is_greater {
+                        max = *ts;
+                    }
+                    let is_less: bool = Spi::get_one_with_args(
+                        "SELECT $1::timestamptz < $2::timestamptz",
+                        &[(*ts).into(), min.into()],
+                    )
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .unwrap_or(false);
+                    if is_less {
+                        min = *ts;
+                    }
+                }
+                (max, min)
+            };
+
+            let lag: f64 = Spi::get_one_with_args(
+                "SELECT EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))::float8",
+                &[max_wm.into(), min_wm.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(0.0);
+
+            let _ = lag_secs; // used above for 2-source shortcut
+
+            if lag > group.tolerance_secs {
+                let reason = format!(
+                    "watermark group '{}' misaligned: lag {:.1}s exceeds tolerance {:.1}s",
+                    group.group_name, lag, group.tolerance_secs
+                );
+                return Ok((false, Some(reason)));
+            }
+        }
+    }
+
+    Ok((true, None))
+}
+
 // ── Scheduler Job (Phase 2: parallel refresh) ─────────────────────────────
 
 /// Status of a scheduler job in the parallel refresh pipeline.
