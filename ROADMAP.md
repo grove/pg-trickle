@@ -1136,11 +1136,11 @@ source tables are populated on different schedules.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| WM-1 | Catalog: `pgt_watermarks` table (`source_relid`, `current_watermark`, `updated_at`, `wal_lsn_at_advance`); `pgt_watermark_groups` table (`group_name`, `sources`, `tolerance`) | 2h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
-| WM-2 | `advance_watermark(source, watermark)` — monotonicity check, store LSN alongside watermark, lightweight scheduler signal | 2h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
-| WM-3 | `create_watermark_group(name, sources[], tolerance)` / `drop_watermark_group()` | 2h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
-| WM-4 | Scheduler pre-check: evaluate watermark alignment predicate; skip + log `SKIP(watermark_misaligned)` if not aligned | 3–4h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
-| WM-5 | `watermarks()`, `watermark_groups()`, `watermark_status()` introspection functions | 2h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
+| ~~WM-1~~ | ~~Catalog: `pgt_watermarks` table (`source_relid`, `current_watermark`, `updated_at`, `wal_lsn_at_advance`); `pgt_watermark_groups` table (`group_name`, `sources`, `tolerance`)~~ | ✅ Done | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
+| ~~WM-2~~ | ~~`advance_watermark(source, watermark)` — monotonicity check, store LSN alongside watermark, lightweight scheduler signal~~ | ✅ Done | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
+| ~~WM-3~~ | ~~`create_watermark_group(name, sources[], tolerance)` / `drop_watermark_group()`~~ | ✅ Done | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
+| ~~WM-4~~ | ~~Scheduler pre-check: evaluate watermark alignment predicate; skip + log `SKIP(watermark_misaligned)` if not aligned~~ | ✅ Done | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
+| ~~WM-5~~ | ~~`watermarks()`, `watermark_groups()`, `watermark_status()` introspection functions~~ | ✅ Done | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
 | WM-6 | E2E tests: nightly ETL, micro-batch tolerance, multiple pipelines, mixed external+internal sources | 6–8h | [PLAN_WATERMARK_GATING.md](plans/sql/PLAN_WATERMARK_GATING.md) |
 
 > **Watermark gating subtotal: ~17–20 hours**
@@ -1196,10 +1196,10 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | INFRA-1 | **Prove the Docker image builds.** Set up a CI workflow that builds the official Docker Hub image (PostgreSQL 18 + pg_trickle pre-installed), runs a smoke test (create extension, create a stream table, refresh it), but doesn't publish anywhere yet. When 1.0 arrives, publishing is just flipping a switch. | 5h | [PLAN_DOCKER_IMAGE.md](plans/infra/PLAN_DOCKER_IMAGE.md) |
-| INFRA-2 | **Prepare for `pgxn install pg_trickle`.** PGXN is PostgreSQL's official extension registry. Drafting the `META.json` metadata file now means publishing to PGXN at 1.0 is a single command — no scrambling to figure out the required fields and version constraints at release time. | 2h | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
+| INFRA-2 | **Publish an early PGXN testing release.** Draft `META.json` and upload a `release_status: "testing"` package to PGXN so `pgxn install pg_trickle` works for early adopters now. PGXN explicitly supports pre-stable releases; this gets real-world install testing and establishes registry presence before 1.0. At 1.0 the only change is flipping `release_status` to `"stable"`. | 2–3h | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
 | INFRA-3 | **Verify Kubernetes deployment works.** A CI smoke test that deploys the pg_trickle extension image into a CloudNativePG (CNPG) Kubernetes cluster, creates a stream table, and confirms a refresh cycle completes. Catches packaging and compatibility issues before they reach Kubernetes users. | 4h | [PLAN_CLOUDNATIVEPG.md](plans/ecosystem/PLAN_CLOUDNATIVEPG.md) |
 
-> **Infrastructure prep subtotal: ~11 hours**
+> **Infrastructure prep subtotal: ~11–12 hours**
 
 ### Performance — Regression Fixes & Benchmark Infrastructure (Part 9 S1–S2) ✅ Done
 
@@ -1242,6 +1242,9 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 - [ ] `advance_watermark` + scheduler gating operational; ETL E2E tests pass
 - [ ] Monotone circular DAGs converge to fixpoint; non-convergence surfaces as `ERROR`
 - [x] UDAs, nested window expressions, and deeply nested OR+sublinks supported in DIFFERENTIAL mode
+- [ ] Docker Hub image CI workflow builds and smoke-tests successfully
+- [ ] PGXN `testing` release uploaded; `pgxn install pg_trickle` works
+- [ ] CNPG integration smoke test passes in CI
 - [ ] Extension upgrade path tested (`0.6.0 → 0.7.0`)
 
 ---
@@ -1365,31 +1368,11 @@ action.
 
 > **Anomalous change detection subtotal: ~10–14 hours**
 
-### Pre-1.0 Infrastructure Prep
-
-> **In plain terms:** Three preparatory tasks that make the eventual 1.0
-> release smoother. A draft Docker Hub image workflow (tests the build but
-> doesn't publish yet); a PGXN metadata file so the extension can eventually
-> be installed with `pgxn install pg_trickle`; and a basic CNPG integration
-> test that verifies the extension image loads correctly in a CloudNativePG
-> cluster. None of these ship user-facing features — they're CI and
-> packaging scaffolding.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| INFRA-1 | **Prove the Docker image builds.** Set up a CI workflow that builds the official Docker Hub image (PostgreSQL 18 + pg_trickle pre-installed), runs a smoke test (create extension, create a stream table, refresh it), but doesn't publish anywhere yet. When 1.0 arrives, publishing is just flipping a switch. | 5h | [PLAN_DOCKER_IMAGE.md](plans/infra/PLAN_DOCKER_IMAGE.md) |
-| INFRA-2 | **Prepare for `pgxn install pg_trickle`.** PGXN is PostgreSQL's official extension registry. Drafting the `META.json` metadata file now means publishing to PGXN at 1.0 is a single command — no scrambling to figure out the required fields and version constraints at release time. | 2h | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
-| INFRA-3 | **Verify Kubernetes deployment works.** A CI smoke test that deploys the pg_trickle extension image into a CloudNativePG (CNPG) Kubernetes cluster, creates a stream table, and confirms a refresh cycle completes. Catches packaging and compatibility issues before they reach Kubernetes users. | 4h | [PLAN_CLOUDNATIVEPG.md](plans/ecosystem/PLAN_CLOUDNATIVEPG.md) |
-
-> **Infrastructure prep subtotal: ~11 hours**
-
-> **v0.9.0 total: ~33–37 hours**
+> **v0.9.0 total: ~22–26 hours**
 
 **Exit criteria:**
 - [ ] Prometheus queries + alerting rules + Grafana dashboard shipped
 - [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers
-- [ ] Docker Hub image draft workflow passes; PGXN `META.json` drafted
-- [ ] CNPG integration smoke test passes in CI
 - [ ] `ALTER EXTENSION pg_trickle UPDATE` tested (`0.8.0 → 0.9.0`)
 - [ ] All public documentation current and reviewed
 
@@ -1786,14 +1769,15 @@ distribution — getting pg_trickle onto package registries.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | R1 | Semantic versioning policy + compatibility guarantees | 2–3h | [PLAN_VERSIONING.md](plans/infra/PLAN_VERSIONING.md) |
-| R2 | PGXN / apt / rpm packaging | 8–12h | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
+| R2 | apt / rpm packaging (Debian/Ubuntu `.deb` + RHEL `.rpm` via PGDG) | 8–12h | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
+| R2b | PGXN `release_status` → `"stable"` (flip one field; PGXN testing release ships in v0.7.0) | 30min | [PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) |
 | R3 | ~~Docker Hub official image~~ → CNPG extension image | ✅ Done | [PLAN_CLOUDNATIVEPG.md](plans/ecosystem/PLAN_CLOUDNATIVEPG.md) |
 | R4 | CNPG operator hardening (K8s 1.33+ native ImageVolume) | 4–6h | [PLAN_CLOUDNATIVEPG.md](plans/ecosystem/PLAN_CLOUDNATIVEPG.md) |
 
-> **v1.0.0 total: ~18–27 hours**
+> **v1.0.0 total: ~18–28 hours**
 
 **Exit criteria:**
-- [ ] Published on PGXN and Docker Hub
+- [ ] Published on PGXN (stable) and apt/rpm via PGDG
 - [x] CNPG extension image published to GHCR (`pg_trickle-ext`)
 - [x] CNPG cluster-example.yaml validated (Image Volume approach)
 - [ ] Upgrade path from v0.14.0 tested
