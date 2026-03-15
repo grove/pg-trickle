@@ -7,7 +7,7 @@
 #
 # Files and their unsafe block counts:
 src/api.rs 10
-src/dvm/parser.rs 774
+src/dvm/parser.rs 613
 src/lib.rs 2
 src/scheduler.rs 7
 src/shmem.rs 5

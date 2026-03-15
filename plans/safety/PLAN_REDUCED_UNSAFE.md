@@ -1,6 +1,6 @@
 # PLAN: Reduce Unsafe Code Surface
 
-**Status:** Proposed
+**Status:** Complete
 **Target milestone:** v0.7.0
 **Last updated:** 2026-03-15
 
