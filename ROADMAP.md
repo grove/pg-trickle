@@ -23,7 +23,7 @@ coverage, all in plain language.
 - [v0.4.0 — Parallel Refresh & Performance Hardening](#v040--parallel-refresh--performance-hardening)
 - [v0.5.0 — Row-Level Security & Operational Controls](#v050--row-level-security--operational-controls)
 - [v0.6.0 — Partitioning, Idempotent DDL, Edge Cases & Circular Dependency Foundation](#v060--partitioning-idempotent-ddl-edge-cases--circular-dependency-foundation)
-- [v0.7.0 — Watermarks, Circular DAG Execution, Observability & Infrastructure](#v070--watermarks-circular-dag-execution-observability--infrastructure)
+- [v0.7.0 — Performance, Watermarks, Circular DAG Execution, Observability & Infrastructure](#v070--performance-watermarks-circular-dag-execution-observability--infrastructure)
 - [v0.8.0 — Connection Pooler Compatibility](#v080--connection-pooler-compatibility)
 - [v0.9.0 — Observability, Anomaly Detection & pg_dump Support](#v090--observability-anomaly-detection--pg_dump-support)
 - [v0.10.0 — Incremental Aggregate Maintenance](#v0100--incremental-aggregate-maintenance)
@@ -1109,12 +1109,14 @@ Forms the prerequisite for full SCC-based fixpoint refresh in v0.7.0.
 
 ---
 
-## v0.7.0 — Watermarks, Circular DAG Execution, Observability & Infrastructure
+## v0.7.0 — Performance, Watermarks, Circular DAG Execution, Observability & Infrastructure
 
-**Goal:** Add user-injected temporal watermark gating for batch-ETL
-coordination, complete the fixpoint scheduler for circular stream table
-DAGs, ship ready-made Prometheus/Grafana monitoring, and prepare the
-1.0 packaging and deployment infrastructure.
+**Goal:** Land Part 9 performance improvements (parallel refresh
+scheduling, MERGE strategy optimization, advanced benchmarks), add
+user-injected temporal watermark gating for batch-ETL coordination,
+complete the fixpoint scheduler for circular stream table DAGs, ship
+ready-made Prometheus/Grafana monitoring, and prepare the 1.0 packaging
+and deployment infrastructure.
 
 ### Watermark Gating
 
@@ -1246,6 +1248,7 @@ Zero-code monitoring integration. All config files live in a new
 > **v0.7.0 total: ~59–62h**
 
 **Exit criteria:**
+- [x] Part 9 performance: DAG levels, xxh64 hashing, aggregate saturation bypass, cost-based threshold, advanced benchmarks
 - [ ] `advance_watermark` + scheduler gating operational; ETL E2E tests pass
 - [ ] Monotone circular DAGs converge to fixpoint; non-convergence surfaces as `ERROR`
 - [ ] Prometheus queries + alerting rules + Grafana dashboard shipped
