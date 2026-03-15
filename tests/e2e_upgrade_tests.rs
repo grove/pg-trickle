@@ -56,6 +56,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("pgt_schema", "text"),
         ("requested_cdc_mode", "text"),
         ("refresh_mode", "text"),
+        ("scc_id", "integer"),
         ("schedule", "text"),
         ("status", "text"),
         ("topk_limit", "integer"),
