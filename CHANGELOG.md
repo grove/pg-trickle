@@ -27,6 +27,34 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+- **User-defined aggregates (UDAs) in DIFFERENTIAL mode.** Custom aggregates
+  created with `CREATE AGGREGATE` (including PostGIS, pgvector, and user-created
+  functions) are now supported in DIFFERENTIAL and AUTO modes using the
+  group-rescan strategy. Previously these fell back to FULL refresh in AUTO mode
+  or produced errors in explicit DIFFERENTIAL mode.
+
+- **Multiple OR+sublink conjuncts in WHERE clauses.** Queries with two or more
+  `(a OR EXISTS(...))` patterns combined with AND are now rewritten to UNION
+  branches for DIFFERENTIAL mode. A combinatorial guard limits expansion to
+  16 UNION branches. Previously only the first OR+sublink conjunct was handled;
+  additional ones caused FULL fallback or errors.
+
+- **De Morgan normalization for NOT+sublink patterns.** `NOT (a AND NOT EXISTS(...))`
+  is now automatically rewritten to `(NOT a) OR EXISTS(...)` using De Morgan's
+  law, exposing previously hidden OR+sublink patterns for the UNION rewrite.
+  Handles NOT(AND), NOT(OR), and NOT(NOT) with double-negation elimination.
+
+- **Multi-pass OR+sublink rewrite pipeline.** The De Morgan normalization and
+  UNION rewrite now run in a fixed-point loop (up to 3 iterations), correctly
+  handling patterns that require multiple transformation passes.
+
+- **E2E tests for differential mode gaps.** New test file
+  `e2e_differential_gaps_tests.rs` with 14 tests covering UDA creation,
+  FILTER/ORDER BY/schema-qualified UDAs, full CDC cycles, AUTO mode resolution,
+  De Morgan normalization, and multi-OR-sublink patterns.
+
 ### Performance
 
 - **Optimized `prefixed_col_list` and `col_list`** — eliminated intermediate
