@@ -27,7 +27,24 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- **User-defined aggregates (UDAs) in DIFFERENTIAL mode.** Custom aggregates
+  created with `CREATE AGGREGATE` (including PostGIS, pgvector, and user-created
+  functions) are now supported in DIFFERENTIAL and AUTO modes using the
+  group-rescan strategy. Previously these fell back to FULL refresh in AUTO mode
+  or produced errors in explicit DIFFERENTIAL mode.
+
+- **Multiple OR+sublink conjuncts in WHERE clauses.** Queries with two or more
+  `(a OR EXISTS(...))` patterns combined with AND are now rewritten to UNION
+  branches for DIFFERENTIAL mode. A combinatorial guard limits expansion to
+  16 UNION branches. Previously only the first OR+sublink conjunct was handled;
+  additional ones caused FULL fallback or errors.
+
+- **E2E tests for differential mode gaps.** New test file
+  `e2e_differential_gaps_tests.rs` with 7 tests covering UDA creation,
+  CDC cycles, AUTO mode resolution, mixed UDA+builtin aggregates, and
+  multi-OR-sublink patterns.
 
 ---
 

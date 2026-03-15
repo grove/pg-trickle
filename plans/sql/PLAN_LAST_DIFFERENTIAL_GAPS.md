@@ -1,7 +1,7 @@
 # Plan: Last Differential Mode Gaps
 
 Date: 2026-03-15
-Status: Draft
+Status: G1 + G3 implemented; G2 was done in a prior release
 
 ---
 

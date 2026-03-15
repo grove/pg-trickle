@@ -237,6 +237,13 @@ pub enum AggFunc {
     /// nested aggregate calls). Uses the group-rescan strategy: any change in
     /// the group triggers full re-evaluation of the expression from source data.
     ComplexExpression(String),
+    /// User-defined aggregate (CREATE AGGREGATE) — group-rescan strategy.
+    ///
+    /// Stores the fully deparsed SQL of the aggregate call (including any
+    /// FILTER, ORDER BY, WITHIN GROUP, and DISTINCT clauses) since UDAs
+    /// may use exotic syntax that cannot be reconstructed from parts.
+    /// Any change in the group triggers full re-aggregation from source data.
+    UserDefined(String),
 }
 
 /// Determine the effective output column names for a LATERAL SRF.
@@ -329,6 +336,7 @@ impl AggFunc {
             AggFunc::HypPercentRank => "PERCENT_RANK",
             AggFunc::HypCumeDist => "CUME_DIST",
             AggFunc::ComplexExpression(_) => "COMPLEX_EXPRESSION",
+            AggFunc::UserDefined(_) => "USER_DEFINED",
         }
     }
 
@@ -382,6 +390,7 @@ impl AggFunc {
                 | AggFunc::HypPercentRank
                 | AggFunc::HypCumeDist
                 | AggFunc::ComplexExpression(_)
+                | AggFunc::UserDefined(_)
         )
     }
 }
@@ -2723,7 +2732,8 @@ fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleError> {
                     | AggFunc::HypDenseRank
                     | AggFunc::HypPercentRank
                     | AggFunc::HypCumeDist
-                    | AggFunc::ComplexExpression(_) => {}
+                    | AggFunc::ComplexExpression(_)
+                    | AggFunc::UserDefined(_) => {}
                 }
             }
             check_ivm_support(child)
@@ -6374,51 +6384,76 @@ pub fn rewrite_sublinks_in_or(query: &str) -> Result<String, PgTrickleError> {
     Ok(rewritten)
 }
 
-/// Handle AND conjunction (at any nesting depth) where one arm is an OR
-/// containing sublinks.
+/// Handle AND conjunction (at any nesting depth) where one or more arms
+/// are OR expressions containing sublinks.
 ///
 /// ```sql
-/// -- Input (one-level AND):
+/// -- Input (single OR+sublink conjunct):
 /// SELECT * FROM t WHERE a > 10 AND (status = 'active' OR EXISTS (...))
-/// -- Input (two-level AND):
-/// SELECT * FROM t WHERE a > 10 AND b = 1 AND (status = 'active' OR EXISTS (...))
 /// -- Rewrite to:
-/// SELECT * FROM t WHERE a > 10 AND ... AND status = 'active'
+/// SELECT * FROM t WHERE a > 10 AND status = 'active'
 /// UNION
-/// SELECT * FROM t WHERE a > 10 AND ... AND EXISTS (...)
+/// SELECT * FROM t WHERE a > 10 AND EXISTS (...)
+///
+/// -- Input (multiple OR+sublink conjuncts):
+/// SELECT * FROM t WHERE (a OR EXISTS(s1)) AND (b OR NOT EXISTS(s2))
+/// -- Rewrite to cartesian product of UNION branches:
+/// SELECT * FROM t WHERE a AND b
+/// UNION
+/// SELECT * FROM t WHERE a AND NOT EXISTS(s2)
+/// UNION
+/// SELECT * FROM t WHERE EXISTS(s1) AND b
+/// UNION
+/// SELECT * FROM t WHERE EXISTS(s1) AND NOT EXISTS(s2)
 /// ```
 ///
 /// The `where_node` argument is the entire WHERE clause node (typically a
 /// BoolExpr AND chain). The function flattens all nested AND layers before
-/// searching for the OR arm, so arbitrarily deep `AND(AND(OR(...)))` nesting
+/// searching for OR arms, so arbitrarily deep `AND(AND(OR(...)))` nesting
 /// is handled correctly.
+///
+/// A combinatorial guard limits expansion to 16 UNION branches (4 binary
+/// OR+sublink conjuncts). Queries exceeding this produce an error directing
+/// the user to simplify the WHERE clause.
 fn rewrite_and_with_or_sublinks(
     select: &pg_sys::SelectStmt,
     where_node: *mut pg_sys::Node,
 ) -> Result<String, PgTrickleError> {
+    const MAX_UNION_BRANCHES: usize = 16;
+
     // Flatten the entire AND chain into a list of atomic conjuncts.
     // AND(a, AND(b, OR(...))) → [a, b, OR(...)]
     let mut conjuncts: Vec<*mut pg_sys::Node> = Vec::new();
     unsafe { flatten_and_conjuncts(where_node, &mut conjuncts) };
 
-    // Find the first OR arm with sublinks; accumulate the rest as plain
-    // conjuncts. If there are multiple OR-with-sublinks, only the first
-    // is decomposed — subsequent ones are left as regular predicates
-    // (the downstream parser will handle or reject them).
-    let mut or_arm: Option<*mut pg_sys::Node> = None;
+    // Separate OR+sublink conjuncts from plain conjuncts.
+    let mut or_arms_list: Vec<Vec<String>> = Vec::new();
     let mut other_conjuncts: Vec<String> = Vec::new();
 
     for arg_ptr in conjuncts {
         if arg_ptr.is_null() {
             continue;
         }
-        if or_arm.is_none() && unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_BoolExpr) } {
+        if unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_BoolExpr) } {
             let inner_bool = unsafe { &*(arg_ptr as *const pg_sys::BoolExpr) };
             if inner_bool.boolop == pg_sys::BoolExprType::OR_EXPR
                 && unsafe { node_tree_contains_sublink(arg_ptr) }
             {
-                or_arm = Some(arg_ptr);
-                continue;
+                let or_args = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(inner_bool.args) };
+                let mut arms = Vec::new();
+                for a in or_args.iter_ptr() {
+                    if a.is_null() {
+                        continue;
+                    }
+                    let expr = unsafe { node_to_expr(a) }
+                        .map(|e| e.to_sql())
+                        .unwrap_or_else(|_| "TRUE".to_string());
+                    arms.push(expr);
+                }
+                if arms.len() >= 2 {
+                    or_arms_list.push(arms);
+                    continue;
+                }
             }
         }
         let expr = unsafe { node_to_expr(arg_ptr) }
@@ -6427,35 +6462,39 @@ fn rewrite_and_with_or_sublinks(
         other_conjuncts.push(expr);
     }
 
-    let or_node = match or_arm {
-        Some(n) => n,
-        None => return deparse_full_select(select),
-    };
+    if or_arms_list.is_empty() {
+        return deparse_full_select(select);
+    }
 
-    let or_bool = unsafe { &*(or_node as *const pg_sys::BoolExpr) };
-    let or_args = unsafe { pgrx::PgList::<pg_sys::Node>::from_pg(or_bool.args) };
+    // Compute total branch count (cartesian product of all OR arm counts).
+    let branch_count: usize = or_arms_list.iter().map(|arms| arms.len()).product();
+    if branch_count > MAX_UNION_BRANCHES {
+        return Err(PgTrickleError::UnsupportedOperator(format!(
+            "Query would produce {branch_count} UNION branches after OR+sublink rewriting \
+             (limit: {MAX_UNION_BRANCHES}). Simplify the WHERE clause or use FULL refresh mode.",
+        )));
+    }
 
-    // Build the common AND prefix
+    // Build the common AND prefix from non-OR conjuncts.
     let and_prefix = if other_conjuncts.is_empty() {
         String::new()
     } else {
         format!("{} AND ", other_conjuncts.join(" AND "))
     };
 
-    // Extract OR arms
-    let mut or_arm_exprs: Vec<String> = Vec::new();
-    for arg_ptr in or_args.iter_ptr() {
-        if arg_ptr.is_null() {
-            continue;
+    // Generate the cartesian product of all OR arm combinations.
+    // Start with a single empty combination and expand one OR at a time.
+    let mut combinations: Vec<Vec<&str>> = vec![vec![]];
+    for or_arms in &or_arms_list {
+        let mut next = Vec::with_capacity(combinations.len() * or_arms.len());
+        for combo in &combinations {
+            for arm in or_arms {
+                let mut new_combo = combo.clone();
+                new_combo.push(arm.as_str());
+                next.push(new_combo);
+            }
         }
-        let expr = unsafe { node_to_expr(arg_ptr) }
-            .map(|e| e.to_sql())
-            .unwrap_or_else(|_| "TRUE".to_string());
-        or_arm_exprs.push(expr);
-    }
-
-    if or_arm_exprs.len() < 2 {
-        return deparse_full_select(select);
+        combinations = next;
     }
 
     // Build query components
@@ -6465,17 +6504,19 @@ fn rewrite_and_with_or_sublinks(
     let having_sql = deparse_having_clause(select);
     let order_sql = deparse_order_clause(select);
 
-    let mut branches: Vec<String> = Vec::new();
-    for arm in &or_arm_exprs {
+    let mut branches: Vec<String> = Vec::with_capacity(combinations.len());
+    for combo in &combinations {
+        let combo_where = combo.join(" AND ");
         branches.push(format!(
-            "SELECT {target_sql} FROM {from_sql} WHERE {and_prefix}{arm}{group_sql}{having_sql}"
+            "SELECT {target_sql} FROM {from_sql} WHERE {and_prefix}{combo_where}{group_sql}{having_sql}"
         ));
     }
 
     let rewritten = format!("{}{order_sql}", branches.join(" UNION "));
 
     pgrx::debug1!(
-        "[pg_trickle] Rewrote AND(..OR-sublinks..) to UNION: {}",
+        "[pg_trickle] Rewrote AND(..OR-sublinks..) to {} UNION branches: {}",
+        branches.len(),
         rewritten
     );
 
@@ -13770,12 +13811,19 @@ unsafe fn extract_aggregates(
                      Use FULL refresh mode instead.",
                 )));
             } else if is_user_defined_aggregate(&name_lower) {
-                // User-defined aggregate (CREATE AGGREGATE) — not supported
-                return Err(PgTrickleError::UnsupportedOperator(format!(
-                    "User-defined aggregate function {func_name}() is not supported \
-                     in DIFFERENTIAL mode. Only built-in PostgreSQL aggregates are \
-                     supported. Use FULL refresh mode instead.",
-                )));
+                // User-defined aggregate (CREATE AGGREGATE) — treat as group-rescan.
+                // Deparse the full call so agg_to_rescan_sql can emit it verbatim.
+                let raw_expr = unsafe { node_to_expr(rt.val)? };
+                let raw_sql = raw_expr.to_sql();
+                aggs.push(AggExpr {
+                    function: AggFunc::UserDefined(raw_sql),
+                    argument: None,
+                    alias,
+                    is_distinct: false,
+                    second_arg: None,
+                    filter: None,
+                    order_within_group: None,
+                });
             } else {
                 let expr = unsafe { node_to_expr(rt.val)? };
                 non_aggs.push(expr);
@@ -14493,6 +14541,10 @@ mod tests {
         assert_eq!(AggFunc::RegrSxx.sql_name(), "REGR_SXX");
         assert_eq!(AggFunc::RegrSxy.sql_name(), "REGR_SXY");
         assert_eq!(AggFunc::RegrSyy.sql_name(), "REGR_SYY");
+        assert_eq!(
+            AggFunc::UserDefined("my_agg(x)".into()).sql_name(),
+            "USER_DEFINED"
+        );
     }
 
     // ── OpTree::alias tests ─────────────────────────────────────────

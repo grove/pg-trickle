@@ -1167,29 +1167,25 @@ convergence (zero net change) or `max_fixpoint_iterations` is exceeded.
 
 ### Last Differential Mode Gaps
 
-> **In plain terms:** Three query patterns that currently fall back to `FULL`
-> refresh even in `AUTO` mode — or hard-error in explicit `DIFFERENTIAL` mode
-> — despite the DVM engine already having the infrastructure to handle them.
-> Closing these gaps means more queries get cheap incremental refreshes instead
-> of expensive full recomputes.
-
-Three small parser-level gaps prevent DIFFERENTIAL mode from covering patterns
-it could otherwise handle efficiently:
+> **In plain terms:** Three query patterns that previously fell back to `FULL`
+> refresh in `AUTO` mode — or hard-errored in explicit `DIFFERENTIAL` mode
+> — despite the DVM engine having the infrastructure to handle them.
+> All three gaps are now closed.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| DG-1 | **User-Defined Aggregates (UDAs).** PostGIS (`ST_Union`, `ST_Collect`), pgvector vector averages, and any `CREATE AGGREGATE` function are rejected. Fix: classify unknown aggregates as `AggFunc::UserDefined` and route them through the existing group-rescan strategy — no new delta math required. | ~3h | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G1 |
-| DG-2 | **Window functions nested in expressions.** `RANK() OVER (...) + 1`, `CASE WHEN ROW_NUMBER() OVER (...) <= 10`, `COALESCE(LAG(v) OVER (...), 0)` etc. are rejected. Fix: extract the window function into a CTE subquery and rewrite the outer expression to reference the CTE column, then apply the existing `diff_window()` operator. | ~7h | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G2 |
-| DG-3 | **Sublinks in deeply nested OR.** The two-stage rewrite pipeline handles flat `EXISTS(...) OR …` and `AND(EXISTS OR …)` but gives up on `OR(AND(AND(…EXISTS)))` patterns. Fix: add a multi-pass AND-flattening loop, multi-conjunct OR handler, and optional De Morgan normalization. | ~2h | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G3 |
+| ~~DG-1~~ | ~~**User-Defined Aggregates (UDAs).** PostGIS (`ST_Union`, `ST_Collect`), pgvector vector averages, and any `CREATE AGGREGATE` function are rejected. Fix: classify unknown aggregates as `AggFunc::UserDefined` and route them through the existing group-rescan strategy — no new delta math required.~~ | ✅ Done | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G1 |
+| ~~DG-2~~ | ~~**Window functions nested in expressions.** `RANK() OVER (...) + 1`, `CASE WHEN ROW_NUMBER() OVER (...) <= 10`, `COALESCE(LAG(v) OVER (...), 0)` etc. are rejected.~~ | ✅ Done (v0.6.0) | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G2 |
+| ~~DG-3~~ | ~~**Sublinks in deeply nested OR.** The two-stage rewrite pipeline handles flat `EXISTS(...) OR …` and `AND(EXISTS OR …)` but gives up on multiple OR+sublink conjuncts. Fix: expand all OR+sublink conjuncts in AND to a cartesian product of UNION branches with a 16-branch explosion guard.~~ | ✅ Done | [PLAN_LAST_DIFFERENTIAL_GAPS.md](plans/sql/PLAN_LAST_DIFFERENTIAL_GAPS.md) §G3 |
 
-> **Last differential gaps subtotal: ~12 hours**
+> **Last differential gaps: ✅ Complete**
 
-> **v0.7.0 total: ~48–51h**
+> **v0.7.0 total: ~36–39h** (remaining: Watermarks + Circular Dependencies)
 
 **Exit criteria:**
 - [ ] `advance_watermark` + scheduler gating operational; ETL E2E tests pass
 - [ ] Monotone circular DAGs converge to fixpoint; non-convergence surfaces as `ERROR`
-- [ ] UDAs, nested window expressions, and deeply nested OR+sublinks supported in DIFFERENTIAL mode
+- [x] UDAs, nested window expressions, and deeply nested OR+sublinks supported in DIFFERENTIAL mode
 - [ ] Extension upgrade path tested (`0.6.0 → 0.7.0`)
 
 ---
@@ -1823,7 +1819,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.4.0 — Parallel Refresh & Performance Hardening | ~60–94h | 245–346h | ✅ Released |
 | v0.5.0 — RLS, Operational Controls + Perf Wave 1 (A-3a only) | ~51–97h | 296–443h | ✅ Released |
 | v0.6.0 — Partitioning, Idempotent DDL & Circular Dependency Foundation | ~35–50h | 331–493h | |
-| v0.7.0 — Watermarks, Circular DAG Execution & Last Differential Gaps | ~48–51h | 379–544h | |
+| v0.7.0 — Watermarks, Circular DAG Execution & Last Differential Gaps | ~36–39h | 367–532h | |
 | v0.8.0 — Connection Pooler Compatibility & pg_dump Support | ~12–17d | 475–680h | |
 | v0.9.0 — Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep | ~33–37h | 508–717h | |
 | v0.10.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
