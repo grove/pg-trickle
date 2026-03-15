@@ -136,6 +136,8 @@ reducing the surface area where memory-safety bugs could theoretically hide.
 
 ### Added
 
+#### Circular Dependencies — Fixed-Point Scheduling (CYC-5/6/7/8)
+
 - **Circular dependency scheduler integration (CYC-5).** When stream tables
   form cyclic dependencies (A → B → A), the scheduler now iterates them to a
   fixed point — refreshing all members of the strongly connected component
@@ -170,6 +172,41 @@ reducing the surface area where memory-safety bugs could theoretically hide.
   `pgtrickle.pgt_stream_tables` that records how many fixpoint iterations the
   last SCC convergence took. Useful for monitoring convergence speed and
   detecting near-non-convergence patterns.
+
+#### Watermark Gating for Cross-Source Temporal Alignment
+
+New scheduling control for ETL pipelines where multiple source tables are
+populated by separate jobs that finish at different times. External processes
+declare "how far" each source has been loaded via a timestamp watermark, and
+the scheduler waits until all sources in a group are aligned before refreshing
+downstream stream tables.
+
+- **`advance_watermark(source, watermark)`** — Signal that a source table's
+  data is complete through the given timestamp. Enforces monotonicity (rejects
+  backward timestamps) and is idempotent (same value is a no-op). Records
+  `pg_current_wal_insert_lsn()` alongside the watermark for future hold-back
+  support. Transactional — the watermark only becomes visible when the caller's
+  transaction commits.
+- **`create_watermark_group(name, sources[], tolerance_secs)`** — Declare that
+  a set of sources must be temporally aligned within `tolerance_secs` seconds
+  before gated stream tables refresh. Requires at least 2 sources.
+- **`drop_watermark_group(name)`** — Remove a watermark group.
+- **Scheduler integration** — Before each refresh, the scheduler checks whether
+  all overlapping watermark groups are aligned. If any group's watermarks differ
+  by more than the configured tolerance, the stream table is skipped with a
+  logged `SKIP(watermark misaligned)` reason in `pgt_refresh_history`.
+- **Introspection functions:**
+  - `watermarks()` — Current watermark state for all registered sources.
+  - `watermark_groups()` — All group definitions with source count and tolerance.
+  - `watermark_status()` — Live alignment status per group: min/max watermark,
+    lag in seconds, aligned flag, and source counts.
+- **Catalog tables:** `pgt_watermarks` (per-source watermark state) and
+  `pgt_watermark_groups` (group definitions with tolerance).
+- **E2E test suite** (`e2e_watermark_gating_tests.rs`) — 28 tests covering
+  watermark advancement (monotonicity, idempotency, error handling), group CRUD
+  (create, drop, validation), introspection functions (alignment, tolerance,
+  source counts), intermediate ST behavior, and scheduler integration (skip on
+  misalignment, resume after alignment, tolerance-based gating).
 
 ---
 

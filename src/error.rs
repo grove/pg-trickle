@@ -85,6 +85,20 @@ pub enum PgTrickleError {
     #[error("SPI permission error: {0}")]
     SpiPermissionError(String),
 
+    // ── Watermark errors ─────────────────────────────────────────────────
+    /// A watermark advancement was rejected because the new value is older
+    /// than the current watermark (monotonicity violation).
+    #[error("watermark moved backward: {0}")]
+    WatermarkBackwardMovement(String),
+
+    /// A watermark group was not found.
+    #[error("watermark group not found: {0}")]
+    WatermarkGroupNotFound(String),
+
+    /// A watermark group with this name already exists.
+    #[error("watermark group already exists: {0}")]
+    WatermarkGroupAlreadyExists(String),
+
     // ── Transient errors — always retry ──────────────────────────────────
     /// A refresh was skipped because a previous one is still running.
     #[error("refresh skipped: {0}")]
@@ -235,7 +249,10 @@ impl PgTrickleError {
             | PgTrickleError::CycleDetected(_)
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
-            | PgTrickleError::InvalidArgument(_) => PgTrickleErrorKind::User,
+            | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::WatermarkBackwardMovement(_)
+            | PgTrickleError::WatermarkGroupNotFound(_)
+            | PgTrickleError::WatermarkGroupAlreadyExists(_) => PgTrickleErrorKind::User,
 
             PgTrickleError::UpstreamTableDropped(_) | PgTrickleError::UpstreamSchemaChanged(_) => {
                 PgTrickleErrorKind::Schema

@@ -2636,4 +2636,178 @@ WHERE gated = true;
 SELECT pgtrickle.ungate_source('stale_source');
 ```
 
+---
+
+## Watermark Gating (v0.7.0)
+
+Watermark gating is a scheduling control for ETL pipelines where multiple
+source tables are populated by separate jobs that finish at different times.
+Each ETL job declares "I'm done up to timestamp X", and the scheduler waits
+until all sources in a group are caught up within a configurable tolerance
+before refreshing downstream stream tables.
+
+### Catalog Tables
+
+#### pgtrickle.pgt_watermarks
+
+Per-source watermark state. One row per source table that has had a watermark
+advanced.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source_relid` | `oid` | Source table OID (primary key) |
+| `watermark` | `timestamptz` | Current watermark value |
+| `updated_at` | `timestamptz` | When the watermark was last advanced |
+| `advanced_by` | `text` | User/role that advanced the watermark |
+| `wal_lsn_at_advance` | `text` | WAL LSN at the time of advancement |
+
+#### pgtrickle.pgt_watermark_groups
+
+Watermark group definitions. Each group declares that a set of sources must
+be temporally aligned.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `group_id` | `serial` | Auto-generated group ID (primary key) |
+| `group_name` | `text` | Unique group name |
+| `source_relids` | `oid[]` | Array of source table OIDs in the group |
+| `tolerance_secs` | `float8` | Maximum allowed lag in seconds (default 0) |
+| `created_at` | `timestamptz` | When the group was created |
+
+### Functions
+
+#### pgtrickle.advance_watermark(source TEXT, watermark TIMESTAMPTZ)
+
+Signal that a source table's data is complete through the given timestamp.
+
+- **Monotonic:** rejects watermarks that go backward (raises error).
+- **Idempotent:** advancing to the same value is a silent no-op.
+- **Transactional:** the watermark is part of the caller's transaction.
+
+```sql
+SELECT pgtrickle.advance_watermark('orders', '2026-03-01 12:05:00+00');
+```
+
+#### pgtrickle.create_watermark_group(group_name TEXT, sources TEXT[], tolerance_secs FLOAT8 DEFAULT 0)
+
+Create a watermark group. Requires at least 2 sources.
+
+- `tolerance_secs`: maximum allowed lag between the most-advanced and
+  least-advanced watermarks. Default `0` means strict alignment.
+
+```sql
+SELECT pgtrickle.create_watermark_group(
+    'order_pipeline',
+    ARRAY['orders', 'order_lines'],
+    0    -- strict alignment (default)
+);
+```
+
+#### pgtrickle.drop_watermark_group(group_name TEXT)
+
+Remove a watermark group by name.
+
+```sql
+SELECT pgtrickle.drop_watermark_group('order_pipeline');
+```
+
+#### pgtrickle.watermarks()
+
+Return the current watermark state for all registered sources.
+
+```sql
+SELECT * FROM pgtrickle.watermarks();
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source_table` | `text` | Source table name |
+| `schema_name` | `text` | Schema name |
+| `watermark` | `timestamptz` | Current watermark value |
+| `updated_at` | `timestamptz` | Last advancement time |
+| `advanced_by` | `text` | User that advanced it |
+| `wal_lsn` | `text` | WAL LSN at advancement |
+
+#### pgtrickle.watermark_groups()
+
+Return all watermark group definitions.
+
+```sql
+SELECT * FROM pgtrickle.watermark_groups();
+```
+
+#### pgtrickle.watermark_status()
+
+Return live alignment status for each watermark group.
+
+```sql
+SELECT * FROM pgtrickle.watermark_status();
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `group_name` | `text` | Group name |
+| `min_watermark` | `timestamptz` | Least-advanced watermark |
+| `max_watermark` | `timestamptz` | Most-advanced watermark |
+| `lag_secs` | `float8` | Lag in seconds between max and min |
+| `aligned` | `boolean` | Whether lag is within tolerance |
+| `sources_with_watermark` | `int4` | Number of sources that have a watermark |
+| `sources_total` | `int4` | Total sources in the group |
+
+### Recipes
+
+#### Recipe 6 — Nightly ETL with Watermarks
+
+```sql
+-- Create a watermark group for the order pipeline.
+SELECT pgtrickle.create_watermark_group(
+    'order_pipeline',
+    ARRAY['orders', 'order_lines']
+);
+
+-- Nightly ETL job 1: Load orders
+BEGIN;
+  COPY orders FROM '/data/orders_20260301.csv';
+  SELECT pgtrickle.advance_watermark('orders', '2026-03-01');
+COMMIT;
+
+-- Nightly ETL job 2: Load order lines (may run later)
+BEGIN;
+  COPY order_lines FROM '/data/lines_20260301.csv';
+  SELECT pgtrickle.advance_watermark('order_lines', '2026-03-01');
+COMMIT;
+
+-- order_report refreshes on the next tick after both watermarks align.
+```
+
+#### Recipe 7 — Micro-Batch Tolerance
+
+```sql
+-- Allow up to 30 seconds of skew between trades and quotes.
+SELECT pgtrickle.create_watermark_group(
+    'realtime_pipeline',
+    ARRAY['trades', 'quotes'],
+    30   -- 30-second tolerance
+);
+
+-- External process advances watermarks every few seconds.
+SELECT pgtrickle.advance_watermark('trades', '2026-03-01 12:00:05+00');
+SELECT pgtrickle.advance_watermark('quotes', '2026-03-01 12:00:02+00');
+-- Lag is 3s, within 30s tolerance → stream tables refresh normally.
+```
+
+#### Recipe 8 — Monitoring Watermark Alignment
+
+```sql
+-- Check which groups are currently misaligned.
+SELECT group_name, lag_secs, aligned
+FROM pgtrickle.watermark_status()
+WHERE NOT aligned;
+
+-- Check individual source watermarks.
+SELECT source_table, watermark, updated_at
+FROM pgtrickle.watermarks()
+ORDER BY watermark;
+```
+
 
