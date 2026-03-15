@@ -675,24 +675,24 @@ memory pressure). This makes it difficult to detect real regressions.
 
 ## 10. Implementation Priority & Schedule
 
-### Session 1: Verify & Fix Regressions (3–4 hours)
+### Session 1: Verify & Fix Regressions (3–4 hours) ✅ Done
 
-| Step | Task | Effort |
-|------|------|--------|
-| A-1 | Verify adaptive threshold fix via E2E benchmark | 30 min |
-| A-2 | Verify prepared statements recover join regression | 30 min |
-| A-3 | Fix `prefixed_col_list/20` regression | 1 hour |
-| A-4 | Investigate `lsn_gt` regression | 1 hour |
+| Step | Task | Effort | Status |
+|------|------|--------|--------|
+| A-1 | Verify adaptive threshold fix via E2E benchmark | 30 min | Deferred (requires E2E run) |
+| A-2 | Verify prepared statements recover join regression | 30 min | Deferred (requires E2E run) |
+| A-3 | Fix `prefixed_col_list/20` regression | 1 hour | ✅ Done — eliminated Vec allocation |
+| A-4 | Investigate `lsn_gt` regression | 1 hour | ✅ Done — use `split_once` |
 
-### Session 2: Benchmark Infrastructure (8–12 hours)
+### Session 2: Benchmark Infrastructure (8–12 hours) ✅ Done
 
-| Step | Task | Effort |
-|------|------|--------|
-| I-1c | Run diff_operators in Docker (quick fix) | 1 hour |
-| I-2 | Add per-cycle CSV output to E2E benchmarks | 2 hours |
-| I-3 | Add EXPLAIN ANALYZE capture mode | 3–4 hours |
-| I-6 | Add 1M-row benchmark tier | 2 hours |
-| I-8 | Reduce Criterion noise | 1 hour |
+| Step | Task | Effort | Status |
+|------|------|--------|--------|
+| I-1c | Run diff_operators in Docker (quick fix) | 1 hour | ✅ Done — `just bench-docker` target |
+| I-2 | Add per-cycle CSV output to E2E benchmarks | 2 hours | ✅ Done — `[BENCH_CYCLE]` lines |
+| I-3 | Add EXPLAIN ANALYZE capture mode | 3–4 hours | ✅ Done — `PGS_BENCH_EXPLAIN=true` |
+| I-6 | Add 1M-row benchmark tier | 2 hours | ✅ Done — `bench_*_1m_*` + `bench_large_matrix` |
+| I-8 | Reduce Criterion noise | 1 hour | ✅ Done — sample_size(200), measurement_time(10s) |
 
 ### Session 3: Statement-Level Triggers ✅ Complete
 
@@ -730,8 +730,8 @@ memory pressure). This makes it difficult to detect real regressions.
 
 | Session | Focus | Effort | Value |
 |---------|-------|--------|-------|
-| 1 | Regression triage | 3–4h | Recover Part 6 perf; verify fixes |
-| 2 | Benchmark infrastructure | 8–12h | Better insights for all future work |
+| 1 | Regression triage | 3–4h | ✅ Done: A-3/A-4 fixed; A-1/A-2 deferred to E2E run |
+| 2 | Benchmark infrastructure | 8–12h | ✅ Done: I-1c, I-2, I-3, I-6, I-8 |
 | 3 | Statement-level triggers | 12–16h | 50–80% write-side overhead reduction |
 | 4 | Parallel refresh | 16–24h | Linear speedup for multi-ST deployments |
 | 5 | MERGE optimization | 8–12h | Better strategy selection; wide table support |

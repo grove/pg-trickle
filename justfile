@@ -315,6 +315,20 @@ bench-diff:
 bench-bencher:
     ./scripts/run_benchmarks.sh -- --output-format bencher
 
+# Run Criterion benchmarks inside the E2E Docker builder (for environments
+# where local pg_stub linking fails, e.g. missing PG server symbols)
+[group: "bench"]
+bench-docker: build-e2e-image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMAGE="${BUILDER_IMAGE:-pg_trickle_builder:pg18}"
+    echo "Running Criterion benchmarks inside Docker ($IMAGE)..."
+    docker run --rm -t \
+        -v "$(pwd)":/workspace \
+        -w /workspace \
+        "$IMAGE" \
+        bash -c 'cargo bench --features pg18 2>&1'
+
 # ── Coverage ──────────────────────────────────────────────────────────────
 
 # Generate HTML + LCOV coverage report

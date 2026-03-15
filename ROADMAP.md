@@ -1209,6 +1209,22 @@ Zero-code monitoring integration. All config files live in a new
 
 > **Infrastructure prep subtotal: ~11 hours**
 
+### Performance — Regression Fixes & Benchmark Infrastructure (Part 9 S1–S2) ✅ Done
+
+> Fixes Criterion benchmark regressions identified in Part 9 and ships five
+> benchmark infrastructure improvements to support data-driven performance
+> decisions.
+
+| Item | Description | Status |
+|------|-------------|--------|
+| A-3 | Fix `prefixed_col_list/20` +34% regression — eliminate intermediate `Vec` allocation | ✅ Done |
+| A-4 | Fix `lsn_gt` +22% regression — use `split_once` instead of `split().collect()` | ✅ Done |
+| I-1c | `just bench-docker` target for running Criterion inside Docker builder image | ✅ Done |
+| I-2 | Per-cycle `[BENCH_CYCLE]` CSV output in E2E benchmarks for external analysis | ✅ Done |
+| I-3 | EXPLAIN ANALYZE capture mode (`PGS_BENCH_EXPLAIN=true`) for delta query plans | ✅ Done |
+| I-6 | 1M-row benchmark tier (`bench_*_1m_*` + `bench_large_matrix`) | ✅ Done |
+| I-8 | Criterion noise reduction (`sample_size(200)`, `measurement_time(10s)`) | ✅ Done |
+
 > **v0.7.0 total: ~59–62h**
 
 **Exit criteria:**

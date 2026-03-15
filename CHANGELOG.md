@@ -27,7 +27,37 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
-No changes yet.
+### Performance
+
+- **Optimized `prefixed_col_list` and `col_list`** — eliminated intermediate
+  `Vec` allocation by streaming directly into a pre-allocated `String`.
+  Addresses the +34% `prefixed_col_list/20` Criterion regression identified
+  in Part 9 Session 1 (A-3).
+- **Optimized LSN comparison** — replaced `split('/').collect::<Vec<_>>()`
+  with `split_once('/')` in `lsn_gt()`, eliminating a heap allocation on
+  every LSN comparison. Addresses the +22% `lsn_gt` Criterion regression
+  (A-4).
+
+### Improved
+
+- **Benchmark infrastructure** — five improvements from PLAN_PERFORMANCE_PART_9
+  Session 2:
+  - **Per-cycle CSV output (I-2):** E2E benchmarks now emit machine-parseable
+    `[BENCH_CYCLE]` lines to stderr, enabling external histogram analysis
+    and trend detection without changing the human-readable tables.
+  - **EXPLAIN ANALYZE capture (I-3):** Set `PGS_BENCH_EXPLAIN=true` to
+    capture EXPLAIN (ANALYZE, BUFFERS) plans for the defining query on the
+    first measured cycle. Plans are saved to `/tmp/bench_plans/`.
+  - **1M-row benchmark tier (I-6):** New `bench_*_1m_*` individual tests
+    and `bench_large_matrix` that includes 10K, 100K, and 1M-row tiers for
+    production-scale performance validation.
+  - **Criterion noise reduction (I-8):** Critical benchmarks (`quote_ident`,
+    `col_list`, `prefixed_col_list`, `lsn_gt`, `diff_scan`) now use
+    `sample_size(200)` and `measurement_time(10s)` for more reliable
+    comparisons.
+  - **Docker benchmark target (I-1c):** New `just bench-docker` target runs
+    Criterion benchmarks inside the builder Docker image for environments
+    where local pg_stub linking is problematic.
 
 ---
 

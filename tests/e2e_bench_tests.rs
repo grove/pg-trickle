@@ -261,6 +261,31 @@ fn parse_profile_line(line: &str) -> Option<ProfileData> {
 }
 
 fn print_results_table(results: &[BenchResult]) {
+    // ── Per-cycle machine-parseable output (I-2) ───────────────────
+    // Format: [BENCH_CYCLE] scenario=X rows=N pct=P cycle=C mode=M ms=T
+    // Enables external analysis (histograms, trend detection) without changing
+    // the human-readable tables below.
+    for r in results {
+        eprintln!(
+            "[BENCH_CYCLE] scenario={} rows={} pct={:.2} cycle={} mode={} ms={:.3}{}",
+            r.scenario,
+            r.table_size,
+            r.change_pct,
+            r.cycle,
+            r.mode,
+            r.refresh_ms,
+            if let Some(ref p) = r.profile {
+                format!(
+                    " decision={:.2} gen_build={:.2} merge={:.2} cleanup={:.2} path={}",
+                    p.decision_ms, p.generate_ms, p.merge_ms, p.cleanup_ms, p.path
+                )
+            } else {
+                String::new()
+            },
+        );
+    }
+    eprintln!();
+
     println!();
     println!(
         "╔══════════════════════════════════════════════════════════════════════════════════════╗"
@@ -484,6 +509,56 @@ fn print_phase_breakdown(results: &[BenchResult]) {
 
 // ── Benchmark runner ───────────────────────────────────────────────────
 
+/// Whether EXPLAIN ANALYZE plan capture is enabled via `PGS_BENCH_EXPLAIN=true`.
+fn explain_capture_enabled() -> bool {
+    std::env::var("PGS_BENCH_EXPLAIN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Capture EXPLAIN ANALYZE output for a stream table's defining query.
+///
+/// Runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)` on the defining query
+/// and writes the plan to `/tmp/bench_plans/<scenario>_<size>_<pct>.txt`.
+async fn capture_explain_plan(
+    db: &E2eDb,
+    scenario_name: &str,
+    table_size: usize,
+    change_pct: f64,
+    defining_query: &str,
+) {
+    let plan_dir = "/tmp/bench_plans";
+    let _ = std::fs::create_dir_all(plan_dir);
+    let plan_file = format!(
+        "{}/{}_{}_{}pct.txt",
+        plan_dir,
+        scenario_name,
+        table_size,
+        (change_pct * 100.0) as u32
+    );
+
+    let explain_sql = format!("EXPLAIN (ANALYZE, BUFFERS) {defining_query}");
+    match db.query_text(&explain_sql).await {
+        Some(plan_text) => {
+            let _ = std::fs::write(&plan_file, &plan_text);
+            eprintln!(
+                "[BENCH_EXPLAIN] scenario={} rows={} pct={:.2} plan_file={}",
+                scenario_name, table_size, change_pct, plan_file
+            );
+            // Print first 20 lines to console for quick inspection
+            for (i, line) in plan_text.lines().take(20).enumerate() {
+                eprintln!("[BENCH_EXPLAIN]   {}: {}", i + 1, line);
+            }
+        }
+        None => {
+            eprintln!(
+                "[BENCH_EXPLAIN] WARN: Could not capture plan for {}",
+                scenario_name
+            );
+        }
+    }
+}
+
 /// Run one full benchmark for a given (scenario, table_size, change_rate).
 ///
 /// Creates one container with bench-tuned resource constraints, sets up
@@ -578,6 +653,14 @@ async fn run_benchmark(
     for _ in 0..WARMUP_CYCLES {
         apply_changes(&db, table_size, change_pct).await;
         db.execute("ANALYZE src").await;
+        db.refresh_st(&inc_pgt_name).await;
+    }
+
+    // I-3: Capture EXPLAIN ANALYZE plan on first measured cycle if enabled
+    if explain_capture_enabled() {
+        apply_changes(&db, table_size, change_pct).await;
+        db.execute("ANALYZE src").await;
+        capture_explain_plan(&db, scenario.name, table_size, change_pct, scenario.query).await;
         db.refresh_st(&inc_pgt_name).await;
     }
 
@@ -741,6 +824,94 @@ async fn bench_join_agg_100k_10pct() {
     let s = &scenarios[4];
     let results = run_benchmark(s, 100_000, 0.10).await;
     print_results_table(&results);
+}
+
+// ── 1M row benchmarks (I-6) ───────────────────────────────────────────
+//
+// Tests at production-scale table sizes. The delta is larger (10K changes
+// at 1% of 1M rows) and MERGE touches more stream table rows.
+// Run separately from the standard suite due to longer run time.
+
+#[tokio::test]
+#[ignore]
+async fn bench_scan_1m_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[0]; // scan
+    let results = run_benchmark(s, 1_000_000, 0.01).await;
+    print_results_table(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_filter_1m_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[1]; // filter
+    let results = run_benchmark(s, 1_000_000, 0.01).await;
+    print_results_table(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_aggregate_1m_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[2]; // aggregate
+    let results = run_benchmark(s, 1_000_000, 0.01).await;
+    print_results_table(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_join_1m_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[3]; // join
+    let results = run_benchmark(s, 1_000_000, 0.01).await;
+    print_results_table(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_join_agg_1m_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[4]; // join_agg
+    let results = run_benchmark(s, 1_000_000, 0.01).await;
+    print_results_table(&results);
+}
+
+// ── Large matrix benchmark (I-6) ──────────────────────────────────────
+//
+// Includes the 1M-row tier in addition to 10K and 100K. Uses only 1% change
+// rate at 1M to keep run time reasonable. Expect ~45-90 minutes total.
+
+#[tokio::test]
+#[ignore]
+async fn bench_large_matrix() {
+    let scenarios = query_scenarios();
+    let mut all_results = Vec::new();
+    let large_sizes: &[usize] = &[10_000, 100_000, 1_000_000];
+    let large_rates: &[f64] = &[0.01, 0.10];
+
+    for &table_size in large_sizes {
+        // At 1M rows, only test 1% change rate to keep run time sane
+        let rates: &[f64] = if table_size >= 1_000_000 {
+            &[0.01]
+        } else {
+            large_rates
+        };
+        for &change_pct in rates {
+            for scenario in &scenarios {
+                eprintln!(
+                    "▶ Benchmarking: {} | {} rows | {:.0}% changes ...",
+                    scenario.name,
+                    table_size,
+                    change_pct * 100.0,
+                );
+                let results = run_benchmark(scenario, table_size, change_pct).await;
+                all_results.extend(results);
+            }
+        }
+    }
+
+    print_results_table(&all_results);
 }
 
 // ── Full matrix benchmark ──────────────────────────────────────────────
