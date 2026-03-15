@@ -605,7 +605,11 @@ pgtrickle.pgt_scc_status() → SETOF record(
 
 ---
 
-### Part 8 — Documentation and E2E Tests
+### Part 8 — Documentation and E2E Tests ✅ Done
+
+> **Implemented in CYC-8 commit.** New `tests/e2e_circular_tests.rs` with 6
+> test scenarios covering all circular dependency paths. README limitations
+> table updated.
 
 #### E2E Tests
 

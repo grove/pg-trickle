@@ -160,6 +160,12 @@ reducing the surface area where memory-safety bugs could theoretically hide.
   with member count, member names, last iteration count, and last
   convergence time.
 
+- **Circular dependency E2E tests (CYC-8).** New `e2e_circular_tests.rs`
+  with 6 test scenarios: monotone cycle convergence, non-monotone cycle
+  rejection, convergence iteration tracking, non-convergence → ERROR
+  status, drop-member SCC cleanup, and default `allow_circular=false`
+  rejection. Updated README limitations table.
+
 - **`last_fixpoint_iterations` catalog column.** New column on
   `pgtrickle.pgt_stream_tables` that records how many fixpoint iterations the
   last SCC convergence took. Useful for monitoring convergence speed and
