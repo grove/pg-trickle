@@ -582,6 +582,21 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::Success;
     }
 
+    // WM-4: Check watermark alignment — skip if misaligned.
+    let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
+    if wm_misaligned {
+        let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
+        log!(
+            "pg_trickle refresh worker: skipping {}.{} — {} (job {})",
+            st.pgt_schema,
+            st.pgt_name,
+            reason,
+            job.job_id,
+        );
+        log_watermark_skip(&st, reason);
+        return RefreshOutcome::Success;
+    }
+
     let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
         Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
     } else {
@@ -642,6 +657,21 @@ fn execute_worker_atomic_group(job: &SchedulerJob) -> RefreshOutcome {
                 job.job_id,
             );
             log_gated_skip(&st);
+            continue;
+        }
+
+        // WM-4: Skip if watermarks misaligned.
+        let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
+        if wm_misaligned {
+            let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
+            log!(
+                "pg_trickle refresh worker: skipping {}.{} — {} (atomic group job {})",
+                st.pgt_schema,
+                st.pgt_name,
+                reason,
+                job.job_id,
+            );
+            log_watermark_skip(&st, reason);
             continue;
         }
 
@@ -1591,6 +1621,20 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         continue;
                     }
 
+                    // WM-4: Skip if watermarks misaligned.
+                    let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
+                    if wm_misaligned {
+                        let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
+                        log!(
+                            "pg_trickle: skipping {}.{} in atomic group — {}",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            reason,
+                        );
+                        log_watermark_skip(&st, reason);
+                        continue;
+                    }
+
                     // Check retry backoff
                     let retry = retry_states.entry(pgt_id).or_default();
                     if retry.is_in_backoff(now_ms) {
@@ -2214,6 +2258,20 @@ fn refresh_single_st(
         return;
     }
 
+    // WM-4: Check watermark alignment — skip if misaligned.
+    let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
+    if wm_misaligned {
+        let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
+        log!(
+            "pg_trickle: skipping {}.{} — {}",
+            st.pgt_schema,
+            st.pgt_name,
+            reason,
+        );
+        log_watermark_skip(&st, reason);
+        return;
+    }
+
     let retry = retry_states.entry(pgt_id).or_default();
     if retry.is_in_backoff(now_ms) {
         emit_stale_alert_if_needed(&st);
@@ -2753,6 +2811,67 @@ fn log_gated_skip(st: &StreamTableMeta) {
     ) {
         pgrx::warning!(
             "pg_trickle: failed to log SKIP for {}.{}: {}",
+            st.pgt_schema,
+            st.pgt_name,
+            e
+        );
+    }
+}
+
+// ── Watermark Gating helpers (v0.7.0) ─────────────────────────────────────
+
+/// Check whether a stream table should be skipped due to watermark
+/// misalignment. Returns `true` if the ST should be skipped (misaligned).
+fn is_watermark_misaligned(pgt_id: i64) -> (bool, Option<String>) {
+    let source_oids = get_source_oids_for_st(pgt_id);
+    if source_oids.is_empty() {
+        return (false, None);
+    }
+    match crate::catalog::check_watermark_alignment(&source_oids) {
+        Ok((aligned, reason)) => (!aligned, reason),
+        Err(e) => {
+            pgrx::warning!(
+                "pg_trickle: watermark check failed for pgt_id={}: {}",
+                pgt_id,
+                e
+            );
+            (false, None)
+        }
+    }
+}
+
+/// Log a watermark-gated skip into `pgt_refresh_history`.
+fn log_watermark_skip(st: &StreamTableMeta, reason: &str) {
+    let now = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
+        .unwrap_or(None)
+        .unwrap_or_else(|| {
+            pgrx::warning!(
+                "log_watermark_skip: now() returned NULL for {}.{}",
+                st.pgt_schema,
+                st.pgt_name
+            );
+            TimestampWithTimeZone::try_from(0i64).unwrap_or_else(|_| {
+                pgrx::error!("scheduler: failed to create epoch TimestampWithTimeZone")
+            })
+        });
+
+    if let Err(e) = crate::catalog::RefreshRecord::insert(
+        st.pgt_id,
+        now,
+        "SKIP",
+        "SKIPPED",
+        0,
+        0,
+        Some(reason),
+        Some("SCHEDULER"),
+        None,
+        0,
+        None,
+        false,
+        None,
+    ) {
+        pgrx::warning!(
+            "pg_trickle: failed to log watermark SKIP for {}.{}: {}",
             st.pgt_schema,
             st.pgt_name,
             e

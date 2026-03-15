@@ -3146,6 +3146,283 @@ fn bootstrap_gate_status_fn() -> TableIterator<
     TableIterator::new(rows)
 }
 
+// ── Watermark Gating (v0.7.0) ─────────────────────────────────────────────
+
+/// Advance the watermark for a source table.
+///
+/// The external process calls this after each load batch to signal "this
+/// source's data is complete through timestamp `watermark`".
+///
+/// - **Monotonic:** rejects watermarks that go backward.
+/// - **Idempotent:** re-advancing to the same value is a no-op.
+/// - **Transactional:** the watermark is part of the caller's transaction.
+#[pg_extern(schema = "pgtrickle")]
+fn advance_watermark(source: &str, watermark: TimestampWithTimeZone) -> Result<(), PgTrickleError> {
+    let source_relid = resolve_source_oid(source)?;
+    let advanced_by = Spi::get_one::<String>("SELECT current_user::text")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    crate::catalog::advance_watermark(source_relid, watermark, advanced_by.as_deref())?;
+
+    // Notify the scheduler that watermark state changed.
+    let payload = format!("wm:{}", source_relid.to_u32());
+    Spi::run(&format!(
+        "SELECT pg_notify('pgtrickle_watermark', '{}')",
+        &payload
+    ))
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    pgrx::info!(
+        "pg_trickle: watermark for {} (oid={}) advanced",
+        source,
+        source_relid.to_u32()
+    );
+    Ok(())
+}
+
+/// Create a watermark group that declares a set of sources must be
+/// temporally aligned before downstream stream tables refresh.
+///
+/// - `group_name`: unique name for this group.
+/// - `sources`: array of source table names (optionally schema-qualified).
+/// - `tolerance_secs`: maximum allowed lag in seconds between the most
+///   advanced and least advanced watermark in the group (default 0 = strict).
+#[pg_extern(schema = "pgtrickle")]
+fn create_watermark_group(
+    group_name: &str,
+    sources: Vec<String>,
+    tolerance_secs: default!(f64, 0.0),
+) -> Result<i32, PgTrickleError> {
+    if sources.len() < 2 {
+        return Err(PgTrickleError::InvalidArgument(
+            "watermark group requires at least 2 sources".into(),
+        ));
+    }
+    if tolerance_secs < 0.0 {
+        return Err(PgTrickleError::InvalidArgument(
+            "tolerance_secs must be non-negative".into(),
+        ));
+    }
+
+    let mut source_oids = Vec::with_capacity(sources.len());
+    for src in &sources {
+        let oid = resolve_source_oid(src)?;
+        source_oids.push(oid);
+    }
+
+    let group_id =
+        crate::catalog::create_watermark_group(group_name, &source_oids, tolerance_secs)?;
+
+    pgrx::info!(
+        "pg_trickle: created watermark group '{}' (id={}) with {} sources, tolerance {:.1}s",
+        group_name,
+        group_id,
+        sources.len(),
+        tolerance_secs
+    );
+    Ok(group_id)
+}
+
+/// Drop a watermark group by name.
+#[pg_extern(schema = "pgtrickle")]
+fn drop_watermark_group(group_name: &str) -> Result<(), PgTrickleError> {
+    crate::catalog::drop_watermark_group(group_name)?;
+    pgrx::info!("pg_trickle: dropped watermark group '{}'", group_name);
+    Ok(())
+}
+
+/// Return the current watermark state for all registered sources.
+#[pg_extern(schema = "pgtrickle", name = "watermarks")]
+#[allow(clippy::type_complexity)]
+fn watermarks_fn() -> TableIterator<
+    'static,
+    (
+        name!(source_table, String),
+        name!(schema_name, String),
+        name!(watermark, TimestampWithTimeZone),
+        name!(updated_at, TimestampWithTimeZone),
+        name!(advanced_by, Option<String>),
+        name!(wal_lsn, Option<String>),
+    ),
+> {
+    let rows: Vec<_> = Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT c.relname::text, n.nspname::text, \
+                        w.watermark, w.updated_at, w.advanced_by, w.wal_lsn_at_advance \
+                 FROM pgtrickle.pgt_watermarks w \
+                 JOIN pg_class c ON c.oid = w.source_relid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 ORDER BY n.nspname, c.relname",
+                None,
+                &[],
+            )
+            .unwrap_or_else(|e| panic!("watermarks: SPI error: {}", e));
+
+        let mut out = Vec::new();
+        for row in table {
+            let relname: String = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let nspname: String = row.get::<String>(2).unwrap_or(None).unwrap_or_default();
+            let watermark = row.get::<TimestampWithTimeZone>(3).unwrap_or(None);
+            let updated_at = row.get::<TimestampWithTimeZone>(4).unwrap_or(None);
+            let advanced_by = row.get::<String>(5).unwrap_or(None);
+            let wal_lsn = row.get::<String>(6).unwrap_or(None);
+            if let (Some(wm), Some(ua)) = (watermark, updated_at) {
+                out.push((relname, nspname, wm, ua, advanced_by, wal_lsn));
+            }
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
+/// Return all watermark group definitions.
+#[pg_extern(schema = "pgtrickle", name = "watermark_groups")]
+#[allow(clippy::type_complexity)]
+fn watermark_groups_fn() -> TableIterator<
+    'static,
+    (
+        name!(group_name, String),
+        name!(source_count, i32),
+        name!(tolerance_secs, f64),
+        name!(created_at, TimestampWithTimeZone),
+    ),
+> {
+    let rows: Vec<_> = match crate::catalog::get_all_watermark_groups() {
+        Ok(groups) => groups
+            .into_iter()
+            .map(|g| {
+                (
+                    g.group_name,
+                    g.source_relids.len() as i32,
+                    g.tolerance_secs,
+                    g.created_at,
+                )
+            })
+            .collect(),
+        Err(e) => {
+            pgrx::warning!("watermark_groups: {}", e);
+            Vec::new()
+        }
+    };
+    TableIterator::new(rows)
+}
+
+/// Return live alignment status for each watermark group.
+///
+/// Shows per-group lag, whether the group is currently aligned, and the
+/// effective minimum watermark.
+#[pg_extern(schema = "pgtrickle", name = "watermark_status")]
+#[allow(clippy::type_complexity)]
+fn watermark_status_fn() -> TableIterator<
+    'static,
+    (
+        name!(group_name, String),
+        name!(min_watermark, Option<TimestampWithTimeZone>),
+        name!(max_watermark, Option<TimestampWithTimeZone>),
+        name!(lag_secs, Option<f64>),
+        name!(aligned, bool),
+        name!(sources_with_watermark, i32),
+        name!(sources_total, i32),
+    ),
+> {
+    let rows: Vec<_> = Spi::connect(|client| {
+        let groups = match crate::catalog::get_all_watermark_groups() {
+            Ok(g) => g,
+            Err(e) => {
+                pgrx::warning!("watermark_status: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let mut out = Vec::new();
+        for group in &groups {
+            let total = group.source_relids.len() as i32;
+            let mut wm_values: Vec<TimestampWithTimeZone> = Vec::new();
+
+            for oid in &group.source_relids {
+                if let Ok(Some(wm)) = crate::catalog::get_watermark_for_source(*oid) {
+                    wm_values.push(wm.watermark);
+                }
+            }
+
+            let with_wm = wm_values.len() as i32;
+
+            if wm_values.len() < 2 {
+                out.push((
+                    group.group_name.clone(),
+                    wm_values.first().copied(),
+                    wm_values.first().copied(),
+                    Some(0.0),
+                    true, // trivially aligned if <2 watermarks
+                    with_wm,
+                    total,
+                ));
+                continue;
+            }
+
+            // Compute min/max/lag via SQL.
+            let mut min_wm = wm_values[0];
+            let mut max_wm = wm_values[0];
+            for wm in &wm_values[1..] {
+                let is_less: bool = client
+                    .select(
+                        "SELECT $1::timestamptz < $2::timestamptz",
+                        None,
+                        &[(*wm).into(), min_wm.into()],
+                    )
+                    .ok()
+                    .and_then(|t| t.into_iter().next())
+                    .and_then(|row| row.get::<bool>(1).ok().flatten())
+                    .unwrap_or(false);
+                if is_less {
+                    min_wm = *wm;
+                }
+                let is_greater: bool = client
+                    .select(
+                        "SELECT $1::timestamptz > $2::timestamptz",
+                        None,
+                        &[(*wm).into(), max_wm.into()],
+                    )
+                    .ok()
+                    .and_then(|t| t.into_iter().next())
+                    .and_then(|row| row.get::<bool>(1).ok().flatten())
+                    .unwrap_or(false);
+                if is_greater {
+                    max_wm = *wm;
+                }
+            }
+
+            let lag: f64 = client
+                .select(
+                    "SELECT EXTRACT(EPOCH FROM ($1::timestamptz - $2::timestamptz))::float8",
+                    None,
+                    &[max_wm.into(), min_wm.into()],
+                )
+                .ok()
+                .and_then(|t| t.into_iter().next())
+                .and_then(|row| row.get::<f64>(1).ok().flatten())
+                .unwrap_or(0.0);
+
+            let aligned = lag <= group.tolerance_secs;
+
+            out.push((
+                group.group_name.clone(),
+                Some(min_wm),
+                Some(max_wm),
+                Some(lag),
+                aligned,
+                with_wm,
+                total,
+            ));
+        }
+        out
+    });
+
+    TableIterator::new(rows)
+}
+
 /// Resolve a (possibly schema-qualified) table name to its OID.
 fn resolve_source_oid(source: &str) -> Result<pg_sys::Oid, PgTrickleError> {
     let oid = Spi::get_one_with_args::<pg_sys::Oid>("SELECT $1::regclass::oid", &[source.into()])
