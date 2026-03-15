@@ -1800,8 +1800,14 @@ pub fn execute_differential_refresh(
         && total_change_count > 0
         && st.defining_query.to_ascii_uppercase().contains("GROUP BY")
     {
+        // Try pg_class.reltuples first (cheap); fall back to COUNT(*) if
+        // the stream table has never been analyzed (reltuples = -1 or 0).
         let st_group_count: i64 = Spi::get_one::<i64>(&format!(
-            "SELECT GREATEST(reltuples::bigint, 0) FROM pg_class WHERE oid = {}::oid",
+            "SELECT CASE WHEN reltuples >= 1 THEN reltuples::bigint \
+                    ELSE (SELECT COUNT(*) FROM \"{}\".\"{}\" ) END \
+             FROM pg_class WHERE oid = {}::oid",
+            schema.replace('"', "\"\""),
+            name.replace('"', "\"\""),
             st.pgt_relid.to_u32(),
         ))
         .unwrap_or(Some(0))
@@ -2572,13 +2578,16 @@ fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
                           / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, \
                       AVG(delta_row_count)::double precision AS avg_delta, \
                       COUNT(*)::int AS cnt \
-               FROM pgtrickle.pgt_refresh_history \
-               WHERE pgt_id = {pgt_id} \
-                 AND action = 'DIFFERENTIAL' \
-                 AND status = 'COMPLETED' \
-                 AND delta_row_count > 0 \
-                 AND end_time IS NOT NULL \
-               ORDER BY refresh_id DESC LIMIT 10 \
+               FROM ( \
+                 SELECT end_time, start_time, delta_row_count \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = {pgt_id} \
+                   AND action = 'DIFFERENTIAL' \
+                   AND status = 'COMPLETED' \
+                   AND delta_row_count > 0 \
+                   AND end_time IS NOT NULL \
+                 ORDER BY refresh_id DESC LIMIT 10 \
+               ) __pgt_incr \
              ) incr, ( \
                SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0) AS avg_full_ms \
                FROM ( \
