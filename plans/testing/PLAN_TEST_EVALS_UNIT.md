@@ -39,15 +39,18 @@ The initial hardening slice from this report has been started and validated on b
 - Added Linux/CI-only execution-backed integration tests for nested natural join operations (`tests/dvm_nested_natural_join_tests.rs`) covering the three-table natural join chain execution cascading for innermost insert and outermost delete paths.
 - Added Linux/CI-only execution-backed integration tests for **natural-join-style conditions** (`e.dept_id = d.dept_id` — same column name on both sides of the equi-join condition) via the new `tests/dvm_natural_join_tests.rs`, covering: inner-join employee insert matching department (validates `rewrite_join_condition` same-named-column rewriting for Part 1a), inner-join employee delete (Part 1b R₀ path with same-named condition), inner-join department delete fan-out (Part 2 L₀ ⋈ ΔR for two matching employees), left-join employee insert with no department (Part 3a NULL-padded I — validates NOT EXISTS rewriting for same-named column), and full-join department insert with no employees (Part 6 NULL-padded right-only I — unique to FULL JOIN)
 
-- Added exhaustive property-based fuzz coverage for token scanners (`find_top_level_keyword`, `split_top_level_commas`, `detect_select_star`) and WAL/text decoders (`extract_action_from_decoding_line`, `extract_column_from_chunk`, `parse_quoted_string_value`, `build_pk_hash_expression`) assuring no-panic safety invariants across arbitrary random inputs.
+- Added P2 property/fuzz tests with 16 `proptest!` cases distributed across three inline `#[cfg(test)]` modules:
+  - `src/api.rs`: `prop_detect_select_star_no_panic`, `prop_detect_select_star_false_without_star`, `prop_split_top_level_commas_no_panic`, `prop_split_top_level_commas_nonempty_for_nonempty_input`, `prop_find_top_level_keyword_no_panic`, `prop_find_top_level_keyword_pos_in_bounds`, `prop_cron_is_due_no_panic`.
+  - `src/dvm/mod.rs`: `prop_split_top_level_union_all_no_panic`, `prop_split_top_level_set_op_no_panic`. These tests **discovered and fixed real char-boundary panic bugs** in `split_top_level_union_all`, `split_top_level_set_op`, and `replace_top_level_union_with_union_all` — all three functions used `query[i..i+N].eq_ignore_ascii_case("KEYWORD")` which panics when `i+N` lands on a non–char-boundary inside a multi-byte UTF-8 sequence. Fixed by replacing all such slices with the byte-level `bytes[i..i+N].eq_ignore_ascii_case(b"KEYWORD")`.
+  - `src/wal_decoder.rs`: `prop_parse_pgoutput_action_no_panic` (also validates result ∈ {None, Some('I'/'U'/'D'/'T')}), `prop_parse_pgoutput_columns_no_panic`, `prop_parse_pgoutput_old_columns_no_panic`, `prop_build_pk_hash_empty_pk_returns_zero`, `prop_build_pk_hash_no_panic`, `prop_detect_schema_mismatch_empty_parsed_is_false`, `prop_detect_schema_mismatch_no_panic`.
 
-This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, extends the execution-backed hardening track across all four initially identified thin operators, broadens aggregate execution coverage across algebraic, extremum, object-aggregate, and ordered-set families, adds the first backend-backed parser summary tests, and adds inner-join, left-join, full-outer-join, three-table nested-join, nested-left-join, nested-full-join, and natural-join-style execution-backed coverage. The macOS-compatible DVM test harness is now complete (`scripts/run_dvm_integration_tests.sh`, `just test-dvm`). All P0 and P1 nested/natural join tasks are complete.
+This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, extends the execution-backed hardening track across all four initially identified thin operators, broadens aggregate execution coverage across algebraic, extremum, object-aggregate, and ordered-set families, adds the first backend-backed parser summary tests, adds inner-join, left-join, full-outer-join, three-table nested-join, nested-left-join, nested-full-join, and natural-join-style execution-backed coverage, and completes the P2 property/fuzz tier (16 proptest cases across `api.rs`, `dvm/mod.rs`, `wal_decoder.rs` — additionally discovering and fixing latent char-boundary panic bugs in the set-op splitter functions). The macOS-compatible DVM test harness is now complete (`scripts/run_dvm_integration_tests.sh`, `just test-dvm`). All P0, P1, and P2 tasks are complete.
 
 ## Remaining Work Summary
 
 Still not started:
 
-- (none — all P0 and P1 nested/natural join tasks complete; macOS DVM harness delivered)
+- (none — all P0, P1, and P2 tasks complete; macOS DVM harness delivered)
 
 Substantially Completed (Follow-up only):
 
@@ -294,9 +297,9 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 | P1 (Done) | `src/ivm.rs` | Executed keyed/keyless DML SQL behavior tests (COMPLETED) |
 | P1 | `src/config.rs` | Direct normalization/default-value tests. Initial helper coverage completed; broader accessor/default coverage remains optional. |
 | P1 | `src/lib.rs` | `_PG_init()` preload/warning decision helper tests. Initial coverage completed. |
-| P2 | `src/api.rs` | Property tests for SQL scanners and duration/cron boundary fuzzing |
-| P2 | `src/dvm/mod.rs` | Fuzz/property tests for set-op splitters and quoted-string nesting |
-| P2 | `src/wal_decoder.rs` | Decoder fuzzing and real fixture corpus |
+| P2 (Done) | `src/api.rs` | Property tests for SQL scanners and duration/cron boundary fuzzing |
+| P2 (Done) | `src/dvm/mod.rs` | Fuzz/property tests for set-op splitters and quoted-string nesting — discovered+fixed char-boundary panic bugs |
+| P2 (Done) | `src/wal_decoder.rs` | Decoder fuzzing and real fixture corpus |
 
 ## Suggested Confidence Statement For Planning Purposes
 
