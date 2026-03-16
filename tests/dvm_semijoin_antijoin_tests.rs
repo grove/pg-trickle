@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "macos"))]
+
 
 //! Execution-backed tests for semi-join and anti-join DVM SQL.
 //!
