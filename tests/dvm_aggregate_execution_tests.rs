@@ -881,3 +881,53 @@ async fn test_diff_aggregate_executes_percentile_disc_rescan_update() {
         vec![("I".to_string(), "east".to_string(), 3, 20)]
     );
 }
+
+fn jsonb_agg_col(argument: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::JsonbAgg,
+        argument: Some(colref(argument)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_jsonb_agg_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_jsonb_arr_st", &["region", "amount_arr"])
+        .differentiate(&grouped_aggregate(jsonb_agg_col("amount", "amount_arr")))
+        .expect("jsonb_agg differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'a'), \
+         (2, 'east', 20, 'b'), \
+         (3, 'east', 30, 'c')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_jsonb_arr_st VALUES \
+         (100, 'east', 2, '[10, 30]')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+    )
+    .await;
+
+    let rows = query_json_aggregate_rows(&db, &sql, "amount_arr").await;
+    assert_eq!(rows.len(), 1);
+    let (action, region, count, json_str) = &rows[0];
+    assert_eq!(action, "I");
+    assert_eq!(region, "east");
+    assert_eq!(*count, 3);
+    assert!(json_str.contains("10"));
+    assert!(json_str.contains("20"));
+    assert!(json_str.contains("30"));
+}

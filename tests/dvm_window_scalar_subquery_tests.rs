@@ -801,3 +801,76 @@ async fn test_diff_scalar_subquery_executes_shared_source_outer_insert_stable_sc
         vec![("I".to_string(), 3, 999, 200)]
     );
 }
+
+fn build_unpartitioned_window_tree() -> OpTree {
+    let window_expr = WindowExpr {
+        function: AggFunc::RowNumber,
+        argument: None,
+        partition_by: vec![],
+        order_by: vec![sort_asc("amount")],
+        frame: None,
+    };
+    OpTree::Window {
+        source: Box::new(scan_with_pk(
+            1,
+            "orders",
+            "o",
+            vec![int_col("id"), text_col("region"), int_col("amount")],
+            &["id"],
+        )),
+        windows: vec![(window_expr, "global_rn".to_string())],
+    }
+}
+
+#[tokio::test]
+async fn test_diff_window_executes_unpartitioned_global_recompute() {
+    let db = setup_window_db().await;
+    let sql = make_window_ctx("window_unpartitioned_st")
+        .differentiate(&build_unpartitioned_window_tree())
+        .expect("window differentiation should succeed");
+
+    db.execute(
+        "TRUNCATE TABLE pgtrickle_changes.changes_1, public.window_unpartitioned_st, public.orders RESTART IDENTITY",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10), \
+         (2, 'east', 20), \
+         (3, 'west', 15), \
+         (4, 'east', 40)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.window_unpartitioned_st VALUES \
+         (1, 1, 'east', 10, 1), \
+         (3, 3, 'west', 15, 2), \
+         (2, 2, 'east', 20, 3), \
+         (4, 4, 'east', 40, 4)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount) \
+         VALUES ('0/1', 'I', 5, 5, 'north', 5)",
+    )
+    .await;
+
+    // A change to amount=5 should bump everything down by 1 in row_number!
+    // The query returns (action, id, region, amount, new_rn).
+    assert_eq!(
+        query_window_rows(&db, &sql, "global_rn").await,
+        vec![
+            ("D".to_string(), 1, "east".to_string(), 10, 1),
+            ("D".to_string(), 2, "east".to_string(), 20, 3),
+            ("D".to_string(), 3, "west".to_string(), 15, 2),
+            ("D".to_string(), 4, "east".to_string(), 40, 4),
+            ("I".to_string(), 1, "east".to_string(), 10, 2),
+            ("I".to_string(), 2, "east".to_string(), 20, 4),
+            ("I".to_string(), 3, "west".to_string(), 15, 3),
+            ("I".to_string(), 4, "east".to_string(), 40, 5),
+            ("I".to_string(), 5, "north".to_string(), 5, 1),
+        ]
+    );
+}
