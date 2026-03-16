@@ -24,21 +24,22 @@ The initial hardening slice from this report has been started and validated on b
 - Added initial execution-backed integration tests for `semi_join` and `anti_join` that run the generated DVM SQL against a standalone PostgreSQL container on Linux/CI; these tests are gated off on macOS because importing `pg_trickle` internals into an integration-test binary currently aborts with a pgrx flat-namespace symbol lookup failure
 - Added Linux/CI-only execution-backed integration tests for `window` and `scalar_subquery`, covering partition-local `ROW_NUMBER` recomputation, frame-sensitive running `SUM(...) OVER (...)` recomputation, scalar-subquery inner-change fan-out, and outer-only passthrough behavior
 - Added Linux/CI-only execution-backed integration tests for representative aggregate families, covering grouped `COUNT(*)`, grouped `SUM`, grouped `AVG` rescan behavior, and a filtered grouped `COUNT(...)`
+- Added backend-backed parser summary coverage via `cargo pgrx test`, exercising real SQL parsing for representative CTE, window, scalar-subquery, and recursive-CTE queries
 
-This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, extends the execution-backed hardening track across all four initially identified thin operators, and starts representative aggregate execution coverage. The remaining highest-value work is a successful `execute_differential_refresh()` path, parser integration summaries, deeper aggregate/operator edge cases, and a macOS-compatible harness for the new operator integration tests.
+This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, extends the execution-backed hardening track across all four initially identified thin operators, starts representative aggregate execution coverage, and adds the first backend-backed parser summary tests. Successful differential refresh behavior was already covered at the E2E layer by `tests/e2e_user_trigger_tests.rs`; the remaining highest-value work is deeper aggregate/operator edge coverage and a macOS-compatible harness for the new DVM-internal integration tests.
 
 ## Remaining Work Summary
 
 Still not started:
 
-- A success-path test for `execute_differential_refresh()` in `src/refresh.rs`
-- SQL-to-`OpTree` integration summary tests for `src/dvm/parser.rs`
 - A macOS-compatible harness for DVM-internal execution-backed integration tests
 
 Started but still partial:
 
 - Aggregate execution-backed coverage now includes grouped `COUNT(*)`, grouped `SUM`, grouped `AVG`, and a filtered grouped `COUNT(...)`; remaining high-value cases are `MIN`, `MAX`, JSON/JSONB aggregates, `STRING_AGG`, and ordered-set aggregates
 - Thin-operator execution-backed coverage now exists for `semi_join`, `anti_join`, `window`, and `scalar_subquery`, but each still has important edge cases left
+- Refresh-path coverage exists at the E2E layer (`tests/e2e_user_trigger_tests.rs` and related refresh suites), but there is still no narrower direct seam around `src/refresh.rs` itself if we decide that finer-grained coverage is worth the extra maintenance cost
+- Parser integration summaries now exist for representative CTE, window, scalar-subquery, and recursive-CTE shapes via `cargo pgrx test`, but they are still a small summary slice rather than exhaustive SQL-shape coverage
 
 Lower-priority follow-up:
 

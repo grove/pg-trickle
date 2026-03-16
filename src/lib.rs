@@ -193,6 +193,15 @@ mod tests {
     }
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub mod pg_test {
+    pub fn setup(_options: Vec<&str>) {}
+
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
 // ── SQL migration for catalog tables ──────────────────────────────────
 
 extension_sql!(
