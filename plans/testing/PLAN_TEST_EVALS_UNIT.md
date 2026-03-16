@@ -8,10 +8,21 @@
 
 The unit test suite is currently green and substantial:
 
-- `just test-unit` passed with `1284 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
-- Unit tests exist in `40` source files under `src/`
-- `5` source files currently have no unit tests: `src/config.rs`, `src/dvm/row_id.rs`, `src/lib.rs`, `src/shmem.rs`, and `src/bin/pgrx_embed.rs`
+- `just test-unit` now passes with `1305 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+- Unit tests now exist in `44` source files under `src/`
+- `1` source file currently has no unit tests: `src/bin/pgrx_embed.rs`
 - No unit tests are marked `#[ignore]` or `#[should_panic]`
+
+## Implementation Status
+
+The initial hardening slice from this report has been started and validated on branch `test-evals-unit-1`:
+
+- Added direct unit coverage to `src/dvm/row_id.rs`
+- Extracted and unit-tested pure worker-token helpers in `src/shmem.rs`
+- Added direct normalization/helper tests in `src/config.rs`
+- Extracted `_PG_init()` decision logic into a pure helper and tested it in `src/lib.rs`
+
+This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`. The remaining highest-value work is still execution-backed testing for thin DVM operators and a successful `execute_differential_refresh()` path.
 
 My overall confidence in the unit suite is **moderate-high for pure Rust logic, but only moderate as a standalone signal for end-to-end correctness**.
 
@@ -73,10 +84,6 @@ That is the right granularity here: the goal is not to restate every function na
 
 | File | Risk | Notes |
 |---|---|---|
-| `src/dvm/row_id.rs` | Medium | Small but important type/strategy module; currently zero direct tests |
-| `src/shmem.rs` | Medium-high | Shared-memory and worker-token coordination are completely unittested |
-| `src/config.rs` | Medium | Large GUC surface has no direct unit assertions |
-| `src/lib.rs` | Medium | `_PG_init()` branching and preload warnings are not unit tested |
 | `src/bin/pgrx_embed.rs` | Low | Probably low-value generated/tooling path |
 
 ## Per-File Assessment
@@ -188,8 +195,8 @@ This is visible in:
 
 - `src/refresh.rs`: no success-path differential refresh test
 - `src/scheduler.rs`: no realistic job lifecycle test
-- `src/shmem.rs`: no tests at all
-- `src/lib.rs`: no `_PG_init()` preload-path tests
+- `src/shmem.rs`: only the extracted pure token/accounting helpers are covered; shared-memory integration itself is still untested
+- `src/lib.rs`: `_PG_init()` decision branching now has direct unit coverage, but runtime registration side effects remain integration-only
 - `src/cdc.rs` / `src/ivm.rs`: no actual trigger execution tests
 
 ### 4. Thin operators are the easiest place for subtle bugs to survive
@@ -206,7 +213,7 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 
 1. Add execution-backed tests for `SEMI JOIN`, `ANTI JOIN`, `WINDOW`, `SCALAR SUBQUERY`, and representative `AGGREGATE` families.
 2. Add a success-path test for `execute_differential_refresh()`.
-3. Add direct unit coverage for `src/dvm/row_id.rs` and `src/shmem.rs`.
+3. Add direct unit coverage for `src/dvm/row_id.rs` and `src/shmem.rs`. Completed in the initial hardening slice.
 4. Add parser integration tests that validate real SQL-to-`OpTree` summaries, since unit tests cannot prove that today.
 
 ### Priority 1: Reduce false confidence from SQL-fragment tests
@@ -224,9 +231,9 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 ### Priority 3: Cover currently untested files
 
 1. `src/dvm/row_id.rs`: test each enum variant and any strategy-selection helper added around it.
-2. `src/shmem.rs`: extract pure compare-and-swap logic behind a trait or helper and test token-acquire/release/reconcile invariants.
-3. `src/config.rs`: add table-driven tests around string-to-mode parsing and default values if exposed by helper functions.
-4. `src/lib.rs`: extract preload decision logic into a pure helper so `_PG_init()` behavior can be unit tested.
+2. `src/shmem.rs`: extract pure compare-and-swap logic behind a trait or helper and test token-acquire/release/reconcile invariants. Completed for the pure helper layer; shared-memory runtime integration still needs higher-tier coverage.
+3. `src/config.rs`: add table-driven tests around string-to-mode parsing and default values if exposed by helper functions. Started with direct normalization/threshold helper tests.
+4. `src/lib.rs`: extract preload decision logic into a pure helper so `_PG_init()` behavior can be unit tested. Completed.
 
 ## Recommended Hardening Backlog By File
 
@@ -238,11 +245,13 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 | P0 | `src/refresh.rs` | Success-path differential refresh test; prepared statement parameter-order test |
 | P0 | `src/dvm/parser.rs` | SQL-to-tree integration summary tests using real PostgreSQL parsing |
 | P0 | `src/dvm/operators/aggregate.rs` | Result-level tests for `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, filtered agg, one JSON agg |
-| P1 | `src/shmem.rs` | Pure helper extraction + worker token/accounting tests |
-| P1 | `src/dvm/row_id.rs` | Direct unit tests for strategy enum and selection rules |
+| P1 | `src/shmem.rs` | Pure helper extraction + worker token/accounting tests. Initial pure-helper coverage completed; integration coverage still pending. |
+| P1 | `src/dvm/row_id.rs` | Direct unit tests for strategy enum and selection rules. Initial direct coverage completed. |
 | P1 | `src/scheduler.rs` | Fake-repository tests for enqueue/claim/complete/retry/cancel |
 | P1 | `src/cdc.rs` | Integration tests for trigger-generated rows, keyless and wide-row cases |
 | P1 | `src/ivm.rs` | Executed keyed/keyless DML SQL behavior tests |
+| P1 | `src/config.rs` | Direct normalization/default-value tests. Initial helper coverage completed; broader accessor/default coverage remains optional. |
+| P1 | `src/lib.rs` | `_PG_init()` preload/warning decision helper tests. Initial coverage completed. |
 | P2 | `src/api.rs` | Property tests for SQL scanners and duration/cron boundary fuzzing |
 | P2 | `src/dvm/mod.rs` | Fuzz/property tests for set-op splitters and quoted-string nesting |
 | P2 | `src/wal_decoder.rs` | Decoder fuzzing and real fixture corpus |
@@ -271,5 +280,5 @@ We should **not** trust it as the primary proof layer for:
 
 1. Add execution-backed unit or integration tests for the thin DVM operators first: `semi_join`, `anti_join`, `window`, `scalar_subquery`.
 2. Add a success-path `execute_differential_refresh` test.
-3. Add direct tests for `dvm/row_id.rs` and extracted pure helpers from `shmem.rs`.
-4. Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.
+3. Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.
+4. Add a fake-repository or similar seam for higher-value `scheduler.rs` lifecycle tests.
