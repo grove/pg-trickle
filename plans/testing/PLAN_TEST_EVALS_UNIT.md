@@ -284,7 +284,7 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 | P0 | `src/dvm/operators/window.rs` | Linux/CI-only result-level tests now cover partition-local `ROW_NUMBER` recompute, frame-sensitive running `SUM`, cross-partition UPDATE (partition-move that recomputes both old and new partitions), simultaneous two-expression recompute (`ROW_NUMBER` + running `SUM` together), unpartitioned full-recompute cases, and Window-over-Aggregate ordering. Remaining work: a macOS-compatible local harness. |
 | P0 | `src/dvm/operators/scalar_subquery.rs` | Linux/CI-only result-level tests now cover inner-change fan-out, outer-only passthrough, simultaneous outer-and-inner change (validates DBSP `C₀` pre-image formula), shared-source OID (outer and inner reference same change buffer; confirms Part-2 does not fire spuriously when inner is stable), and aggregate-backed inner scalar subqueries. Remaining work: a macOS-compatible local harness. |
 | P0 | `src/refresh.rs` | Success-path differential refresh test; prepared statement parameter-order test |
-| P0 | `src/dvm/parser.rs` | SQL-to-tree integration summary tests using real PostgreSQL parsing |
+| P0 (Done) | `src/dvm/parser.rs` | SQL-to-tree integration summary tests using real PostgreSQL parsing (COMPLETED) |
 | P0 | `src/dvm/operators/aggregate.rs` | Initial Linux/CI-only result-level tests now cover grouped `COUNT(*)`, grouped `SUM`, grouped `AVG`, filtered grouped `COUNT(...)`, grouped `MIN`, grouped `MAX`, ordered `STRING_AGG`, ordered-set `MODE()`, `JSON_OBJECT_AGG`, `JSONB_OBJECT_AGG`, `PERCENTILE_CONT`, and `PERCENTILE_DISC`. Remaining work: broader multi-group / mixed-family edge cases and any extra aggregate families we decide are important enough to execute directly. |
 | P0 | `src/dvm/operators/join.rs` | Linux/CI-only execution-backed tests in `tests/dvm_join_tests.rs` now cover left-insert, left-delete (R₀ path), right-delete fan-out, right-insert no-match, simultaneous left-and-right, EC-01 regression (concurrent left+right DELETE), three-table nested chain insert (innermost delta flows through to outer Part 1a), and three-table nested chain delete (outermost delta triggers outer Part 2 via inner join L₀ snapshot). Remaining work: natural join execution. |
 | P1 | `src/dvm/operators/outer_join.rs` | Linux/CI-only result-level tests in `tests/dvm_outer_join_tests.rs` cover all Part 1–5 paths and EC-01. Remaining: nested left join, natural left join. |
@@ -320,6 +320,12 @@ We should **not** trust it as the primary proof layer for:
 ## Recommended Next Actions
 
 1. Add a success-path `execute_differential_refresh` test.
-2. Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.
+2. ~~Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.~~ (COMPLETED)
 3. Extend aggregate execution-backed coverage into the remaining rescan and ordered-set families, and deepen thin-operator edge cases.
 4. Add a fake-repository or similar seam for higher-value `scheduler.rs` lifecycle tests.
+
+
+## Implementation Status
+
+- **P1 (Done)**: `src/cdc.rs` & `src/ivm.rs` integration tests implemented.
+- **P0 (Done)**: `src/dvm/parser.rs` integration summary tests implementing raw PostgreSQL parsing implemented.
