@@ -1211,7 +1211,7 @@ light-E2E limitations).
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 5 | Add `assert_st_matches_query` to `getting_started_tests` | Tutorial walkthrough fully validated | Small |
+| 5 | ~~Add `assert_st_matches_query` to `getting_started_tests`~~ | DONE | Small |
 | 6 | Add `assert_st_matches_query` to `lateral_subquery_tests` | 13 tests gain full verification | Small |
 | 7 | Add `assert_st_matches_query` to `topk_tests` (10 most critical) | Top-N content verified, not just counts | Medium |
 | 8 | Add error-path tests to `create_or_replace_tests` | Currently zero error tests | Small |
