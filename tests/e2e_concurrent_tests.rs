@@ -217,8 +217,10 @@ async fn test_concurrent_refresh_multiple_sts_same_source() {
     r2.expect("task2 panicked").expect("refresh st2 failed");
 
     // Both STs should reflect the full 100-row source
-    assert_eq!(db.count("public.cc_shared_st1").await, 100);
-    assert_eq!(db.count("public.cc_shared_st2").await, 100);
+    db.assert_st_matches_query("cc_shared_st1", "SELECT id, val FROM cc_shared")
+        .await;
+    db.assert_st_matches_query("cc_shared_st2", "SELECT id, val * 2 AS val2 FROM cc_shared")
+        .await;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -266,8 +268,8 @@ async fn test_concurrent_refresh_same_st_no_corruption() {
     let _ = r2.expect("task2 panicked");
 
     // After both complete, row count must be exactly correct — no duplicates
-    let count = db.count("public.cc_lock_st").await;
-    assert_eq!(count, 200, "No duplicate rows after concurrent refreshes");
+    db.assert_st_matches_query("cc_lock_st", "SELECT id, val FROM cc_lock_src")
+        .await;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -314,9 +316,6 @@ async fn test_full_refresh_racing_with_dml() {
 
     // After a stabilising refresh, count must converge to 200
     db.refresh_st("cc_dml_st").await;
-    let count = db.count("public.cc_dml_st").await;
-    assert_eq!(
-        count, 200,
-        "ST must converge to 200 after stabilising refresh"
-    );
+    db.assert_st_matches_query("cc_dml_st", "SELECT id, val FROM cc_dml_src")
+        .await;
 }

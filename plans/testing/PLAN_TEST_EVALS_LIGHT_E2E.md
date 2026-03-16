@@ -1221,12 +1221,12 @@ light-E2E limitations).
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 10 | Harden `monitoring_tests` with value validation | Staleness/history actually verified | Medium |
-| 11 | Add `assert_st_matches_query` to `create_tests` (5 complex cases) | Creation correctness verified | Small |
-| 12 | Add `assert_st_matches_query` to `alter_tests` post-alter | Altered STs verified correct | Small |
-| 13 | Verify `consecutive_errors` in `dag_error_tests` | Error tracking validated | Small |
-| 14 | Add `assert_st_matches_query` to `concurrent_tests` post-op | Concurrency correctness verified | Small |
-| 15 | Add correctness check after DDL hooks in `view_tests` | Post-reinit correctness verified | Small |
+| 10 | ~~Harden `monitoring_tests` with value validation~~ | DONE | Medium |
+| 11 | ~~Add `assert_st_matches_query` to `create_tests` (5 complex cases)~~ | DONE | Small |
+| 12 | ~~Add `assert_st_matches_query` to `alter_tests` post-alter~~ | DONE | Small |
+| 13 | ~~Verify `consecutive_errors` in `dag_error_tests`~~ | DONE | Small |
+| 14 | ~~Add `assert_st_matches_query` to `concurrent_tests` post-op~~ | DONE | Small |
+| 15 | ~~Add correctness check after DDL hooks in `view_tests`~~ | DONE | Small |
 
 ### P3 — Low (backlog)
 
