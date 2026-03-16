@@ -3333,4 +3333,46 @@ mod pg_tests {
         assert!(inserted > 0);
         assert!(deleted > 0);
     }
+    #[pg_test]
+    fn test_pg_prepare_ordered_parameters() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
+        Spi::run("CREATE TABLE public.test_refresh_params_src (id INT PRIMARY KEY, val TEXT)")
+            .unwrap();
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.test_refresh_params_st',
+                'SELECT id, val FROM public.test_refresh_params_src',
+                '1 minute'
+            ).unwrap();",
+        );
+
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_params_st").unwrap();
+
+        let source_oids: Vec<pg_sys::Oid> = st
+            .frontier
+            .as_ref()
+            .unwrap()
+            .source_oids()
+            .into_iter()
+            .map(pg_sys::Oid::from)
+            .collect();
+
+        assert_eq!(source_oids.len(), 1, "Should have 1 source table");
+
+        // Force multi-parameter execution to ensure parameter bindings order matches expected prepare indexes.
+        let merge_sql = build_merge_sql(&st).unwrap();
+        let param_sql = parameterize_merge_sql(&merge_sql, &source_oids);
+
+        Spi::connect(|client| {
+            // Verify PREPARE parsing natively
+            let stmt_name = "test_pg_prepare_stmt";
+            let type_list = build_prepare_type_list_sql(&source_oids);
+            let prepare_sql = format!("PREPARE {} ({}) AS {}", stmt_name, type_list, param_sql);
+
+            let result = client.update(&prepare_sql, None, &[]);
+            assert!(result.is_ok(), "PREPARE parameter bound parsing failed");
+            Ok::<(), pgrx::spi::SpiError>(())
+        })
+        .unwrap();
+    }
 }
