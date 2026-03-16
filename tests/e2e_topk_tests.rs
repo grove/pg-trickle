@@ -21,13 +21,14 @@ async fn test_topk_create_basic() {
     db.execute("INSERT INTO topk_src VALUES (1,10),(2,50),(3,30),(4,40),(5,20)")
         .await;
 
+    let query = "SELECT id, score FROM topk_src ORDER BY score DESC LIMIT 3";
     db.create_st(
         "topk_basic",
-        "SELECT id, score FROM topk_src ORDER BY score DESC LIMIT 3",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_basic", query).await;
 
     // Should have exactly 3 rows — the top 3 by score
     assert_eq!(db.count("public.topk_basic").await, 3);
@@ -54,13 +55,14 @@ async fn test_topk_create_differential_mode() {
         .await;
 
     // TopK tables should be accepted even with DIFFERENTIAL mode
+    let query = "SELECT id, val FROM topk_diff_src ORDER BY val DESC LIMIT 2";
     db.create_st(
         "topk_diff",
-        "SELECT id, val FROM topk_diff_src ORDER BY val DESC LIMIT 2",
+        query,
         "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+        "DIFFERENTIAL"
+    ).await;
+    db.assert_st_matches_query("topk_diff", query).await;
 
     assert_eq!(db.count("public.topk_diff").await, 2);
 }
@@ -76,13 +78,14 @@ async fn test_topk_catalog_fields_populated() {
     db.execute("INSERT INTO topk_cat VALUES (1,1),(2,2),(3,3)")
         .await;
 
+    let query = "SELECT id, rank FROM topk_cat ORDER BY rank ASC LIMIT 2";
     db.create_st(
         "topk_cat_st",
-        "SELECT id, rank FROM topk_cat ORDER BY rank ASC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_cat_st", query).await;
 
     let topk_limit: i32 = db
         .query_scalar(
@@ -111,13 +114,14 @@ async fn test_topk_monitoring_view_shows_is_topk() {
         .await;
     db.execute("INSERT INTO topk_mon VALUES (1,1),(2,2)").await;
 
+    let query = "SELECT id, v FROM topk_mon ORDER BY v DESC LIMIT 1";
     db.create_st(
         "topk_mon_st",
-        "SELECT id, v FROM topk_mon ORDER BY v DESC LIMIT 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_mon_st", query).await;
 
     let is_topk: bool = db
         .query_scalar(
@@ -138,18 +142,20 @@ async fn test_topk_refresh_new_row_enters_top_n() {
     db.execute("INSERT INTO topk_ins VALUES (1,10),(2,20),(3,30)")
         .await;
 
+    let query = "SELECT id, score FROM topk_ins ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_ins_st",
-        "SELECT id, score FROM topk_ins ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_ins_st", query).await;
     assert_eq!(db.count("public.topk_ins_st").await, 2);
 
     // Insert a row with a higher score that should enter the top 2
     db.execute("INSERT INTO topk_ins VALUES (4, 50)").await;
-    db.refresh_st("topk_ins_st").await;
+db.refresh_st("topk_ins_st").await;
+    db.assert_st_matches_query("topk_ins_st", query).await;
 
     assert_eq!(db.count("public.topk_ins_st").await, 2);
 
@@ -174,17 +180,19 @@ async fn test_topk_refresh_new_row_below_cutoff() {
     db.execute("INSERT INTO topk_below VALUES (1,100),(2,200),(3,300)")
         .await;
 
+    let query = "SELECT id, score FROM topk_below ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_below_st",
-        "SELECT id, score FROM topk_below ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_below_st", query).await;
 
     // Insert a row below the top-2 cutoff
     db.execute("INSERT INTO topk_below VALUES (4, 50)").await;
-    db.refresh_st("topk_below_st").await;
+db.refresh_st("topk_below_st").await;
+    db.assert_st_matches_query("topk_below_st", query).await;
 
     assert_eq!(db.count("public.topk_below_st").await, 2);
 
@@ -206,18 +214,20 @@ async fn test_topk_refresh_update_changes_ranking() {
     db.execute("INSERT INTO topk_upd VALUES (1,10),(2,20),(3,30)")
         .await;
 
+    let query = "SELECT id, score FROM topk_upd ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_upd_st",
-        "SELECT id, score FROM topk_upd ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_upd_st", query).await;
 
     // Update the lowest-scoring row to become the highest
     db.execute("UPDATE topk_upd SET score = 100 WHERE id = 1")
         .await;
-    db.refresh_st("topk_upd_st").await;
+db.refresh_st("topk_upd_st").await;
+    db.assert_st_matches_query("topk_upd_st", query).await;
 
     assert_eq!(db.count("public.topk_upd_st").await, 2);
 
@@ -243,18 +253,20 @@ async fn test_topk_refresh_delete_top_row() {
     db.execute("INSERT INTO topk_del VALUES (1,10),(2,20),(3,30),(4,40)")
         .await;
 
+    let query = "SELECT id, score FROM topk_del ORDER BY score DESC LIMIT 3";
     db.create_st(
         "topk_del_st",
-        "SELECT id, score FROM topk_del ORDER BY score DESC LIMIT 3",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_del_st", query).await;
     assert_eq!(db.count("public.topk_del_st").await, 3);
 
     // Delete the highest-scoring row
     db.execute("DELETE FROM topk_del WHERE id = 4").await;
-    db.refresh_st("topk_del_st").await;
+db.refresh_st("topk_del_st").await;
+    db.assert_st_matches_query("topk_del_st", query).await;
 
     assert_eq!(db.count("public.topk_del_st").await, 3);
 
@@ -280,20 +292,22 @@ async fn test_topk_fewer_rows_than_limit() {
         .await;
     db.execute("INSERT INTO topk_few VALUES (1,10)").await;
 
+    let query = "SELECT id, val FROM topk_few ORDER BY val DESC LIMIT 5";
     db.create_st(
         "topk_few_st",
-        "SELECT id, val FROM topk_few ORDER BY val DESC LIMIT 5",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_few_st", query).await;
 
     // Only 1 row exists, LIMIT 5 — should have 1 row
     assert_eq!(db.count("public.topk_few_st").await, 1);
 
     db.execute("INSERT INTO topk_few VALUES (2,20),(3,30)")
         .await;
-    db.refresh_st("topk_few_st").await;
+db.refresh_st("topk_few_st").await;
+    db.assert_st_matches_query("topk_few_st", query).await;
 
     assert_eq!(db.count("public.topk_few_st").await, 3);
 }
@@ -309,18 +323,20 @@ async fn test_topk_multiple_refreshes() {
     db.execute("INSERT INTO topk_multi VALUES (1,10),(2,20),(3,30),(4,40),(5,50)")
         .await;
 
+    let query = "SELECT id, score FROM topk_multi ORDER BY score DESC LIMIT 3";
     db.create_st(
         "topk_multi_st",
-        "SELECT id, score FROM topk_multi ORDER BY score DESC LIMIT 3",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_multi_st", query).await;
     assert_eq!(db.count("public.topk_multi_st").await, 3);
 
     // Refresh 1: insert new top row
     db.execute("INSERT INTO topk_multi VALUES (6, 100)").await;
-    db.refresh_st("topk_multi_st").await;
+db.refresh_st("topk_multi_st").await;
+    db.assert_st_matches_query("topk_multi_st", query).await;
     assert_eq!(db.count("public.topk_multi_st").await, 3);
     let max1: i32 = db
         .query_scalar("SELECT MAX(score) FROM public.topk_multi_st")
@@ -329,7 +345,8 @@ async fn test_topk_multiple_refreshes() {
 
     // Refresh 2: delete the new top row
     db.execute("DELETE FROM topk_multi WHERE id = 6").await;
-    db.refresh_st("topk_multi_st").await;
+db.refresh_st("topk_multi_st").await;
+    db.assert_st_matches_query("topk_multi_st", query).await;
     assert_eq!(db.count("public.topk_multi_st").await, 3);
     let max2: i32 = db
         .query_scalar("SELECT MAX(score) FROM public.topk_multi_st")
@@ -352,13 +369,14 @@ async fn test_topk_with_join() {
     db.execute("INSERT INTO topk_orders VALUES (1,1,100),(2,2,200),(3,3,300),(4,1,400),(5,2,500)")
         .await;
 
+    let query = "SELECT o.id, c.name, o.amount FROM topk_orders o JOIN topk_customers c ON o.customer_id = c.id ORDER BY o.amount DESC LIMIT 3";
     db.create_st(
         "topk_join_st",
-        "SELECT o.id, c.name, o.amount FROM topk_orders o JOIN topk_customers c ON o.customer_id = c.id ORDER BY o.amount DESC LIMIT 3",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_join_st", query).await;
 
     assert_eq!(db.count("public.topk_join_st").await, 3);
 
@@ -381,13 +399,14 @@ async fn test_topk_with_aggregate() {
     )
     .await;
 
+    let query = "SELECT product, SUM(revenue) as total FROM topk_sales GROUP BY product ORDER BY total DESC LIMIT 2";
     db.create_st(
         "topk_agg_st",
-        "SELECT product, SUM(revenue) as total FROM topk_sales GROUP BY product ORDER BY total DESC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_agg_st", query).await;
 
     assert_eq!(db.count("public.topk_agg_st").await, 2);
 
@@ -409,13 +428,14 @@ async fn test_topk_drop_stream_table() {
     db.execute("INSERT INTO topk_drop_src VALUES (1,1),(2,2)")
         .await;
 
+    let query = "SELECT id, v FROM topk_drop_src ORDER BY v DESC LIMIT 1";
     db.create_st(
         "topk_drop_st",
-        "SELECT id, v FROM topk_drop_src ORDER BY v DESC LIMIT 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_drop_st", query).await;
 
     db.drop_st("topk_drop_st").await;
 
@@ -435,19 +455,21 @@ async fn test_topk_full_refresh_matches_differential() {
         .await;
 
     // Create with DIFFERENTIAL — TopK tables use scoped recomputation for both modes
+    let query = "SELECT id, score FROM topk_fr_src ORDER BY score DESC LIMIT 3";
     db.create_st(
         "topk_fr_st",
-        "SELECT id, score FROM topk_fr_src ORDER BY score DESC LIMIT 3",
+        query,
         "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+        "DIFFERENTIAL"
+    ).await;
+    db.assert_st_matches_query("topk_fr_st", query).await;
 
     assert_eq!(db.count("public.topk_fr_st").await, 3);
 
     // Mutate and do a manual (full) refresh
     db.execute("INSERT INTO topk_fr_src VALUES (6, 100)").await;
-    db.refresh_st("topk_fr_st").await;
+db.refresh_st("topk_fr_st").await;
+    db.assert_st_matches_query("topk_fr_st", query).await;
 
     assert_eq!(db.count("public.topk_fr_st").await, 3);
     let max_score: i32 = db
@@ -470,19 +492,21 @@ async fn test_topk_no_change_skips_refresh() {
     db.execute("INSERT INTO topk_nc_src VALUES (1,10),(2,20),(3,30)")
         .await;
 
+    let query = "SELECT id, score FROM topk_nc_src ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_nc_st",
-        "SELECT id, score FROM topk_nc_src ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+        "DIFFERENTIAL"
+    ).await;
+    db.assert_st_matches_query("topk_nc_st", query).await;
 
     assert_eq!(db.count("public.topk_nc_st").await, 2);
 
     // Refresh without any source changes — should succeed without error
     // and stream table contents should be unchanged.
-    db.refresh_st("topk_nc_st").await;
+db.refresh_st("topk_nc_st").await;
+    db.assert_st_matches_query("topk_nc_st", query).await;
     assert_eq!(db.count("public.topk_nc_st").await, 2);
 
     let max_score: i32 = db
@@ -505,13 +529,14 @@ async fn test_topk_limit_zero_accepted() {
     db.execute("INSERT INTO topk_lz_src VALUES (1,10),(2,20)")
         .await;
 
+    let query = "SELECT id, val FROM topk_lz_src ORDER BY val DESC LIMIT 0";
     db.create_st(
         "topk_lz_st",
-        "SELECT id, val FROM topk_lz_src ORDER BY val DESC LIMIT 0",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_lz_st", query).await;
 
     // LIMIT 0 produces an empty stream table
     assert_eq!(db.count("public.topk_lz_st").await, 0);
@@ -527,13 +552,14 @@ async fn test_topk_limit_all_no_topk() {
         .await;
 
     // LIMIT ALL is equivalent to no LIMIT — should produce a normal ST, not TopK
+    let query = "SELECT id, val FROM topk_la_src ORDER BY val DESC LIMIT ALL";
     db.create_st(
         "topk_la_st",
-        "SELECT id, val FROM topk_la_src ORDER BY val DESC LIMIT ALL",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_la_st", query).await;
 
     // All rows should be present (no TopK restriction)
     assert_eq!(db.count("public.topk_la_st").await, 3);
@@ -625,13 +651,14 @@ async fn test_topk_offset_create_basic() {
         .await;
 
     // Top 7 by score DESC = 70,60,50,40,30,20,10. LIMIT 3 OFFSET 2 = rows 3-5 = 50,40,30
+    let query = "SELECT id, score FROM topk_off_src ORDER BY score DESC LIMIT 3 OFFSET 2";
     db.create_st(
         "topk_off_basic",
-        "SELECT id, score FROM topk_off_src ORDER BY score DESC LIMIT 3 OFFSET 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_off_basic", query).await;
 
     assert_eq!(db.count("public.topk_off_basic").await, 3);
 
@@ -655,13 +682,14 @@ async fn test_topk_offset_catalog_metadata() {
     db.execute("INSERT INTO topk_offcat VALUES (1,1),(2,2),(3,3)")
         .await;
 
+    let query = "SELECT id, v FROM topk_offcat ORDER BY v DESC LIMIT 2 OFFSET 1";
     db.create_st(
         "topk_offcat_st",
-        "SELECT id, v FROM topk_offcat ORDER BY v DESC LIMIT 2 OFFSET 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_offcat_st", query).await;
 
     let topk_offset: i32 = db
         .query_scalar(
@@ -688,13 +716,14 @@ async fn test_topk_offset_zero_is_no_offset() {
         .await;
 
     // OFFSET 0 is semantically equivalent to no OFFSET
+    let query = "SELECT id, score FROM topk_off0 ORDER BY score DESC LIMIT 2 OFFSET 0";
     db.create_st(
         "topk_off0_st",
-        "SELECT id, score FROM topk_off0 ORDER BY score DESC LIMIT 2 OFFSET 0",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_off0_st", query).await;
 
     assert_eq!(db.count("public.topk_off0_st").await, 2);
 
@@ -726,13 +755,14 @@ async fn test_topk_offset_refresh_page_shifts() {
         .await;
 
     // DESC order: 50,40,30,20,10. LIMIT 2 OFFSET 1 → rows 2-3 = 40,30
+    let query = "SELECT id, score FROM topk_offref ORDER BY score DESC LIMIT 2 OFFSET 1";
     db.create_st(
         "topk_offref_st",
-        "SELECT id, score FROM topk_offref ORDER BY score DESC LIMIT 2 OFFSET 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_offref_st", query).await;
 
     assert_eq!(db.count("public.topk_offref_st").await, 2);
     let max_score: i32 = db
@@ -742,7 +772,8 @@ async fn test_topk_offset_refresh_page_shifts() {
 
     // Insert a row with score 45 → DESC: 50,45,40,30,20,10. OFFSET 1 LIMIT 2 → 45,40
     db.execute("INSERT INTO topk_offref VALUES (6, 45)").await;
-    db.refresh_st("topk_offref_st").await;
+db.refresh_st("topk_offref_st").await;
+    db.assert_st_matches_query("topk_offref_st", query).await;
 
     assert_eq!(db.count("public.topk_offref_st").await, 2);
     let max_score: i32 = db
@@ -770,13 +801,14 @@ async fn test_topk_offset_with_aggregates() {
 
     // dept totals: D=50, A=300, B=700, C=1100. DESC: C=1100, B=700, A=300, D=50
     // LIMIT 2 OFFSET 1 → B=700, A=300
+    let query = "SELECT dept, SUM(salary) AS total FROM topk_offagg GROUP BY dept ORDER BY total DESC LIMIT 2 OFFSET 1";
     db.create_st(
         "topk_offagg_st",
-        "SELECT dept, SUM(salary) AS total FROM topk_offagg GROUP BY dept ORDER BY total DESC LIMIT 2 OFFSET 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_offagg_st", query).await;
 
     assert_eq!(db.count("public.topk_offagg_st").await, 2);
 
@@ -801,13 +833,14 @@ async fn test_topk_offset_differential_mode() {
         .await;
 
     // DESC: 50,40,30,20,10. LIMIT 2 OFFSET 2 → 30,20
+    let query = "SELECT id, score FROM topk_offdiff ORDER BY score DESC LIMIT 2 OFFSET 2";
     db.create_st(
         "topk_offdiff_st",
-        "SELECT id, score FROM topk_offdiff ORDER BY score DESC LIMIT 2 OFFSET 2",
+        query,
         "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+        "DIFFERENTIAL"
+    ).await;
+    db.assert_st_matches_query("topk_offdiff_st", query).await;
 
     assert_eq!(db.count("public.topk_offdiff_st").await, 2);
 
@@ -819,7 +852,8 @@ async fn test_topk_offset_differential_mode() {
     // Delete score=50 → DESC: 40,30,20,10. OFFSET 2 LIMIT 2 → 20,10
     db.execute("DELETE FROM topk_offdiff WHERE score = 50")
         .await;
-    db.refresh_st("topk_offdiff_st").await;
+db.refresh_st("topk_offdiff_st").await;
+    db.assert_st_matches_query("topk_offdiff_st", query).await;
 
     let max_score: i32 = db
         .query_scalar("SELECT MAX(score) FROM public.topk_offdiff_st")
@@ -859,13 +893,14 @@ async fn test_topk_fetch_first_syntax_accepted() {
         .await;
 
     // FETCH FIRST N ROWS ONLY with ORDER BY should be accepted as TopK
+    let query = "SELECT id, score FROM topk_ff_src ORDER BY score DESC FETCH FIRST 2 ROWS ONLY";
     db.create_st(
         "topk_ff_st",
-        "SELECT id, score FROM topk_ff_src ORDER BY score DESC FETCH FIRST 2 ROWS ONLY",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_ff_st", query).await;
 
     assert_eq!(db.count("public.topk_ff_st").await, 2);
 
@@ -889,13 +924,14 @@ async fn test_topk_with_where() {
     )
     .await;
 
+    let query = "SELECT id, score FROM topk_where WHERE active ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_where_st",
-        "SELECT id, score FROM topk_where WHERE active ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_where_st", query).await;
 
     assert_eq!(db.count("public.topk_where_st").await, 2);
 
@@ -917,13 +953,14 @@ async fn test_topk_alter_schedule_works() {
     db.execute("INSERT INTO topk_alt_src VALUES (1,1),(2,2)")
         .await;
 
+    let query = "SELECT id, v FROM topk_alt_src ORDER BY v DESC LIMIT 1";
     db.create_st(
         "topk_alt_st",
-        "SELECT id, v FROM topk_alt_src ORDER BY v DESC LIMIT 1",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("topk_alt_st", query).await;
 
     // Altering schedule/status should work on TopK tables
     db.alter_st("topk_alt_st", "schedule => '5m'").await;
@@ -954,13 +991,14 @@ async fn test_subquery_offset_without_order_by_accepted_with_warning() {
         .await;
 
     // Subquery uses OFFSET without ORDER BY — should succeed with a warning
+    let query = "SELECT * FROM (SELECT id, val FROM sub_off_src OFFSET 2) sub";
     db.create_st(
         "sub_off_st",
-        "SELECT * FROM (SELECT id, val FROM sub_off_src OFFSET 2) sub",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("sub_off_st", query).await;
 
     // Stream table should be populated (non-deterministic subset, but 3 rows)
     let count = db.count("public.sub_off_st").await;
@@ -977,13 +1015,14 @@ async fn test_subquery_offset_with_order_by_no_warning() {
         .await;
 
     // Subquery uses OFFSET with ORDER BY — should succeed without warning
+    let query = "SELECT * FROM (SELECT id, val FROM sub_oob_src ORDER BY val OFFSET 2) sub";
     db.create_st(
         "sub_oob_st",
-        "SELECT * FROM (SELECT id, val FROM sub_oob_src ORDER BY val OFFSET 2) sub",
+        query,
         "1m",
-        "FULL",
-    )
-    .await;
+        "FULL"
+    ).await;
+    db.assert_st_matches_query("sub_oob_st", query).await;
 
     let count = db.count("public.sub_oob_st").await;
     assert_eq!(
@@ -1380,13 +1419,14 @@ async fn test_topk_immediate_mode_switch_from_differential() {
         .await;
 
     // Create as DIFFERENTIAL first
+    let query = "SELECT id, score FROM topk_imm_sw ORDER BY score DESC LIMIT 2";
     db.create_st(
         "topk_imm_sw_st",
-        "SELECT id, score FROM topk_imm_sw ORDER BY score DESC LIMIT 2",
+        query,
         "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+        "DIFFERENTIAL"
+    ).await;
+    db.assert_st_matches_query("topk_imm_sw_st", query).await;
 
     assert_eq!(db.count("public.topk_imm_sw_st").await, 2);
 

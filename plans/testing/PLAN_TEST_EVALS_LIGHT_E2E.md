@@ -1213,9 +1213,9 @@ light-E2E limitations).
 |---|--------|--------|--------|
 | 5 | ~~Add `assert_st_matches_query` to `getting_started_tests`~~ | DONE | Small |
 | 6 | ~~Add `assert_st_matches_query` to `lateral_subquery_tests`~~ | DONE | Small |
-| 7 | Add `assert_st_matches_query` to `topk_tests` (10 most critical) | Top-N content verified, not just counts | Medium |
+| 7 | ~~Add `assert_st_matches_query` to `topk_tests` (10 most critical)~~ | DONE | Medium |
 | 8 | ~~Add error-path tests to `create_or_replace_tests`~~ | DONE | Small |
-| 9 | Add error message checks to `error_tests` | Most tests only check `is_err()` | Medium |
+| 9 | ~~Add error message checks to `error_tests`~~ | DONE | Medium |
 
 ### P2 — Medium (address during regular maintenance)
 

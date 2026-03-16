@@ -564,7 +564,7 @@ async fn test_cor_invalid_query_fails() {
     assert!(res.is_err(), "Replacing with invalid query should fail");
     let err_msg = res.unwrap_err().to_string();
     assert!(
-        err_msg.contains("column \\"non_existent\\" does not exist"),
+        err_msg.contains("column \"non_existent\" does not exist"),
         "Unexpected error: {}", err_msg
     );
 }
