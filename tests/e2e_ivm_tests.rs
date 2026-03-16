@@ -398,6 +398,8 @@ async fn test_ivm_alter_immediate_to_differential() {
         1,
         "INSERT should NOT propagate in DIFFERENTIAL mode"
     );
+    // Refresh should synchronize it
+    db.refresh_st("sw_i2d_st").await;
     db.assert_st_matches_query("sw_i2d_st", query).await;
 }
 
