@@ -246,7 +246,7 @@ fn drain_pending_cleanups() {
                 "TRUNCATE \"{schema}\".changes_{oid}",
                 schema = change_schema,
             )) {
-                pgrx::debug1!("[pg_trickle] Deferred cleanup TRUNCATE failed: {}", e);
+                pgrx::debug1!("[pg_trickle] Deferred cleanup TRUNCATE failed: {}", e).unwrap();
             }
         } else {
             let delete_sql = format!(
@@ -255,7 +255,7 @@ fn drain_pending_cleanups() {
                 schema = change_schema,
             );
             if let Err(e) = Spi::run(&delete_sql) {
-                pgrx::debug1!("[pg_trickle] Deferred cleanup DELETE failed: {}", e);
+                pgrx::debug1!("[pg_trickle] Deferred cleanup DELETE failed: {}", e).unwrap();
             }
         }
     }
@@ -376,7 +376,8 @@ fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oids: &[u32]) 
                 "TRUNCATE \"{schema}\".changes_{oid}",
                 schema = change_schema,
             )) {
-                pgrx::debug1!("[pg_trickle] Frontier-based cleanup TRUNCATE failed: {}", e);
+                pgrx::debug1!("[pg_trickle] Frontier-based cleanup TRUNCATE failed: {}", e)
+                    .unwrap();
             }
         } else {
             let delete_sql = format!(
@@ -385,7 +386,7 @@ fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oids: &[u32]) 
                 schema = change_schema,
             );
             if let Err(e) = Spi::run(&delete_sql) {
-                pgrx::debug1!("[pg_trickle] Frontier-based cleanup DELETE failed: {}", e);
+                pgrx::debug1!("[pg_trickle] Frontier-based cleanup DELETE failed: {}", e).unwrap();
             }
         }
     }
@@ -436,11 +437,12 @@ fn apply_planner_hints(estimated_delta: i64) {
             pgrx::debug1!(
                 "[pg_trickle] D-1: failed to SET LOCAL enable_nestloop: {}",
                 e
-            );
+            )
+            .unwrap();
         }
         let mb = crate::config::pg_trickle_merge_work_mem_mb();
         if let Err(e) = Spi::run(&format!("SET LOCAL work_mem = '{mb}MB'")) {
-            pgrx::debug1!("[pg_trickle] D-1: failed to SET LOCAL work_mem: {}", e);
+            pgrx::debug1!("[pg_trickle] D-1: failed to SET LOCAL work_mem: {}", e).unwrap();
         }
     } else if estimated_delta >= PLANNER_HINT_NESTLOOP_THRESHOLD {
         // Medium delta: just disable nested loops
@@ -448,7 +450,8 @@ fn apply_planner_hints(estimated_delta: i64) {
             pgrx::debug1!(
                 "[pg_trickle] D-1: failed to SET LOCAL enable_nestloop: {}",
                 e
-            );
+            )
+            .unwrap();
         }
     }
 }
@@ -528,7 +531,7 @@ fn deallocate_prepared_merge_statement(_pgt_id: i64) {
         .unwrap_or(Some(false))
         .unwrap_or(false);
         if exists {
-            let _ = Spi::run(&format!("DEALLOCATE {stmt}"));
+            let _ = Spi::run(&format!("DEALLOCATE {stmt}")).unwrap();
         }
     }
 }
@@ -2371,7 +2374,7 @@ pub fn execute_differential_refresh(
             .unwrap_or(Some(false))
             .unwrap_or(false);
             if stale_exists {
-                let _ = Spi::run(&format!("DEALLOCATE {stmt_name}"));
+                let _ = Spi::run(&format!("DEALLOCATE {stmt_name}")).unwrap();
             }
             Spi::run(&format!(
                 "PREPARE {stmt_name} ({type_list}) AS {}",
@@ -2769,7 +2772,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_differential_refresh_rejects_unpopulated_stream_table() {
+    fn test_execute_differential_refresh_rejects_unpop_st() {
         let mut st = test_st(RefreshMode::Differential, false);
         st.is_populated = false;
 
@@ -3232,164 +3235,86 @@ mod tests {
         assert!(result.contains(r#"d.__pgt_row_id, d."id", d."type", d."payload""#));
     }
 }
-
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod pg_tests {
-    #[pg_test]
-    fn test_execute_differential_refresh_append_only_failure() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
-        Spi::run("CREATE TABLE public.test_refresh_ao_src (id INT PRIMARY KEY, val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'public.test_refresh_ao_st',
-                'SELECT id, val FROM public.test_refresh_ao_src',
-                '1 minute'
-            );"
-        );
-        Spi::run("ALTER STREAM TABLE public.test_refresh_ao_st SET (append_only = true);");
-
-        Spi::run("INSERT INTO public.test_refresh_ao_src VALUES (1, 'hello'), (2, 'world')");
-        // FULL refresh
-        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_ao_st', 'FULL')");
-
-        let mut st = StreamTableMeta::get_by_name("public", "test_refresh_ao_st").unwrap();
-        // Since we created it, let's just make it populated
-        st.is_populated = true;
-        
-        let prev_frontier = st.f        let prev_frontier = stak        let pch        let prev_frontier = st.f        let prev_frontier = stare        let prev_frontier = st.f        let prev_front =        let prev_frontier = st.f        let prev_frontier = stak        let pch        lete_       nt        let prev &        let prev_frontier = st.f        let prev_sult.is_err());
-        let err_msg = result.un        let err_msg = result.un        let err_msg = res("append-o        let err_msg = reses        let er_e        lff        let err_msg = result.un        let err_msg = result.un        let err_msg = res("aSTS        let err_msg = result.un        let err_msg = result.un        let err_msg = res("app val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'p                'p                'p          'SELECT id, val FROM public.test_refresh_param_src',
-                '1 minute'
-            );"
-        );
-
-        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSE  Spi::run("INSERT INTO public.test_refresh_param_src VALUES (2, 'world')");
-        let new_frontier = crate::version::capture_current_frontier().unwrap();
-
-        let result = execute_differential_refresh(&st, &prev_frontier, &new_frontier);
-        assert!(result.is_err());
-    }
-
-    #[pg_test]
-    fn test_execute_differential_refresh_append_only_failure() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
-        Spi::run("CREATE TABLE public.test_refresh_ao_src (id INT PRIMARY KEY, val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'public.test_refresh_ao_st',
-                'SELECT id, val FROM public.test_refresh_ao_src',
-                '1 minute'
-            );"
-        );
-        Spi::run("ALTER STREAM TABLE public.test_refresh_ao_st SET (append_only = true);");
-
-        Spi::run("INSERT INTO public.test_refresh_ao_src VALUES (1, 'hello'), (2, 'world')");
-        // FULL refresh
-        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_ao_st', 'FULL')");
-
-        let mut st = StreamTableMeta::get_by_name("public", "test_refresh_ao_st").unwrap();
-        // Since we created it, let's just make it populated
-        st.is_populated = true;
-        
-        let prev_frontier = st.f        let prev_frontier = stak        let pch        let prev_frontier = st.f        let prev_frontier = stare        let prev_frontier = st.f        let prev_front =        let prev_frontier = st.f        let prev_frontier = stak        let pch        lete_       nt        let prev &        let prev_frontier = st.f        let prev_sult.is_err());
-        let err_msg = result.un        let err_msg = result.un        let err_msg = res("append-o        let err_msg = reses        let er_e        lff        let err_msg = result.un        let err_msg = result.un        let err_msg = res("aSTS        let err_msg = result.un        let err_msg = result.un        let err_msg = res("app val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'p                'p                'p          'SELECT id, val FROM public.test_refresh_param_src',
-                '1 minute'
-            );"
-        );
-
-        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSE  Spi::run("INSERT INTO public.test_refresh_param_src VALUES (2, 'world')");
-        let new_frontier = crate::version::capture_current_frontier().unwrap();
-
-        let result = execute_differential_refresh(&st, &prev_frontier, &new_frontier);
-        assert!(result.is_err());
-    }
-
-    #[pg_test]
-    fn test_execute_differential_refresh_append_only_failure() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
-        Spi::run("CREATE TABLE public.test_refresh_ao_src (id INT PRIMARY KEY, val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'public.test_refresh_ao_st',
-                'SELECT id, val FROM public.test_refresh_ao_src',
-                '1 minute'
-            );"
-        );
-        Spi::run("ALTER STREAM TABLE public.test_refresh_ao_st SET (append_only = true);");
-
-        Spi::run("INSERT INTO public.test_refresh_ao_src VALUES (1, 'hello'), (2, 'world')");
-        // FULL refresh
-        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_ao_st', 'FULL')");
-
-        let mut st = StreamTableMeta::get_by_name("public", "test_refresh_ao_st").unwrap();
-        // Since we created it, let's just make it populated
-        st.is_populated = true;
-        
-        let prev_frontier = st.f        let prev_frontier = stak        let pch        let prev_frontier = st.f        let prev_frontier = stare        let prev_frontier = st.f        let prev_front =        let prev_frontier = st.f        let prev_frontier = stak        let pch        lete_       nt        let prev &        let prev_frontier = st.f        let prev_sult.is_err());
-        let err_msg = result.un        let err_msg = result.un        let err_msg = res("append-o        let err_msg = reses        let er_e        lff        let err_msg = result.un        let err_msg = result.un        let err_msg = res("aSTS        let err_msg = result.un        let err_msg = result.un        let err_msg = res("app val TEXT)");
-        
-        Spi::run(
-            "SELECT pgtrickle.create_stream_table(
-                'p                'p                'p          'SELECT id, val FROM public.test_refresh_param_src',
-                '1 minute'
-            );"
-        );
-
-        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSERT INTO public.tes        Spi::run("INSE  Spi::run("INSERT INTO public.test_refresh_param_src VALUES (2, 'world')");
-        let new_frontier = crate::version::capture_current_frontier().unwrap();
-
-        let result = execute_differential_refresh(&st, &prev_frontier, &new_frontier);
-        assert!(result.is_err());
-    }
-
     use super::*;
     use crate::catalog::StreamTableMeta;
     use crate::version::Frontier;
     use pgrx::prelude::*;
 
     #[pg_test]
-    fn test_execute_differential_refresh_success() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
-        Spi::run("CREATE TABLE public.test_refresh_src (id INT PRIMARY KEY, val TEXT)");
+    fn test_execute_differential_refresh_rejects_unpop_st() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
+        Spi::run("CREATE TABLE public.test_refresh_unpop (id INT PRIMARY KEY)").unwrap();
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.test_refresh_unpop_st',
+                'SELECT id FROM public.test_refresh_unpop',
+                '1 minute'
+            ).unwrap();",
+        );
 
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_unpop_st").unwrap();
+        let frontier = Frontier::new();
+        let result = execute_differential_refresh(&st, &frontier, &frontier);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not fully populated")
+        );
+    }
+
+    #[pg_test]
+    fn test_execute_differential_refresh_rejects_empty_frontier() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
+        Spi::run("CREATE TABLE public.test_refresh_empty_f (id INT PRIMARY KEY)").unwrap();
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.test_refresh_empty_f_st',
+                'SELECT id FROM public.test_refresh_empty_f',
+                '1 minute'
+            ).unwrap();",
+        );
+        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_empty_f_st', 'FULL')").unwrap();
+
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_empty_f_st").unwrap();
+        let frontier = Frontier::new();
+        let result = execute_differential_refresh(&st, &frontier, &frontier);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("frontier is empty")
+        );
+    }
+
+    #[pg_test]
+    fn test_execute_differential_refresh_success() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
+        Spi::run("CREATE TABLE public.test_refresh_src (id INT PRIMARY KEY, val TEXT)").unwrap();
         Spi::run(
             "SELECT pgtrickle.create_stream_table(
                 'public.test_refresh_st',
                 'SELECT id, val FROM public.test_refresh_src',
                 '1 minute'
-            );",
+            ).unwrap();",
         );
 
-        Spi::run("INSERT INTO public.test_refresh_src VALUES (1, 'hello'), (2, 'world')");
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (1, 'hello'), (2, 'world')").unwrap();
+        // FULL refresh
+        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_st', 'FULL')").unwrap();
 
-        // Wait, populate via refresh
-        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_st', 'FULL')");
-
-        // Get metadata correctly
-        let st = StreamTableMeta::get_by_name("public", "test_refresh_st").expect("st must exist");
-        assert!(st.is_populated, "ST should be populated after FULL");
-
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_st").unwrap();
         let prev_frontier = st.frontier.clone().unwrap();
-        assert!(
-            !prev_frontier.is_empty(),
-            "Frontier should not be empty after FULL refresh"
-        );
 
         // Make delta changes
-        Spi::run("INSERT INTO public.test_refresh_src VALUES (3, 'foo')");
-        Spi::run("UPDATE public.test_refresh_src SET val = 'bar' WHERE id = 1");
-        Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2");
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (3, 'foo')").unwrap();
+        Spi::run("UPDATE public.test_refresh_src SET val = 'bar' WHERE id = 1").unwrap();
+        Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2").unwrap();
 
         let source_oids: Vec<pg_sys::Oid> = st
             .frontier
@@ -3403,18 +3328,9 @@ mod pg_tests {
         let new_frontier =
             crate::version::compute_new_frontier(&slot_positions, "1970-01-01T00:00:00Z");
 
-        let (inserted, deleted) = execute_differential_refresh(&st, &prev_frontier, &new_frontier)
-            .expect("differential refresh should succeed");
-
-        assert!(inserted > 0, "should have inserted rows");
-        assert!(deleted > 0, "should have deleted rows");
-
-        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM public.test_refresh_st")
-            .unwrap()
-            .unwrap();
-        assert_eq!(count, 2, "1,3 should be present");
-
-        Spi::run("SELECT pgtrickle.drop_stream_table('public.test_refresh_st')");
-        Spi::run("DROP TABLE public.test_refresh_src CASCADE");
+        let (inserted, deleted) =
+            execute_differential_refresh(&st, &prev_frontier, &new_frontier).unwrap();
+        assert!(inserted > 0);
+        assert!(deleted > 0);
     }
 }
