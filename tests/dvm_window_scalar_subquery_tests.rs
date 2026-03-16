@@ -10,7 +10,7 @@ mod common;
 
 use common::TestDb;
 use pg_trickle::dvm::DiffContext;
-use pg_trickle::dvm::parser::{AggFunc, Column, Expr, OpTree, SortExpr, WindowExpr};
+use pg_trickle::dvm::parser::{Column, Expr, OpTree, SortExpr, WindowExpr};
 use pg_trickle::version::Frontier;
 
 fn int_col(name: &str) -> Column {
