@@ -1,0 +1,394 @@
+#![cfg(not(target_os = "macos"))]
+
+//! Execution-backed tests for aggregate DVM SQL.
+//!
+//! These tests run generated aggregate delta SQL against a standalone
+//! PostgreSQL container so we can validate result rows for representative
+//! algebraic and rescan aggregate families.
+
+mod common;
+
+use common::TestDb;
+use pg_trickle::dvm::DiffContext;
+use pg_trickle::dvm::parser::{AggExpr, AggFunc, Column, Expr, OpTree};
+use pg_trickle::version::Frontier;
+
+fn int_col(name: &str) -> Column {
+    Column {
+        name: name.to_string(),
+        type_oid: 23,
+        is_nullable: true,
+    }
+}
+
+fn text_col(name: &str) -> Column {
+    Column {
+        name: name.to_string(),
+        type_oid: 25,
+        is_nullable: true,
+    }
+}
+
+fn colref(name: &str) -> Expr {
+    Expr::ColumnRef {
+        table_alias: None,
+        column_name: name.to_string(),
+    }
+}
+
+fn lit(value: &str) -> Expr {
+    Expr::Literal(value.to_string())
+}
+
+fn binop(op: &str, left: Expr, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        op: op.to_string(),
+        left: Box::new(left),
+        right: Box::new(right),
+    }
+}
+
+fn scan_orders() -> OpTree {
+    OpTree::Scan {
+        table_oid: 1,
+        table_name: "orders".to_string(),
+        schema: "public".to_string(),
+        columns: vec![int_col("id"), text_col("region"), int_col("amount")],
+        pk_columns: vec!["id".to_string()],
+        alias: "o".to_string(),
+    }
+}
+
+fn count_star(alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::CountStar,
+        argument: None,
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+fn sum_col(column: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::Sum,
+        argument: Some(colref(column)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+fn avg_col(column: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::Avg,
+        argument: Some(colref(column)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+fn filtered_count_col(column: &str, alias: &str, filter: Expr) -> AggExpr {
+    AggExpr {
+        function: AggFunc::Count,
+        argument: Some(colref(column)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: Some(filter),
+        order_within_group: None,
+    }
+}
+
+fn grouped_aggregate(aggregate: AggExpr) -> OpTree {
+    OpTree::Aggregate {
+        group_by: vec![colref("region")],
+        aggregates: vec![aggregate],
+        child: Box::new(scan_orders()),
+    }
+}
+
+fn make_aggregate_ctx(st_name: &str, st_user_columns: &[&str]) -> DiffContext {
+    let mut prev_frontier = Frontier::new();
+    prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
+
+    let mut new_frontier = Frontier::new();
+    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+
+    let mut ctx = DiffContext::new_standalone(prev_frontier, new_frontier)
+        .with_pgt_name("public", st_name)
+        .with_defining_query("SELECT region, amount FROM public.orders");
+    ctx.st_user_columns = Some(st_user_columns.iter().map(|c| (*c).to_string()).collect());
+    ctx.st_has_pgt_count = true;
+    ctx
+}
+
+async fn setup_aggregate_db() -> TestDb {
+    let db = TestDb::new().await;
+
+    sqlx::raw_sql(
+        r#"
+CREATE SCHEMA IF NOT EXISTS pgtrickle;
+CREATE SCHEMA IF NOT EXISTS pgtrickle_changes;
+
+CREATE OR REPLACE FUNCTION pgtrickle.pg_trickle_hash(val TEXT)
+RETURNS BIGINT
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT hashtextextended(COALESCE(val, ''), 0)::BIGINT
+$$;
+
+CREATE OR REPLACE FUNCTION pgtrickle.pg_trickle_hash_multi(vals TEXT[])
+RETURNS BIGINT
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT hashtextextended(COALESCE(array_to_string(vals, '|', '<NULL>'), ''), 0)::BIGINT
+$$;
+
+CREATE TABLE public.orders (
+    id INT PRIMARY KEY,
+    region TEXT NOT NULL,
+    amount INT NOT NULL
+);
+
+CREATE TABLE public.agg_count_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    order_count BIGINT NOT NULL
+);
+
+CREATE TABLE public.agg_sum_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    total_amount BIGINT NOT NULL
+);
+
+CREATE TABLE public.agg_avg_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    avg_amount NUMERIC NOT NULL
+);
+
+CREATE TABLE public.agg_filtered_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    high_value_count BIGINT NOT NULL
+);
+
+CREATE TABLE pgtrickle_changes.changes_1 (
+    change_id BIGSERIAL PRIMARY KEY,
+    lsn PG_LSN NOT NULL,
+    action CHAR(1) NOT NULL,
+    pk_hash BIGINT,
+    new_id INT,
+    new_region TEXT,
+    new_amount INT,
+    old_id INT,
+    old_region TEXT,
+    old_amount INT
+);
+"#,
+    )
+    .execute(&db.pool)
+    .await
+    .expect("failed to set up aggregate execution database");
+
+    db
+}
+
+async fn reset_aggregate_fixture(db: &TestDb) {
+    db.execute(
+        "TRUNCATE TABLE \
+         pgtrickle_changes.changes_1, \
+         public.orders, \
+         public.agg_count_st, \
+         public.agg_sum_st, \
+         public.agg_avg_st, \
+         public.agg_filtered_st \
+         RESTART IDENTITY",
+    )
+    .await;
+}
+
+async fn query_bigint_aggregate_rows(
+    db: &TestDb,
+    sql: &str,
+    aggregate_column: &str,
+) -> Vec<(String, String, i64, i64)> {
+    sqlx::query_as::<_, (String, String, i64, i64)>(&format!(
+        "SELECT __pgt_action, region, __pgt_count, {aggregate_column} \
+         FROM ({sql}) delta ORDER BY __pgt_action, region"
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed to execute generated aggregate delta SQL")
+}
+
+async fn query_numeric_aggregate_rows(
+    db: &TestDb,
+    sql: &str,
+    aggregate_column: &str,
+) -> Vec<(String, String, i64, String)> {
+    sqlx::query_as::<_, (String, String, i64, String)>(&format!(
+        "SELECT __pgt_action, region, __pgt_count, ({aggregate_column})::numeric(10,2)::text \
+         FROM ({sql}) delta ORDER BY __pgt_action, region"
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed to execute generated aggregate delta SQL")
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_count_star_gain_and_loss() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_count_st", &["region", "order_count"])
+        .differentiate(&grouped_aggregate(count_star("order_count")))
+        .expect("count aggregate differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10), \
+         (2, 'east', 20), \
+         (4, 'east', 40)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_count_st VALUES \
+         (100, 'east', 2, 2), \
+         (200, 'west', 1, 1)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount) \
+         VALUES ('0/1', 'I', 4, 4, 'east', 40)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, old_id, old_region, old_amount) \
+         VALUES ('0/2', 'D', 3, 3, 'west', 30)",
+    )
+    .await;
+
+    assert_eq!(
+        query_bigint_aggregate_rows(&db, &sql, "order_count").await,
+        vec![
+            ("D".to_string(), "west".to_string(), 1, 1),
+            ("I".to_string(), "east".to_string(), 3, 3),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_sum_update_with_balanced_delta() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_sum_st", &["region", "total_amount"])
+        .differentiate(&grouped_aggregate(sum_col("amount", "total_amount")))
+        .expect("sum aggregate differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10), \
+         (3, 'east', 15)",
+    )
+    .await;
+    db.execute("INSERT INTO public.agg_sum_st VALUES (100, 'east', 2, 30)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 'east', 15)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, old_id, old_region, old_amount) \
+         VALUES ('0/2', 'D', 2, 2, 'east', 20)",
+    )
+    .await;
+
+    assert_eq!(
+        query_bigint_aggregate_rows(&db, &sql, "total_amount").await,
+        vec![("I".to_string(), "east".to_string(), 2, 25)]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_avg_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_avg_st", &["region", "avg_amount"])
+        .differentiate(&grouped_aggregate(avg_col("amount", "avg_amount")))
+        .expect("avg aggregate differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10), \
+         (2, 'east', 20), \
+         (3, 'east', 30)",
+    )
+    .await;
+    db.execute("INSERT INTO public.agg_avg_st VALUES (100, 'east', 2, 15.00)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 'east', 30)",
+    )
+    .await;
+
+    assert_eq!(
+        query_numeric_aggregate_rows(&db, &sql, "avg_amount").await,
+        vec![("I".to_string(), "east".to_string(), 3, "20.00".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_filtered_count_update() {
+    let db = setup_aggregate_db().await;
+    let filter = binop(">=", colref("amount"), lit("20"));
+    let sql = make_aggregate_ctx("agg_filtered_st", &["region", "high_value_count"])
+        .differentiate(&grouped_aggregate(filtered_count_col(
+            "amount",
+            "high_value_count",
+            filter,
+        )))
+        .expect("filtered aggregate differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 25), \
+         (2, 'east', 20)",
+    )
+    .await;
+    db.execute("INSERT INTO public.agg_filtered_st VALUES (100, 'east', 2, 1)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, old_id, old_region, old_amount) \
+         VALUES ('0/1', 'U', 1, 1, 'east', 25, 1, 'east', 10)",
+    )
+    .await;
+
+    assert_eq!(
+        query_bigint_aggregate_rows(&db, &sql, "high_value_count").await,
+        vec![("I".to_string(), "east".to_string(), 2, 2)]
+    );
+}

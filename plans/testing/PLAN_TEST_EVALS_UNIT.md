@@ -23,8 +23,28 @@ The initial hardening slice from this report has been started and validated on b
 - Extracted `_PG_init()` decision logic into a pure helper and tested it in `src/lib.rs`
 - Added initial execution-backed integration tests for `semi_join` and `anti_join` that run the generated DVM SQL against a standalone PostgreSQL container on Linux/CI; these tests are gated off on macOS because importing `pg_trickle` internals into an integration-test binary currently aborts with a pgrx flat-namespace symbol lookup failure
 - Added Linux/CI-only execution-backed integration tests for `window` and `scalar_subquery`, covering partition-local `ROW_NUMBER` recomputation, frame-sensitive running `SUM(...) OVER (...)` recomputation, scalar-subquery inner-change fan-out, and outer-only passthrough behavior
+- Added Linux/CI-only execution-backed integration tests for representative aggregate families, covering grouped `COUNT(*)`, grouped `SUM`, grouped `AVG` rescan behavior, and a filtered grouped `COUNT(...)`
 
-This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, and extends the execution-backed hardening track across all four initially identified thin operators. The remaining highest-value work is a successful `execute_differential_refresh()` path, representative aggregate execution-backed coverage, and a macOS-compatible harness for the new operator integration tests.
+This closes the previously identified zero-coverage gap for `row_id.rs`, `shmem.rs`, `config.rs`, and `lib.rs`, extends the execution-backed hardening track across all four initially identified thin operators, and starts representative aggregate execution coverage. The remaining highest-value work is a successful `execute_differential_refresh()` path, parser integration summaries, deeper aggregate/operator edge cases, and a macOS-compatible harness for the new operator integration tests.
+
+## Remaining Work Summary
+
+Still not started:
+
+- A success-path test for `execute_differential_refresh()` in `src/refresh.rs`
+- SQL-to-`OpTree` integration summary tests for `src/dvm/parser.rs`
+- A macOS-compatible harness for DVM-internal execution-backed integration tests
+
+Started but still partial:
+
+- Aggregate execution-backed coverage now includes grouped `COUNT(*)`, grouped `SUM`, grouped `AVG`, and a filtered grouped `COUNT(...)`; remaining high-value cases are `MIN`, `MAX`, JSON/JSONB aggregates, `STRING_AGG`, and ordered-set aggregates
+- Thin-operator execution-backed coverage now exists for `semi_join`, `anti_join`, `window`, and `scalar_subquery`, but each still has important edge cases left
+
+Lower-priority follow-up:
+
+- Scheduler lifecycle seams in `src/scheduler.rs`
+- Trigger/runtime integration coverage in `src/cdc.rs`, `src/ivm.rs`, and shared-memory runtime coverage in `src/shmem.rs`
+- Property/fuzz coverage for scanners, DAG invariants, and WAL/text parsers
 
 My overall confidence in the unit suite is **moderate-high for pure Rust logic, but only moderate as a standalone signal for end-to-end correctness**.
 
@@ -213,8 +233,8 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 
 ### Priority 0: Highest-value hardening
 
-1. Extend execution-backed coverage from the initial `SEMI JOIN` / `ANTI JOIN` / `WINDOW` / `SCALAR SUBQUERY` slices to representative `AGGREGATE` families and deeper operator edge cases.
-2. Add a success-path test for `execute_differential_refresh()`.
+1. Add a success-path test for `execute_differential_refresh()`.
+2. Extend aggregate execution-backed coverage from the initial `COUNT(*)` / `SUM` / `AVG` / filtered `COUNT(...)` slice into `MIN`, `MAX`, JSON/JSONB, `STRING_AGG`, and ordered-set families.
 3. Add direct unit coverage for `src/dvm/row_id.rs` and `src/shmem.rs`. Completed in the initial hardening slice.
 4. Add parser integration tests that validate real SQL-to-`OpTree` summaries, since unit tests cannot prove that today.
 
@@ -247,7 +267,7 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 | P0 | `src/dvm/operators/scalar_subquery.rs` | Initial executed inner-change fan-out and outer-only passthrough tests completed in a Linux/CI-only integration harness. Remaining work: shared-source overlap cases, aggregate-backed scalar subqueries, and a macOS-compatible local harness. |
 | P0 | `src/refresh.rs` | Success-path differential refresh test; prepared statement parameter-order test |
 | P0 | `src/dvm/parser.rs` | SQL-to-tree integration summary tests using real PostgreSQL parsing |
-| P0 | `src/dvm/operators/aggregate.rs` | Result-level tests for `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, filtered agg, one JSON agg |
+| P0 | `src/dvm/operators/aggregate.rs` | Initial Linux/CI-only result-level tests completed for grouped `COUNT(*)`, grouped `SUM`, grouped `AVG`, and filtered grouped `COUNT(...)`. Remaining work: `MIN`, `MAX`, JSON/JSONB, `STRING_AGG`, ordered-set aggregates, and more multi-group edge cases. |
 | P1 | `src/shmem.rs` | Pure helper extraction + worker token/accounting tests. Initial pure-helper coverage completed; integration coverage still pending. |
 | P1 | `src/dvm/row_id.rs` | Direct unit tests for strategy enum and selection rules. Initial direct coverage completed. |
 | P1 | `src/scheduler.rs` | Fake-repository tests for enqueue/claim/complete/retry/cancel |
@@ -282,6 +302,6 @@ We should **not** trust it as the primary proof layer for:
 ## Recommended Next Actions
 
 1. Add a success-path `execute_differential_refresh` test.
-2. Extend execution-backed operator coverage into representative aggregate families and deeper thin-operator edge cases.
-3. Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.
+2. Add parser integration summary tests so `parser.rs` coverage matches the apparent confidence implied by its test count.
+3. Extend aggregate execution-backed coverage into the remaining rescan and ordered-set families, and deepen thin-operator edge cases.
 4. Add a fake-repository or similar seam for higher-value `scheduler.rs` lifecycle tests.
