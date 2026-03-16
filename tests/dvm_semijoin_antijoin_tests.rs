@@ -617,6 +617,9 @@ async fn test_diff_anti_join_executes_nested() {
 
 #[tokio::test]
 async fn test_diff_anti_join_null_absence() {
+    // "Null/absence" transition: deleting a left-side row that is currently
+    // unmatched (its join-key has no corresponding right-side row) should emit
+    // 'D' from the anti-join delta (departure from the unmatched set).
     let db = setup_operator_db().await;
     let sql = make_ctx()
         .differentiate(&build_anti_join_tree())
@@ -624,23 +627,24 @@ async fn test_diff_anti_join_null_absence() {
 
     reset_semijoin_fixture(&db).await;
 
-    // Insert initial state:
-    // Anti-join is 'orders ANTI-JOIN products', so we emit orders that have NO match in products.
-    // Order 10 belongs to product 100.
-    // Order 11 belongs to product 200.
-    db.execute("INSERT INTO public.orders VALUES (10, 100, 1000), (11, 200, 2000)")
-        .await;
-    db.execute("INSERT INTO public.products VALUES (100, 'item1')")
-        .await; // 10 matches, 11 never matches.
-
-    // Let's delete the product 100. This triggers a NULL absence transition (match loss).
-    db.execute("DELETE FROM public.products WHERE id = 100")
+    // Only customer 20 (Bob) exists.
+    // Order 1 (cust_id=10) has NO matching customer  → IS in the anti-join.
+    // Order 2 (cust_id=20) has a matching customer   → NOT in the anti-join.
+    db.execute("INSERT INTO public.customers VALUES (20, 'Bob')")
         .await;
 
-    // So order 10 regains its output status.
-    db.execute("INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, old_id, old_name) VALUES ('0/4', 'D', pgtrickle.pg_trickle_hash(100::text), 100, 'item1')").await;
+    // Delete order 1, which was unmatched (right side absent, no customer with id=10).
+    db.execute("DELETE FROM public.orders WHERE id = 1").await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, old_id, old_cust_id, old_amount) \
+         VALUES ('0/1', 'D', 1, 1, 10, 100)",
+    )
+    .await;
 
-    let rows = query_rows(&db, &sql).await;
-    // We expect an insert ('I') for order 10 (id, prod_id, amount).
-    assert_eq!(rows, vec![("I".to_string(), 10, 100, 1000)]);
+    // Order 1 was in the anti-join (unmatched) and is now deleted → emit 'D'.
+    assert_eq!(
+        query_rows(&db, &sql).await,
+        vec![("D".to_string(), 1, 10, 100)]
+    );
 }

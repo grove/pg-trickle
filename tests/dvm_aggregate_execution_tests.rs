@@ -224,6 +224,31 @@ fn grouped_aggregate(aggregate: AggExpr) -> OpTree {
     }
 }
 
+fn build_multi_group_mixed_family_tree() -> OpTree {
+    OpTree::Aggregate {
+        group_by: vec![colref("region"), colref("label")],
+        aggregates: vec![
+            count_star("cnt"),
+            sum_col("amount", "total_amt"),
+            max_col("amount", "max_amt"),
+        ],
+        child: Box::new(scan_orders()),
+    }
+}
+
+async fn query_multi_agg_rows(
+    db: &TestDb,
+    sql: &str,
+) -> Vec<(String, String, String, i64, i64, i32)> {
+    sqlx::query_as::<_, (String, String, String, i64, i64, i32)>(&format!(
+        "SELECT __pgt_action, region, label, cnt, total_amt, max_amt \
+         FROM ({sql}) delta ORDER BY __pgt_action DESC, region, label"
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed to execute multi-group aggregate delta SQL")
+}
+
 fn make_aggregate_ctx(st_name: &str, st_user_columns: &[&str]) -> DiffContext {
     let mut prev_frontier = Frontier::new();
     prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
@@ -354,6 +379,23 @@ CREATE TABLE public.agg_filtered_st (
     high_value_count BIGINT NOT NULL
 );
 
+CREATE TABLE public.agg_jsonb_arr_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    amount_arr JSONB NOT NULL
+);
+
+CREATE TABLE public.agg_multi_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    label TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    cnt BIGINT NOT NULL,
+    total_amt BIGINT NOT NULL,
+    max_amt INT NOT NULL
+);
+
 CREATE TABLE pgtrickle_changes.changes_1 (
     change_id BIGSERIAL PRIMARY KEY,
     lsn PG_LSN NOT NULL,
@@ -393,7 +435,9 @@ async fn reset_aggregate_fixture(db: &TestDb) {
          public.agg_jsonb_object_st, \
          public.agg_percentile_cont_st, \
          public.agg_percentile_disc_st, \
-         public.agg_filtered_st \
+         public.agg_filtered_st, \
+         public.agg_jsonb_arr_st, \
+         public.agg_multi_st \
          RESTART IDENTITY",
     )
     .await;
@@ -930,4 +974,82 @@ async fn test_diff_aggregate_executes_jsonb_agg_rescan_update() {
     assert!(json_str.contains("10"));
     assert!(json_str.contains("20"));
     assert!(json_str.contains("30"));
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_multi_group_mixed_family() {
+    // Tests that simultaneous changes to two different groups produce the
+    // correct delta rows for each group, and that a mixed aggregate family
+    // (COUNT + SUM + MAX) is computed correctly in a single rescan pass.
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx(
+        "agg_multi_st",
+        &["region", "label", "cnt", "total_amt", "max_amt"],
+    )
+    .differentiate(&build_multi_group_mixed_family_tree())
+    .expect("multi-group mixed-family aggregate differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+
+    // Seed base state: three groups — east-A, east-B, west-A.
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'A'), \
+         (2, 'east', 20, 'B'), \
+         (3, 'west', 15, 'A')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_multi_st \
+         (__pgt_row_id, region, label, __pgt_count, cnt, total_amt, max_amt) VALUES \
+         (1, 'east', 'A', 1, 1, 10, 10), \
+         (2, 'east', 'B', 1, 1, 20, 20), \
+         (3, 'west', 'A', 1, 1, 15, 15)",
+    )
+    .await;
+
+    // Delta: two groups change simultaneously — east-A and west-A each gain a row.
+    db.execute("INSERT INTO public.orders VALUES (4, 'east', 40, 'A'), (5, 'west', 40, 'A')")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) VALUES \
+         ('0/1', 'I', 4, 4, 'east', 40, 'A'), \
+         ('0/2', 'I', 5, 5, 'west', 40, 'A')",
+    )
+    .await;
+
+    let rows = query_multi_agg_rows(&db, &sql).await;
+
+    // Two groups changed → two upsert rows (I for each changed group).
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected 2 delta rows, one per changed group"
+    );
+
+    // east-A: count 1→2, sum 10+40=50, max(10,40)=40
+    assert_eq!(
+        rows[0],
+        (
+            "I".to_string(),
+            "east".to_string(),
+            "A".to_string(),
+            2,
+            50,
+            40
+        )
+    );
+    // west-A: count 1→2, sum 15+40=55, max(15,40)=40
+    assert_eq!(
+        rows[1],
+        (
+            "I".to_string(),
+            "west".to_string(),
+            "A".to_string(),
+            2,
+            55,
+            40
+        )
+    );
 }
