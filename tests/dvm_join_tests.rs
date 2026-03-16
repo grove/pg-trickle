@@ -422,3 +422,281 @@ async fn test_diff_inner_join_ec01_left_delete_with_concurrent_right_delete() {
         "EC-01 regression: D row for order 1 was silently dropped; rows={rows:?}"
     );
 }
+
+// ── three-table chain helpers ─────────────────────────────────────────────────
+
+/// Three-source frontier: OIDs 1 (orders), 2 (products), 3 (categories).
+fn make_ctx_3() -> DiffContext {
+    let mut prev_frontier = Frontier::new();
+    prev_frontier.set_source(1, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
+    prev_frontier.set_source(2, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
+    prev_frontier.set_source(3, "0/0".to_string(), "2025-01-01T00:00:00Z".to_string());
+
+    let mut new_frontier = Frontier::new();
+    new_frontier.set_source(1, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    new_frontier.set_source(2, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+    new_frontier.set_source(3, "0/10".to_string(), "2025-01-01T00:00:10Z".to_string());
+
+    DiffContext::new_standalone(prev_frontier, new_frontier)
+}
+
+/// Build the three-table join tree:
+///   (orders/o ⋈ products/p  ON o.prod_id = p.id) ⋈ categories/c ON p.cat_id = c.id
+fn build_three_table_join_tree() -> OpTree {
+    let orders = scan_with_pk(
+        1,
+        "orders",
+        "o",
+        vec![int_col("id"), int_col("prod_id"), int_col("amount")],
+        &["id"],
+    );
+    let products = scan_with_pk(
+        2,
+        "products",
+        "p",
+        vec![int_col("id"), int_col("cat_id"), text_col("name")],
+        &["id"],
+    );
+    let inner = OpTree::InnerJoin {
+        condition: eq_cond("o", "prod_id", "p", "id"),
+        left: Box::new(orders),
+        right: Box::new(products),
+    };
+    let categories = scan_with_pk(
+        3,
+        "categories",
+        "c",
+        vec![int_col("id"), text_col("label")],
+        &["id"],
+    );
+    OpTree::InnerJoin {
+        condition: eq_cond("p", "cat_id", "c", "id"),
+        left: Box::new(inner),
+        right: Box::new(categories),
+    }
+}
+
+async fn setup_3way_db() -> TestDb {
+    let db = TestDb::new().await;
+
+    sqlx::raw_sql(
+        r#"
+CREATE SCHEMA IF NOT EXISTS pgtrickle;
+CREATE SCHEMA IF NOT EXISTS pgtrickle_changes;
+
+CREATE OR REPLACE FUNCTION pgtrickle.pg_trickle_hash_multi(vals TEXT[])
+RETURNS BIGINT
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT hashtextextended(COALESCE(array_to_string(vals, '|', '<NULL>'), ''), 0)::BIGINT
+$$;
+
+CREATE TABLE public.orders (
+    id      INT PRIMARY KEY,
+    prod_id INT NOT NULL,
+    amount  INT NOT NULL
+);
+
+CREATE TABLE public.products (
+    id     INT PRIMARY KEY,
+    cat_id INT NOT NULL,
+    name   TEXT NOT NULL
+);
+
+CREATE TABLE public.categories (
+    id    INT PRIMARY KEY,
+    label TEXT NOT NULL
+);
+
+CREATE TABLE pgtrickle_changes.changes_1 (
+    change_id   BIGSERIAL PRIMARY KEY,
+    lsn         PG_LSN NOT NULL,
+    action      CHAR(1) NOT NULL,
+    pk_hash     BIGINT,
+    new_id      INT,
+    new_prod_id INT,
+    new_amount  INT,
+    old_id      INT,
+    old_prod_id INT,
+    old_amount  INT
+);
+
+CREATE TABLE pgtrickle_changes.changes_2 (
+    change_id  BIGSERIAL PRIMARY KEY,
+    lsn        PG_LSN NOT NULL,
+    action     CHAR(1) NOT NULL,
+    pk_hash    BIGINT,
+    new_id     INT,
+    new_cat_id INT,
+    new_name   TEXT,
+    old_id     INT,
+    old_cat_id INT,
+    old_name   TEXT
+);
+
+CREATE TABLE pgtrickle_changes.changes_3 (
+    change_id BIGSERIAL PRIMARY KEY,
+    lsn       PG_LSN NOT NULL,
+    action    CHAR(1) NOT NULL,
+    pk_hash   BIGINT,
+    new_id    INT,
+    new_label TEXT,
+    old_id    INT,
+    old_label TEXT
+);
+"#,
+    )
+    .execute(&db.pool)
+    .await
+    .expect("failed to set up 3-way join execution database");
+
+    db
+}
+
+async fn reset_3way_fixture(db: &TestDb) {
+    db.execute(
+        "TRUNCATE TABLE \
+         pgtrickle_changes.changes_1, \
+         pgtrickle_changes.changes_2, \
+         pgtrickle_changes.changes_3, \
+         public.orders, \
+         public.products, \
+         public.categories \
+         RESTART IDENTITY",
+    )
+    .await;
+}
+
+/// Query delta rows from the three-table join output.
+///
+/// The outer join (inner_join ⋈ categories) produces doubly-prefixed
+/// columns: `join__o__*`, `join__p__*` from the nested inner result, and
+/// `c__*` from categories.
+///
+/// Columns returned: (action, join__o__id, join__o__prod_id, join__o__amount,
+///                    join__p__id, join__p__cat_id, join__p__name, c__id, c__label)
+async fn query_3way_rows(
+    db: &TestDb,
+    sql: &str,
+) -> Vec<(String, i32, i32, i32, i32, i32, String, i32, String)> {
+    sqlx::query_as::<_, (String, i32, i32, i32, i32, i32, String, i32, String)>(&format!(
+        r#"SELECT __pgt_action,
+                  "join__o__id",
+                  "join__o__prod_id",
+                  "join__o__amount",
+                  "join__p__id",
+                  "join__p__cat_id",
+                  "join__p__name",
+                  "c__id",
+                  "c__label"
+           FROM ({sql}) delta
+           ORDER BY __pgt_action, "join__o__id""#
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed to execute generated 3-way join delta SQL")
+}
+
+// ── three-table chain tests ───────────────────────────────────────────────────
+
+/// Insert a new order that joins to an existing product and category.
+///
+/// The innermost change (orders delta) flows through the nested inner join
+/// and up to the outer join's Part 1a (ΔL ⋈ R₁ for inserts). The outer
+/// join's right side (categories) is unchanged, so Part 2 contributes
+/// nothing. Result: exactly one I row spanning all three tables.
+#[tokio::test]
+async fn test_diff_inner_join_three_table_chain_order_insert_fires_part1() {
+    let db = setup_3way_db().await;
+    let sql = make_ctx_3()
+        .differentiate(&build_three_table_join_tree())
+        .expect("three-table join differentiation should succeed");
+
+    reset_3way_fixture(&db).await;
+    // Current state after the insert: all three rows exist.
+    db.execute("INSERT INTO public.orders     VALUES (5, 10, 500)")
+        .await;
+    db.execute("INSERT INTO public.products   VALUES (10, 20, 'Widget')")
+        .await;
+    db.execute("INSERT INTO public.categories VALUES (20, 'Electronics')")
+        .await;
+
+    // Only orders changes: INSERT order (5, prod_id=10, amount=500).
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_prod_id, new_amount) \
+         VALUES ('0/1', 'I', 5, 5, 10, 500)",
+    )
+    .await;
+
+    // Inner join Part 1a: I(order 5) ⋈ products{(10,20,"Widget")}
+    //   → inner delta: I(o__id=5, o__prod_id=10, o__amount=500, p__id=10, p__cat_id=20, p__name="Widget")
+    // Outer join Part 1a: inner delta ⋈ categories{(20,"Electronics")} on p__cat_id=c.id
+    //   → I(join__o__id=5, ..., c__id=20, c__label="Electronics")
+    assert_eq!(
+        query_3way_rows(&db, &sql).await,
+        vec![(
+            "I".to_string(),
+            5,
+            10,
+            500,
+            10,
+            20,
+            "Widget".to_string(),
+            20,
+            "Electronics".to_string()
+        )]
+    );
+}
+
+/// Delete the rightmost table's row (category) while the inner two-table join
+/// remains unchanged.
+///
+/// The outer join's Part 2 (L₀ ⋈ ΔR) fires: the pre-change snapshot of the
+/// inner join result is joined to the categories delta to emit a D row.
+/// Part 1 contributes nothing (no orders or products delta). Result: one D
+/// row spanning all three tables.
+#[tokio::test]
+async fn test_diff_inner_join_three_table_chain_category_delete_fires_part2() {
+    let db = setup_3way_db().await;
+    let sql = make_ctx_3()
+        .differentiate(&build_three_table_join_tree())
+        .expect("three-table join differentiation should succeed");
+
+    reset_3way_fixture(&db).await;
+    // Current state: category 20 already deleted; orders and products remain.
+    db.execute("INSERT INTO public.orders   VALUES (1, 10, 100)")
+        .await;
+    db.execute("INSERT INTO public.products VALUES (10, 20, 'Widget')")
+        .await;
+    // categories is empty — category 20 has just been deleted.
+
+    // Only categories changes: DELETE category (20, "Electronics").
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_3 \
+         (lsn, action, pk_hash, old_id, old_label) \
+         VALUES ('0/1', 'D', 20, 20, 'Electronics')",
+    )
+    .await;
+
+    // Outer join Part 2: L₀(inner join) ⋈ D(cat.id=20)
+    //   L₀ = orders ⋈ products = {(o=1,prod_id=10,amount=100, p=10,cat_id=20,"Widget")}
+    //   ΔR  = {D(20,"Electronics")}
+    //   join cond: p__cat_id = c.id  → 20 = 20  ✓
+    //   → D(join__o__id=1, ..., c__id=20, c__label="Electronics")
+    assert_eq!(
+        query_3way_rows(&db, &sql).await,
+        vec![(
+            "D".to_string(),
+            1,
+            10,
+            100,
+            10,
+            20,
+            "Widget".to_string(),
+            20,
+            "Electronics".to_string()
+        )]
+    );
+}
