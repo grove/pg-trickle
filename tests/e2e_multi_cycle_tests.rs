@@ -161,8 +161,10 @@ async fn test_multi_cycle_prepared_statement_cache() {
     // Insert multiple groups to prevent the differential refresh from falling back
     // to a FULL refresh due to the "aggregate saturation threshold" (where total_changes >= group_count).
     // A FULL refresh bypasses the MERGE path entirely, so prepared statements would never be used.
-    db.execute("INSERT INTO mc_prep (grp, val) VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)")
-        .await;
+    db.execute(
+        "INSERT INTO mc_prep (grp, val) VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4), ('e', 5)",
+    )
+    .await;
 
     let q = "SELECT grp, SUM(val) AS total FROM mc_prep GROUP BY grp";
     db.create_st("mc_prep_st", q, "1m", "DIFFERENTIAL").await;
