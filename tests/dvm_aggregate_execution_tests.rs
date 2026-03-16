@@ -156,6 +156,54 @@ fn mode_col(column: &str, alias: &str) -> AggExpr {
     }
 }
 
+fn json_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::JsonObjectAgg,
+        argument: Some(colref(key_col)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: Some(colref(val_col)),
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+fn jsonb_object_agg_col(key_col: &str, val_col: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::JsonbObjectAgg,
+        argument: Some(colref(key_col)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: Some(colref(val_col)),
+        filter: None,
+        order_within_group: None,
+    }
+}
+
+fn percentile_cont_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::PercentileCont,
+        argument: Some(lit(fraction)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: Some(vec![sort_asc(order_col)]),
+    }
+}
+
+fn percentile_disc_col(fraction: &str, order_col: &str, alias: &str) -> AggExpr {
+    AggExpr {
+        function: AggFunc::PercentileDisc,
+        argument: Some(lit(fraction)),
+        alias: alias.to_string(),
+        is_distinct: false,
+        second_arg: None,
+        filter: None,
+        order_within_group: Some(vec![sort_asc(order_col)]),
+    }
+}
+
 fn filtered_count_col(column: &str, alias: &str, filter: Expr) -> AggExpr {
     AggExpr {
         function: AggFunc::Count,
@@ -271,6 +319,34 @@ CREATE TABLE public.agg_mode_st (
     mode_amount INT NOT NULL
 );
 
+CREATE TABLE public.agg_json_object_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    amount_map JSON NOT NULL
+);
+
+CREATE TABLE public.agg_jsonb_object_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    amount_map JSONB NOT NULL
+);
+
+CREATE TABLE public.agg_percentile_cont_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    median_amount NUMERIC NOT NULL
+);
+
+CREATE TABLE public.agg_percentile_disc_st (
+    __pgt_row_id BIGINT PRIMARY KEY,
+    region TEXT NOT NULL,
+    __pgt_count BIGINT NOT NULL,
+    median_disc_amount INT NOT NULL
+);
+
 CREATE TABLE public.agg_filtered_st (
     __pgt_row_id BIGINT PRIMARY KEY,
     region TEXT NOT NULL,
@@ -313,6 +389,10 @@ async fn reset_aggregate_fixture(db: &TestDb) {
          public.agg_max_st, \
          public.agg_string_st, \
          public.agg_mode_st, \
+         public.agg_json_object_st, \
+         public.agg_jsonb_object_st, \
+         public.agg_percentile_cont_st, \
+         public.agg_percentile_disc_st, \
          public.agg_filtered_st \
          RESTART IDENTITY",
     )
@@ -354,6 +434,20 @@ async fn query_text_aggregate_rows(
 ) -> Vec<(String, String, i64, String)> {
     sqlx::query_as::<_, (String, String, i64, String)>(&format!(
         "SELECT __pgt_action, region, __pgt_count, ({aggregate_column})::text \
+         FROM ({sql}) delta ORDER BY __pgt_action, region"
+    ))
+    .fetch_all(&db.pool)
+    .await
+    .expect("failed to execute generated aggregate delta SQL")
+}
+
+async fn query_json_aggregate_rows(
+    db: &TestDb,
+    sql: &str,
+    aggregate_column: &str,
+) -> Vec<(String, String, i64, String)> {
+    sqlx::query_as::<_, (String, String, i64, String)>(&format!(
+        "SELECT __pgt_action, region, __pgt_count, (({aggregate_column})::jsonb)::text \
          FROM ({sql}) delta ORDER BY __pgt_action, region"
     ))
     .fetch_all(&db.pool)
@@ -627,5 +721,163 @@ async fn test_diff_aggregate_executes_mode_rescan_update() {
     assert_eq!(
         query_bigint_aggregate_rows(&db, &sql, "(mode_amount)::bigint").await,
         vec![("I".to_string(), "east".to_string(), 5, 20)]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_json_object_agg_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_json_object_st", &["region", "amount_map"])
+        .differentiate(&grouped_aggregate(json_object_agg_col(
+            "label",
+            "amount",
+            "amount_map",
+        )))
+        .expect("json_object_agg differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'a'), \
+         (2, 'east', 20, 'b'), \
+         (3, 'east', 30, 'c')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_json_object_st VALUES \
+         (100, 'east', 2, '{\"a\":10,\"c\":30}')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+    )
+    .await;
+
+    assert_eq!(
+        query_json_aggregate_rows(&db, &sql, "amount_map").await,
+        vec![(
+            "I".to_string(),
+            "east".to_string(),
+            3,
+            "{\"a\": 10, \"b\": 20, \"c\": 30}".to_string(),
+        )]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_jsonb_object_agg_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_jsonb_object_st", &["region", "amount_map"])
+        .differentiate(&grouped_aggregate(jsonb_object_agg_col(
+            "label",
+            "amount",
+            "amount_map",
+        )))
+        .expect("jsonb_object_agg differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'a'), \
+         (2, 'east', 20, 'b'), \
+         (3, 'east', 30, 'c')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_jsonb_object_st VALUES \
+         (100, 'east', 2, '{\"a\":10,\"c\":30}')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+    )
+    .await;
+
+    assert_eq!(
+        query_json_aggregate_rows(&db, &sql, "amount_map").await,
+        vec![(
+            "I".to_string(),
+            "east".to_string(),
+            3,
+            "{\"a\": 10, \"b\": 20, \"c\": 30}".to_string(),
+        )]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_percentile_cont_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_percentile_cont_st", &["region", "median_amount"])
+        .differentiate(&grouped_aggregate(percentile_cont_col(
+            "0.5",
+            "amount",
+            "median_amount",
+        )))
+        .expect("percentile_cont differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'a'), \
+         (2, 'east', 20, 'b'), \
+         (3, 'east', 40, 'c')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_percentile_cont_st VALUES \
+         (100, 'east', 2, 25.00)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+    )
+    .await;
+
+    assert_eq!(
+        query_numeric_aggregate_rows(&db, &sql, "median_amount").await,
+        vec![("I".to_string(), "east".to_string(), 3, "20.00".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_aggregate_executes_percentile_disc_rescan_update() {
+    let db = setup_aggregate_db().await;
+    let sql = make_aggregate_ctx("agg_percentile_disc_st", &["region", "median_disc_amount"])
+        .differentiate(&grouped_aggregate(percentile_disc_col(
+            "0.5",
+            "amount",
+            "median_disc_amount",
+        )))
+        .expect("percentile_disc differentiation should succeed");
+
+    reset_aggregate_fixture(&db).await;
+    db.execute(
+        "INSERT INTO public.orders VALUES \
+         (1, 'east', 10, 'a'), \
+         (2, 'east', 20, 'b'), \
+         (3, 'east', 40, 'c')",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO public.agg_percentile_disc_st VALUES \
+         (100, 'east', 2, 10)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 \
+         (lsn, action, pk_hash, new_id, new_region, new_amount, new_label) \
+         VALUES ('0/1', 'I', 2, 2, 'east', 20, 'b')",
+    )
+    .await;
+
+    assert_eq!(
+        query_bigint_aggregate_rows(&db, &sql, "(median_disc_amount)::bigint").await,
+        vec![("I".to_string(), "east".to_string(), 3, 20)]
     );
 }
