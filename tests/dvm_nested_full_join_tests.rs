@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! Execution-backed tests for full-join (FULL OUTER JOIN) DVM SQL.
 //!
 //! These tests run the generated delta SQL against a standalone PostgreSQL

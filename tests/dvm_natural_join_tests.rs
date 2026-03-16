@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! Execution-backed tests for "natural-join style" DVM SQL.
 //!
 //! PostgreSQL `NATURAL JOIN` is parsed as a regular join whose condition

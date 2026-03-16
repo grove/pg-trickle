@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! Execution-backed tests for nested natural-join-style DVM SQL.
 //!
 //! Schema: (sales INNER JOIN branches ON s.branch_id = b.branch_id)

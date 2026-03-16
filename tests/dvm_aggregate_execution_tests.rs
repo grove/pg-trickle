@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! Execution-backed tests for aggregate DVM SQL.
 //!
 //! These tests run generated aggregate delta SQL against a standalone

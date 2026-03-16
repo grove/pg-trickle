@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "macos"))]
-
 //! Execution-backed tests for window and scalar-subquery DVM SQL.
 //!
 //! These tests execute generated delta SQL against a standalone PostgreSQL
