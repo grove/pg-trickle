@@ -1139,3 +1139,19 @@ async fn test_json_table_differential_mode() {
     let count = db.count("public.event_tags").await;
     assert_eq!(count, 5, "Should have 5 tags after insert");
 }
+
+#[tokio::test]
+async fn test_expression_invalid_query_fails() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE expr_err_src (id INT PRIMARY KEY)")
+        .await;
+
+    let result = db.try_execute(
+        "SELECT pgtrickle.create_stream_table('expr_err_st', 'SELECT id + non_existent FROM expr_err_src', '1m', 'DIFFERENTIAL')"
+    ).await;
+
+    assert!(
+        result.is_err(),
+        "Creation with invalid expression query should fail"
+    );
+}

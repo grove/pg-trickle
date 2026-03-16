@@ -469,3 +469,40 @@ async fn test_lateral_subquery_with_group_by() {
     // Alice has 2 categories: A(30) and B(30)
     assert_eq!(db.count("public.lsq_gb_summary").await, 2);
 }
+
+#[tokio::test]
+async fn test_lateral_invalid_query_fails() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_err_src (id INT PRIMARY KEY)")
+        .await;
+
+    let result = db.try_execute(
+        "SELECT pgtrickle.create_stream_table('lat_err_st', 'SELECT l.id, lat.x FROM lat_err_src l, LATERAL (SELECT l.id + non_existent as x) lat', '1m', 'DIFFERENTIAL')"
+    ).await;
+
+    assert!(
+        result.is_err(),
+        "Creation with invalid lateral query should fail"
+    );
+}
+
+#[tokio::test]
+async fn test_lateral_with_nulls() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_null_src (id INT, val INT)")
+        .await;
+
+    db.execute("INSERT INTO lat_null_src VALUES (1, NULL), (NULL, 10), (NULL, NULL)")
+        .await;
+
+    let q = "SELECT l.id, l.val, lat.x FROM lat_null_src l LEFT JOIN LATERAL (SELECT l.val * 2 as x) lat ON true";
+
+    db.create_st("lat_null_st", q, "1m", "DIFFERENTIAL").await;
+
+    db.assert_st_matches_query("lat_null_st", q).await;
+
+    db.execute("INSERT INTO lat_null_src VALUES (2, 20)").await;
+    db.refresh_st("lat_null_st").await;
+
+    db.assert_st_matches_query("lat_null_st", q).await;
+}

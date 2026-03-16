@@ -897,3 +897,25 @@ async fn test_window_differential_partition_key_change_sum() {
         .await;
     assert_eq!(sales_total, 260, "sales total should be 260 after move");
 }
+
+#[tokio::test]
+async fn test_window_with_nulls() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE window_null_src (id INT, grp INT, val INT)")
+        .await;
+
+    db.execute("INSERT INTO window_null_src VALUES (1, NULL, 10), (2, 1, NULL), (3, NULL, NULL), (4, 1, 20)").await;
+
+    let q = "SELECT id, grp, SUM(val) OVER (PARTITION BY grp) as s FROM window_null_src";
+
+    db.create_st("window_null_st", q, "1m", "DIFFERENTIAL")
+        .await;
+
+    db.assert_st_matches_query("window_null_st", q).await;
+
+    db.execute("INSERT INTO window_null_src VALUES (5, NULL, 30)")
+        .await;
+    db.refresh_st("window_null_st").await;
+
+    db.assert_st_matches_query("window_null_st", q).await;
+}

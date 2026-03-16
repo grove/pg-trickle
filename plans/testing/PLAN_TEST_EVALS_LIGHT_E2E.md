@@ -1232,11 +1232,11 @@ light-E2E limitations).
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 16 | Add error-path tests to CTE, expression, lateral files | Error handling coverage | Medium |
-| 17 | Add NULL edge cases to set_operation, window, lateral | Edge case coverage | Medium |
-| 18 | Add FETCH NEXT syntax test to topk | SQL compliance coverage | Small |
-| 19 | Add multi-row unmatched FULL JOIN test | Edge case coverage | Small |
-| 20 | Add LAG/LEAD NULL test to multi_window | Edge case coverage | Small |
+| 16 | ~~Add error-path tests to CTE, expression, lateral files~~ | DONE | Medium |
+| 17 | ~~Add NULL edge cases to set_operation, window, lateral~~ | DONE | Medium |
+| 18 | ~~Add FETCH NEXT syntax test to topk~~ | DONE | Small |
+| 19 | ~~Add multi-row unmatched FULL JOIN test~~ | DONE | Small |
+| 20 | ~~Add LAG/LEAD NULL test to multi_window~~ | DONE | Small |
 
 ---
 
