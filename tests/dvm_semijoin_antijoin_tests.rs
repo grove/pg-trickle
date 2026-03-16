@@ -272,3 +272,110 @@ async fn test_diff_anti_join_executes_match_gain_and_loss() {
         vec![("I".to_string(), 1, 10, 100)]
     );
 }
+
+#[tokio::test]
+async fn test_diff_semi_join_executes_simultaneous_left_and_right_deltas() {
+    let db = setup_operator_db().await;
+    let sql = make_ctx()
+        .differentiate(&build_semi_join_tree())
+        .expect("semi-join differentiation should succeed");
+
+    reset_semijoin_fixture(&db).await;
+    db.execute("INSERT INTO public.orders VALUES (3, 10, 300)")
+        .await;
+    db.execute("INSERT INTO public.customers VALUES (10, 'Alice')")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 10, 300)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name, old_id, old_name) \
+         VALUES \
+         ('0/2', 'I', 10, 10, 'Alice', NULL, NULL), \
+         ('0/3', 'D', 20, NULL, NULL, 20, 'Bob')",
+    )
+    .await;
+
+    assert_eq!(
+        query_rows(&db, &sql).await,
+        vec![
+            ("I".to_string(), 1, 10, 100),
+            ("D".to_string(), 2, 20, 200),
+            ("I".to_string(), 3, 10, 300),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_anti_join_executes_simultaneous_left_and_right_deltas() {
+    let db = setup_operator_db().await;
+    let sql = make_ctx()
+        .differentiate(&build_anti_join_tree())
+        .expect("anti-join differentiation should succeed");
+
+    reset_semijoin_fixture(&db).await;
+    db.execute("INSERT INTO public.orders VALUES (3, 10, 300)")
+        .await;
+    db.execute("INSERT INTO public.customers VALUES (10, 'Alice')")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 10, 300)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, new_id, new_name, old_id, old_name) \
+         VALUES \
+         ('0/2', 'I', 10, 10, 'Alice', NULL, NULL), \
+         ('0/3', 'D', 20, NULL, NULL, 20, 'Bob')",
+    )
+    .await;
+
+    assert_eq!(
+        query_rows(&db, &sql).await,
+        vec![("D".to_string(), 1, 10, 100), ("I".to_string(), 2, 20, 200),]
+    );
+}
+
+#[tokio::test]
+async fn test_diff_semi_join_ignores_unmatched_left_insert() {
+    let db = setup_operator_db().await;
+    let sql = make_ctx()
+        .differentiate(&build_semi_join_tree())
+        .expect("semi-join differentiation should succeed");
+
+    reset_semijoin_fixture(&db).await;
+    db.execute("INSERT INTO public.orders VALUES (3, 30, 300)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 30, 300)",
+    )
+    .await;
+
+    assert!(query_rows(&db, &sql).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_diff_anti_join_emits_unmatched_left_insert() {
+    let db = setup_operator_db().await;
+    let sql = make_ctx()
+        .differentiate(&build_anti_join_tree())
+        .expect("anti-join differentiation should succeed");
+
+    reset_semijoin_fixture(&db).await;
+    db.execute("INSERT INTO public.orders VALUES (3, 30, 300)")
+        .await;
+    db.execute(
+        "INSERT INTO pgtrickle_changes.changes_1 (lsn, action, pk_hash, new_id, new_cust_id, new_amount) \
+         VALUES ('0/1', 'I', 3, 3, 30, 300)",
+    )
+    .await;
+
+    assert_eq!(
+        query_rows(&db, &sql).await,
+        vec![("I".to_string(), 3, 30, 300)]
+    );
+}
