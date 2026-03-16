@@ -305,4 +305,71 @@ mod tests {
 
         assert_eq!(epoch.load(Ordering::Relaxed), 43);
     }
+
+    // ── P3: acquire/release token cycle and invariants ─────────────────────
+
+    #[test]
+    fn test_token_acquire_and_release_cycle() {
+        let counter = AtomicU32::new(0);
+
+        // Acquire two tokens up to budget of 3
+        assert!(try_increment_bounded_counter(&counter, 3));
+        assert!(try_increment_bounded_counter(&counter, 3));
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+        // Release one
+        saturating_decrement_counter(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        // Can acquire again
+        assert!(try_increment_bounded_counter(&counter, 3));
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+        // Release both
+        saturating_decrement_counter(&counter);
+        saturating_decrement_counter(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_counter_does_not_go_below_zero_on_over_release() {
+        let counter = AtomicU32::new(1);
+
+        // Release once (valid)
+        saturating_decrement_counter(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        // Extra releases are no-ops
+        saturating_decrement_counter(&counter);
+        saturating_decrement_counter(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_epoch_monotonically_increases() {
+        let epoch = AtomicU64::new(0);
+        let mut last = epoch.load(Ordering::Relaxed);
+
+        for _ in 0..10 {
+            increment_epoch(&epoch);
+            let current = epoch.load(Ordering::Relaxed);
+            assert!(current > last);
+            last = current;
+        }
+    }
+
+    #[test]
+    fn test_bounded_counter_budget_one_acts_as_mutex() {
+        let counter = AtomicU32::new(0);
+
+        // Acquire the single token
+        assert!(try_increment_bounded_counter(&counter, 1));
+        // Second acquire must be rejected
+        assert!(!try_increment_bounded_counter(&counter, 1));
+
+        // Release
+        saturating_decrement_counter(&counter);
+        // Now acquirable again
+        assert!(try_increment_bounded_counter(&counter, 1));
+    }
 }

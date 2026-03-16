@@ -955,4 +955,74 @@ mod tests {
             ParallelRefreshMode::On
         );
     }
+
+    // ── P3: as_str coverage for all enum variants; threshold edge cases ─────
+
+    #[test]
+    fn test_user_triggers_mode_as_str() {
+        assert_eq!(UserTriggersMode::Auto.as_str(), "auto");
+        assert_eq!(UserTriggersMode::Off.as_str(), "off");
+    }
+
+    #[test]
+    fn test_cdc_trigger_mode_as_str() {
+        assert_eq!(CdcTriggerMode::Statement.as_str(), "statement");
+        assert_eq!(CdcTriggerMode::Row.as_str(), "row");
+    }
+
+    #[test]
+    fn test_parallel_refresh_mode_as_str_all_variants() {
+        assert_eq!(ParallelRefreshMode::Off.as_str(), "off");
+        assert_eq!(ParallelRefreshMode::DryRun.as_str(), "dry_run");
+        assert_eq!(ParallelRefreshMode::On.as_str(), "on");
+    }
+
+    #[test]
+    fn test_threshold_mb_to_bytes_negative_input_is_zero_or_negative() {
+        // Negative megabytes should yield a non-positive byte count
+        assert!(threshold_mb_to_bytes(-1) <= 0);
+        assert!(threshold_mb_to_bytes(-100) < 0);
+    }
+
+    #[test]
+    fn test_normalize_parallel_refresh_mode_case_insensitive_on() {
+        assert_eq!(
+            normalize_parallel_refresh_mode(Some("ON".to_string())),
+            ParallelRefreshMode::On
+        );
+    }
+
+    #[test]
+    fn test_normalize_user_triggers_mode_roundtrip_via_as_str() {
+        for (input, expected) in [
+            ("off", UserTriggersMode::Off),
+            ("OFF", UserTriggersMode::Off),
+        ] {
+            assert_eq!(
+                normalize_user_triggers_mode(Some(input.to_string())),
+                expected
+            );
+        }
+        // as_str / normalize should be consistent
+        assert_eq!(
+            normalize_user_triggers_mode(Some(UserTriggersMode::Off.as_str().to_string())),
+            UserTriggersMode::Off
+        );
+        assert_eq!(
+            normalize_user_triggers_mode(Some(UserTriggersMode::Auto.as_str().to_string())),
+            UserTriggersMode::Auto
+        );
+    }
+
+    #[test]
+    fn test_normalize_cdc_trigger_mode_roundtrip_via_as_str() {
+        assert_eq!(
+            normalize_cdc_trigger_mode(Some(CdcTriggerMode::Row.as_str().to_string())),
+            CdcTriggerMode::Row
+        );
+        assert_eq!(
+            normalize_cdc_trigger_mode(Some(CdcTriggerMode::Statement.as_str().to_string())),
+            CdcTriggerMode::Statement
+        );
+    }
 }

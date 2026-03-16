@@ -74,4 +74,63 @@ mod tests {
         );
         assert_eq!(RowIdStrategy::PassThrough, RowIdStrategy::PassThrough);
     }
+
+    // ── P3: cross-variant inequality, debug coverage, edge cases ──────────
+
+    #[test]
+    fn test_row_id_strategy_variants_are_not_equal_to_each_other() {
+        assert_ne!(RowIdStrategy::CombineChildren, RowIdStrategy::PassThrough);
+        assert_ne!(
+            RowIdStrategy::PrimaryKey { pk_columns: vec![] },
+            RowIdStrategy::AllColumns { columns: vec![] },
+        );
+        assert_ne!(
+            RowIdStrategy::PrimaryKey {
+                pk_columns: vec!["id".to_string()]
+            },
+            RowIdStrategy::GroupByKey {
+                group_columns: vec!["id".to_string()]
+            },
+        );
+    }
+
+    #[test]
+    fn test_row_id_strategy_debug_unit_variants() {
+        assert!(format!("{:?}", RowIdStrategy::CombineChildren).contains("CombineChildren"));
+        assert!(format!("{:?}", RowIdStrategy::PassThrough).contains("PassThrough"));
+    }
+
+    #[test]
+    fn test_row_id_strategy_empty_columns_accepted() {
+        let pk = RowIdStrategy::PrimaryKey { pk_columns: vec![] };
+        let all = RowIdStrategy::AllColumns { columns: vec![] };
+        let grp = RowIdStrategy::GroupByKey {
+            group_columns: vec![],
+        };
+
+        assert_eq!(pk, RowIdStrategy::PrimaryKey { pk_columns: vec![] });
+        assert_eq!(all, RowIdStrategy::AllColumns { columns: vec![] });
+        assert_eq!(
+            grp,
+            RowIdStrategy::GroupByKey {
+                group_columns: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn test_row_id_strategy_primary_key_clone_is_equal() {
+        let original = RowIdStrategy::PrimaryKey {
+            pk_columns: vec!["id".to_string(), "tenant".to_string()],
+        };
+        assert_eq!(original.clone(), original);
+    }
+
+    #[test]
+    fn test_row_id_strategy_all_columns_clone_is_equal() {
+        let original = RowIdStrategy::AllColumns {
+            columns: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+        assert_eq!(original.clone(), original);
+    }
 }
