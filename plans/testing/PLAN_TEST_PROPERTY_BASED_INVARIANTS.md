@@ -102,10 +102,10 @@ Property-based tests should complement them, not replace them.
 
 | Rank | Area | Current Suite(s) | Why it benefits | Priority | Effort |
 |------|------|------------------|-----------------|:--------:|:------:|
-| 1 | Multi-cycle DAG correctness | `e2e_multi_cycle_dag_tests.rs`, `e2e_pipeline_dag_tests.rs` | Highest risk of cumulative drift across layers and cycles | P0 | 1–2 wk |
-| 2 | Cross-source / diamond consistency | `e2e_snapshot_consistency_tests.rs` | Simultaneous source changes and mixed-snapshot bugs are sequence-sensitive | P0 | 1–2 wk |
-| 3 | Circular / SCC / fixpoint correctness | `e2e_circular_tests.rs` | Scheduler convergence and SCC bookkeeping are fragile under graph variation | P1 | 1–2 wk |
-| 4 | Error isolation and recovery | `e2e_dag_error_tests.rs` | Example tests cover specific stories, not diverse failure/recovery traces | P1 | 4–6 days |
+| 1 | **[DONE]** Multi-cycle DAG correctness | `e2e_property_dag_tests.rs` | Highest risk of cumulative drift across layers and cycles | P0 | 1–2 wk |
+| 2 | **[DONE]** Cross-source / diamond consistency | `e2e_property_snapshot_tests.rs` | Simultaneous source changes and mixed-snapshot bugs are sequence-sensitive | P0 | 1–2 wk |
+| 3 | **[DONE]** Circular / SCC / fixpoint correctness | `e2e_property_circular_tests.rs` | Scheduler convergence and SCC bookkeeping are fragile under graph variation | P1 | 1–2 wk |
+| 4 | **[DONE]** Error isolation and recovery | `e2e_dag_error_tests.rs` | Example tests cover specific stories, not diverse failure/recovery traces | P1 | 4–6 days |
 | 5 | Topology / scheduler stress | `e2e_dag_topology_tests.rs`, `e2e_dag_autorefresh_tests.rs` | Needed for multi-source and branch-interaction assurance | P2 | 4–6 days |
 | 6 | Pure Rust DAG / scheduler helper logic | `tests/property_tests.rs`, unit tests in `src/dag.rs`, `src/version.rs` | Cheap additional assurance for ordering / monotonic metadata helpers | P2 | 2–4 days |
 | 7 | Legacy lifecycle / scenario workflows | `scenario_tests.rs`, `workflow_tests.rs` | Lower ROI because stronger suites already cover the core invariant | P3 | defer |
@@ -446,7 +446,7 @@ Nightly/manual:
 
 ## 7. Concrete Implementation Roadmap
 
-## Phase 1 — Shared Harness Extraction
+## Phase 1 — Shared Harness Extraction (**COMPLETED**)
 
 **Priority:** P0  
 **Estimated effort:** 2–3 days
@@ -468,7 +468,7 @@ Nightly/manual:
 
 ---
 
-## Phase 2 — Multi-Cycle DAG Property Suite
+## Phase 2 — Multi-Cycle DAG Property Suite (**COMPLETED**)
 
 **Priority:** P0  
 **Estimated effort:** 4–6 days
@@ -492,7 +492,7 @@ Nightly/manual:
 
 ---
 
-## Phase 3 — Snapshot / Diamond Property Suite
+## Phase 3 — Snapshot / Diamond Property Suite (**COMPLETED**)
 
 **Priority:** P0  
 **Estimated effort:** 4–6 days
@@ -515,7 +515,7 @@ Nightly/manual:
 
 ---
 
-## Phase 4 — Circular / SCC Property Suite
+## Phase 4 — Circular / SCC Property Suite (**COMPLETED**)
 
 **Priority:** P1  
 **Estimated effort:** 4–6 days
@@ -539,7 +539,7 @@ Nightly/manual:
 
 ---
 
-## Phase 5 — Error Isolation / Recovery Property Traces
+## Phase 5 — Error Isolation / Recovery Property Traces (**COMPLETED**)
 
 **Priority:** P1  
 **Estimated effort:** 2–4 days
