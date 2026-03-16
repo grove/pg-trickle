@@ -286,7 +286,6 @@ The least-tested operators are not necessarily the simplest ones. `SEMI JOIN`, `
 | P1 | `src/dvm/operators/outer_join.rs` | Linux/CI-only result-level tests in `tests/dvm_outer_join_tests.rs` cover all Part 1–5 paths and EC-01. Remaining: nested left join, natural left join. |
 | P1 | `src/dvm/operators/full_join.rs` | Linux/CI-only result-level tests in `tests/dvm_full_join_tests.rs` cover all Part 1–7 paths (including the symmetric right-side Parts 6-7 unique to FULL JOIN) and EC-01. Remaining: nested full join, natural full join. |
 | P1 | `src/dvm/row_id.rs` | Direct unit tests for strategy enum and selection rules. Initial direct coverage completed. |
-| P1 | `src/scheduler.rs` | Fake-repository tests for enqueue/claim/complete/retry/cancel |
 | P1 | `src/cdc.rs` | Integration tests for trigger-generated rows, keyless and wide-row cases |
 | P1 | `src/ivm.rs` | Executed keyed/keyless DML SQL behavior tests |
 | P1 | `src/config.rs` | Direct normalization/default-value tests. Initial helper coverage completed; broader accessor/default coverage remains optional. |
