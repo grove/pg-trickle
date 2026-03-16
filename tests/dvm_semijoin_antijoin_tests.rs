@@ -614,3 +614,33 @@ async fn test_diff_anti_join_executes_nested() {
         vec![("I".to_string(), 2, 20, 200)]
     );
 }
+
+#[tokio::test]
+async fn test_diff_anti_join_null_absence() {
+    let db = setup_operator_db().await;
+    let sql = make_ctx()
+        .differentiate(&build_anti_join_tree())
+        .expect("anti-join differentiation should succeed");
+
+    reset_semijoin_fixture(&db).await;
+
+    // Insert initial state:
+    // Anti-join is 'orders ANTI-JOIN products', so we emit orders that have NO match in products.
+    // Order 10 belongs to product 100.
+    // Order 11 belongs to product 200.
+    db.execute("INSERT INTO public.orders VALUES (10, 100, 1000), (11, 200, 2000)")
+        .await;
+    db.execute("INSERT INTO public.products VALUES (100, 'item1')")
+        .await; // 10 matches, 11 never matches.
+
+    // Let's delete the product 100. This triggers a NULL absence transition (match loss).
+    db.execute("DELETE FROM public.products WHERE id = 100")
+        .await;
+
+    // So order 10 regains its output status.
+    db.execute("INSERT INTO pgtrickle_changes.changes_2 (lsn, action, pk_hash, old_id, old_name) VALUES ('0/4', 'D', pgtrickle.pg_trickle_hash(100::text), 100, 'item1')").await;
+
+    let rows = query_rows(&db, &sql).await;
+    // We expect an insert ('I') for order 10 (id, prod_id, amount).
+    assert_eq!(rows, vec![("I".to_string(), 10, 100, 1000)]);
+}

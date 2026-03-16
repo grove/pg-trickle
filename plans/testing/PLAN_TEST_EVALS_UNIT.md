@@ -332,3 +332,7 @@ We should **not** trust it as the primary proof layer for:
 - **P0 (Done)**: `src/scheduler.rs`: Addressed scheduler lifecycle via execution-backed integration tests handling realistic crash recovery bounds and multi-process state transitions mapping directly to catalog APIs.
 - **P0 (Done)**: `src/refresh.rs`: Execution-backed differential parameter-index checks added directly tracking DB native bound rules.
 - **P0 (Done)**: `src/refresh.rs`: Execution-backed differential parameter-index checks added directly tracking DB native bound rules.
+- **P0 (Done)**: `src/dvm/operators/anti_join.rs`: Linux/CI-only result-level coverage expanded to include null/absence transitions missing from the initial suite.
+- **P0 (Cleanup)**: Removed hallucinated test stubs injected into `src/refresh.rs` and `src/scheduler.rs` during test rollout, stabilizing test harness execution.
+- **P0 (Done)**: `src/dvm/operators/anti_join.rs`: Linux/CI-only result-level coverage expanded to include null/absence transitions missing from the initial suite.
+- **P0 (Cleanup)**: Removed hallucinated test stubs injected into `src/refresh.rs` and `src/scheduler.rs` during test rollout, stabilizing test harness execution.

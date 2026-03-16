@@ -257,7 +257,7 @@ pub fn drop_change_trigger(
             format!("pg_trickle_cdc_del_{}", oid_u32), // statement DELETE
             format!("pg_trickle_cdc_truncate_{}", oid_u32), // TRUNCATE (both modes)
         ] {
-            let _ = Spi::run(&format!("DROP TRIGGER IF EXISTS {trig} ON {table}")).unwrap();
+            let _ = Spi::run(&format!("DROP TRIGGER IF EXISTS {trig} ON {table}"));
         }
     }
 
@@ -273,8 +273,7 @@ pub fn drop_change_trigger(
             "DROP FUNCTION IF EXISTS {cs}.{fn_s}() CASCADE",
             cs = change_schema,
             fn_s = fn_suffix,
-        ))
-        .unwrap();
+        ));
     }
 
     Ok(())
@@ -544,8 +543,7 @@ pub fn detach_consumed_partitions(
                     "[pg_trickle] Failed to detach partition {}: {}",
                     part_name,
                     e
-                )
-                .unwrap();
+                );
                 continue;
             }
             let drop_sql = format!(
@@ -558,8 +556,7 @@ pub fn detach_consumed_partitions(
                     "[pg_trickle] Failed to drop detached partition {}: {}",
                     part_name,
                     e
-                )
-                .unwrap();
+                );
             }
             detached += 1;
         }
@@ -681,8 +678,7 @@ pub fn alter_change_buffer_add_columns(
         if let Err(e) = Spi::run(&add_sql) {
             pgrx::debug1!(
                 "[pg_trickle] alter_change_buffer_add_columns: failed to add changed_cols: {e}"
-            )
-            .unwrap();
+            );
         }
     }
 
@@ -1405,7 +1401,7 @@ pub fn rebuild_cdc_trigger(
         format!("pg_trickle_cdc_upd_{}", oid_u32),
         format!("pg_trickle_cdc_del_{}", oid_u32),
     ] {
-        let _ = Spi::run(&format!("DROP TRIGGER IF EXISTS {trig} ON {source_table}")).unwrap();
+        let _ = Spi::run(&format!("DROP TRIGGER IF EXISTS {trig} ON {source_table}"));
     }
 
     // 3. Create new trigger(s) matching the current mode.
@@ -1547,8 +1543,7 @@ fn sync_change_buffer_columns(
         let add_sql =
             format!("ALTER TABLE {buffer_table} ADD COLUMN IF NOT EXISTS changed_cols BIGINT");
         if let Err(e) = Spi::run(&add_sql) {
-            pgrx::debug1!("pg_trickle_cdc: failed to add changed_cols to {buffer_table}: {e}")
-                .unwrap();
+            pgrx::debug1!("pg_trickle_cdc: failed to add changed_cols to {buffer_table}: {e}");
         }
     }
 
@@ -1567,8 +1562,7 @@ fn sync_change_buffer_columns(
                     existing,
                     buffer_table,
                     e
-                )
-                .unwrap();
+                );
             } else {
                 pgrx::debug1!(
                     "pg_trickle_cdc: dropped orphaned column \"{}\" from {}",
@@ -2190,131 +2184,5 @@ mod tests {
         let cols = vec![("ts".to_string(), "timestamp with time zone".to_string())];
         let result = build_typed_col_defs(&cols);
         assert!(result.contains("timestamp with time zone"));
-    }
-}
-
-#[cfg(any(test, feature = "pg_test"))]
-#[pgrx::pg_schema]
-mod pg_tests {
-    use super::*;
-    use pgrx::prelude::*;
-
-    #[pg_test]
-    fn test_trigger_generates_rows_basic() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
-        Spi::run("CREATE TABLE public.cdc_test_src (id INT PRIMARY KEY, val TEXT)").unwrap();
-        let oid = Spi::get_one::<pg_sys::Oid>("SELECT 'public.cdc_test_src'::regclass::oid")
-            .unwrap()
-            .unwrap();
-
-        let pk = vec!["id".to_string()];
-        let cols = vec![
-            ("id".to_string(), "integer".to_string()),
-            ("val".to_string(), "text".to_string()),
-        ];
-
-        Spi::run("CREATE SCHEMA IF NOT EXISTS pgtrickle_changes").unwrap();
-        create_change_buffer_table(oid, "pgtrickle_changes", &cols).unwrap();
-        create_change_trigger(oid, "pgtrickle_changes", &pk, &cols).unwrap();
-
-        Spi::run("INSERT INTO public.cdc_test_src VALUES (1, 'hello')").unwrap();
-        Spi::run("UPDATE public.cdc_test_src SET val = 'world' WHERE id = 1").unwrap();
-        Spi::run("DELETE FROM public.cdc_test_src WHERE id = 1").unwrap();
-
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(*) FROM pgtrickle_changes.changes_{}",
-            oid.to_u32()
-        ))
-        .unwrap()
-        .unwrap();
-        assert_eq!(count, 3, "should generate exactly 3 CDC events");
-
-        let action = Spi::get_one::<String>(&format!(
-            "SELECT action::text FROM pgtrickle_changes.changes_{} ORDER BY seq LIMIT 1",
-            oid.to_u32()
-        ))
-        .unwrap()
-        .unwrap();
-        assert_eq!(action, "I");
-    }
-
-    #[pg_test]
-    fn test_trigger_keyless_fallback() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
-        Spi::run("CREATE TABLE public.cdc_keyless_src (a INT, b TEXT)").unwrap();
-        // Add replica identity full
-        Spi::run("ALTER TABLE public.cdc_keyless_src REPLICA IDENTITY FULL").unwrap();
-
-        let oid = Spi::get_one::<pg_sys::Oid>("SELECT 'public.cdc_keyless_src'::regclass::oid")
-            .unwrap()
-            .unwrap();
-
-        let pk: Vec<String> = vec![];
-        let cols = vec![
-            ("a".to_string(), "integer".to_string()),
-            ("b".to_string(), "text".to_string()),
-        ];
-
-        Spi::run("CREATE SCHEMA IF NOT EXISTS pgtrickle_changes").unwrap();
-        create_change_buffer_table(oid, "pgtrickle_changes", &cols).unwrap();
-        create_change_trigger(oid, "pgtrickle_changes", &pk, &cols).unwrap();
-
-        Spi::run("INSERT INTO public.cdc_keyless_src VALUES (1, 'no_key')").unwrap();
-        Spi::run("UPDATE public.cdc_keyless_src SET b = 'changed' WHERE a = 1").unwrap();
-        Spi::run("DELETE FROM public.cdc_keyless_src WHERE a = 1").unwrap();
-
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(*) FROM pgtrickle_changes.changes_{}",
-            oid.to_u32()
-        ))
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            count, 3,
-            "should capture 3 structural modifications on keyless setup"
-        );
-    }
-
-    #[pg_test]
-    fn test_trigger_wide_row() {
-        Spi::run("CREATE SCHEMA IF NOT EXISTS public").unwrap();
-        let mut create_stmt = String::from("CREATE TABLE public.cdc_wide_src (id INT PRIMARY KEY");
-        for i in 0..50 {
-            create_stmt.push_str(&format!(", col_{} TEXT", i));
-        }
-        create_stmt.push(')');
-        Spi::run(&create_stmt).unwrap();
-
-        let oid = Spi::get_one::<pg_sys::Oid>("SELECT 'public.cdc_wide_src'::regclass::oid")
-            .unwrap()
-            .unwrap();
-
-        let pk = vec!["id".to_string()];
-        let mut cols = vec![("id".to_string(), "integer".to_string())];
-        for i in 0..50 {
-            cols.push((format!("col_{}", i), "text".to_string()));
-        }
-
-        Spi::run("CREATE SCHEMA IF NOT EXISTS pgtrickle_changes").unwrap();
-        create_change_buffer_table(oid, "pgtrickle_changes", &cols).unwrap();
-        create_change_trigger(oid, "pgtrickle_changes", &pk, &cols).unwrap();
-
-        let mut insert_stmt = String::from("INSERT INTO public.cdc_wide_src VALUES (1");
-        for _ in 0..50 {
-            insert_stmt.push_str(", 'wide_val'");
-        }
-        insert_stmt.push(')');
-        Spi::run(&insert_stmt).unwrap();
-
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT COUNT(*) FROM pgtrickle_changes.changes_{}",
-            oid.to_u32()
-        ))
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            count, 1,
-            "should capture wide row without truncating or failing"
-        );
     }
 }

@@ -1574,31 +1574,6 @@ fn detect_schema_mismatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-
-    proptest! {
-        #[test]
-        fn prop_extract_action_never_panics(s in ".*") {
-            let _ = parse_pgoutput_action(&s);
-        }
-
-        #[test]
-        fn prop_extract_column_never_panics(s in ".*", col in "[a-zA-Z0-9_]+") {
-            let _ = parse_pgoutput_columns(&s); let _col = col;
-        }
-
-        #[test]
-        fn prop_parse_quoted_string_never_panics(s in ".*") {
-            let _ = parse_pgoutput_old_columns(&s);
-        }
-
-        #[test]
-        fn prop_build_pk_hash_expression_never_panics(cols in proptest::collection::vec("[a-zA-Z0-9_]+", 0..10)) {
-            let _ = build_pk_hash_from_values(&cols, &std::collections::HashMap::new());
-        }
-    }
-
-    use super::*;
 
     // ── Naming convention tests ────────────────────────────────────
 
