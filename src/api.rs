@@ -1127,8 +1127,10 @@ fn migrate_storage_table_compatible(
     Ok(())
 }
 
-/// Manage auxiliary count columns (__pgt_count, __pgt_count_l, __pgt_count_r)
-/// during ALTER QUERY when the query type changes (e.g., flat → aggregate).
+/// Manage auxiliary columns (__pgt_count, __pgt_count_l/r, __pgt_aux_sum_*,
+/// __pgt_aux_count_*, __pgt_aux_sum2_*) during ALTER QUERY when the query
+/// type or aggregate composition changes.
+#[allow(clippy::too_many_arguments)]
 fn migrate_aux_columns(
     schema: &str,
     table_name: &str,
@@ -1137,6 +1139,10 @@ fn migrate_aux_columns(
     new_needs_pgt_count: bool,
     new_needs_dual_count: bool,
     new_needs_union_dedup: bool,
+    old_avg_aux: &[(String, String, String)],
+    new_avg_aux: &[(String, String, String)],
+    old_sum2_aux: &[(String, String)],
+    new_sum2_aux: &[(String, String)],
 ) -> Result<(), PgTrickleError> {
     let quoted_table = format!(
         "{}.{}",
@@ -1202,6 +1208,78 @@ fn migrate_aux_columns(
         }
     }
 
+    // Transition: AVG auxiliary columns (__pgt_aux_sum_*, __pgt_aux_count_*)
+    let old_avg_names: std::collections::HashSet<(&str, &str)> = old_avg_aux
+        .iter()
+        .map(|(s, c, _)| (s.as_str(), c.as_str()))
+        .collect();
+    let new_avg_names: std::collections::HashSet<(&str, &str)> = new_avg_aux
+        .iter()
+        .map(|(s, c, _)| (s.as_str(), c.as_str()))
+        .collect();
+    // Add new AVG aux columns
+    for (sum_col, count_col, _) in new_avg_aux {
+        if !old_avg_names.contains(&(sum_col.as_str(), count_col.as_str())) {
+            Spi::run(&format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} NUMERIC NOT NULL DEFAULT 0",
+                quoted_table,
+                quote_identifier(sum_col),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Spi::run(&format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} BIGINT NOT NULL DEFAULT 0",
+                quoted_table,
+                quote_identifier(count_col),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+    // Drop removed AVG aux columns
+    for (sum_col, count_col, _) in old_avg_aux {
+        if !new_avg_names.contains(&(sum_col.as_str(), count_col.as_str())) {
+            Spi::run(&format!(
+                "ALTER TABLE {} DROP COLUMN IF EXISTS {}",
+                quoted_table,
+                quote_identifier(sum_col),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Spi::run(&format!(
+                "ALTER TABLE {} DROP COLUMN IF EXISTS {}",
+                quoted_table,
+                quote_identifier(count_col),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+
+    // Transition: sum-of-squares auxiliary columns (__pgt_aux_sum2_*)
+    let old_sum2_names: std::collections::HashSet<&str> =
+        old_sum2_aux.iter().map(|(n, _)| n.as_str()).collect();
+    let new_sum2_names: std::collections::HashSet<&str> =
+        new_sum2_aux.iter().map(|(n, _)| n.as_str()).collect();
+    // Add new sum2 aux columns
+    for (col_name, _) in new_sum2_aux {
+        if !old_sum2_names.contains(col_name.as_str()) {
+            Spi::run(&format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} NUMERIC NOT NULL DEFAULT 0",
+                quoted_table,
+                quote_identifier(col_name),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+    // Drop removed sum2 aux columns
+    for (col_name, _) in old_sum2_aux {
+        if !new_sum2_names.contains(col_name.as_str()) {
+            Spi::run(&format!(
+                "ALTER TABLE {} DROP COLUMN IF EXISTS {}",
+                quoted_table,
+                quote_identifier(col_name),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1254,6 +1332,8 @@ fn alter_stream_table_query(
     // Detect old auxiliary column state from current ST metadata
     let old_needs_pgt_count = crate::dvm::query_needs_pgt_count(&st.defining_query);
     let old_needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
+    let old_avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+    let old_sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
 
     // ── Phase 1: Suspend ──
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
@@ -1362,6 +1442,10 @@ fn alter_stream_table_query(
             vq.needs_pgt_count,
             vq.needs_dual_count,
             vq.needs_union_dedup,
+            &old_avg_aux,
+            &vq.avg_aux_columns,
+            &old_sum2_aux,
+            &vq.sum2_aux_columns,
         )?;
     }
 

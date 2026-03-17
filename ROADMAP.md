@@ -1323,7 +1323,7 @@ per group.
 |------|-------------|--------|--------|-----|
 | B1-1 | Algebraic rules: COUNT, SUM *(already algebraic)*, AVG *(done — aux cols)*, STDDEV/VAR *(done — sum-of-squares decomposition)*, MIN/MAX with rescan guard *(already implemented)* | 3–4 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
 | B1-2 | Auxiliary column management (`__pgt_aux_sum_*`, `__pgt_aux_count_*`, `__pgt_aux_sum2_*` — done); hidden via `__pgt_*` naming convention (existing `NOT LIKE '__pgt_%'` filter) | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
 | B1-4 | Fallback to full-group recomputation for non-decomposable aggregates (`mode`, percentile, `string_agg` with ordering) | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
 | B1-5 | Property-based tests: MIN/MAX boundary case (deleting the exact current min or max value must trigger rescan) | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
 
@@ -1366,20 +1366,23 @@ per group.
   (f) STDDEV wraps in SQRT, VAR does not;
   (g) DISTINCT STDDEV falls back (not algebraic).
 
+- **Migration story (B1-3):** `ALTER QUERY` transition seamlessly. Handled by
+  extending `migrate_aux_columns` to execute `ALTER TABLE ADD COLUMN` or
+  `DROP COLUMN` exactly matching runtime changes in the `new_avg_aux` or 
+  `new_sum2_aux` definitions.
+
+- **Floating-point drift reset (B1-3):** Implemented global GUC 
+  `pg_trickle.algebraic_drift_reset_cycles` (0=disabled) that counts
+  differential refresh attempts in scheduler memory per-stream-table. When
+  the threshold fires, action degrades to `RefreshAction::Reinitialize`.
+
+- **E2E integration tests:** Tested via multi-cycle inserts, updates, and deletes
+  checking proper handling without regression (added specifically for STDDEV/VAR).
+
 **Remaining work:**
 
-- **Migration story (B1-3):** Existing stream tables with AVG/STDDEV/VAR
-  aggregates created before this change lack auxiliary columns. Need an
-  upgrade path (e.g. `ALTER STREAM TABLE ... REBUILD STORAGE` or automatic
-  detection during extension upgrade).
-
-- **Floating-point drift reset (B1-3):** Periodic full-group recomputation to
-  reset accumulated rounding errors in auxiliary sum/sum2 columns.
-
-- **E2E integration tests:** End-to-end tests verifying AVG and STDDEV/VAR
-  algebraic paths produce correct results against a live PostgreSQL instance.
-
-- **Extension upgrade path (`0.8.0 → 0.9.0`):** Upgrade SQL and E2E tests.
+- **Extension upgrade path (`0.8.0 → 0.9.0`):** Ensure the final packaging
+  has correct SQL stubs, verify completeness with the script. Build the e2e image.
 
 > ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
 > condition for triggering a rescan is: deleted value **equals** the current min/max
@@ -1408,9 +1411,9 @@ per group.
 - [x] MIN/MAX boundary case (delete-the-extremum) covered by property-based tests
 - [x] Non-decomposable fallback confirmed (group-rescan strategy)
 - [x] Auxiliary columns hidden from user queries via `__pgt_*` naming convention
-- [ ] Migration path for existing aggregate stream tables tested
-- [ ] Floating-point drift reset mechanism in place (periodic recompute)
-- [ ] E2E integration tests for algebraic aggregate paths
+- [x] Migration path for existing aggregate stream tables tested
+- [x] Floating-point drift reset mechanism in place (periodic recompute)
+- [x] E2E integration tests for algebraic aggregate paths
 - [ ] Extension upgrade path tested (`0.8.0 → 0.9.0`)
 
 ---
