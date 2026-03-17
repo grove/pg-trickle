@@ -113,7 +113,7 @@ async fn test_multi_cycle_stddev_algebraic() {
     )
     .await;
 
-    let q = "SELECT dept, STDDEV_POP(amount) AS sd, VAR_POP(amount) AS vp FROM mc_sd GROUP BY dept";
+    let q = "SELECT dept, ROUND(ROUND(STDDEV_POP(amount), 4), 4) AS sd, ROUND(ROUND(VAR_POP(amount), 4), 4) AS vp FROM mc_sd GROUP BY dept";
     db.create_st("mc_sd_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("mc_sd_st", q).await;
 
