@@ -1303,6 +1303,58 @@ that re-links orphaned catalog entries on extension restore.
 
 ---
 
+## v0.9.0 — Incremental Aggregate Maintenance
+
+**Goal:** Implement algebraic incremental maintenance for decomposable aggregates
+(COUNT, SUM, AVG, MIN, MAX, STDDEV), reducing per-group refresh from O(group_size)
+to O(1) for the common case. This is the highest-potential-payoff item in the
+performance plan — benchmarks show aggregate scenarios going from 2.5 ms to sub-1 ms
+per group.
+
+### Algebraic Aggregate Shortcuts (B-1)
+
+> **In plain terms:** When only one row changes in a group of 100,000, today
+> pg_trickle re-scans all 100,000 rows to recompute the aggregate. Algebraic
+> maintenance keeps running totals: `new_sum = old_sum + Δsum`, `new_count =
+> old_count + Δcount`. Only MIN/MAX needs a rescan — and only when the deleted
+> value *was* the current minimum or maximum.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B1-1 | Algebraic rules: COUNT, SUM, AVG, STDDEV (Welford online algorithm), MIN/MAX with rescan guard when deleted value equals current extremum | 3–4 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-2 | Auxiliary column management (`__pgt_aux_count`, `__pgt_aux_sum`, etc.); view wrapper to hide from user queries | 1–2 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-4 | Fallback to full-group recomputation for non-decomposable aggregates (`mode`, percentile, `string_agg` with ordering) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-5 | Property-based tests: MIN/MAX boundary case (deleting the exact current min or max value must trigger rescan) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
+> condition for triggering a rescan is: deleted value **equals** the current min/max
+> (not when it differs). Getting this backwards silently produces stale aggregates
+> on the most common OLTP delete pattern. See the corrected table and risk analysis
+> in PLAN_NEW_STUFF.md §B-1.
+
+> **Retraction consideration (B-1):** Keep in v0.9.0, but item B1-5 (property-based
+> tests covering the MIN/MAX boundary case) is a **hard prerequisite** for B1-1, not
+> optional follow-on work. The MIN/MAX rule was stated backwards in the original spec;
+> the corrected rule is now in PLAN_NEW_STUFF.md. Do not merge any MIN/MAX algebraic
+> path until property-based tests confirm: (a) deleting the exact current min triggers
+> a rescan and (b) deleting a non-min value does not. Floating-point drift reset
+> (B1-3) is also required before enabling persistent auxiliary columns.
+
+> **Algebraic aggregates subtotal: ~7–9 weeks**
+
+> **v0.9.0 total: ~7–9 weeks**
+
+**Exit criteria:**
+- [ ] COUNT/SUM/AVG/STDDEV algebraic paths implemented and benchmarked vs. full-group recompute
+- [ ] MIN/MAX boundary case (delete-the-extremum) covered by property-based tests
+- [ ] Auxiliary columns hidden from user queries via view wrapper
+- [ ] Migration path for existing aggregate stream tables tested
+- [ ] Floating-point drift reset mechanism in place (periodic recompute)
+- [ ] Extension upgrade path tested (`0.8.0 → 0.9.0`)
+
+---
+
 ## v0.10.0 — Connection Pooler Compatibility, Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep
 
 **Goal:** Enable cloud-native PgBouncer transaction-mode deployments via an opt-in compatibility mode, ship ready-made Prometheus/Grafana monitoring so the product is
@@ -1393,58 +1445,6 @@ action.
 - [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers
 - [ ] `ALTER EXTENSION pg_trickle UPDATE` tested (`0.9.0 → 0.10.0`)
 - [ ] All public documentation current and reviewed
-
----
-
-## v0.9.0 — Incremental Aggregate Maintenance
-
-**Goal:** Implement algebraic incremental maintenance for decomposable aggregates
-(COUNT, SUM, AVG, MIN, MAX, STDDEV), reducing per-group refresh from O(group_size)
-to O(1) for the common case. This is the highest-potential-payoff item in the
-performance plan — benchmarks show aggregate scenarios going from 2.5 ms to sub-1 ms
-per group.
-
-### Algebraic Aggregate Shortcuts (B-1)
-
-> **In plain terms:** When only one row changes in a group of 100,000, today
-> pg_trickle re-scans all 100,000 rows to recompute the aggregate. Algebraic
-> maintenance keeps running totals: `new_sum = old_sum + Δsum`, `new_count =
-> old_count + Δcount`. Only MIN/MAX needs a rescan — and only when the deleted
-> value *was* the current minimum or maximum.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| B1-1 | Algebraic rules: COUNT, SUM, AVG, STDDEV (Welford online algorithm), MIN/MAX with rescan guard when deleted value equals current extremum | 3–4 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-2 | Auxiliary column management (`__pgt_aux_count`, `__pgt_aux_sum`, etc.); view wrapper to hide from user queries | 1–2 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-4 | Fallback to full-group recomputation for non-decomposable aggregates (`mode`, percentile, `string_agg` with ordering) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-5 | Property-based tests: MIN/MAX boundary case (deleting the exact current min or max value must trigger rescan) | 1 wk | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-
-> ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
-> condition for triggering a rescan is: deleted value **equals** the current min/max
-> (not when it differs). Getting this backwards silently produces stale aggregates
-> on the most common OLTP delete pattern. See the corrected table and risk analysis
-> in PLAN_NEW_STUFF.md §B-1.
-
-> **Retraction consideration (B-1):** Keep in v0.9.0, but item B1-5 (property-based
-> tests covering the MIN/MAX boundary case) is a **hard prerequisite** for B1-1, not
-> optional follow-on work. The MIN/MAX rule was stated backwards in the original spec;
-> the corrected rule is now in PLAN_NEW_STUFF.md. Do not merge any MIN/MAX algebraic
-> path until property-based tests confirm: (a) deleting the exact current min triggers
-> a rescan and (b) deleting a non-min value does not. Floating-point drift reset
-> (B1-3) is also required before enabling persistent auxiliary columns.
-
-> **Algebraic aggregates subtotal: ~7–9 weeks**
-
-> **v0.9.0 total: ~7–9 weeks**
-
-**Exit criteria:**
-- [ ] COUNT/SUM/AVG/STDDEV algebraic paths implemented and benchmarked vs. full-group recompute
-- [ ] MIN/MAX boundary case (delete-the-extremum) covered by property-based tests
-- [ ] Auxiliary columns hidden from user queries via view wrapper
-- [ ] Migration path for existing aggregate stream tables tested
-- [ ] Floating-point drift reset mechanism in place (periodic recompute)
-- [ ] Extension upgrade path tested (`0.8.0 → 0.9.0`)
 
 ---
 
