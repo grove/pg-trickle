@@ -1,0 +1,16 @@
+[profile.default]
+retries = 0
+
+[profile.ci]
+retries = 2
+junit = { path = "junit.xml" }
+
+[[profile.default.overrides]]
+# e2e tests need to run sequentially
+filter = "test(e2e)"
+threads-required = 1
+
+[[profile.default.overrides]]
+# Integration tests need to run sequentially
+filter = "test(integration)"
+threads-required = 1

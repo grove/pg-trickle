@@ -1,6 +1,6 @@
 # PLAN_CARGO_NEXTEST.md — Accelerating and Stabilizing the pg_trickle Test Suite
 
-**Status:** Proposed
+**Status:** In Progress
 **Date:** 2026-03-17
 **Driver:** Open
 **Relates to:** Priority 0-1 of `PLAN_TEST_EVALS_FINAL_REPORT.md`
@@ -76,3 +76,20 @@ Integrate the results utilizing a standard GitHub action like `mikepenz/action-j
 - CI pipelines use `cargo nextest` and output JUnit XML reports into GitHub.
 - Flaky tests are documented as auto-retrying in CI.
 - Overall CI runtime is reliably kept under 10 minutes.
+
+## 6. Implementation Status (Updated 2026-03-17)
+
+**What has been done:**
+- Created initial `.config/nextest.toml` configuration with basic retry logic and group definitions.
+- Updated `.github/actions/setup-pgrx/action.yml` to install `cargo-nextest` via `taiki-e/install-action@nextest`.
+- Modified test execution scripts to conditionally use `cargo nextest run` if available. This fallback approach maintains backward compatibility for contributors who have not yet installed nextest. Scripts touched:
+  - `scripts/run_unit_tests.sh`
+  - `scripts/run_dvm_integration_tests.sh`
+  - `scripts/run_light_e2e_tests.sh`
+
+**What is left to do:**
+- Update `ci.yml` explicitly to define testing steps generating JUnit XML output, and upload the output to GitHub Actions.
+- Convert raw `cargo test` and `cargo pgrx test` calls inside `ci.yml` to utilize `cargo nextest run` where appropriate (e.g., standard integration tests).
+- Review `pgrx` wrapper integration to confirm whether custom environment variables are necessary for `nextest` running `cargo pgrx test`.
+- Add test suites concurrency bounds appropriately into `.config/nextest.toml` (such as `e2e_partition_tests.rs`) to prevent test database pollution, ensuring proper groups setup.
+- Update `justfile` targets to invoke `nextest` explicitly.
