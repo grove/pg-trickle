@@ -184,12 +184,14 @@ fn handle_ddl_command(cmd: &DdlCommand) {
             handle_policy_change(cmd);
         }
         DdlEventKind::ExtensionChange => {
-            if let Some(ref ident) = cmd.object_identity {
-                if ident == "pg_trickle" {
-                    pgrx::info!("pg_trickle extension loaded; checking for orphaned catalog entries to restore...");
-                    if let Err(e) = crate::api::restore_stream_tables() {
-                        pgrx::warning!("Failed to automatically restore stream tables: {}", e);
-                    }
+            if let Some(ref ident) = cmd.object_identity
+                && ident == "pg_trickle"
+            {
+                pgrx::info!(
+                    "pg_trickle extension loaded; checking for orphaned catalog entries to restore..."
+                );
+                if let Err(e) = crate::api::restore_stream_tables() {
+                    pgrx::warning!("Failed to automatically restore stream tables: {}", e);
                 }
             }
         }

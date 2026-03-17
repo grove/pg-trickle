@@ -6,9 +6,10 @@ use std::process::Command;
 async fn test_pg_dump_and_restore() {
     let db = E2eDb::new().await.with_extension().await;
 
-    // Create a source table and a stream table
-    db.execute("CREATE TABLE source (id INT PRIMARY KEY, val TEXT)").await;
-    db.execute("INSERT INTO source VALUES (1, 'one'), (2, 'two')").await;
+    db.execute("CREATE TABLE source (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO source VALUES (1, 'one'), (2, 'two')")
+        .await;
 
     db.create_st(
         "dump_test_st",
@@ -20,8 +21,9 @@ async fn test_pg_dump_and_restore() {
 
     assert_eq!(db.count("public.dump_test_st").await, 2);
 
-    // 1. pg_dump the database
     let container_id = db.container_id();
+
+    // 1. pg_dump the database
     let dump_output = Command::new("docker")
         .args(&[
             "exec",
@@ -32,56 +34,116 @@ async fn test_pg_dump_and_restore() {
             "-d",
             "postgres",
             "-F",
-            "c", // Custom format is best for pg_restore
-                                   /dump.backup"
+            "c",
+            "-f",
+            "/tmp/dump.backup",
         ])
         .output()
-        .e        .e        .e  te        .e    e container");
-    
-    assert    assert   .status.success(), "pg_dump failed: {:?}    assert    assert   .status.success(), "pg_dump fai // 2. Drop the original schema to simulate starting fresh
-    // Create the DB using docker exec to avoid transaction wrapper     // Create the DB using docker exec to avoid transaction wrapper     ["e    // Create thid    // Create the DB ure    // Create the DB using docker exDATABASE restore    // Create the DB uut           .expect("Failed to execute psql inside container");
-    assert!(cre    assert!(cre    assert!(cr),    assert!(cre    assert!(cre    assert:from_utf8_lossy(&create_db_output.stderr));
+        .expect("Failed to execute docker exec");
+    assert!(
+        dump_output.status.success(),
+        "pg_dump failed: {:?}",
+        String::from_utf8_lossy(&dump_output.stderr)
+    );
 
-                n 1 Validate Restoring Pre-Data
-    let restore_    let restore_    lew("docker")
-                             "exec",
+    // 2. Drop the original schema to simulate starting fresh
+    let create_db_output = Command::new("docker")
+        .args(&[
+            "exec",
             container_id,
-                                      "-U",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-c",
+            "CREATE DATABASE restored_db",
+        ])
+        .output()
+        .expect("Failed to create restored_db");
+    assert!(create_db_output.status.success(), "create db failed");
+
+    // 3. Section 1 Validate Restoring Pre-Data
+    let restore_output = Command::new("docker")
+        .args(&[
+            "exec",
+            container_id,
+            "pg_restore",
+            "-U",
             "postgres",
             "-d",
             "restored_db",
-            "--sectio         a"            "--stmp/dump.backup"
+            "--section=pre-data",
+            "/tmp/dump.backup",
         ])
         .output()
-        .expect("Fa   d         .expect("Fa   d         .expect("Fa   d );
-    
+        .expect("Failed to execute pg_restore pre-data");
+    assert!(
+        restore_output.status.success(),
+        "pg_restore pre-data failed"
+    );
+
     // 4. Section 2 Validate Restoring Data
     let restore_data = Command::new("docker")
         .args(&[
-            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "           5. Connect to restored DB to manually heal metadata buffer
-    let restored_conn_str = db.connection_string().replace("/postgres?", "    let restored_conn_str = db.connection_stripo    let restored_conn_str = db.connection_stringti    let restored_conn_str = db.conn::time::Duration::from_secs(    let restored_conn_str = db.connection_connect(&restored_conn_str    let restored;
-    let restored_conn_strcr    let restored_conn_strcr    let restored_conn_strcr    let rssing.
-    // Call the manual r    // Call the manual r    // Call the manual r    // Call the manual r ")
-                                              t
+            "exec",
+            container_id,
+            "pg_restore",
+            "-U",
+            "postgres",
+            "-d",
+            "restored_db",
+            "--section=data",
+            "/tmp/dump.backup",
+        ])
+        .output()
+        .expect("Failed to execute pg_restore data");
+    assert!(restore_data.status.success(), "pg_restore data failed");
+
+    // 5. Connect to restored DB to manually heal metadata buffer
+    let restored_conn_str = db
+        .connection_string()
+        .replace("/postgres?", "/restored_db?");
+    let restored_pool = sqlx::PgPool::connect(&restored_conn_str).await.unwrap();
+
+    // Call the manual restore helper
+    sqlx::query("SELECT pgtrickle.restore_stream_tables()")
+        .execute(&restored_pool)
+        .await
         .unwrap();
-        
-    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6 container");
-        
+
+    // 6. Restore post-data to load triggers properly
+    let restore_post = Command::new("docker")
+        .args(&[
+            "exec",
+            container_id,
+            "pg_restore",
+            "-U",
+            "postgres",
+            "-d",
+            "restored_db",
+            "--section=post-data",
+            "/tmp/dump.backup",
+        ])
+        .output()
+        .expect("Failed to execute pg_restore post-data");
+    assert!(restore_post.status.success(), "pg_restore post-data failed");
+
     // Validate the stream table has data!
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.dump_test_st")
         .fetch_one(&restored_pool)
         .await
         .expect("Failed to query restored stream table");
-    
     assert_eq!(count, 2, "Data should be preserved");
 
-    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /d)
+    // Let's modify the source table and see if ST refreshes correctly!
     sqlx::query("INSERT INTO source VALUES (3, 'three')")
         .execute(&restored_pool)
         .await
         .unwrap();
 
-    sqlx::query("SELE    sqlx::query("es    sqlm_table('dump_test_st')")
+    // Trigger full refresh
+    sqlx::query("SELECT pgtrickle.refresh_stream_table('dump_test_st')")
         .execute(&restored_pool)
         .await
         .unwrap();
@@ -90,6 +152,9 @@ async fn test_pg_dump_and_restore() {
         .fetch_one(&restored_pool)
         .await
         .unwrap();
-    
-    assert_eq!(new_count, 3, "Stream table should continue to track updates via CDC triggers after restore");
+
+    assert_eq!(
+        new_count, 3,
+        "Stream table should continue to track updates via CDC triggers after restore"
+    );
 }
