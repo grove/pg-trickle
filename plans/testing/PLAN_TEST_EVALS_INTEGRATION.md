@@ -8,6 +8,30 @@
 
 ---
 
+## Implementation Status
+
+> **Updated:** 2026-03-17
+> **Status:** All P0 and P1 items implemented. P2–P3 remain.
+
+| Priority | Item | Status | Notes |
+|----------|------|--------|-------|
+| P0-1 | Extract Multiset Comparison Helper | ✅ DONE | `assert_sets_equal()` added to `tests/common/mod.rs` |
+| P0-2 | Add LISTEN/NOTIFY Round-Trip Test | ✅ DONE | Real `PgListener` round-trip in `monitoring_tests.rs`, replaces fire-and-forget |
+| P0-3 | Strengthen Workflow Data Validation | ✅ DONE | `test_full_refresh_workflow` now uses `assert_sets_equal` for row-level correctness |
+| P0-4 | Add Semi/Anti Join Unit Tests | ✅ DONE | Expanded from 3→9 tests each; nested, multi-column, filter, complementary |
+| P1-1 | Widen Staleness Test Tolerance | ✅ DONE | Changed 59–65s window to 50–120s in `test_staleness_calculation` |
+| P1-2 | Add Column Type Verification | ✅ DONE | Two new tests in `extension_tests.rs` verify column types via `information_schema` |
+| P1-3 | Add Error Escalation Threshold Test | ✅ DONE | `test_error_escalation_exact_threshold` + `test_suspended_to_active_recovery` added to `resilience_tests.rs` |
+| P2-1 | DDL Drift Detection Test | ❌ TODO | Compare hardcoded `CATALOG_DDL` against actual `sql/` files |
+| P2-2 | Multi-Table Join Chain Unit Tests | ❌ TODO | `(A ⋈ B) ⋈ C` compositions for all join types |
+| P2-3 | Scheduler Job Lifecycle Integration Test | ❌ TODO | Enqueue/claim/complete cycle via raw SQL |
+| P2-4 | Extend Property Tests to DVM Operators | ❌ TODO | Proptest for join/aggregate SQL output |
+| P3-1 | Remove or Fold Smoke Tests | ❌ TODO | Low priority |
+| P3-2 | Add Workflow Test for ST Drop Cascade | ❌ TODO | Verify change buffer/deps/history removed on drop |
+| P3-3 | Standardize Test Naming | ❌ TODO | Style consistency across all files |
+
+---
+
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
