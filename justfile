@@ -56,6 +56,12 @@ unsafe-inventory:
 test-unit:
     ./scripts/run_unit_tests.sh pg{{pg}}
 
+# Run DVM execution-backed integration tests with pg_stub (macOS + Linux)
+# Requires Docker for testcontainers Postgres.
+[group: "test"]
+test-dvm:
+    ./scripts/run_dvm_integration_tests.sh pg{{pg}}
+
 # Run integration tests (requires Docker)
 [group: "test"]
 test-integration:
@@ -92,6 +98,16 @@ test-e2e: build-e2e-image
 [group: "test"]
 test-e2e-fast:
     ./scripts/run_e2e_tests.sh --test 'e2e_*' -- --test-threads=1
+
+# Run E2E tests with parallel refresh mode enabled (rebuilds Docker image first)
+[group: "test"]
+test-e2e-parallel: build-e2e-image
+    PGT_PARALLEL_MODE=on ./scripts/run_e2e_tests.sh --test 'e2e_*' -- --test-threads=1
+
+# Run E2E tests with parallel refresh mode enabled, skip Docker image rebuild
+[group: "test"]
+test-e2e-parallel-fast:
+    PGT_PARALLEL_MODE=on ./scripts/run_e2e_tests.sh --test 'e2e_*' -- --test-threads=1
 
 # Package the extension for light-E2E tests (cargo pgrx package)
 [group: "test"]

@@ -213,12 +213,26 @@ async fn test_consecutive_errors_tracked_and_reset() {
         assert!(result.is_err(), "Refresh attempt {i} should fail");
     }
 
+    // Simulate scheduler tracking errors
+    db.execute("UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 3 WHERE pgt_name = 'err_cnt_st'").await;
+    let (_, _, _, err_count) = db.pgt_status("err_cnt_st").await;
+    assert_eq!(
+        err_count, 3,
+        "pgt_status should return consecutive_errors from catalog"
+    );
+
     // Fix the data
     db.execute("UPDATE err_cnt_src SET denom = 2 WHERE denom = 0")
         .await;
 
     // After fixing the data, the refresh should succeed.
     db.refresh_st("err_cnt_st").await;
+    // Manual success clears errors
+    let (_, _, _, err_count_after) = db.pgt_status("err_cnt_st").await;
+    assert_eq!(
+        err_count_after, 0,
+        "Successful manual refresh should reset consecutive_errors"
+    );
 
     // The table should now be populated correctly.
     db.assert_st_matches_query(

@@ -192,3 +192,29 @@ async fn test_intersect_multi_column_differential() {
     db.refresh_st("isect_mc_st").await;
     db.assert_st_matches_query("isect_mc_st", q).await;
 }
+
+#[tokio::test]
+async fn test_set_operation_with_nulls() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE set_null_a (id INT, val TEXT)")
+        .await;
+    db.execute("CREATE TABLE set_null_b (id INT, val TEXT)")
+        .await;
+
+    db.execute("INSERT INTO set_null_a VALUES (1, NULL), (NULL, 'A')")
+        .await;
+    db.execute("INSERT INTO set_null_b VALUES (1, NULL), (NULL, 'B')")
+        .await;
+
+    let q = "SELECT id, val FROM set_null_a UNION ALL SELECT id, val FROM set_null_b";
+
+    db.create_st("set_null_st", q, "1m", "DIFFERENTIAL").await;
+
+    db.assert_st_matches_query("set_null_st", q).await;
+
+    db.execute("INSERT INTO set_null_a VALUES (NULL, NULL)")
+        .await;
+    db.refresh_st("set_null_st").await;
+
+    db.assert_st_matches_query("set_null_st", q).await;
+}

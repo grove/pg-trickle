@@ -188,7 +188,7 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
             .iter()
             .map(|c| {
                 let qc = quote_ident(c);
-                format!("st.{qc} = cp.{qc}")
+                format!("st.{qc} IS NOT DISTINCT FROM cp.{qc}")
             })
             .collect::<Vec<_>>()
             .join(" AND ")
@@ -226,7 +226,7 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
             .iter()
             .map(|c| {
                 let qc = quote_ident(c);
-                format!("d.{qc} = cp.{qc}")
+                format!("d.{qc} IS NOT DISTINCT FROM cp.{qc}")
             })
             .collect::<Vec<_>>()
             .join(" AND ")

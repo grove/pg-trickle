@@ -2698,9 +2698,25 @@ fn compute_adaptive_threshold(current: f64, incr_ms: f64, full_ms: f64) -> f64 {
 }
 
 /// Execute a reinitialize refresh: full recompute after schema change.
+///
+/// If the ST has an `original_query`, uses it for the FULL refresh
+/// (so current view definitions are resolved at execution time), then
+/// re-runs the rewrite pipeline to store the updated inlined query.
 pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    // Same as full refresh but also clears the reinit flag
-    let result = execute_full_refresh(st)?;
+    // Use original_query for the refresh so current view/function
+    // definitions are resolved at execution time.
+    let refresh_st = if let Some(oq) = &st.original_query {
+        let mut tmp = st.clone();
+        tmp.defining_query = oq.clone();
+        tmp
+    } else {
+        st.clone()
+    };
+
+    let result = execute_full_refresh(&refresh_st)?;
+
+    // After refresh, re-run the rewrite pipeline to update stored query.
+    let _ = crate::api::reinit_rewrite_if_needed(st);
 
     // Clear reinit flag
     Spi::run(&format!(
@@ -3255,5 +3271,64 @@ mod tests {
         assert!(result.contains(r#"INSERT INTO "myschema"."events""#));
         assert!(result.contains(r#"__pgt_row_id, "id", "type", "payload""#));
         assert!(result.contains(r#"d.__pgt_row_id, d."id", d."type", d."payload""#));
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod pg_tests {
+    use super::*;
+    use crate::catalog::StreamTableMeta;
+    use crate::version::Frontier;
+    use pgrx::prelude::*;
+
+    #[pg_test]
+    fn test_execute_differential_refresh_success() {
+        Spi::run("CREATE SCHEMA IF NOT EXISTS public");
+        Spi::run("CREATE TABLE public.test_refresh_src (id INT PRIMARY KEY, val TEXT)");
+
+        Spi::run(
+            "SELECT pgtrickle.create_stream_table(
+                'public.test_refresh_st',
+                'SELECT id, val FROM public.test_refresh_src',
+                '1 minute'
+            );",
+        );
+
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (1, 'hello'), (2, 'world')");
+
+        // Wait, populate via refresh
+        Spi::run("SELECT pgtrickle.refresh('public.test_refresh_st', 'FULL')");
+
+        // Get metadata correctly
+        let st = StreamTableMeta::get_by_name("public", "test_refresh_st").expect("st must exist");
+        assert!(st.is_populated, "ST should be populated after FULL");
+
+        let prev_frontier = st.frontier.clone();
+        assert!(
+            !prev_frontier.is_empty(),
+            "Frontier should not be empty after FULL refresh"
+        );
+
+        // Make delta changes
+        Spi::run("INSERT INTO public.test_refresh_src VALUES (3, 'foo')");
+        Spi::run("UPDATE public.test_refresh_src SET val = 'bar' WHERE id = 1");
+        Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2");
+
+        let new_frontier = crate::version::capture_current_frontier().expect("new frontier");
+
+        let (inserted, deleted) = execute_differential_refresh(&st, &prev_frontier, &new_frontier)
+            .expect("differential refresh should succeed");
+
+        assert!(inserted > 0, "should have inserted rows");
+        assert!(deleted > 0, "should have deleted rows");
+
+        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM public.test_refresh_st")
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 2, "1,3 should be present");
+
+        Spi::run("SELECT pgtrickle.drop_stream_table('public.test_refresh_st')");
+        Spi::run("DROP TABLE public.test_refresh_src CASCADE");
     }
 }

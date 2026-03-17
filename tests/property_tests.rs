@@ -543,6 +543,21 @@ proptest! {
     }
 }
 
+// ── DAG Fuzzy Structure Generation ─────────────────────────────────────────
+
+fn arb_dag_edges(
+    max_nodes: usize,
+    max_edges: usize,
+) -> impl Strategy<Value = (usize, Vec<(usize, usize)>)> {
+    (1..=max_nodes).prop_flat_map(move |n| {
+        let edge_strat = (1..=n, 1..=n);
+        (
+            Just(n),
+            proptest::collection::vec(edge_strat, 0..=max_edges),
+        )
+    })
+}
+
 // ── Frontier merge monotonicity ──────────────────────────────────────────────
 
 fn arb_frontier() -> impl Strategy<Value = Frontier> {
@@ -561,6 +576,8 @@ fn arb_frontier() -> impl Strategy<Value = Frontier> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
     #[test]
     fn prop_frontier_merge_monotonic(f1 in arb_frontier(), f2 in arb_frontier()) {
         let mut f_merged = f1.clone();
@@ -571,6 +588,48 @@ proptest! {
         }
         for oid in f2.source_oids() {
             prop_assert!(lsn_gte(&f_merged.get_lsn(oid), &f2.get_lsn(oid)));
+        }
+    }
+
+    #[test]
+    fn prop_dag_fuzz_cycle_and_topological_sort(
+        (num_nodes, edges) in arb_dag_edges(20, 50)
+    ) {
+        let mut dag = StDag::new();
+        // Add nodes
+        for i in 1..=num_nodes {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(i as i64),
+                schedule: Some(Duration::from_secs(60)),
+                effective_schedule: Duration::from_secs(60),
+                name: format!("st_{}", i),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+
+        for &(u, v) in &edges {
+            dag.add_edge(NodeId::StreamTable(u as i64), NodeId::StreamTable(v as i64));
+        }
+
+        // Verify topological order when no cycles are detected
+        match dag.topological_order() {
+            Ok(order) => {
+                let mut pos = vec![0; num_nodes + 1];
+                for (idx, &node) in order.iter().enumerate() {
+                    if let NodeId::StreamTable(n) = node {
+                        pos[n as usize] = idx;
+                    }
+                }
+
+                // If acyclic, topological sort MUST enforce u -> v ordering
+                for &(u, v) in &edges {
+                    prop_assert!(pos[u] < pos[v], "Topological order violated or cyclic edge present: {} -> {}", u, v);
+                }
+            }
+            Err(_) => {
+                // If it evaluates as Err, then cycle truly exists.
+            }
         }
     }
 }
