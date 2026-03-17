@@ -22,6 +22,11 @@
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
 mod e2e;
+// P2.11: Shared TPC-H helpers (also used by e2e_tpch_dag_tests). The local
+// helper functions in this file are kept for now; a follow-up can replace
+// them with tpch:: references once the module is stable.
+#[allow(unused_imports)]
+mod tpch;
 
 use e2e::E2eDb;
 use std::time::Instant;
@@ -90,11 +95,25 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
 /// See plans/testing/TEST_SUITE_TPC_H-GAPS.md §T2 for the initial-population
 /// procedure.
 const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
-    // All queries — allowlist is not yet populated from an initial run.
-    // Remove this catch-all once the real skip set is known.
-    "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10", "q11", "q12", "q13", "q14",
-    "q15", "q16", "q17", "q18", "q19", "q20", "q21", "q22", "q01",
+    // q05, q07, q08, q09: multi-table joins produce DVM SQL that exceeds
+    // the Docker container's temp_file_limit (4 GB).
+    "q05", "q07", "q08", "q09",
 ];
+
+// ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
+//
+// When `TPCH_STRICT=1` is set, soft-skips become hard-fails:
+//   - Any unexpected skip (not in the respective allowlist) causes the
+//     test to fail immediately rather than accumulating in the skip list.
+//   - Useful for local debugging when you need zero tolerance for regressions.
+//
+// Usage:
+//   TPCH_STRICT=1 cargo test --test e2e_tpch_tests -- --ignored --nocapture
+fn strict_mode() -> bool {
+    std::env::var("TPCH_STRICT")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
 
 // ── Scale factor dimensions ────────────────────────────────────────────
 
@@ -558,7 +577,7 @@ async fn test_tpch_differential_correctness() {
     let queries = tpch_queries();
     let mut passed = 0usize;
     let mut skipped: Vec<(&str, String)> = Vec::new();
-    let failed: Vec<(&str, String)> = Vec::new(); // populated if we add soft-failure logic later
+    let mut failed: Vec<(&str, String)> = Vec::new(); // populated for invariant assertion errors
 
     for q in &queries {
         println!(
@@ -673,11 +692,15 @@ async fn test_tpch_differential_correctness() {
                 break 'cycles;
             }
 
-            // Assert the invariant — soft-fail for known DVM bugs
+            // Assert the invariant.
+            // Invariant violations are hard-failures (DVM correctness bugs),
+            // distinct from DVM engine errors that prevent refresh (which are
+            // soft-skips).  Populate `failed` so the final T2 guard can report
+            // them separately from known infrastructure skips.
             if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await {
                 let msg = e.lines().next().unwrap_or(&e).to_string();
-                println!("  WARN cycle {cycle} — {msg}");
-                skipped.push((q.name, format!("invariant cycle {cycle}: {msg}")));
+                println!("  FAIL cycle {cycle} — {msg}");
+                failed.push((q.name, format!("invariant cycle {cycle}: {msg}")));
                 dvm_ok = false;
                 break 'cycles;
             }
@@ -710,9 +733,10 @@ async fn test_tpch_differential_correctness() {
 
     println!("\n══════════════════════════════════════════════════════════");
     println!(
-        "  Results: {passed}/{} queries passed, {} skipped",
+        "  Results: {passed}/{} queries passed, {} skipped, {} failed",
         queries.len(),
-        skipped.len()
+        skipped.len(),
+        failed.len(),
     );
     if !skipped.is_empty() {
         println!("  Skipped (pg_trickle limitation):");
@@ -722,17 +746,19 @@ async fn test_tpch_differential_correctness() {
         }
     }
     if !failed.is_empty() {
-        println!("  FAILED (assertion errors):");
+        println!("  FAILED (assertion errors — correctness bugs):");
         for (name, reason) in &failed {
             println!("    {name}: {reason}");
         }
     }
     println!("══════════════════════════════════════════════════════════\n");
 
+    // P1.7: Hard-fail on invariant violations (distinct from DVM infra errors).
     assert!(
         failed.is_empty(),
-        "{} queries failed with assertion errors (not pg_trickle limitations)",
-        failed.len()
+        "{} queries failed with assertion errors (not pg_trickle limitations): {:?}",
+        failed.len(),
+        failed.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
     );
 
     // T2: Skip-set regression guard for DIFFERENTIAL mode.
@@ -748,6 +774,16 @@ async fn test_tpch_differential_correctness() {
          If intentional, add to the allowlist with an explanatory comment.",
         unexpected_skips
     );
+
+    // P3.15: TPCH_STRICT=1 — hard-fail on any skip whatsoever.
+    if strict_mode() {
+        assert!(
+            skipped.is_empty(),
+            "STRICT: {} queries skipped (zero tolerance in TPCH_STRICT mode): {:?}",
+            skipped.len(),
+            skipped.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        );
+    }
 }
 // ═══════════════════════════════════════════════════════════════════════
 // Phase 2: Cross-Query Consistency
@@ -902,10 +938,208 @@ async fn test_tpch_cross_query_consistency() {
             .await;
     }
 
+    // P0.3: Minimum surviving ST assertion — prevents silent complete deactivation.
+    // At least 50% of created STs must survive all cycles (i.e., 8+ if 17 are created).
+    let min_surviving = (created.len() / 2).max(1);
     println!(
-        "\n  Cross-query consistency: PASSED ✓ ({}/{} STs survived all cycles)\n",
+        "\n  Cross-query consistency: {}/{} STs survived all cycles{}\n",
         active.len(),
-        created.len()
+        created.len(),
+        if active.len() >= min_surviving {
+            " ✓"
+        } else {
+            " ✗"
+        },
+    );
+    assert!(
+        active.len() >= min_surviving,
+        "Cross-query consistency: only {}/{} STs survived all cycles \
+         (minimum required: {min_surviving}).\n\
+         Check for CDC fan-out bugs or cascade deactivation.",
+        active.len(),
+        created.len(),
+    );
+
+    // P3.15: TPCH_STRICT=1 — all created STs must survive all cycles.
+    if strict_mode() {
+        assert!(
+            active.len() == created.len(),
+            "STRICT: {}/{} STs survived — {} were deactivated during churn",
+            active.len(),
+            created.len(),
+            created.len() - active.len(),
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 2b: Standalone FULL Mode Correctness
+// ═══════════════════════════════════════════════════════════════════════
+//
+// P2.8: Creates each query in FULL mode only and asserts baseline + N
+// mutation cycles against ground truth.  This is distinct from
+// test_tpch_full_vs_differential (which validates FULL == DIFF) because
+// it directly validates FULL refresh output against the defining query —
+// catching correctness bugs in the FULL refresh path that happen to affect
+// both FULL and DIFFERENTIAL equally.
+//
+// Design:
+//   1. Create ST with '24h' schedule + FULL mode
+//   2. Assert baseline invariant (assert_tpch_invariant vs ground truth)
+//   3. For N cycles: RF1+RF2+RF3 → refresh → assert invariant
+//   4. Drop ST
+//
+// Uses the same DIFFERENTIAL_SKIP_ALLOWLIST for expected skips —
+// queries that are too large for the Docker temp_file_limit are expected
+// to fail in FULL mode for the same infrastructure reasons.
+
+#[tokio::test]
+#[ignore]
+async fn test_tpch_full_correctness() {
+    let sf = scale_factor();
+    let n_cycles = cycles();
+    println!("\n══════════════════════════════════════════════════════════");
+    println!("  TPC-H FULL Mode Correctness — SF={sf}, cycles={n_cycles}");
+    println!(
+        "  Orders: {}, Customers: {}, Suppliers: {}, Parts: {}",
+        sf_orders(),
+        sf_customers(),
+        sf_suppliers(),
+        sf_parts()
+    );
+    println!("  RF batch size: {} rows", rf_count());
+    println!("══════════════════════════════════════════════════════════\n");
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+
+    let t = Instant::now();
+    load_schema(&db).await;
+    load_data(&db).await;
+    println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
+
+    let queries = tpch_queries();
+    let mut passed = 0usize;
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+
+    for q in &queries {
+        println!(
+            "── {} (Tier {}) ──────────────────────────────",
+            q.name, q.tier
+        );
+
+        let st_name = format!("tpch_full_{}", q.name);
+        let create_result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', 'FULL')",
+                sql = q.sql,
+            ))
+            .await;
+
+        if let Err(e) = create_result {
+            let reason = e.to_string();
+            let short = reason.split(':').next_back().unwrap_or(&reason).trim();
+            println!("  SKIP — {short}");
+            skipped.push((q.name, reason));
+            continue;
+        }
+
+        // Baseline assertion against ground truth
+        let t = Instant::now();
+        if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, 0).await {
+            println!("  WARN baseline — {e}");
+            skipped.push((q.name, format!("baseline: {e}")));
+            let _ = db
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+                .await;
+            continue;
+        }
+        println!("  baseline — {:.0}ms ✓", t.elapsed().as_secs_f64() * 1000.0);
+
+        let mut full_ok = true;
+        'cycles: for cycle in 1..=n_cycles {
+            let ct = Instant::now();
+
+            let next_ok = max_orderkey(&db).await + 1;
+            apply_rf1(&db, next_ok).await;
+            apply_rf2(&db).await;
+            apply_rf3(&db).await;
+
+            db.execute("ANALYZE orders").await;
+            db.execute("ANALYZE lineitem").await;
+            db.execute("ANALYZE customer").await;
+
+            if let Err(e) = try_refresh_st(&db, &st_name).await {
+                let msg = e.lines().next().unwrap_or(&e).to_string();
+                println!("  WARN cycle {cycle} — FULL refresh error: {msg}");
+                skipped.push((q.name, format!("FULL refresh error cycle {cycle}: {msg}")));
+                full_ok = false;
+                break 'cycles;
+            }
+
+            if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await {
+                let msg = e.lines().next().unwrap_or(&e).to_string();
+                println!("  FAIL cycle {cycle} — {msg}");
+                // FULL mode invariant failure is always a hard error (not a known DVM limitation):
+                // FULL refresh re-executes the query from scratch, so any mismatch is a bug.
+                panic!("FULL mode correctness failure for {}: {e}", q.name);
+            }
+
+            log_progress(
+                q.name,
+                q.tier,
+                cycle,
+                n_cycles,
+                ct.elapsed().as_secs_f64() * 1000.0,
+            );
+
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM ANALYZE").await;
+        }
+
+        if full_ok {
+            passed += 1;
+        }
+
+        let _ = db
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+            .await;
+    }
+
+    println!("\n══════════════════════════════════════════════════════════");
+    println!(
+        "  Results: {passed}/{} queries passed, {} skipped",
+        queries.len(),
+        skipped.len()
+    );
+    if !skipped.is_empty() {
+        println!("  Skipped:");
+        for (name, reason) in &skipped {
+            let short = reason.split(':').next_back().unwrap_or(reason).trim();
+            println!("    {name}: {short}");
+        }
+    }
+    println!("══════════════════════════════════════════════════════════\n");
+
+    // Require at least as many FULL-mode passes as DIFFERENTIAL-mode passes.
+    let min_passing = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2;
+    assert!(
+        passed >= min_passing,
+        "FULL mode correctness: only {passed}/{} queries passed (minimum required: {min_passing}).\n\
+         Skipped: {:?}",
+        queries.len(),
+        skipped.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+    );
+
+    // T2-style guard: unexpected skips (not in DIFFERENTIAL allowlist) are regressions.
+    let unexpected: Vec<&str> = skipped
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !DIFFERENTIAL_SKIP_ALLOWLIST.contains(name))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "FULL MODE REGRESSION: queries newly skipped not in DIFFERENTIAL_SKIP_ALLOWLIST: {:?}",
+        unexpected
     );
 }
 
@@ -1084,9 +1318,32 @@ async fn test_tpch_full_vs_differential() {
         queries.len()
     );
 
+    // P0.2: Minimum threshold — must pass at least as many as the non-skipped set.
+    // With 5 known DIFFERENTIAL skips, at least 15/22 should pass.
+    let min_passing = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2; // -2 tolerance
     assert!(
-        passed > 0,
-        "Expected at least one TPC-H query to pass FULL vs DIFFERENTIAL comparison"
+        passed >= min_passing,
+        "FULL vs DIFFERENTIAL: only {passed}/{} queries passed (minimum required: {min_passing}).\n\
+         Expected at most {} skips (the known DIFFERENTIAL limitations).\n\
+         Skipped: {:?}",
+        queries.len(),
+        DIFFERENTIAL_SKIP_ALLOWLIST.len() + 2,
+        skipped,
+    );
+
+    // P1.4: T2-style regression guard — if a query not in the DIFFERENTIAL skip
+    // allowlist is skipped, a DVM regression has occurred.
+    let unexpected_full_skips: Vec<&str> = skipped
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !DIFFERENTIAL_SKIP_ALLOWLIST.contains(name))
+        .collect();
+    assert!(
+        unexpected_full_skips.is_empty(),
+        "FULL vs DIFFERENTIAL REGRESSION: queries newly skipped that are not in \
+         DIFFERENTIAL_SKIP_ALLOWLIST: {:?}\n\
+         If intentional, add to the allowlist with an explanatory comment.",
+        unexpected_full_skips
     );
 }
 
@@ -1370,9 +1627,16 @@ async fn test_tpch_performance_comparison() {
         queries.len()
     );
 
+    // P0.2: Minimum threshold — at least 15 queries must be benchmarked
+    // (22 queries minus the 5 known DIFFERENTIAL skips minus 2 tolerance).
+    let min_benchmarked = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2;
     assert!(
-        !results.is_empty(),
-        "Expected at least one TPC-H query to produce benchmark results"
+        results.len() >= min_benchmarked,
+        "T1-B Performance: only {}/{} queries benchmarked (minimum required: {min_benchmarked}).\n\
+         Skipped: {:?}",
+        results.len(),
+        queries.len(),
+        skipped,
     );
 }
 
@@ -1415,19 +1679,23 @@ async fn test_tpch_sustained_churn() {
     println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
 
     // Use a subset of queries that are known to work well with DIFFERENTIAL.
-    // q01 (agg), q03 (join+agg), q05 (multi-join+agg), q06 (filter+agg),
-    // q10 (join+agg), q14 (join+agg).
-    // NOTE: q12 excluded — it has a known DVM drift issue (CASE WHEN with
-    // IN-list predicate produces non-deterministic incremental results;
-    // already tracked as a known limitation in test_tpch_differential_correctness
-    // and test_tpch_full_vs_differential where it is explicitly skipped).
-    // NOTE: q05 excluded — it reliably exceeds temp_file_limit on every
-    // DIFFERENTIAL cycle (6-table wide join), generating ~28 s of I/O noise
-    // per cycle (44 failures over 50 cycles = ~1,200 s wasted). Replaced
-    // with q22 (customer × orders aggregate) which is clean and fast.
+    // Operator diversity covered:
+    //   q01 — scalar aggregate (no GROUP BY grouping keys)
+    //   q03 — 3-table join + GROUP BY aggregate
+    //   q04 — EXISTS subquery (orders with matching lineitem)
+    //   q06 — filter + single SUM aggregate (single-table)
+    //   q10 — 4-table join + GROUP BY aggregate
+    //   q14 — 2-table join + CASE aggregate (CASE WHEN path)
+    //   q22 — NOT EXISTS correlated subquery
+    // NOTE: q12 excluded — known DVM drift (CASE WHEN IN-list produces
+    // non-deterministic incremental results).
+    // NOTE: q05 excluded — reliably exceeds temp_file_limit (6-table join).
+    // P2.10: Added q04 to cover the EXISTS subquery operator path, which was
+    // previously untested in sustained churn.
     let churn_queries: Vec<(&str, &str)> = vec![
         ("q01", include_str!("tpch/queries/q01.sql")),
         ("q03", include_str!("tpch/queries/q03.sql")),
+        ("q04", include_str!("tpch/queries/q04.sql")),
         ("q06", include_str!("tpch/queries/q06.sql")),
         ("q10", include_str!("tpch/queries/q10.sql")),
         ("q14", include_str!("tpch/queries/q14.sql")),
@@ -1513,9 +1781,11 @@ async fn test_tpch_sustained_churn() {
             }
 
             // Report change buffer sizes
+            // P3.16: Use GREATEST(reltuples, 0) to avoid -1 from unanalyzed tables
+            // (PostgreSQL sets reltuples = -1 for tables not yet analyzed by VACUUM).
             let buf_total: i64 = db
                 .query_scalar(
-                    "SELECT COALESCE(SUM(c.reltuples), 0)::bigint \
+                    "SELECT COALESCE(SUM(GREATEST(c.reltuples, 0)), 0)::bigint \
                      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
                      WHERE n.nspname = 'pgtrickle_changes'",
                 )
@@ -1851,9 +2121,8 @@ async fn test_tpch_immediate_correctness() {
     );
 
     // T2: Skip-set regression guard for IMMEDIATE mode.
-    // NOTE: IMMEDIATE_SKIP_ALLOWLIST is currently fully permissive (all query
-    // names listed) until the real skip set is collected from a first run.
-    // See the comment on IMMEDIATE_SKIP_ALLOWLIST above for how to tighten it.
+    // T2-style regression guard for IMMEDIATE mode.
+    // If a query that isn't in IMMEDIATE_SKIP_ALLOWLIST skips here, hard-fail.
     let unexpected_imm_skips: Vec<&str> = skipped
         .iter()
         .map(|(name, _)| *name)
@@ -1903,11 +2172,14 @@ async fn test_tpch_immediate_rollback() {
     load_data(&db).await;
     println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
 
+    // P1.5: Replaced q05 (6-table join, reliably exceeds temp_file_limit at SF=0.01)
+    // with q14 (2-table join + CASE aggregate, fast and clean in IMMEDIATE mode).
+    // This ensures the rollback test covers 4 reliable queries instead of 3 effective ones.
     let rollback_queries: &[(&str, &str)] = &[
         ("q01", include_str!("tpch/queries/q01.sql")),
         ("q06", include_str!("tpch/queries/q06.sql")),
         ("q03", include_str!("tpch/queries/q03.sql")),
-        ("q05", include_str!("tpch/queries/q05.sql")),
+        ("q14", include_str!("tpch/queries/q14.sql")),
     ];
 
     let mut all_passed = true;
@@ -2180,6 +2452,7 @@ async fn test_tpch_differential_vs_immediate() {
     let queries = tpch_queries();
     let mut passed = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    let mut deadlocks: Vec<String> = Vec::new(); // P2.9: track lock-timeout events separately
 
     for q in &queries {
         let st_diff = format!("tpch_di_{}", q.name);
@@ -2257,10 +2530,16 @@ async fn test_tpch_differential_vs_immediate() {
             db.execute("ANALYZE customer").await;
 
             // Explicit refresh for DIFFERENTIAL; IMMEDIATE is already current.
+            // P2.9: Distinguish lock-timeout (deadlock) from other DVM errors.
             if let Err(e) = try_refresh_st(&db, &st_diff).await {
                 let msg = e.lines().next().unwrap_or(&e).to_string();
-                println!("  WARN cycle {cycle} DIFF refresh — {msg}");
-                skipped.push(q.name.to_string());
+                if msg.contains("lock timeout") || msg.contains("canceling statement due to lock") {
+                    println!("  WARN cycle {cycle} DIFF refresh — lock timeout/deadlock: {msg}");
+                    deadlocks.push(format!("{} cycle-{cycle}", q.name));
+                } else {
+                    println!("  WARN cycle {cycle} DIFF refresh — {msg}");
+                    skipped.push(q.name.to_string());
+                }
                 mode_ok = false;
                 break 'cyc;
             }
@@ -2333,18 +2612,40 @@ async fn test_tpch_differential_vs_immediate() {
     }
 
     println!("\n══════════════════════════════════════════════════════════");
+    if !deadlocks.is_empty() {
+        println!("  Lock-timeout / deadlock events ({}):", deadlocks.len());
+        for d in &deadlocks {
+            println!("    {d}");
+        }
+    }
     if !skipped.is_empty() {
         println!("  Skipped / diverged: {}", skipped.join(", "));
     }
     println!(
-        "  DIFFERENTIAL vs IMMEDIATE: {passed}/{} queries agreed ✓\n",
+        "  DIFFERENTIAL vs IMMEDIATE: {passed}/{} queries agreed ✓",
         queries.len()
     );
+    if !deadlocks.is_empty() {
+        println!(
+            "  NOTE: {} deadlock event(s) detected — consider serialising DIFF+IMM \
+             refreshes to avoid lock contention (see plan item P2.9)",
+            deadlocks.len()
+        );
+    }
     println!("══════════════════════════════════════════════════════════\n");
 
+    // P0.2: Minimum threshold — at least 10 queries must agree between DIFF and IMM.
+    // This test is operationally complex (known deadlocks for q08, mode divergence
+    // for q01/q13), so 10 is a conservative lower bound.
     assert!(
-        passed > 0,
-        "Expected at least one TPC-H query to agree between DIFFERENTIAL and IMMEDIATE"
+        passed >= 10,
+        "DIFFERENTIAL vs IMMEDIATE: only {passed}/{} queries agreed \
+         (minimum required: 10).\n\
+         Deadlocks: {:?}\n\
+         Diverged/skipped: {:?}",
+        queries.len(),
+        deadlocks,
+        skipped,
     );
 }
 
@@ -2520,5 +2821,171 @@ async fn test_tpch_single_row_mutations() {
         "Single-row mutation correctness failed for {}/{} queries",
         single_row_queries.len() - skipped.len() - passed,
         single_row_queries.len() - skipped.len(),
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_tpch_immediate_savepoint_rollback() {
+    let sf = scale_factor();
+    println!("\n══════════════════════════════════════════════════════════");
+    println!("  TPC-H IMMEDIATE Savepoint Rollback Correctness — SF={sf}");
+    println!("══════════════════════════════════════════════════════════\n");
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+
+    let t = std::time::Instant::now();
+    load_schema(&db).await;
+    load_data(&db).await;
+    println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
+
+    let rollback_queries: &[(&str, &str)] = &[
+        ("q01", include_str!("tpch/queries/q01.sql")),
+        ("q06", include_str!("tpch/queries/q06.sql")),
+        ("q14", include_str!("tpch/queries/q14.sql")),
+    ];
+
+    let mut all_passed = true;
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+
+    for (name, sql) in rollback_queries {
+        println!("── {name} ──────────────────────────────────────────");
+
+        let st_name = format!("tpch_sp_rb_{name}");
+
+        let create_sql = format!(
+            "SELECT pgtrickle.create_stream_table('{}', $${}$$, NULL, 'IMMEDIATE')",
+            st_name, sql
+        );
+        if let Err(e) = db.try_execute(&create_sql).await {
+            let reason = e.to_string();
+            let short = reason.split(':').next_back().unwrap_or(&reason).trim();
+            println!("  SKIP (create) — {}", short);
+            skipped.push((name, reason));
+            continue;
+        }
+
+        if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 0).await {
+            println!("  SKIP (baseline) — {e}");
+            skipped.push((name, format!("baseline: {e}")));
+            let drop_sql = format!("SELECT pgtrickle.drop_stream_table('{}')", st_name);
+            let _ = db.try_execute(&drop_sql).await;
+            continue;
+        }
+
+        let count_sql = format!("SELECT count(*) FROM public.{}", st_name);
+        let pre_count: i64 = db.query_scalar(&count_sql).await;
+        println!("  baseline ✓ (rows: {pre_count})");
+
+        {
+            let next_ok = max_orderkey(&db).await + 1;
+            let rf1_sql = substitute_rf(RF1_SQL, next_ok);
+            let rf2_sql = substitute_rf(RF2_SQL, 0);
+
+            let mut txn = db.pool.begin().await.expect("begin txn");
+
+            let mut rf_err = false;
+            for stmt in rf1_sql.split(';') {
+                let stmt = stmt.trim();
+                let has_sql = stmt
+                    .lines()
+                    .any(|l| !l.trim().is_empty() && !l.trim().starts_with("--"));
+                if !has_sql {
+                    continue;
+                }
+                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                    let err_str = e.to_string();
+                    let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
+                    println!("  SKIP RF1 — trigger error: {}", short);
+                    rf_err = true;
+                    break;
+                }
+            }
+
+            if rf_err {
+                let _ = txn.rollback().await;
+                continue;
+            }
+
+            let mid_count1: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(pre_count);
+            println!("  RF1 (INSERT) mid-txn rows: {mid_count1}");
+
+            sqlx::query("SAVEPOINT my_sp")
+                .execute(&mut *txn)
+                .await
+                .expect("savepoint");
+
+            for stmt in rf2_sql.split(';') {
+                let stmt = stmt.trim();
+                let has_sql = stmt
+                    .lines()
+                    .any(|l| !l.trim().is_empty() && !l.trim().starts_with("--"));
+                if !has_sql {
+                    continue;
+                }
+                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                    let err_str = e.to_string();
+                    let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
+                    println!("  SKIP RF2 — trigger error: {}", short);
+                    rf_err = true;
+                    break;
+                }
+            }
+
+            if rf_err {
+                let _ = txn.rollback().await;
+                continue;
+            }
+
+            let mid_count2: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(mid_count1);
+            println!("  RF2 (DELETE) mid-sp rows: {mid_count2}");
+
+            sqlx::query("ROLLBACK TO SAVEPOINT my_sp")
+                .execute(&mut *txn)
+                .await
+                .expect("rollback to sp");
+            let mid_count3: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(mid_count2);
+            println!("  POST-ROLLBACK-TO-SP rows: {mid_count3} (should be {mid_count1})");
+
+            if mid_count1 != mid_count3 {
+                println!(
+                    "  FAIL SAVEPOINT ROLLBACK: expected {} got {}",
+                    mid_count1, mid_count3
+                );
+                all_passed = false;
+            }
+
+            txn.commit().await.expect("txn commit");
+
+            if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 1).await {
+                println!("  FAIL FINAL COMMIT invariant — {e}");
+                all_passed = false;
+            } else {
+                println!("  commit ✓");
+            }
+        }
+
+        let drop_sql = format!("SELECT pgtrickle.drop_stream_table('{}')", st_name);
+        let _ = db.try_execute(&drop_sql).await;
+    }
+
+    if !skipped.is_empty() {
+        println!("\n  Skipped queries:");
+        for (q, r) in &skipped {
+            println!("    {:4} : {}", q, r);
+        }
+    }
+    assert!(
+        all_passed,
+        "One or more invariants failed after savepoint rollback/commit!"
     );
 }
