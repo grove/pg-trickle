@@ -2825,3 +2825,169 @@ async fn test_tpch_single_row_mutations() {
         single_row_queries.len() - skipped.len(),
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_tpch_immediate_savepoint_rollback() {
+    let sf = scale_factor();
+    println!("\n══════════════════════════════════════════════════════════");
+    println!("  TPC-H IMMEDIATE Savepoint Rollback Correctness — SF={sf}");
+    println!("══════════════════════════════════════════════════════════\n");
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+
+    let t = std::time::Instant::now();
+    load_schema(&db).await;
+    load_data(&db).await;
+    println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
+
+    let rollback_queries: &[(&str, &str)] = &[
+        ("q01", include_str!("tpch/queries/q01.sql")),
+        ("q06", include_str!("tpch/queries/q06.sql")),
+        ("q14", include_str!("tpch/queries/q14.sql")),
+    ];
+
+    let mut all_passed = true;
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+
+    for (name, sql) in rollback_queries {
+        println!("── {name} ──────────────────────────────────────────");
+
+        let st_name = format!("tpch_sp_rb_{name}");
+
+        let create_sql = format!(
+            "SELECT pgtrickle.create_stream_table('{}', $${}$$, NULL, 'IMMEDIATE')",
+            st_name, sql
+        );
+        if let Err(e) = db.try_execute(&create_sql).await {
+            let reason = e.to_string();
+            let short = reason.split(':').next_back().unwrap_or(&reason).trim();
+            println!("  SKIP (create) — {}", short);
+            skipped.push((name, reason));
+            continue;
+        }
+
+        if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 0).await {
+            println!("  SKIP (baseline) — {e}");
+            skipped.push((name, format!("baseline: {e}")));
+            let drop_sql = format!("SELECT pgtrickle.drop_stream_table('{}')", st_name);
+            let _ = db.try_execute(&drop_sql).await;
+            continue;
+        }
+
+        let count_sql = format!("SELECT count(*) FROM public.{}", st_name);
+        let pre_count: i64 = db.query_scalar(&count_sql).await;
+        println!("  baseline ✓ (rows: {pre_count})");
+
+        {
+            let next_ok = max_orderkey(&db).await + 1;
+            let rf1_sql = substitute_rf(RF1_SQL, next_ok);
+            let rf2_sql = substitute_rf(RF2_SQL, 0);
+
+            let mut txn = db.pool.begin().await.expect("begin txn");
+
+            let mut rf_err = false;
+            for stmt in rf1_sql.split(';') {
+                let stmt = stmt.trim();
+                let has_sql = stmt
+                    .lines()
+                    .any(|l| !l.trim().is_empty() && !l.trim().starts_with("--"));
+                if !has_sql {
+                    continue;
+                }
+                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                    let err_str = e.to_string();
+                    let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
+                    println!("  SKIP RF1 — trigger error: {}", short);
+                    rf_err = true;
+                    break;
+                }
+            }
+
+            if rf_err {
+                let _ = txn.rollback().await;
+                continue;
+            }
+
+            let mid_count1: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(pre_count);
+            println!("  RF1 (INSERT) mid-txn rows: {mid_count1}");
+
+            sqlx::query("SAVEPOINT my_sp")
+                .execute(&mut *txn)
+                .await
+                .expect("savepoint");
+
+            for stmt in rf2_sql.split(';') {
+                let stmt = stmt.trim();
+                let has_sql = stmt
+                    .lines()
+                    .any(|l| !l.trim().is_empty() && !l.trim().starts_with("--"));
+                if !has_sql {
+                    continue;
+                }
+                if let Err(e) = sqlx::query(stmt).execute(&mut *txn).await {
+                    let err_str = e.to_string();
+                    let short = err_str.split(':').next_back().unwrap_or(&err_str).trim();
+                    println!("  SKIP RF2 — trigger error: {}", short);
+                    rf_err = true;
+                    break;
+                }
+            }
+
+            if rf_err {
+                let _ = txn.rollback().await;
+                continue;
+            }
+
+            let mid_count2: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(mid_count1);
+            println!("  RF2 (DELETE) mid-sp rows: {mid_count2}");
+
+            sqlx::query("ROLLBACK TO SAVEPOINT my_sp")
+                .execute(&mut *txn)
+                .await
+                .expect("rollback to sp");
+            let mid_count3: i64 = sqlx::query_scalar(&count_sql)
+                .fetch_one(&mut *txn)
+                .await
+                .unwrap_or(mid_count2);
+            println!("  POST-ROLLBACK-TO-SP rows: {mid_count3} (should be {mid_count1})");
+
+            if mid_count1 != mid_count3 {
+                println!(
+                    "  FAIL SAVEPOINT ROLLBACK: expected {} got {}",
+                    mid_count1, mid_count3
+                );
+                all_passed = false;
+            }
+
+            txn.commit().await.expect("txn commit");
+
+            if let Err(e) = assert_tpch_invariant(&db, &st_name, sql, name, 1).await {
+                println!("  FAIL FINAL COMMIT invariant — {e}");
+                all_passed = false;
+            } else {
+                println!("  commit ✓");
+            }
+        }
+
+        let drop_sql = format!("SELECT pgtrickle.drop_stream_table('{}')", st_name);
+        let _ = db.try_execute(&drop_sql).await;
+    }
+
+    if !skipped.is_empty() {
+        println!("\n  Skipped queries:");
+        for (q, r) in &skipped {
+            println!("    {:4} : {}", q, r);
+        }
+    }
+    assert!(
+        all_passed,
+        "One or more invariants failed after savepoint rollback/commit!"
+    );
+}

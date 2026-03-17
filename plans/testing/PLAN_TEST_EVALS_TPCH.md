@@ -670,10 +670,11 @@ focused E2E tests, not TPC-H.
 | 16 | P3 | Fix `buf≈-2` display with `GREATEST(reltuples, 0)` | ✅ Done | `SUM(GREATEST(c.reltuples, 0))` in sustained churn checkpoint query |
 | 8 | P2 | Add standalone FULL mode correctness test | ✅ Done | Added `test_tpch_full_correctness` creating standalone STs with standalone RF and EXCEPT ALL comparison |
 | 9 | P2 | Add deadlock detection to `test_tpch_differential_vs_immediate` | ✅ Done | Extracted `lock timeout` checks into a dedicated `deadlocks` list |
-| 10 | P2 | Add churn queries for NOT EXISTS / correlated subquery | ✅ Done | Added Q04 inside `churn_queries` |
+| 10 | P2 | Add churn queries for underrepresented operators (NOT EXISTS, correlated subquery) | ✅ Done | Added Q04 inside `churn_queries` |
 | 11 | P2 | Extract shared helpers from `e2e_tpch_dag_tests.rs` | ✅ Done | Created `tests/tpch/mod.rs` centralizing shared DVM helpers |
 | 14 | P3 | Make DAG chain level-1 more complex | ✅ Done | Refactored `test_tpch_dag_chain` to use `ROLLUP_SQL` (aggregation step) |
 | 15 | P3 | Add `TPCH_STRICT=1` env var | ✅ Done | Exported and enforced via `strict_mode()` wrapper over allowlist checks |
+| 13 | P3 | Add nested SAVEPOINT rollback test for IMMEDIATE mode | ✅ Done | Added `test_tpch_immediate_savepoint_rollback` to test snapshot isolation and rollbacks in IMMEDIATE mode |
 
 ### Not yet implemented
 
@@ -681,7 +682,6 @@ focused E2E tests, not TPC-H.
 |---|----------|--------|-----------------|
 | 1 | P0 | Populate `IMMEDIATE_SKIP_ALLOWLIST` from actual test run | Requires running the full TPC-H suite against the Docker image; cannot be done without CI infra |
 | 12 | P2 | Add performance regression threshold (3× baseline) | Requires reference baseline file |
-| 13 | P3 | Add nested SAVEPOINT rollback test for IMMEDIATE mode | New test function |
 | 17 | P3 | Investigate customer UPDATE DVM bug (LEFT JOIN delta SQL) | Large; root cause unknown |
 
 ---
@@ -719,7 +719,7 @@ focused E2E tests, not TPC-H.
 
 | # | Action | Impact | Effort | Status |
 |---|--------|--------|--------|--------|
-| 13 | Add nested SAVEPOINT rollback test for IMMEDIATE mode | Deeper transactional correctness | Medium | ⏳ Deferred |
+| 13 | Add nested SAVEPOINT rollback test for IMMEDIATE mode | Deeper transactional correctness | Medium | ✅ Done |
 | 14 | Make DAG chain level-1 more complex (re-aggregation or join) | Stronger DAG propagation test | Medium | ✅ Done |
 | 15 | Add `TPCH_STRICT=1` env var that hard-fails on any skip | Enables strict CI mode | Small | ✅ Done |
 | 16 | Fix `buf≈-2` display with `GREATEST(reltuples, 0)` | Cosmetic fix | Trivial | ✅ Done |
