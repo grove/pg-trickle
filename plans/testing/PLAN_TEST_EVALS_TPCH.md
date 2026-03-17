@@ -713,7 +713,7 @@ focused E2E tests, not TPC-H.
 | 9 | Add deadlock detection to `test_tpch_differential_vs_immediate` | q08 deadlock classified properly | Medium | ✅ Done |
 | 10 | Add churn queries for underrepresented operators (NOT EXISTS, correlated subquery) | Churn covers more operator types | Small | ✅ Done |
 | 11 | Extract shared helpers from `e2e_tpch_dag_tests.rs` to avoid duplication | Code hygiene | Small | ✅ Done |
-| 12 | Add performance regression threshold (3× baseline) | Catches performance regressions | Medium | ⏳ Deferred |
+| 12 | Add performance regression threshold (3× baseline) | Catches performance regressions | Medium | ⏳ Deferred (Decided not to do this at this time, may revisit later) |
 
 ### P3 — Low (backlog)
 

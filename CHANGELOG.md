@@ -78,6 +78,16 @@ that systematically exercise DAG, circular, snapshot, and topology scenarios.
 - Clippy `unusual_byte_groupings` lint warnings silenced across test and source
   files to keep `just lint` clean.
 
+#### Internal Code Quality: TPC-H Test Suite Hardening
+
+Completed a comprehensive hardening pass of the TPC-H integration test suite:
+- **`TPCH_STRICT=1` enforcement** — The test harness now fails immediately if queries are unexpectedly skipped, ensuring regressions are caught early.
+- **Savepoint Isolation Testing** — Added nested transaction commit/rollback tests (`test_tpch_immediate_savepoint_rollback`) for `IMMEDIATE` mode to ensure proper snapshot isolation boundaries.
+- **Sustained Churn Validations** — Added `test_tpch_sustained_churn` to continuously run 10,000+ random CDC mutations and sequential refreshes to confirm absolute DVM stability.
+- **LEFT JOIN Correctness** — Re-enabled customer market-segment rotations in TPC-H RF3. Verified that the "column c_custkey does not exist" bug triggered by left-table target-key updates is officially resolved.
+- **DAG Chain Testing** — Expanded `test_tpch_dag_chain` into complex multi-level re-aggregations.
+
+
 #### Internal Code Quality: Comprehensive Unit Test Suite
 
 Completed a full hardening pass of the unit test suite, bringing all Priority 0/1/2/3 items to done:
