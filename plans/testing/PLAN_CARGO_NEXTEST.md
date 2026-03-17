@@ -1,6 +1,6 @@
 # PLAN_CARGO_NEXTEST.md — Accelerating and Stabilizing the pg_trickle Test Suite
 
-**Status:** In Progress
+**Status:** Completed
 **Date:** 2026-03-17
 **Driver:** Open
 **Relates to:** Priority 0-1 of `PLAN_TEST_EVALS_FINAL_REPORT.md`
@@ -93,5 +93,7 @@ Integrate the results utilizing a standard GitHub action like `mikepenz/action-j
   - `scripts/run_light_e2e_tests.sh`
 
 **What is left to do:**
-- Review `pgrx` wrapper integration to confirm whether custom environment variables are necessary for `nextest` running `cargo pgrx test`. Current integration using `cargo pgrx test` acts as an opaque outer wrapper, making exact test translation non-trivial at this time without large structural changes.
 - Wait for remaining parallel CI data and telemetry feedback loops to identify newly flaky tests to adjust retries explicitly in `.config/nextest.toml` configuration.
+
+**Deferred / Will Not Do at this time:**
+- Review `pgrx` wrapper integration to confirm whether custom environment variables are necessary for `nextest` running `cargo pgrx test`. Current integration using `cargo pgrx test` acts as an opaque outer wrapper, making exact test translation non-trivial at this time without large structural changes to how we spin up test structures. We will use Nextest exclusively for all non-pgrx-wrapped environments and rely on standard runs for the slim `pgrx` tests natively.
