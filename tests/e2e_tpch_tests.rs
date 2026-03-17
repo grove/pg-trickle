@@ -22,6 +22,11 @@
 //! Prerequisites: `./tests/build_e2e_image.sh`
 
 mod e2e;
+// P2.11: Shared TPC-H helpers (also used by e2e_tpch_dag_tests). The local
+// helper functions in this file are kept for now; a follow-up can replace
+// them with tpch:: references once the module is stable.
+#[allow(unused_imports)]
+mod tpch;
 
 use e2e::E2eDb;
 use std::time::Instant;
@@ -95,6 +100,21 @@ const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
     "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10", "q11", "q12", "q13", "q14",
     "q15", "q16", "q17", "q18", "q19", "q20", "q21", "q22", "q01",
 ];
+
+// ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
+//
+// When `TPCH_STRICT=1` is set, soft-skips become hard-fails:
+//   - Any unexpected skip (not in the respective allowlist) causes the
+//     test to fail immediately rather than accumulating in the skip list.
+//   - Useful for local debugging when you need zero tolerance for regressions.
+//
+// Usage:
+//   TPCH_STRICT=1 cargo test --test e2e_tpch_tests -- --ignored --nocapture
+fn strict_mode() -> bool {
+    std::env::var("TPCH_STRICT")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
 
 // ── Scale factor dimensions ────────────────────────────────────────────
 
@@ -755,6 +775,16 @@ async fn test_tpch_differential_correctness() {
          If intentional, add to the allowlist with an explanatory comment.",
         unexpected_skips
     );
+
+    // P3.15: TPCH_STRICT=1 — hard-fail on any skip whatsoever.
+    if strict_mode() {
+        assert!(
+            skipped.is_empty(),
+            "STRICT: {} queries skipped (zero tolerance in TPCH_STRICT mode): {:?}",
+            skipped.len(),
+            skipped.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        );
+    }
 }
 // ═══════════════════════════════════════════════════════════════════════
 // Phase 2: Cross-Query Consistency
@@ -929,6 +959,188 @@ async fn test_tpch_cross_query_consistency() {
          Check for CDC fan-out bugs or cascade deactivation.",
         active.len(),
         created.len(),
+    );
+
+    // P3.15: TPCH_STRICT=1 — all created STs must survive all cycles.
+    if strict_mode() {
+        assert!(
+            active.len() == created.len(),
+            "STRICT: {}/{} STs survived — {} were deactivated during churn",
+            active.len(),
+            created.len(),
+            created.len() - active.len(),
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 2b: Standalone FULL Mode Correctness
+// ═══════════════════════════════════════════════════════════════════════
+//
+// P2.8: Creates each query in FULL mode only and asserts baseline + N
+// mutation cycles against ground truth.  This is distinct from
+// test_tpch_full_vs_differential (which validates FULL == DIFF) because
+// it directly validates FULL refresh output against the defining query —
+// catching correctness bugs in the FULL refresh path that happen to affect
+// both FULL and DIFFERENTIAL equally.
+//
+// Design:
+//   1. Create ST with '24h' schedule + FULL mode
+//   2. Assert baseline invariant (assert_tpch_invariant vs ground truth)
+//   3. For N cycles: RF1+RF2+RF3 → refresh → assert invariant
+//   4. Drop ST
+//
+// Uses the same DIFFERENTIAL_SKIP_ALLOWLIST for expected skips —
+// queries that are too large for the Docker temp_file_limit are expected
+// to fail in FULL mode for the same infrastructure reasons.
+
+#[tokio::test]
+#[ignore]
+async fn test_tpch_full_correctness() {
+    let sf = scale_factor();
+    let n_cycles = cycles();
+    println!("\n══════════════════════════════════════════════════════════");
+    println!("  TPC-H FULL Mode Correctness — SF={sf}, cycles={n_cycles}");
+    println!(
+        "  Orders: {}, Customers: {}, Suppliers: {}, Parts: {}",
+        sf_orders(),
+        sf_customers(),
+        sf_suppliers(),
+        sf_parts()
+    );
+    println!("  RF batch size: {} rows", rf_count());
+    println!("══════════════════════════════════════════════════════════\n");
+
+    let db = E2eDb::new_bench().await.with_extension().await;
+
+    let t = Instant::now();
+    load_schema(&db).await;
+    load_data(&db).await;
+    println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
+
+    let queries = tpch_queries();
+    let mut passed = 0usize;
+    let mut skipped: Vec<(&str, String)> = Vec::new();
+
+    for q in &queries {
+        println!(
+            "── {} (Tier {}) ──────────────────────────────",
+            q.name, q.tier
+        );
+
+        let st_name = format!("tpch_full_{}", q.name);
+        let create_result = db
+            .try_execute(&format!(
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${sql}$$, '24h', 'FULL')",
+                sql = q.sql,
+            ))
+            .await;
+
+        if let Err(e) = create_result {
+            let reason = e.to_string();
+            let short = reason.split(':').next_back().unwrap_or(&reason).trim();
+            println!("  SKIP — {short}");
+            skipped.push((q.name, reason));
+            continue;
+        }
+
+        // Baseline assertion against ground truth
+        let t = Instant::now();
+        if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, 0).await {
+            println!("  WARN baseline — {e}");
+            skipped.push((q.name, format!("baseline: {e}")));
+            let _ = db
+                .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+                .await;
+            continue;
+        }
+        println!("  baseline — {:.0}ms ✓", t.elapsed().as_secs_f64() * 1000.0);
+
+        let mut full_ok = true;
+        'cycles: for cycle in 1..=n_cycles {
+            let ct = Instant::now();
+
+            let next_ok = max_orderkey(&db).await + 1;
+            apply_rf1(&db, next_ok).await;
+            apply_rf2(&db).await;
+            apply_rf3(&db).await;
+
+            db.execute("ANALYZE orders").await;
+            db.execute("ANALYZE lineitem").await;
+            db.execute("ANALYZE customer").await;
+
+            if let Err(e) = try_refresh_st(&db, &st_name).await {
+                let msg = e.lines().next().unwrap_or(&e).to_string();
+                println!("  WARN cycle {cycle} — FULL refresh error: {msg}");
+                skipped.push((q.name, format!("FULL refresh error cycle {cycle}: {msg}")));
+                full_ok = false;
+                break 'cycles;
+            }
+
+            if let Err(e) = assert_tpch_invariant(&db, &st_name, q.sql, q.name, cycle).await {
+                let msg = e.lines().next().unwrap_or(&e).to_string();
+                println!("  FAIL cycle {cycle} — {msg}");
+                // FULL mode invariant failure is always a hard error (not a known DVM limitation):
+                // FULL refresh re-executes the query from scratch, so any mismatch is a bug.
+                panic!("FULL mode correctness failure for {}: {e}", q.name);
+            }
+
+            log_progress(
+                q.name,
+                q.tier,
+                cycle,
+                n_cycles,
+                ct.elapsed().as_secs_f64() * 1000.0,
+            );
+
+            db.execute("CHECKPOINT").await;
+            db.execute("VACUUM ANALYZE").await;
+        }
+
+        if full_ok {
+            passed += 1;
+        }
+
+        let _ = db
+            .try_execute(&format!("SELECT pgtrickle.drop_stream_table('{st_name}')"))
+            .await;
+    }
+
+    println!("\n══════════════════════════════════════════════════════════");
+    println!(
+        "  Results: {passed}/{} queries passed, {} skipped",
+        queries.len(),
+        skipped.len()
+    );
+    if !skipped.is_empty() {
+        println!("  Skipped:");
+        for (name, reason) in &skipped {
+            let short = reason.split(':').next_back().unwrap_or(reason).trim();
+            println!("    {name}: {short}");
+        }
+    }
+    println!("══════════════════════════════════════════════════════════\n");
+
+    // Require at least as many FULL-mode passes as DIFFERENTIAL-mode passes.
+    let min_passing = queries.len() - DIFFERENTIAL_SKIP_ALLOWLIST.len() - 2;
+    assert!(
+        passed >= min_passing,
+        "FULL mode correctness: only {passed}/{} queries passed (minimum required: {min_passing}).\n\
+         Skipped: {:?}",
+        queries.len(),
+        skipped.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+    );
+
+    // T2-style guard: unexpected skips (not in DIFFERENTIAL allowlist) are regressions.
+    let unexpected: Vec<&str> = skipped
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !DIFFERENTIAL_SKIP_ALLOWLIST.contains(name))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "FULL MODE REGRESSION: queries newly skipped not in DIFFERENTIAL_SKIP_ALLOWLIST: {:?}",
+        unexpected
     );
 }
 
@@ -1468,19 +1680,23 @@ async fn test_tpch_sustained_churn() {
     println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
 
     // Use a subset of queries that are known to work well with DIFFERENTIAL.
-    // q01 (agg), q03 (join+agg), q05 (multi-join+agg), q06 (filter+agg),
-    // q10 (join+agg), q14 (join+agg).
-    // NOTE: q12 excluded — it has a known DVM drift issue (CASE WHEN with
-    // IN-list predicate produces non-deterministic incremental results;
-    // already tracked as a known limitation in test_tpch_differential_correctness
-    // and test_tpch_full_vs_differential where it is explicitly skipped).
-    // NOTE: q05 excluded — it reliably exceeds temp_file_limit on every
-    // DIFFERENTIAL cycle (6-table wide join), generating ~28 s of I/O noise
-    // per cycle (44 failures over 50 cycles = ~1,200 s wasted). Replaced
-    // with q22 (customer × orders aggregate) which is clean and fast.
+    // Operator diversity covered:
+    //   q01 — scalar aggregate (no GROUP BY grouping keys)
+    //   q03 — 3-table join + GROUP BY aggregate
+    //   q04 — EXISTS subquery (orders with matching lineitem)
+    //   q06 — filter + single SUM aggregate (single-table)
+    //   q10 — 4-table join + GROUP BY aggregate
+    //   q14 — 2-table join + CASE aggregate (CASE WHEN path)
+    //   q22 — NOT EXISTS correlated subquery
+    // NOTE: q12 excluded — known DVM drift (CASE WHEN IN-list produces
+    // non-deterministic incremental results).
+    // NOTE: q05 excluded — reliably exceeds temp_file_limit (6-table join).
+    // P2.10: Added q04 to cover the EXISTS subquery operator path, which was
+    // previously untested in sustained churn.
     let churn_queries: Vec<(&str, &str)> = vec![
         ("q01", include_str!("tpch/queries/q01.sql")),
         ("q03", include_str!("tpch/queries/q03.sql")),
+        ("q04", include_str!("tpch/queries/q04.sql")),
         ("q06", include_str!("tpch/queries/q06.sql")),
         ("q10", include_str!("tpch/queries/q10.sql")),
         ("q14", include_str!("tpch/queries/q14.sql")),
@@ -2238,6 +2454,7 @@ async fn test_tpch_differential_vs_immediate() {
     let queries = tpch_queries();
     let mut passed = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    let mut deadlocks: Vec<String> = Vec::new(); // P2.9: track lock-timeout events separately
 
     for q in &queries {
         let st_diff = format!("tpch_di_{}", q.name);
@@ -2315,10 +2532,16 @@ async fn test_tpch_differential_vs_immediate() {
             db.execute("ANALYZE customer").await;
 
             // Explicit refresh for DIFFERENTIAL; IMMEDIATE is already current.
+            // P2.9: Distinguish lock-timeout (deadlock) from other DVM errors.
             if let Err(e) = try_refresh_st(&db, &st_diff).await {
                 let msg = e.lines().next().unwrap_or(&e).to_string();
-                println!("  WARN cycle {cycle} DIFF refresh — {msg}");
-                skipped.push(q.name.to_string());
+                if msg.contains("lock timeout") || msg.contains("canceling statement due to lock") {
+                    println!("  WARN cycle {cycle} DIFF refresh — lock timeout/deadlock: {msg}");
+                    deadlocks.push(format!("{} cycle-{cycle}", q.name));
+                } else {
+                    println!("  WARN cycle {cycle} DIFF refresh — {msg}");
+                    skipped.push(q.name.to_string());
+                }
                 mode_ok = false;
                 break 'cyc;
             }
@@ -2391,13 +2614,26 @@ async fn test_tpch_differential_vs_immediate() {
     }
 
     println!("\n══════════════════════════════════════════════════════════");
+    if !deadlocks.is_empty() {
+        println!("  Lock-timeout / deadlock events ({}):", deadlocks.len());
+        for d in &deadlocks {
+            println!("    {d}");
+        }
+    }
     if !skipped.is_empty() {
         println!("  Skipped / diverged: {}", skipped.join(", "));
     }
     println!(
-        "  DIFFERENTIAL vs IMMEDIATE: {passed}/{} queries agreed ✓\n",
+        "  DIFFERENTIAL vs IMMEDIATE: {passed}/{} queries agreed ✓",
         queries.len()
     );
+    if !deadlocks.is_empty() {
+        println!(
+            "  NOTE: {} deadlock event(s) detected — consider serialising DIFF+IMM \
+             refreshes to avoid lock contention (see plan item P2.9)",
+            deadlocks.len()
+        );
+    }
     println!("══════════════════════════════════════════════════════════\n");
 
     // P0.2: Minimum threshold — at least 10 queries must agree between DIFF and IMM.
@@ -2407,8 +2643,10 @@ async fn test_tpch_differential_vs_immediate() {
         passed >= 10,
         "DIFFERENTIAL vs IMMEDIATE: only {passed}/{} queries agreed \
          (minimum required: 10).\n\
+         Deadlocks: {:?}\n\
          Diverged/skipped: {:?}",
         queries.len(),
+        deadlocks,
         skipped,
     );
 }

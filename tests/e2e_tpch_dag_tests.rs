@@ -2,7 +2,7 @@
 //!
 //! Creates a two-level DAG:
 //!   Level 0: `tpch_dag_q01` — Q01 (aggregate over `lineitem`), DIFFERENTIAL
-//!   Level 1: `tpch_dag_derived` — filtered projection of Q01 output, DIFFERENTIAL
+//!   Level 1: `tpch_dag_rollup` — re-aggregate Q01 output by l_returnflag (DIFFERENTIAL)
 //!
 //! Applies RF mutations to `lineitem`, refreshes in topological order
 //! (level-0 first, level-1 second), and asserts both STs match their
@@ -16,113 +16,16 @@
 //! **TPC-H Fair Use:** Derived from TPC-H specification; not a benchmark result.
 
 mod e2e;
+mod tpch;
 
 use e2e::E2eDb;
 use std::time::Instant;
+use tpch::{
+    RF1_SQL, RF2_SQL, RF3_SQL, cycles, load_data, load_schema, max_orderkey, rf_count,
+    scale_factor, substitute_rf,
+};
 
-// ── Shared helpers (duplicated from e2e_tpch_tests.rs) ────────────────
-
-fn scale_factor() -> f64 {
-    std::env::var("TPCH_SCALE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.01)
-}
-
-fn cycles() -> usize {
-    std::env::var("TPCH_CYCLES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
-}
-
-fn sf_orders() -> usize {
-    ((scale_factor() * 150_000.0) as usize).max(1_500)
-}
-fn sf_customers() -> usize {
-    ((scale_factor() * 15_000.0) as usize).max(150)
-}
-fn sf_suppliers() -> usize {
-    ((scale_factor() * 1_000.0) as usize).max(10)
-}
-fn sf_parts() -> usize {
-    ((scale_factor() * 20_000.0) as usize).max(200)
-}
-fn rf_count() -> usize {
-    let sf = scale_factor();
-    let orders = ((sf * 150_000.0) as usize).max(1_500);
-    (orders / 100).max(10)
-}
-
-const SCHEMA_SQL: &str = include_str!("tpch/schema.sql");
-const DATAGEN_SQL: &str = include_str!("tpch/datagen.sql");
-const RF1_SQL: &str = include_str!("tpch/rf1.sql");
-const RF2_SQL: &str = include_str!("tpch/rf2.sql");
-const RF3_SQL: &str = include_str!("tpch/rf3.sql");
-
-fn substitute_sf(sql: &str) -> String {
-    sql.replace("__SF_ORDERS__", &sf_orders().to_string())
-        .replace("__SF_CUSTOMERS__", &sf_customers().to_string())
-        .replace("__SF_SUPPLIERS__", &sf_suppliers().to_string())
-        .replace("__SF_PARTS__", &sf_parts().to_string())
-}
-
-fn substitute_rf(sql: &str, next_orderkey: usize) -> String {
-    sql.replace("__RF_COUNT__", &rf_count().to_string())
-        .replace("__NEXT_ORDERKEY__", &next_orderkey.to_string())
-        .replace("__SF_CUSTOMERS__", &sf_customers().to_string())
-        .replace("__SF_PARTS__", &sf_parts().to_string())
-        .replace("__SF_SUPPLIERS__", &sf_suppliers().to_string())
-}
-
-async fn load_schema(db: &E2eDb) {
-    for stmt in SCHEMA_SQL.split(';') {
-        let stmt = stmt.trim();
-        let has_sql = stmt.lines().any(|l| {
-            let l = l.trim();
-            !l.is_empty() && !l.starts_with("--")
-        });
-        if has_sql {
-            db.execute(stmt).await;
-        }
-    }
-}
-
-async fn load_data(db: &E2eDb) {
-    let sql = substitute_sf(DATAGEN_SQL);
-    for stmt in sql.split(';') {
-        let stmt = stmt.trim();
-        let has_sql = stmt.lines().any(|l| {
-            let l = l.trim();
-            !l.is_empty() && !l.starts_with("--")
-        });
-        if has_sql {
-            db.execute(stmt).await;
-        }
-    }
-}
-
-async fn max_orderkey(db: &E2eDb) -> usize {
-    let max: i64 = db
-        .query_scalar("SELECT COALESCE(MAX(o_orderkey), 0)::bigint FROM orders")
-        .await;
-    max as usize
-}
-
-/// Execute multi-statement SQL, returning the first error encountered.
-async fn exec_sql_stmts(db: &E2eDb, sql: &str) -> Result<(), String> {
-    for stmt in sql.split(';') {
-        let stmt = stmt.trim();
-        let has_sql = stmt.lines().any(|l| {
-            let l = l.trim();
-            !l.is_empty() && !l.starts_with("--")
-        });
-        if has_sql {
-            db.try_execute(stmt).await.map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
+// ── DAG-test-local helpers ──────────────────────────────────────────────
 
 /// Refresh a stream table, returning an error string instead of panicking.
 async fn try_refresh(db: &E2eDb, st_name: &str) -> Result<(), String> {
@@ -204,12 +107,24 @@ async fn assert_invariant(
     Ok(())
 }
 
+// P2.11: exec_sql_stmts is now a wrapper around the shared tpch::try_exec_sql.
+async fn exec_sql_stmts(db: &E2eDb, sql: &str) -> Result<(), String> {
+    tpch::try_exec_sql(db, sql).await
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// T6a — Basic Two-Level DAG Chain
+// T6a — Two-Level DAG Chain (with re-aggregation at level-1)
 // ═══════════════════════════════════════════════════════════════════════
 //
-// Level 0: tpch_dag_q01  — Q01 aggregate over lineitem
-// Level 1: tpch_dag_derived — SELECT * FROM tpch_dag_q01 WHERE l_returnflag = 'R'
+// Level 0: tpch_dag_q01   — Q01 aggregate over lineitem (by returnflag + linestatus)
+// Level 1: tpch_dag_rollup — Re-aggregate Q01 output by l_returnflag only
+//           (collapses the l_linestatus dimension), computing total charge
+//           and total order count per flag.
+//
+// P3.14: Changed from a simple WHERE filter (SELECT * WHERE l_returnflag = 'R')
+// to a GROUP BY re-aggregation.  This exercises a more complex DAG propagation
+// path where level-1 must apply its own delta (sum of sums) rather than just
+// projecting level-0 deltas directly.
 //
 // After each RF cycle: refresh level-0 first, then level-1.
 // Both STs must match their defining queries at all checkpoints.
@@ -231,25 +146,25 @@ async fn test_tpch_dag_chain() {
     println!("  Data loaded in {:.1}s\n", t.elapsed().as_secs_f64());
 
     const Q01_SQL: &str = include_str!("tpch/queries/q01.sql");
-    const DERIVED_SQL: &str = "SELECT l_returnflag, l_linestatus, sum_qty, \
-        sum_base_price, sum_disc_price, sum_charge, \
-        avg_qty, avg_price, avg_disc, count_order \
-        FROM tpch_dag_q01 WHERE l_returnflag = 'R'";
 
-    // Level-0 ground truth (same as Q01 but pre-filtered — used for level-1 invariant)
-    const DERIVED_GROUND_TRUTH: &str = "SELECT l_returnflag, l_linestatus, \
-            SUM(l_quantity) AS sum_qty, \
-            SUM(l_extendedprice) AS sum_base_price, \
-            SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price, \
-            SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge, \
-            AVG(l_quantity) AS avg_qty, \
-            AVG(l_extendedprice) AS avg_price, \
-            AVG(l_discount) AS avg_disc, \
-            COUNT(*) AS count_order \
+    // Level-1: re-aggregate Q01 output by l_returnflag only (collapsing l_linestatus).
+    // This is more complex than a simple filter — it requires DVM to propagate
+    // a sum-of-sums delta from the level-0 aggregate into a new aggregate.
+    const ROLLUP_SQL: &str = "SELECT l_returnflag, \
+            SUM(sum_charge) AS total_charge, \
+            SUM(count_order)::bigint AS total_orders \
+         FROM tpch_dag_q01 \
+         GROUP BY l_returnflag \
+         ORDER BY l_returnflag";
+
+    // Ground truth for level-1: compute directly from lineitem (no intermediate ST).
+    const ROLLUP_GROUND_TRUTH: &str = "SELECT l_returnflag, \
+            SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS total_charge, \
+            COUNT(*)::bigint AS total_orders \
          FROM lineitem \
          WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL '90 days' \
-           AND l_returnflag = 'R' \
-         GROUP BY l_returnflag, l_linestatus";
+         GROUP BY l_returnflag \
+         ORDER BY l_returnflag";
 
     // Create level-0 ST
     if let Err(e) = db
@@ -263,49 +178,41 @@ async fn test_tpch_dag_chain() {
     }
     println!("  tpch_dag_q01 created ✓");
 
-    // Create level-1 ST (references level-0)
+    // Create level-1 ST (references level-0 — re-aggregation)
     if let Err(e) = db
         .try_execute(&format!(
-            "SELECT pgtrickle.create_stream_table('tpch_dag_derived', $${DERIVED_SQL}$$, '1m', 'DIFFERENTIAL')"
+            "SELECT pgtrickle.create_stream_table('tpch_dag_rollup', $${ROLLUP_SQL}$$, '1m', 'DIFFERENTIAL')"
         ))
         .await
     {
-        println!("  SKIP — derived level-1 create failed: {e}");
+        println!("  SKIP — rollup level-1 create failed: {e}");
         let _ = db
             .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_q01')")
             .await;
         return;
     }
-    println!("  tpch_dag_derived created ✓");
+    println!("  tpch_dag_rollup created ✓");
 
     // Baseline assertions
     if let Err(e) = assert_invariant(&db, "tpch_dag_q01", Q01_SQL, "dag_q01", 0).await {
-        println!("  WARN baseline dag_q01 — {e}");
         let _ = db
-            .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_derived')")
+            .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_rollup')")
             .await;
         let _ = db
             .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_q01')")
             .await;
-        panic!("DAG chain baseline failed: {e}");
+        panic!("DAG chain baseline (level-0) failed: {e}");
     }
-    if let Err(e) = assert_invariant(
-        &db,
-        "tpch_dag_derived",
-        DERIVED_GROUND_TRUTH,
-        "dag_derived",
-        0,
-    )
-    .await
+    if let Err(e) =
+        assert_invariant(&db, "tpch_dag_rollup", ROLLUP_GROUND_TRUTH, "dag_rollup", 0).await
     {
-        println!("  WARN baseline dag_derived — {e}");
         let _ = db
-            .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_derived')")
+            .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_rollup')")
             .await;
         let _ = db
             .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_q01')")
             .await;
-        panic!("DAG chain baseline failed: {e}");
+        panic!("DAG chain baseline (level-1 rollup) failed: {e}");
     }
     println!("  baseline ✓\n");
 
@@ -334,25 +241,25 @@ async fn test_tpch_dag_chain() {
         try_refresh(&db, "tpch_dag_q01")
             .await
             .unwrap_or_else(|e| panic!("DAG Q01 refresh cycle {cycle}: {e}"));
-        try_refresh(&db, "tpch_dag_derived")
+        try_refresh(&db, "tpch_dag_rollup")
             .await
-            .unwrap_or_else(|e| panic!("DAG derived refresh cycle {cycle}: {e}"));
+            .unwrap_or_else(|e| panic!("DAG rollup refresh cycle {cycle}: {e}"));
 
         // Assert level-0
         assert_invariant(&db, "tpch_dag_q01", Q01_SQL, "dag_q01", cycle)
             .await
             .unwrap_or_else(|e| panic!("dag_q01 invariant cycle {cycle}: {e}"));
 
-        // Assert level-1 (ground truth: Q01 filtered directly from lineitem)
+        // Assert level-1 (ground truth derived directly from lineitem)
         assert_invariant(
             &db,
-            "tpch_dag_derived",
-            DERIVED_GROUND_TRUTH,
-            "dag_derived",
+            "tpch_dag_rollup",
+            ROLLUP_GROUND_TRUTH,
+            "dag_rollup",
             cycle,
         )
         .await
-        .unwrap_or_else(|e| panic!("dag_derived invariant cycle {cycle}: {e}"));
+        .unwrap_or_else(|e| panic!("dag_rollup invariant cycle {cycle}: {e}"));
 
         db.execute("VACUUM").await;
 
@@ -364,7 +271,7 @@ async fn test_tpch_dag_chain() {
 
     // Clean up
     let _ = db
-        .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_derived')")
+        .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_rollup')")
         .await;
     let _ = db
         .try_execute("SELECT pgtrickle.drop_stream_table('tpch_dag_q01')")
