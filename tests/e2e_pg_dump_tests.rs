@@ -33,35 +33,55 @@ async fn test_pg_dump_and_restore() {
             "postgres",
             "-F",
             "c", // Custom format is best for pg_restore
-            "-f",
-            "/tmp/dump.backup"
-        ])
-        ])
- "/tmp/dump.backup"
-at is best to execute pg_dump inside at is best to execute pg_ertat is best to.status.success(), "pg_dump failed: {:?}", String::from_utf8_lossy(&dump_output.stderr));
-
-    //    //    //    //    //    //    //    //    in    //    //    //    //    //    //    //    //    in    //    //    //  yt    //    //    //    //    //    //    //    //    in    //    //    //       //    //    TE DATABASE restored_db").await;
-
-    // 3. pg_restore into the     // 3. pg
-    let restore_output = Command::new("docke    let restore_output = Command::new("docke    let resttai    let restore_output = Commre    let restore_output = Command::new("des    let restore_output = Command::new("dockdb    let restore"-    let restore_ousa    let restore_output =dump.backup"
+                                   /dump.backup"
         ])
         .output()
-                        t                tore inside container");
+        .e        .e        .e  te        .e    e container");
     
-    // We don'    // We don'    // Wess because sometimes pg_restore emits warnings about    // We don'    // We don' //    // Wean check if it at least exited with some info. Wait, single trans won't fail if the schema exists
-    // actually it might. Let's just check the status or error.
-    if !restore_output.status.success() {
-        println!("pg_restore stderr: {:?}", String::from_utf8_lossy(&restore_output.stderr));
-    }
+    assert    assert   .status.success(), "pg_dump failed: {:?}    assert    assert   .status.success(), "pg_dump fai // 2. Drop the original schema to simulate starting fresh
+    // Create the DB using docker exec to avoid transaction wrapper     // Create the DB using docker exec to avoid transaction wrapper     ["e    // Create thid    // Create the DB ure    // Create the DB using docker exDATABASE restore    // Create the DB uut           .expect("Failed to execute psql inside container");
+    assert!(cre    assert!(cre    assert!(cr),    assert!(cre    assert!(cre    assert:from_utf8_lossy(&create_db_output.stderr));
 
-    // Now connect to the restored_db
-    // E2eDb has the connection pool bound to 'postgres' db. So we create a new pool to 'restored_db'
-    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    le t    let rts    let rest          let rest    let rest    let rest    let rest    lpl    let rc.dump_    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    let rest    let rest    let rest    let rest    lpl    lshould be set up!
-    // Let's modify the source table and see if ST refreshes correctly!
+                n 1 Validate Restoring Pre-Data
+    let restore_    let restore_    lew("docker")
+                             "exec",
+            container_id,
+                                      "-U",
+            "postgres",
+            "-d",
+            "restored_db",
+            "--sectio         a"            "--stmp/dump.backup"
+        ])
+        .output()
+        .expect("Fa   d         .expect("Fa   d         .expect("Fa   d );
+    
+    // 4. Section 2 Validate Restoring Data
+    let restore_data = Command::new("docker")
+        .args(&[
+            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "            "           5. Connect to restored DB to manually heal metadata buffer
+    let restored_conn_str = db.connection_string().replace("/postgres?", "    let restored_conn_str = db.connection_stripo    let restored_conn_str = db.connection_stringti    let restored_conn_str = db.conn::time::Duration::from_secs(    let restored_conn_str = db.connection_connect(&restored_conn_str    let restored;
+    let restored_conn_strcr    let restored_conn_strcr    let restored_conn_strcr    let rssing.
+    // Call the manual r    // Call the manual r    // Call the manual r    // Call the manual r ")
+                                              t
+        .unwrap();
+        
+    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6. Restore post-data to load    // 6 container");
+        
+    // Validate the stream table has data!
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public.dump_test_st")
+        .fetch_one(&restored_pool)
+        .await
+        .expect("Failed to query restored stream table");
+    
+    assert_eq!(count, 2, "Data should be preserved");
+
+    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /    /d)
     sqlx::query("INSERT INTO source VALUES (3, 'three')")
         .execute(&restored_pool)
         .await
-        .unwr        .unwr        .unwr        .uck        .unwr        .unwr        .unw)")
+        .unwrap();
+
+    sqlx::query("SELE    sqlx::query("es    sqlm_table('dump_test_st')")
         .execute(&restored_pool)
         .await
         .unwrap();
