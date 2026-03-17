@@ -116,7 +116,7 @@ async fn test_circular_monotone_cycle_converges() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_reach_a', \
          query => $$SELECT DISTINCT e.src, e.dst FROM cyc_edges e \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT e.src, rb.dst \
            FROM cyc_edges e \
            INNER JOIN cyc_reach_b rb ON e.dst = rb.src$$)",
@@ -127,7 +127,7 @@ async fn test_circular_monotone_cycle_converges() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_reach_b', \
          query => $$SELECT DISTINCT e.src, e.dst FROM cyc_edges e \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT ra.src, e.dst \
            FROM cyc_reach_a ra \
            INNER JOIN cyc_edges e ON ra.dst = e.src$$)",
@@ -413,7 +413,7 @@ async fn test_circular_convergence_records_iterations() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_conv_a', \
          query => $$SELECT id, val FROM cyc_conv_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT b.id, b.val FROM cyc_conv_b b$$)",
     )
     .await;
@@ -421,7 +421,7 @@ async fn test_circular_convergence_records_iterations() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_conv_b', \
          query => $$SELECT id, val FROM cyc_conv_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT a.id, a.val FROM cyc_conv_a a$$)",
     )
     .await;
@@ -569,7 +569,7 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_a', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
@@ -577,7 +577,7 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT a.id, a.val FROM cyc_drop_a a$$)",
     )
     .await;
