@@ -2378,95 +2378,104 @@ fn iterate_to_fixpoint(
 
     // Seed per-member row counts from the current DB state.
     //
-    // Convergence is detected by comparing each member's row count before
-    // and after each pass.  We cannot use CDC change buffers here because
-    // SCC peers are stream tables — they never write to the
-    // `pgtrickle_changes.*` buffers, so DIFFERENTIAL refresh would find
-    // nothing to merge and silently skip re-evaluation on every pass after
-    // the first, leaving the fixpoint stuck at the seed values.
+    // Convergence is detected by comparing each member's count(*) before
+    // and after each pass.  Counts are always read OUTSIDE sub-transactions
+    // (after subtxn.commit()) so that pgrx's nested Spi::get_one context
+    // sees the fully committed state and not a potentially stale snapshot.
     let mut prev_row_counts: HashMap<i64, i64> = member_ids
         .iter()
         .map(|&id| (id, get_st_row_count(id).unwrap_or(0)))
         .collect();
 
     for iteration in 0..max_iter {
-        let subtxn = SubTransaction::begin();
-        let mut total_changes: i64 = 0;
         let mut iteration_ok = true;
+        let mut any_refreshed = false;
 
-        for &pgt_id in &member_ids {
-            let st = match load_st_by_id(pgt_id) {
-                Some(st) => st,
-                None => continue,
-            };
+        {
+            let subtxn = SubTransaction::begin();
 
-            if st.status != StStatus::Active && st.status != StStatus::Initializing {
-                continue;
-            }
-
-            // Skip gated sources.
-            if is_any_source_gated(pgt_id, &gated_oids) {
-                log_gated_skip(&st);
-                continue;
-            }
-
-            // Check retry backoff.
-            let retry = retry_states.entry(pgt_id).or_default();
-            if retry.is_in_backoff(now_ms) {
-                emit_stale_alert_if_needed(&st);
-                continue;
-            }
-
-            // Always use FULL refresh in the fixpoint loop.
-            //
-            // SCC peers are stream tables with no CDC change buffers.
-            // DIFFERENTIAL refresh short-circuits when the change-buffer
-            // query returns no rows — which is always the case inside a
-            // cyclic SCC where the only upstream changes come from sibling
-            // stream tables.  FULL refresh re-executes the defining query
-            // against the current DB state each pass, which is the correct
-            // semantics for monotone fixpoint iteration.
-            let action = RefreshAction::Full;
-
-            let result = execute_scheduled_refresh(&st, action, tick_watermark);
-
-            match result {
-                RefreshOutcome::Success => {
-                    // Convergence metric: net row-count change vs previous pass.
-                    // For monotone queries (the only kind admitted into cyclic
-                    // SCCs) rows only accumulate, so abs() is always the delta.
-                    let new_count = get_st_row_count(pgt_id).unwrap_or(0);
-                    let old_count = *prev_row_counts.get(&pgt_id).unwrap_or(&0);
-                    total_changes += (new_count - old_count).abs();
-                    prev_row_counts.insert(pgt_id, new_count);
-
-                    let retry = retry_states.entry(pgt_id).or_default();
-                    retry.reset();
-                }
-                RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
-                    log!(
-                        "pg_trickle: SCC fixpoint aborted — {}.{} failed at iteration {}",
-                        st.pgt_schema,
-                        st.pgt_name,
-                        iteration + 1,
-                    );
-                    iteration_ok = false;
-                    break;
-                }
-            }
-        }
-
-        if !iteration_ok {
-            subtxn.rollback();
-            // Record failure for retry tracking on all members.
             for &pgt_id in &member_ids {
+                let st = match load_st_by_id(pgt_id) {
+                    Some(st) => st,
+                    None => continue,
+                };
+
+                if st.status != StStatus::Active && st.status != StStatus::Initializing {
+                    continue;
+                }
+
+                // Skip gated sources.
+                if is_any_source_gated(pgt_id, &gated_oids) {
+                    log_gated_skip(&st);
+                    continue;
+                }
+
+                // Check retry backoff.
                 let retry = retry_states.entry(pgt_id).or_default();
-                retry.record_failure(retry_policy, now_ms);
+                if retry.is_in_backoff(now_ms) {
+                    emit_stale_alert_if_needed(&st);
+                    continue;
+                }
+
+                // Always use FULL refresh in the fixpoint loop.
+                //
+                // SCC peers are stream tables with no CDC change buffers.
+                // DIFFERENTIAL refresh short-circuits when the change-buffer
+                // query returns no rows — which is always the case inside a
+                // cyclic SCC where the only upstream changes come from sibling
+                // stream tables.  FULL refresh re-executes the defining query
+                // against the current DB state each pass, which is the correct
+                // semantics for monotone fixpoint iteration.
+                let action = RefreshAction::Full;
+
+                let result = execute_scheduled_refresh(&st, action, tick_watermark);
+
+                match result {
+                    RefreshOutcome::Success => {
+                        any_refreshed = true;
+                        let retry = retry_states.entry(pgt_id).or_default();
+                        retry.reset();
+                    }
+                    RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                        log!(
+                            "pg_trickle: SCC fixpoint aborted — {}.{} failed at iteration {}",
+                            st.pgt_schema,
+                            st.pgt_name,
+                            iteration + 1,
+                        );
+                        iteration_ok = false;
+                        break;
+                    }
+                }
             }
-            return;
+
+            if !iteration_ok {
+                subtxn.rollback();
+                // Record failure for retry tracking on all members.
+                for &pgt_id in &member_ids {
+                    let retry = retry_states.entry(pgt_id).or_default();
+                    retry.record_failure(retry_policy, now_ms);
+                }
+                return;
+            }
+
+            subtxn.commit();
+        }
+        // subtxn is committed; now read row counts in the outer transaction
+        // where the full sub-transaction contents are visible.
+
+        if !any_refreshed {
+            // All members skipped (backoff/gating) — cannot assess convergence.
+            continue;
         }
 
-        subtxn.commit();
+        let mut total_changes: i64 = 0;
+        for &pgt_id in &member_ids {
+            let new_count = get_st_row_count(pgt_id).unwrap_or(0);
+            let old_count = prev_row_counts.get(&pgt_id).copied().unwrap_or(0);
+            total_changes += (new_count - old_count).abs();
+            prev_row_counts.insert(pgt_id, new_count);
+        }
 
         if total_changes == 0 {
             log!(
