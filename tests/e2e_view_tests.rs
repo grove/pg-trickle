@@ -490,6 +490,11 @@ async fn test_view_inline_view_replaced() {
         needs_reinit,
         "ST should be marked for reinit after view replacement"
     );
+
+    // After reinit, it should match the new definition
+    db.refresh_st("vi_st_repl").await;
+    db.assert_st_matches_query("vi_st_repl", "SELECT id, val FROM vi_repl_view")
+        .await;
 }
 
 #[tokio::test]
@@ -562,11 +567,8 @@ async fn test_view_inline_truncate_base() {
     db.execute("TRUNCATE vi_trunc_base").await;
     db.refresh_st("vi_st_trunc").await;
 
-    assert_eq!(
-        db.count("public.vi_st_trunc").await,
-        0,
-        "TRUNCATE on base table should propagate through inlined view"
-    );
+    db.assert_st_matches_query("vi_st_trunc", "SELECT id, val FROM vi_trunc_view")
+        .await;
 }
 
 // ── Column Renamed View ────────────────────────────────────────────────

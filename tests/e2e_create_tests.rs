@@ -77,22 +77,11 @@ async fn test_create_with_aggregation() {
     )
     .await;
 
-    let count = db.count("public.customer_totals").await;
-    assert_eq!(count, 3);
-
-    let total_1: i64 = db
-        .query_scalar(
-            "SELECT total_amount::bigint FROM public.customer_totals WHERE customer_id = 1",
-        )
-        .await;
-    assert_eq!(total_1, 300); // 100 + 200
-
-    let total_3: i64 = db
-        .query_scalar(
-            "SELECT total_amount::bigint FROM public.customer_totals WHERE customer_id = 3",
-        )
-        .await;
-    assert_eq!(total_3, 500);
+    db.assert_st_matches_query(
+        "public.customer_totals",
+        "SELECT customer_id, SUM(amount) AS total_amount FROM sales GROUP BY customer_id",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -116,13 +105,11 @@ async fn test_create_with_join() {
     )
     .await;
 
-    let count = db.count("public.customer_orders").await;
-    assert_eq!(count, 3, "Join should produce 3 rows");
-
-    let alice_orders: i64 = db
-        .query_scalar("SELECT count(*) FROM public.customer_orders WHERE name = 'Alice'")
-        .await;
-    assert_eq!(alice_orders, 2);
+    db.assert_st_matches_query(
+        "public.customer_orders",
+        "SELECT c.name, o.amount FROM customers c JOIN orders o ON c.id = o.cust_id",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -731,9 +718,11 @@ async fn test_cross_join_full_mode() {
     )
     .await;
 
-    // 2 × 3 = 6 cross-product rows
-    let count = db.count("public.cj_full").await;
-    assert_eq!(count, 6, "CROSS JOIN should produce cartesian product");
+    db.assert_st_matches_query(
+        "public.cj_full",
+        "SELECT cj_a.x, cj_b.y FROM cj_a CROSS JOIN cj_b",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -757,16 +746,20 @@ async fn test_cross_join_differential_mode() {
     .await;
 
     // Initial: 1 × 2 = 2
-    assert_eq!(db.count("public.cjd_st").await, 2);
+    db.assert_st_matches_query(
+        "public.cjd_st",
+        "SELECT cjd_a.x, cjd_b.y FROM cjd_a CROSS JOIN cjd_b",
+    )
+    .await;
 
     // Insert another row in cjd_a → should add 2 more rows (1 × 2)
     db.execute("INSERT INTO cjd_a VALUES (2, 'a2')").await;
     db.refresh_st("cjd_st").await;
-    assert_eq!(
-        db.count("public.cjd_st").await,
-        4,
-        "After inserting 1 row into left, cross join should add 2 rows"
-    );
+    db.assert_st_matches_query(
+        "public.cjd_st",
+        "SELECT cjd_a.x, cjd_b.y FROM cjd_a CROSS JOIN cjd_b",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -794,11 +787,11 @@ async fn test_nested_cross_join() {
     .await;
 
     // 1 × 2 × 3 = 6 rows
-    assert_eq!(
-        db.count("public.ncj_st").await,
-        6,
-        "Nested CROSS JOIN should produce full cartesian product"
-    );
+    db.assert_st_matches_query(
+        "public.ncj_st",
+        "SELECT ncj_a.x, ncj_b.y, ncj_c.z FROM ncj_a CROSS JOIN ncj_b CROSS JOIN ncj_c",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -823,11 +816,11 @@ async fn test_cross_join_with_where_clause() {
     .await;
 
     // Cartesian product: (10,15),(10,25),(20,25) — only 3 rows where x < y
-    assert_eq!(
-        db.count("public.cjw_st").await,
-        3,
-        "CROSS JOIN with WHERE should filter the cartesian product"
-    );
+    db.assert_st_matches_query(
+        "public.cjw_st",
+        "SELECT cjw_a.x, cjw_b.y FROM cjw_a CROSS JOIN cjw_b WHERE cjw_a.x < cjw_b.y",
+    )
+    .await;
 }
 
 // ── AUTO Mode Tests ────────────────────────────────────────────────────

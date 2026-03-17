@@ -546,11 +546,11 @@ impl E2eDb {
         let dq_upper = defining_query.to_uppercase();
         let set_op_filter = if has_dual_counts {
             if dq_upper.contains("INTERSECT ALL") {
-                " WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
+                ", generate_series(1, LEAST(__pgt_count_l, __pgt_count_r)) WHERE LEAST(__pgt_count_l, __pgt_count_r) > 0"
             } else if dq_upper.contains("INTERSECT") {
                 " WHERE __pgt_count_l > 0 AND __pgt_count_r > 0"
             } else if dq_upper.contains("EXCEPT ALL") {
-                " WHERE __pgt_count_l > __pgt_count_r"
+                ", generate_series(1, __pgt_count_l - __pgt_count_r) WHERE __pgt_count_l > __pgt_count_r"
             } else if dq_upper.contains("EXCEPT") {
                 " WHERE __pgt_count_l > 0 AND __pgt_count_r = 0"
             } else {
@@ -564,20 +564,20 @@ impl E2eDb {
             format!(
                 "SELECT NOT EXISTS ( \
                     (SELECT {cast_cols} FROM {st_table}{set_op_filter} \
-                     EXCEPT \
+                     EXCEPT ALL \
                      SELECT {cast_cols} FROM ({defining_query}) __pgt_dq) \
                     UNION ALL \
                     (SELECT {cast_cols} FROM ({defining_query}) __pgt_dq2 \
-                     EXCEPT \
+                     EXCEPT ALL \
                      SELECT {cast_cols} FROM {st_table}{set_op_filter}) \
                 )"
             )
         } else {
             format!(
                 "SELECT NOT EXISTS ( \
-                    (SELECT {raw_cols} FROM {st_table}{set_op_filter} EXCEPT ({defining_query})) \
+                    (SELECT {raw_cols} FROM {st_table}{set_op_filter} EXCEPT ALL ({defining_query})) \
                     UNION ALL \
-                    (({defining_query}) EXCEPT SELECT {raw_cols} FROM {st_table}{set_op_filter}) \
+                    (({defining_query}) EXCEPT ALL SELECT {raw_cols} FROM {st_table}{set_op_filter}) \
                 )"
             )
         };
