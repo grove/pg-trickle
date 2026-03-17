@@ -1,10 +1,10 @@
 # PLAN: Multi-Table Delta Batching (B-3)
 
-## Status: 🔴 NOT STARTED
+## Status: 🟡 IN PROGRESS
 
 **Goal:** `v0.9.0` (Milestone 3)
 **Remaining to do:** 
-- [ ] **B3-3:** Write property-based correctness proofs for simultaneous multi-source changes (diamond-flow scenarios) using Z-set weight aggregation (`SUM(weight)`) instead of `DISTINCT ON` deduplication.
+- [x] **B3-3:** Write property-based correctness proofs for simultaneous multi-source changes (diamond-flow scenarios) using Z-set weight aggregation (`SUM(weight)`) instead of `DISTINCT ON` deduplication.
 - [ ] **B3-2:** Implement merged-delta generation logic in DVM parser using `GROUP BY __pgt_row_id, SUM(weight)`.
 - [ ] **B3-1:** Implement intra-query delta branch pruning (skip `UNION ALL` branches entirely when a source has zero changes).
 
@@ -14,15 +14,11 @@
 
 When a stream table joins multiple tables (A, B, C) and multiple tables change in the same scheduler cycle, `pg_trickle` currently evaluates the DVM delta query using potentially separate passes or constructs unions with empty branches.
 
-This plan outlines the steps to merge these passes into one optimized query plan, while mathematically preserving correctnesThis plan outlines the steps to merge these passes into one optimiz`DThis plan outlines the steps to merge tle A and Table B in the exact same transaction, and a stream tablThis plan outlines tle canonical row might be corrected twice (once from the ΔA path, once from the ΔB path). 
+This plan outlines the steps to merge these passes into one optimized query plan, while mathematically preserving correctnesThis plan outlines the steps to merge these passes into one optimiz`DISTINCT ON`
 
-Previously, it was proposed to use `DISTINCT ON` for cross-delta deduplication. **This causes silent data corruption.** `DISTINCT ON (__pgt_row_id)` discards subsequent corrections that might offset each other.
+If an update hits both Table If an update hits both Tab saIf an update hits both Table Ifble joins them, a single canonical row might be corrected twice (once from the ΔA path, once from the ΔB path). 
 
-Instead, we must use **Z-set weight aggregation**. We aggregate the combined deltas:
-```sql
-merged_delta AS (
-  SELECT 'A' AS src, * FROM delta_A   UNION ALL
-  SELECT 'B' AS src, * FROM delta_B
+Previously, it was proposed to use `DISTINCT ON` for cross-delta deduplication. **This causes silent data corruptiPreviously, it was proposed to use `DISTINCT ON` for cross-delta deduplication. **This causes silent data corrupstPreviously, it was proposed to use `DISTINCT ON` for cross-delta deduplication. **This causes silent data corruptiPreviously, a_APr UNPreviouslySELECT 'B' AS src, * FROM delta_B
 ),
 final_delta AS (
   SELECT __pgt_row_id, SUM(weight) as weight, <other_cols>
@@ -34,7 +30,16 @@ final_delta AS (
 
 ## Implementation Sequence
 
-### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-based C### 1. Property-bDel### 1. Property-based C### 1. Property-based C### 1. Properhe true multi-source delta engine in `src/dvm/diff.rs`.
+### 1. Property-based Correctness Proofs (B3-3) `✅ Done`
+*What:* Write extensive property tests simulating diamond flows (where changes hit multiple branches of a join simultaneously).
+*Why:* To formally prove that `SUM(weight)*Why:* To formally prove that `SUM(weight)*Why:* To formally prove that `SUM(weihat `DISTINCT ON` introduced.
+*Where:* `tests/e2e_diamond_tests.rs` (Added `test_diamond_flow_simultaneous_multi_source_update`).
+
+### 2. Merged-Delta Generation (B3-2) `🔴 Not Started`
+*What:* Implement the true multi-source delta engine in `src/dvm/diff.rs`.
 *Why:* Generates the `UNION ALL` + `GROUP BY` logic dynamically.
-*Where:* `DiffEngine::diff_node(*Where:* `DiffEngine::diff_node(*Where:* `DiffEngine::diff_node(*Where:* `DiffEnginmize the *Where:* `DiffEn ALL` statements. If 3 tables are in a join but on*Where:* `DiffEngine::di skip genera*in*Where:* `DiffEel*Where:* `DiffEngine::diff_node(*Where:* `DiffEngine::diftgreSQL planner time and execution latency.
-*W*W*W*W*W*W*W*W*W*W*W*W*Wchecking `any_changes` per buffer.
+*Where:* `DiffEngine::diff_node()`.
+
+### 3. Intra-query Delta-Branch Pruning (B3-1) `🔴 Not Started`
+*What:* Optimize the generated `UNION ALL` statements. If 3 tables are in a join but only 1 changed, completely skip gen*What:* Optimize the generated `UNION ALL` statements. Ifar*What:* Optimize tPo*What:* Optimize the gand execution latency.
+*Where:*W`src/refresh.rs` checking `any_changes` per buffer.
