@@ -374,6 +374,10 @@ async fn test_manual_refresh_works_through_full_lifecycle() {
     db.refresh_st("lc_man_st").await;
     let c3: i64 = db.count("public.lc_man_st").await;
     assert_eq!(c3, 3, "manual refresh after re-gate should work");
+
+    // Verify full data correctness at the end of the gate lifecycle
+    db.assert_st_matches_query("public.lc_man_st", "SELECT id, val FROM lc_man_src")
+        .await;
 }
 
 // ── BOOT-F3: bootstrap_gate_status() tests ─────────────────────────────────
@@ -524,6 +528,10 @@ async fn test_manual_refresh_not_blocked_by_gate() {
         count, 2,
         "manual refresh must succeed even when source is gated"
     );
+
+    // Verify data correctness — both rows must be present with correct values
+    db.assert_st_matches_query("public.man_st", "SELECT id, val FROM man_src")
+        .await;
 }
 
 // ── Scheduler SKIP tests (full E2E — requires bgworker) ───────────────────

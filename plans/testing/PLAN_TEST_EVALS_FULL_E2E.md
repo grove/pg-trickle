@@ -21,6 +21,9 @@
 | P0-3 | DDL event post-reinit data assertions | ✅ Done | `e2e_ddl_event_tests.rs` |
 | P0-4 | Circular ST convergence data assertions | ✅ Done | `e2e_circular_tests.rs` |
 | P1-1 | Fix RLS superuser bypass in test | ✅ Done | `e2e_rls_tests.rs` |
+| P1-2 | Add multiset to append-only fallback tests | ✅ Done | `e2e_append_only_tests.rs` |
+| P1-3 | Add multiset to cascade regression tests 3 and 6 | ✅ Done | `e2e_cascade_regression_tests.rs` |
+| P1-4 | Add multiset to bootstrap gating refresh tests 12 and 17 | ✅ Done | `e2e_bootstrap_gating_tests.rs` |
 
 #### P0-1 Details (WAL CDC)
 Added `assert_st_matches_query` to four tests:
@@ -57,13 +60,26 @@ Fixed `test_rls_on_stream_table_filters_reads`:
 - Asserts `count = 2` (only tenant_id=10 rows visible) as restricted role
 - Existing superuser assertion `count = 4` retained
 
+#### P1-2 Details (Append-Only)
+Added `assert_st_matches_query` to three tests:
+- `test_append_only_fallback_on_delete` — verifies row absent after DELETE + MERGE fallback
+- `test_append_only_fallback_on_update` — verifies no stale old-value rows remain
+- `test_alter_enable_append_only` — verifies correct data after INSERT via append-only path
+
+#### P1-3 Details (Cascade Regression)
+Added `assert_st_matches_query` to two tests:
+- `test_st_on_st_cascade_propagates_delete` — compares `order_report` against its defining query post-DELETE
+- `test_three_layer_cascade_insert_propagates` — compares `big_categories` against `category_flags WHERE is_big = true` post-INSERT
+
+#### P1-4 Details (Bootstrap Gating)
+Added `assert_st_matches_query` to two tests:
+- `test_manual_refresh_works_through_full_lifecycle` — verifies all 3 rows correct after full gate/ungate/re-gate cycle
+- `test_manual_refresh_not_blocked_by_gate` — verifies both rows correct after gated manual refresh
+
 ### Remaining Work
 
 | Priority | Item | Status |
 |----------|------|--------|
-| P1-2 | Add multiset to append-only fallback tests | Not started |
-| P1-3 | Add multiset to cascade regression tests 3 and 6 | Not started |
-| P1-4 | Add multiset to bootstrap gating refresh tests 12 and 17 | Not started |
 | P2-1 | Add smoke correctness check to benchmarks (32 tests) | Not started |
 | P2-2 | Add ALTER QUERY + DML cycle tests | Not started |
 | P2-3 | Add upgrade chain data validation | Not started |
