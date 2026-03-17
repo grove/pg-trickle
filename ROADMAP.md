@@ -1313,13 +1313,15 @@ that re-links orphaned catalog entries on extension restore.
 | TE4 | **Full E2E Hardening:** Validate cross-boundary, multi-DAG cascades, partition handling, and upgrade paths | Done | [PLAN_EVALS_FULL_E2E](plans/testing/PLAN_TEST_EVALS_FULL_E2E.md) |
 | TE5 | **TPC-H Smoke Test:** Stateful invariant evaluations for heavily randomized DML loads over large matrices | Done | [PLAN_EVALS_TPCH](plans/testing/PLAN_TEST_EVALS_TPCH.md) |
 | TE6 | **Property-Based Invariants:** Chaotic property testing pipelines for topological boundaries and cyclic executions | Done | [PLAN_PROPERTY_BASED_INVARIANTS](plans/testing/PLAN_TEST_PROPERTY_BASED_INVARIANTS.md) |
+| TE7 | **cargo-nextest Migration:** Move test suite execution to cargo-nextest to aggressively parallelize and isolate tests, solving wall-clock execution regressions | 1–2d | [PLAN_CARGO_NEXTEST](plans/testing/PLAN_CARGO_NEXTEST.md) |
 
-> **Test evaluation subtotal: ~10-12 days (Completed)**
+> **Test evaluation subtotal: ~11-14 days (Mostly Completed)**
 
-> **v0.8.0 total: ~22–29 days**
+> **v0.8.0 total: ~23–31 days**
 
 **Exit criteria:**
 - [x] Test infrastructure hardened with exact mathematical multiset validation
+- [ ] Test harness migrated to `cargo-nextest` to fix speed and CI flake regressions
 - [ ] pg_trickle works correctly under PgBouncer transaction-mode pooling
 - [ ] pg_dump round-trip produces valid, restorable SQL for stream tables
 - [ ] Extension upgrade path tested (`0.7.0 → 0.8.0`)
@@ -1879,7 +1881,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.5.0 — RLS, Operational Controls + Perf Wave 1 (A-3a only) | ~51–97h | 296–443h | ✅ Released |
 | v0.6.0 — Partitioning, Idempotent DDL & Circular Dependency Foundation | ~35–50h | 331–493h | ✅ Released |
 | v0.7.0 — Performance, Watermarks, Circular DAG Execution, Observability & Infrastructure | ~59–62h | 390–555h | |
-| v0.8.0 — Connection Pooler Compatibility, pg_dump Support & Test Hardening | ~22–29d | — | |
+| v0.8.0 — Connection Pooler Compatibility, pg_dump Support & Test Hardening | ~23–31d | — | |
 | v0.9.0 — Observability, Anomaly Detection & pg_dump Support | ~33–37h | — | |
 | v0.10.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
 | v0.11.0 — Partitioned Stream Tables & Operational Scale (A-1, C-2, C-3) | ~9–13 wk | — | |
