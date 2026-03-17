@@ -95,10 +95,9 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
 /// See plans/testing/TEST_SUITE_TPC_H-GAPS.md §T2 for the initial-population
 /// procedure.
 const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
-    // All queries — allowlist is not yet populated from an initial run.
-    // Remove this catch-all once the real skip set is known.
-    "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10", "q11", "q12", "q13", "q14",
-    "q15", "q16", "q17", "q18", "q19", "q20", "q21", "q22", "q01",
+    // q05, q07, q08, q09: multi-table joins produce DVM SQL that exceeds
+    // the Docker container's temp_file_limit (4 GB).
+    "q05", "q07", "q08", "q09",
 ];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
@@ -2122,9 +2121,8 @@ async fn test_tpch_immediate_correctness() {
     );
 
     // T2: Skip-set regression guard for IMMEDIATE mode.
-    // NOTE: IMMEDIATE_SKIP_ALLOWLIST is currently fully permissive (all query
-    // names listed) until the real skip set is collected from a first run.
-    // See the comment on IMMEDIATE_SKIP_ALLOWLIST above for how to tighten it.
+    // T2-style regression guard for IMMEDIATE mode.
+    // If a query that isn't in IMMEDIATE_SKIP_ALLOWLIST skips here, hard-fail.
     let unexpected_imm_skips: Vec<&str> = skipped
         .iter()
         .map(|(name, _)| *name)

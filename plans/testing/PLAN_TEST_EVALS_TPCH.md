@@ -667,6 +667,7 @@ focused E2E tests, not TPC-H.
 | 5 | P1 | Replace q05 with q14 in `test_tpch_immediate_rollback` | ✅ Done | q14 is a 2-table join + CASE aggregate; reliable at SF=0.01 |
 | 6 | P1 | Fix DAG multi-parent soft-skip: hard-fail if level-0 STs created OK but union/baseline fails | ✅ Done | Both `create` and `baseline` failure paths now `panic!` instead of `return` |
 | 7 | P1 | Populate `failed` vector in `test_tpch_differential_correctness` for invariant errors | ✅ Done | Invariant violations → `failed` (hard); DVM engine errors → `skipped` (soft) |
+| 1 | P0 | Populate `IMMEDIATE_SKIP_ALLOWLIST` from actual test run | ✅ Done | Identified properly: `q05, q07, q08, q09` |
 | 16 | P3 | Fix `buf≈-2` display with `GREATEST(reltuples, 0)` | ✅ Done | `SUM(GREATEST(c.reltuples, 0))` in sustained churn checkpoint query |
 | 8 | P2 | Add standalone FULL mode correctness test | ✅ Done | Added `test_tpch_full_correctness` creating standalone STs with standalone RF and EXCEPT ALL comparison |
 | 9 | P2 | Add deadlock detection to `test_tpch_differential_vs_immediate` | ✅ Done | Extracted `lock timeout` checks into a dedicated `deadlocks` list |
@@ -680,7 +681,6 @@ focused E2E tests, not TPC-H.
 
 | # | Priority | Action | Reason deferred |
 |---|----------|--------|-----------------|
-| 1 | P0 | Populate `IMMEDIATE_SKIP_ALLOWLIST` from actual test run | Requires running the full TPC-H suite against the Docker image; cannot be done without CI infra |
 | 12 | P2 | Add performance regression threshold (3× baseline) | Requires reference baseline file |
 | 17 | P3 | Investigate customer UPDATE DVM bug (LEFT JOIN delta SQL) | Large; root cause unknown |
 
@@ -692,7 +692,7 @@ focused E2E tests, not TPC-H.
 
 | # | Action | Impact | Effort | Status |
 |---|--------|--------|--------|--------|
-| 1 | Populate IMMEDIATE_SKIP_ALLOWLIST from actual test run | T2 guard becomes active for IMMEDIATE mode | Small | ⏳ Deferred |
+| 1 | Populate IMMEDIATE_SKIP_ALLOWLIST from actual test run | T2 guard becomes active for IMMEDIATE mode | Small | ✅ Done |
 | 2 | Replace `assert!(passed > 0)` with minimum thresholds in `full_vs_differential` and `differential_vs_immediate` | Prevents passing with 1/22 queries | Small | ✅ Done |
 | 3 | Add minimum surviving assertion to `test_tpch_cross_query_consistency` | Prevents silent ST deactivation | Small | ✅ Done |
 
