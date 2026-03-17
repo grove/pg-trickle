@@ -80,6 +80,11 @@ Integrate the results utilizing a standard GitHub action like `mikepenz/action-j
 ## 6. Implementation Status (Updated 2026-03-17)
 
 **What has been done:**
+- Set global `NEXTEST_PROFILE: ci` environment variable inside `.github/workflows/ci.yml`.
+- Transitioned `cargo test` execution workflows directly inside `ci.yml` over to `cargo nextest run`.
+- Integrated JUnit tracking via `mikepenz/action-junit-report` for multiple test branches inside `ci.yml`.
+- Transitioned standard testing aliases directly over to `cargo nextest run` inside local `justfile` configs.
+- Mapped global namespace-heavy database integration binaries and `e2e` prefixes into proper `max-threads = 1` serialized bounds inside `.config/nextest.toml` configuration groups.
 - Created initial `.config/nextest.toml` configuration with basic retry logic and group definitions.
 - Updated `.github/actions/setup-pgrx/action.yml` to install `cargo-nextest` via `taiki-e/install-action@nextest`.
 - Modified test execution scripts to conditionally use `cargo nextest run` if available. This fallback approach maintains backward compatibility for contributors who have not yet installed nextest. Scripts touched:
@@ -88,8 +93,5 @@ Integrate the results utilizing a standard GitHub action like `mikepenz/action-j
   - `scripts/run_light_e2e_tests.sh`
 
 **What is left to do:**
-- Update `ci.yml` explicitly to define testing steps generating JUnit XML output, and upload the output to GitHub Actions.
-- Convert raw `cargo test` and `cargo pgrx test` calls inside `ci.yml` to utilize `cargo nextest run` where appropriate (e.g., standard integration tests).
-- Review `pgrx` wrapper integration to confirm whether custom environment variables are necessary for `nextest` running `cargo pgrx test`.
-- Add test suites concurrency bounds appropriately into `.config/nextest.toml` (such as `e2e_partition_tests.rs`) to prevent test database pollution, ensuring proper groups setup.
-- Update `justfile` targets to invoke `nextest` explicitly.
+- Review `pgrx` wrapper integration to confirm whether custom environment variables are necessary for `nextest` running `cargo pgrx test`. Current integration using `cargo pgrx test` acts as an opaque outer wrapper, making exact test translation non-trivial at this time without large structural changes.
+- Wait for remaining parallel CI data and telemetry feedback loops to identify newly flaky tests to adjust retries explicitly in `.config/nextest.toml` configuration.
