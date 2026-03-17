@@ -1274,6 +1274,9 @@ After restoring a backup (pg_dump, pg_basebackup, or PITR), the CDC state depend
 
 In all cases, the pg_trickle scheduler automatically detects frontier inconsistencies and falls back to a full refresh for the first cycle after restore. No manual intervention is required for trigger-mode sources.
 
+For full guidelines on disaster recovery strategies, see our dedicated [Backup and Restore](BACKUP_AND_RESTORE.md) chapter.
+
+
 For WAL-mode sources, replication slots created after the backup point will not exist in the restored state. Set `pg_trickle.cdc_mode = 'trigger'` temporarily, or let the auto transition recreate slots.
 
 ### Do CDC triggers fire for rows inserted via logical replication (subscribers)?

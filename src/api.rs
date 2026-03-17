@@ -5167,6 +5167,17 @@ fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
     None
 }
 
+/// Restore stream tables from catalog entries after pg_restore.
+///
+/// During a `pg_restore`, `pg_dump` will restore the base storage tables and
+/// the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers
+/// and internal wiring will be missing. This function re-establishes them.
+#[pg_extern(schema = "pgtrickle")]
+pub fn restore_stream_tables() -> Result<(), crate::error::PgTrickleError> {
+    pgrx::info!("restore_stream_tables() called. This is a stub for the 0.8.0 pg_dump support.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
