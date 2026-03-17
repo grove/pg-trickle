@@ -30,8 +30,10 @@ Our biggest realization was that many of our legacy tests were executing complex
 *   **Order-dependent assertions mask bugs and cause flakes.** Comparing direct SQL outputs often failed due to normal PostgreSQL non-deterministic ordering rather than actual DVM logic errors.
 *   **Mocking CDC obscures the hardest bugs.** Setting up fake CDC buffer state in unit tests could not replace live, execution-backed Postgres trigger tests. We learned that the boundary between our Rust logical replication decoding and the Postgres physical layer was our highest risk area.
 
+It also forced us to re-evaluate our test pyramid. By pushing more multiset and property-based assertions down into pure-Rust and Light E2E tests, we reduced our reliance on the slow, monolithic Full E2E suite. This paradigm shift demonstrated that while E2E is necessary for true systemic confidence, *meaningful* validation requires rigorous math at every tier.
+
 ### The Power of Stateful Property-Based Testing
-We learned that static, handcrafted DML sequences (insert A, update B, delete A) rarely trigger edge-case bugs in differential dataflow. Only by adopting deterministic, randomized property-based testing (via `proptest` and our stateful invariant runners) could we reliably flush out complex interleaving bugs in multi-layer DAGs and cross-source joins.
+We learned that static, handcrafted DML sequences (insert A, update B, delete A) rarely trigger edge-case bugs in differential dataflow. Only by adopting deterministic, randomized property-based testing (via `proptest` and our stateful invariant runners) could we reliably flush out complex interleaving bugs in multi-layer DAGs and cross-source joins. Specifically, chaotic sequence generation proved invaluable for finding places where our DVM delta aggregations transiently violated commutative and associative properties under high load.
 
 ---
 
@@ -64,19 +66,25 @@ These bugs were purely logical edge-cases that *could not* have been caught by s
 
 ---
 
-## 5. Next Steps and Recommendations
+## 5. Prioritized Action Plan & Next Steps
 
-While the test suites are now hardened and highly reliable, the testing evolution of `pg_trickle` must continue as the system scales. 
+With the immediate hardening phase complete, our test environment is stable but must evolve alongside new core features. Below are the concrete, prioritized next steps for test infrastructure, ranked by risk and value:
 
-### Recommended Next Steps
-1.  **Continuous TPC-H Benchmarking vs. Correctness:**
-    Now that the TPC-H suite asserts perfect data exactness via `assert_sets_equal`, we must tightly integrate this with our benchmarking pipelines. Future work should ensure we do not regress performance to preserve correctness.
-2.  **Expand Fuzzing to the SQL Parser:**
-    We heavily fuzz our DVM operators, but our SQL query parser and DAG analyzer remain largely tested via fixed queries. We should introduce structural SQL fuzzing to generate weird (but valid) view definitions and ensure our parser handles them gracefully.
-3.  **Chaos Testing the Background Workers:**
-    Our background worker testing is better, but not fully "chaotic." We should implement a specialized fault-injection E2E suite that randomly kills backend Postgres processes (simulating OOMs or immediate shutdown limits) to ensure our WAL offsets and CDC buffer tables always recover exactly once without data loss.
-4.  **Monitor Suite Execution Time:**
-    With the massive influx of property-based invariant checks, our testing pyramid is heavier. We must carefully monitor test execution times (especially in the Light E2E and Full E2E tiers) and utilize `cargo test` concurrency strategies or `nextest` to keep CI feedback loops under 5 minutes.
+### Priority 0: Critical Stability & CI
+1.  **Monitor Suite Execution Time Limits (P0-1):**
+    With the massive influx of property-based invariant checks, our testing pyramid is heavier. We must carefully profile test execution times—especially in the Light E2E and Full E2E tiers—and utilize `cargo test` concurrency strategies or `cargo-nextest` to keep PR feedback loops under 5-10 minutes. If runtimes exceed 15 minutes, we risk developer friction.
+2.  **Continuous TPC-H Benchmarking vs. Correctness (P0-2):**
+    Now that the TPC-H suite asserts perfect data exactness via `assert_sets_equal`, we must tightly integrate this with our dedicated benchmarking pipelines. Currently, tests prove correctness and scripts prove performance. Future work must bridge these so we can prove a PR does not regress throughput *while* maintaining strict invariant correctness.
+
+### Priority 1: High-Value Edge Case Hunters
+3.  **Expand Fuzzing to the SQL Parser & DAG Analyzer (P1-1):**
+    We heavily fuzz our DVM operators, but our SQL query parser and DAG analyzer remain largely tested via fixed, "happy path" queries. We should introduce structural SQL fuzzing using tools like `sqlancer` or a custom grammar fuzzer to generate weird (but syntactically valid) view definitions. This will prove our parser and dependency DAG handler fail gracefully rather than panicking on unexpected CTEs or nested window functions.
+4.  **Chaos Testing Local Processes for Crash Stability (P1-2):**
+    Our background worker testing is substantially improved, but not fully "chaotic." We should implement a specialized fault-injection E2E suite that randomly sends `SIGKILL` signals to backend Postgres processes (simulating OOMs or immediate pod eviction limits). This is necessary to rigorously prove that our WAL offsets, snapshot isolation bounds, and CDC buffer tables always recover exactly once without silent data loss when resumed.
+
+### Priority 2: Technical Debt & Ergonomics
+5.  **Refactor Test Fixture Data Loading (P2-1):**
+    Currently, tests generate identical DDL and DML repetitively. We should centralize robust test-data generation helpers within `tests/common/` to quickly summon common schema archetypes (e.g., highly normalized snowflaked schemas, flat wide-fact tables) to lower the boilerplate overhead for new test creation.
 
 ---
 
