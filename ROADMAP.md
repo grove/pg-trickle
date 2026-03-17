@@ -1381,8 +1381,7 @@ per group.
 
 **Remaining work:**
 
-- **Extension upgrade path (`0.8.0 → 0.9.0`):** Ensure the final packaging
-  has correct SQL stubs, verify completeness with the script. Build the e2e image.
+- **Extension upgrade path (`0.8.0 → 0.9.0`):** Upgrade SQL stub created. Left as a final pre-release checklist item to generate the final `sql/archive/pg_trickle--0.9.0.sql` with `cargo pgrx package` once all CI checks pass.
 
 > ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
 > condition for triggering a rescan is: deleted value **equals** the current min/max
