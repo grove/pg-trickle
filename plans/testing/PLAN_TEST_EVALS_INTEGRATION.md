@@ -8,6 +8,30 @@
 
 ---
 
+## Implementation Status
+
+> **Updated:** 2026-03-17 (pass 3)
+> **Status:** All items complete. All P0–P3 items implemented or intentionally resolved.
+
+| Priority | Item | Status | Notes |
+|----------|------|--------|-------|
+| P0-1 | Extract Multiset Comparison Helper | ✅ DONE | `assert_sets_equal()` added to `tests/common/mod.rs` |
+| P0-2 | Add LISTEN/NOTIFY Round-Trip Test | ✅ DONE | Real `PgListener` round-trip in `monitoring_tests.rs`, replaces fire-and-forget |
+| P0-3 | Strengthen Workflow Data Validation | ✅ DONE | `test_full_refresh_workflow` now uses `assert_sets_equal` for row-level correctness |
+| P0-4 | Add Semi/Anti Join Unit Tests | ✅ DONE | Expanded from 3→9 tests each; nested, multi-column, filter, complementary |
+| P1-1 | Widen Staleness Test Tolerance | ✅ DONE | Changed 59–65s window to 50–120s in `test_staleness_calculation` |
+| P1-2 | Add Column Type Verification | ✅ DONE | Two new tests in `extension_tests.rs` verify column types via `information_schema` |
+| P1-3 | Add Error Escalation Threshold Test | ✅ DONE | `test_error_escalation_exact_threshold` + `test_suspended_to_active_recovery` added to `resilience_tests.rs` |
+| P2-1 | DDL Drift Detection Test | ✅ DONE | `test_catalog_ddl_no_phantom_columns` + `test_catalog_ddl_no_phantom_tables` in `catalog_compat_tests.rs`; pure-Rust via `include_str!` |
+| P2-2 | Multi-Table Join Chain Unit Tests | ✅ DONE | `(A LEFT JOIN B) INNER JOIN C`, `A INNER JOIN (B INNER JOIN C)` in `join.rs`; `A FULL JOIN (B SEMI JOIN C)`, `(A FULL JOIN B) INNER JOIN C` in `full_join.rs` |
+| P2-3 | Scheduler Job Lifecycle Integration Test | ✅ DONE | `pgt_scheduler_jobs` added to `CATALOG_DDL`; `test_scheduler_job_lifecycle_queued_to_succeeded` + `test_scheduler_job_lifecycle_retryable_failure` in `workflow_tests.rs` |
+| P2-4 | Extend Property Tests to DVM Operators | ✅ DONE | `proptest!` blocks added to `join.rs`, `semi_join.rs`, `anti_join.rs`; 6 new property tests: UNION ALL invariant, output-col-count, left-col-equality, EXISTS/NOT EXISTS presence |
+| P3-1 | Remove or Fold Smoke Tests | ✅ DONE | Kept as first-to-fail diagnostics; updated module doc to explain the intentional redundancy and diagnostic value; test names standardized |
+| P3-2 | Add Workflow Test for ST Drop Cascade | ✅ DONE | `test_workflow_st_drop_cascade` in `workflow_tests.rs`; verifies CASCADE on deps, storage table drop |
+| P3-3 | Standardize Test Naming | ✅ DONE | `workflow_tests.rs` older tests renamed to `test_workflow_*` convention; `smoke_tests.rs` renamed to `test_infra_*` convention |
+
+---
+
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)

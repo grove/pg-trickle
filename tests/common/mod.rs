@@ -77,6 +77,32 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     tracked_by_pgt_ids   BIGINT[]
 );
 
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
+    job_id          BIGSERIAL PRIMARY KEY,
+    dag_version     BIGINT NOT NULL,
+    unit_key        TEXT NOT NULL,
+    unit_kind       TEXT NOT NULL
+                     CHECK (unit_kind IN ('singleton', 'atomic_group', 'immediate_closure')),
+    member_pgt_ids  BIGINT[] NOT NULL,
+    root_pgt_id     BIGINT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'QUEUED'
+                     CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED',
+                                       'RETRYABLE_FAILED', 'PERMANENT_FAILED', 'CANCELLED')),
+    scheduler_pid   INT NOT NULL,
+    worker_pid      INT,
+    attempt_no      INT NOT NULL DEFAULT 1,
+    enqueued_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    outcome_detail  TEXT,
+    retryable       BOOLEAN
+);
+
+CREATE INDEX IF NOT EXISTS idx_sched_jobs_status_enqueued
+    ON pgtrickle.pgt_scheduler_jobs (status, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_sched_jobs_unit_status
+    ON pgtrickle.pgt_scheduler_jobs (unit_key, status);
+
 CREATE OR REPLACE FUNCTION pgtrickle.parse_duration_seconds(input TEXT)
 RETURNS BIGINT LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
@@ -207,5 +233,38 @@ impl TestDb {
     pub async fn count(&self, table: &str) -> i64 {
         self.query_scalar::<i64>(&format!("SELECT count(*) FROM {}", table))
             .await
+    }
+
+    /// Assert that two tables/subqueries contain exactly the same multiset of rows.
+    ///
+    /// Uses the symmetric set-difference pattern:
+    /// ```sql
+    /// SELECT NOT EXISTS (
+    ///   (SELECT cols FROM a EXCEPT ALL SELECT cols FROM b)
+    ///   UNION ALL
+    ///   (SELECT cols FROM b EXCEPT ALL SELECT cols FROM a)
+    /// )
+    /// ```
+    /// This catches: missing rows, extra rows, duplicate discrepancies, and column
+    /// value mutations. Both `table_a` and `table_b` can be table names or
+    /// parenthesized subqueries.
+    pub async fn assert_sets_equal(&self, table_a: &str, table_b: &str, cols: &[&str]) {
+        let col_list = cols.join(", ");
+        let sql = format!(
+            "SELECT NOT EXISTS (
+                (SELECT {col_list} FROM {a} EXCEPT ALL SELECT {col_list} FROM {b})
+                UNION ALL
+                (SELECT {col_list} FROM {b} EXCEPT ALL SELECT {col_list} FROM {a})
+            )",
+            col_list = col_list,
+            a = table_a,
+            b = table_b
+        );
+        let matches: bool = self.query_scalar(&sql).await;
+        assert!(
+            matches,
+            "Set mismatch between {} and {} (columns: {})",
+            table_a, table_b, col_list
+        );
     }
 }

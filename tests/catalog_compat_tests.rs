@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::TestDb;
+use common::{CATALOG_DDL, TestDb};
 
 // ── pg_get_viewdef behavior ─────────────────────────────────────────
 
@@ -474,4 +474,159 @@ async fn test_pg_available_extensions_shape() {
         col_count, 4,
         "pg_available_extensions should have name, default_version, installed_version, comment columns"
     );
+}
+
+// ── DDL Drift Detection ─────────────────────────────────────────────────
+//
+// These are pure-Rust compile-time tests (no database required).
+//
+// The mock `CATALOG_DDL` in `tests/common/mod.rs` is a subset of the real
+// extension DDL in `src/lib.rs`. These tests verify that:
+// 1. Every table name in CATALOG_DDL also exists in lib.rs.
+// 2. Every column name declared in CATALOG_DDL for each table also exists in
+//    the corresponding real table definition in lib.rs.
+//
+// This guards against the case where a column is removed from lib.rs but
+// remains in the mock (causing integration tests to falsely pass against a
+// schema that will never exist in production).
+
+/// Extract column-name tokens from a CREATE TABLE block in a DDL string.
+/// Returns tokens that appear at the start of a column definition line
+/// (i.e., identifier lines inside a CREATE TABLE ... ( ) block).
+fn extract_column_names_from_table(ddl: &str, table_name: &str) -> Vec<String> {
+    // Locate the CREATE TABLE for this table
+    let marker = "CREATE TABLE";
+    let mut columns = Vec::new();
+    let mut in_table = false;
+    let mut depth = 0i32;
+
+    for line in ddl.lines() {
+        let trimmed = line.trim();
+
+        if !in_table {
+            // Look for a CREATE TABLE line that mentions this table name
+            if trimmed.to_uppercase().contains(marker)
+                && trimmed.to_lowercase().contains(&table_name.to_lowercase())
+            {
+                in_table = true;
+                depth = 0;
+                // Count opening parens on this line
+                depth += trimmed.chars().filter(|c| *c == '(').count() as i32;
+                depth -= trimmed.chars().filter(|c| *c == ')').count() as i32;
+            }
+            continue;
+        }
+
+        // We are inside the CREATE TABLE block
+        depth += trimmed.chars().filter(|c| *c == '(').count() as i32;
+        depth -= trimmed.chars().filter(|c| *c == ')').count() as i32;
+
+        if depth <= 0 {
+            // Closing paren of the CREATE TABLE — exit
+            in_table = false;
+            continue;
+        }
+
+        // Extract the first word of a column definition line.
+        // Skip constraint lines (PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY, REFERENCES).
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+        let first = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_uppercase();
+        if matches!(
+            first.as_str(),
+            "PRIMARY" | "UNIQUE" | "CHECK" | "FOREIGN" | "CONSTRAINT" | "REFERENCES"
+        ) {
+            continue;
+        }
+        // The first word is the column name (strip any trailing comma or paren)
+        let col = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(',')
+            .trim_end_matches('(')
+            .to_lowercase();
+        if !col.is_empty() {
+            columns.push(col);
+        }
+    }
+    columns
+}
+
+/// Every column in the mock CATALOG_DDL must exist in the real lib.rs DDL.
+///
+/// This prevents the scenario where a column is removed from lib.rs but a
+/// test in catalog_tests.rs / workflow_tests.rs still INSERTS it into the
+/// mock schema (which would succeed even though the real extension doesn't
+/// have that column).
+#[test]
+fn test_catalog_ddl_no_phantom_columns() {
+    // The real DDL lives inside the pgrx extension_sql!() macro in lib.rs.
+    // We embed the entire file and search it for table definitions.
+    let lib_rs = include_str!("../src/lib.rs");
+
+    // Tables that exist in both mock and real DDL
+    let tables = [
+        "pgt_stream_tables",
+        "pgt_dependencies",
+        "pgt_refresh_history",
+        "pgt_change_tracking",
+    ];
+
+    for table in &tables {
+        let mock_cols = extract_column_names_from_table(CATALOG_DDL, table);
+        let real_cols = extract_column_names_from_table(lib_rs, table);
+
+        assert!(
+            !mock_cols.is_empty(),
+            "Could not find table '{}' in CATALOG_DDL — did it get renamed?",
+            table
+        );
+        assert!(
+            !real_cols.is_empty(),
+            "Could not find table '{}' in src/lib.rs — did it get renamed or moved?",
+            table
+        );
+
+        for col in &mock_cols {
+            assert!(
+                real_cols.contains(col),
+                "CATALOG_DDL has phantom column '{}' in table '{}' — \
+                 it doesn't exist in the real lib.rs DDL. \
+                 Either add it to lib.rs or remove it from CATALOG_DDL.",
+                col,
+                table
+            );
+        }
+    }
+}
+
+/// Every table referenced in CATALOG_DDL exists in the real lib.rs DDL.
+///
+/// Guards against a table being renamed in lib.rs while the mock still
+/// uses the old name.
+#[test]
+fn test_catalog_ddl_no_phantom_tables() {
+    let lib_rs = include_str!("../src/lib.rs");
+
+    let mock_tables = [
+        "pgt_stream_tables",
+        "pgt_dependencies",
+        "pgt_refresh_history",
+        "pgt_change_tracking",
+    ];
+
+    for table in &mock_tables {
+        assert!(
+            lib_rs.contains(table),
+            "CATALOG_DDL references table '{}' but it was not found in src/lib.rs — \
+             has the table been renamed or removed?",
+            table
+        );
+    }
 }

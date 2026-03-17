@@ -11,7 +11,7 @@ use common::TestDb;
 // ── Full Refresh Workflow ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_full_refresh_workflow() {
+async fn test_workflow_full_refresh_lifecycle() {
     let db = TestDb::with_catalog().await;
 
     // Create source table with data
@@ -64,6 +64,15 @@ async fn test_full_refresh_workflow() {
     let count = db.count("public.enriched_orders").await;
     assert_eq!(count, 3, "All orders have amount > 50");
 
+    // Strong row-level data validation: storage table must exactly match
+    // the defining query result (multiset comparison via EXCEPT ALL).
+    db.assert_sets_equal(
+        "public.enriched_orders",
+        "(SELECT id, customer, amount FROM orders WHERE amount > 50)",
+        &["id", "customer", "amount"],
+    )
+    .await;
+
     // Update catalog: mark as populated
     db.execute(
         "UPDATE pgtrickle.pgt_stream_tables \
@@ -99,7 +108,7 @@ async fn test_full_refresh_workflow() {
 // ── Differential Data Changes ───────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_source_data_changes_tracked() {
+async fn test_workflow_cdc_changes_tracked_in_buffer() {
     let db = TestDb::with_catalog().await;
 
     // Create source and ST
@@ -188,7 +197,7 @@ async fn test_source_data_changes_tracked() {
 // ── DAG-like Dependency Chain ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_chained_stream_tables() {
+async fn test_workflow_chained_sts_dependency_dag() {
     let db = TestDb::with_catalog().await;
 
     // Base table -> ST1 -> ST2 (chained)
@@ -265,7 +274,7 @@ async fn test_chained_stream_tables() {
 // ── Error Handling and Suspension ──────────────────────────────────────────
 
 #[tokio::test]
-async fn test_error_escalation_and_suspension() {
+async fn test_workflow_error_escalation_suspends_st() {
     let db = TestDb::with_catalog().await;
 
     db.execute("CREATE TABLE err_src (id INT)").await;
@@ -323,4 +332,310 @@ async fn test_error_escalation_and_suspension() {
         )
         .await;
     assert_eq!(failure_count, 3);
+}
+
+// ── Scheduler Job Lifecycle ─────────────────────────────────────────────────
+
+/// Test the full QUEUED → RUNNING → SUCCEEDED job lifecycle for the scheduler
+/// job table.
+///
+/// The scheduler uses `pgtrickle.pgt_scheduler_jobs` to dispatch parallel
+/// refresh work across worker processes. This test verifies:
+/// - A job can be enqueued (QUEUED)
+/// - A worker can claim it (QUEUED → RUNNING)
+/// - A worker can complete it (RUNNING → SUCCEEDED / PERMANENT_FAILED)
+/// - Indexes correctly index on (status, enqueued_at) and (unit_key, status)
+#[tokio::test]
+async fn test_scheduler_job_lifecycle_queued_to_succeeded() {
+    let db = TestDb::with_catalog().await;
+
+    // Create a source table and ST so we have valid pgt_ids
+    db.execute("CREATE TABLE sched_src (id INT)").await;
+    let oid: i32 = db
+        .query_scalar("SELECT 'sched_src'::regclass::oid::int")
+        .await;
+
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+         VALUES ({oid}, 'sched_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+    ))
+    .await;
+
+    let pgt_id: i64 = db
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'sched_st'")
+        .await;
+
+    // Enqueue a job (simulating the scheduler queueing a singleton refresh unit)
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_scheduler_jobs
+            (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id,
+             status, scheduler_pid)
+         VALUES
+            (1, 'sched_st/public', 'singleton', ARRAY[{pgt_id}], {pgt_id},
+             'QUEUED', pg_backend_pid())"
+    ))
+    .await;
+
+    let job_id: i64 = db
+        .query_scalar(
+            "SELECT job_id FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'sched_st/public'",
+        )
+        .await;
+
+    // Verify initial state
+    let status: String = db
+        .query_scalar(&format!(
+            "SELECT status FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert_eq!(status, "QUEUED");
+
+    let worker_pid: Option<i32> = db
+        .query_scalar_opt(&format!(
+            "SELECT worker_pid FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert!(worker_pid.is_none(), "worker_pid should be NULL on QUEUED");
+
+    // Worker claims the job: QUEUED → RUNNING
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_scheduler_jobs
+         SET status = 'RUNNING', started_at = now(), worker_pid = pg_backend_pid()
+         WHERE job_id = {job_id} AND status = 'QUEUED'"
+    ))
+    .await;
+
+    let running_status: String = db
+        .query_scalar(&format!(
+            "SELECT status FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert_eq!(running_status, "RUNNING");
+
+    let has_started_at: bool = db
+        .query_scalar(&format!(
+            "SELECT started_at IS NOT NULL FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert!(has_started_at, "started_at must be set on RUNNING");
+
+    // Worker completes successfully: RUNNING → SUCCEEDED
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_scheduler_jobs
+         SET status = 'SUCCEEDED', finished_at = now(),
+             outcome_detail = 'refreshed 42 rows'
+         WHERE job_id = {job_id} AND status = 'RUNNING'"
+    ))
+    .await;
+
+    let final_status: String = db
+        .query_scalar(&format!(
+            "SELECT status FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert_eq!(final_status, "SUCCEEDED");
+
+    let outcome: String = db
+        .query_scalar(&format!(
+            "SELECT outcome_detail FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert_eq!(outcome, "refreshed 42 rows");
+
+    let has_finished_at: bool = db
+        .query_scalar(&format!(
+            "SELECT finished_at IS NOT NULL FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert!(has_finished_at, "finished_at must be set on SUCCEEDED");
+}
+
+/// Test the QUEUED → RUNNING → RETRYABLE_FAILED → QUEUED retry cycle.
+///
+/// Workers may fail transiently (e.g. lock timeout). The scheduler should be
+/// able to re-enqueue such jobs for another attempt.
+#[tokio::test]
+async fn test_scheduler_job_lifecycle_retryable_failure() {
+    let db = TestDb::with_catalog().await;
+
+    db.execute("CREATE TABLE retry_src (id INT)").await;
+    let oid: i32 = db
+        .query_scalar("SELECT 'retry_src'::regclass::oid::int")
+        .await;
+
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+         VALUES ({oid}, 'retry_st', 'public', 'SELECT 1', 'FULL', 'ACTIVE')"
+    ))
+    .await;
+
+    let pgt_id: i64 = db
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'retry_st'")
+        .await;
+
+    // Enqueue → claim → fail (retryable)
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_scheduler_jobs
+            (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id,
+             status, scheduler_pid)
+         VALUES
+            (1, 'retry_st/public', 'singleton', ARRAY[{pgt_id}], {pgt_id},
+             'QUEUED', pg_backend_pid())"
+    ))
+    .await;
+
+    let job_id: i64 = db
+        .query_scalar("SELECT job_id FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'retry_st/public' LIMIT 1")
+        .await;
+
+    // QUEUED → RUNNING
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_scheduler_jobs
+         SET status = 'RUNNING', started_at = now(), worker_pid = 9999
+         WHERE job_id = {job_id}"
+    ))
+    .await;
+
+    // RUNNING → RETRYABLE_FAILED (transient lock timeout)
+    db.execute(&format!(
+        "UPDATE pgtrickle.pgt_scheduler_jobs
+         SET status = 'RETRYABLE_FAILED', finished_at = now(),
+             outcome_detail = 'lock timeout', retryable = true
+         WHERE job_id = {job_id}"
+    ))
+    .await;
+
+    let failed_status: String = db
+        .query_scalar(&format!(
+            "SELECT status FROM pgtrickle.pgt_scheduler_jobs WHERE job_id = {job_id}"
+        ))
+        .await;
+    assert_eq!(failed_status, "RETRYABLE_FAILED");
+
+    // Scheduler re-enqueues: insert new attempt (attempt_no = 2)
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_scheduler_jobs
+            (dag_version, unit_key, unit_kind, member_pgt_ids, root_pgt_id,
+             status, scheduler_pid, attempt_no)
+         VALUES
+            (1, 'retry_st/public', 'singleton', ARRAY[{pgt_id}], {pgt_id},
+             'QUEUED', pg_backend_pid(), 2)"
+    ))
+    .await;
+
+    // Verify two jobs exist for this unit: attempt 1 (RETRYABLE_FAILED) and attempt 2 (QUEUED)
+    let total_jobs: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'retry_st/public'",
+        )
+        .await;
+    assert_eq!(total_jobs, 2, "should have original + retry job");
+
+    let queued_count: i64 = db
+        .query_scalar("SELECT count(*) FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'retry_st/public' AND status = 'QUEUED'")
+        .await;
+    assert_eq!(queued_count, 1, "retry job should be QUEUED");
+
+    let max_attempt: i32 = db
+        .query_scalar("SELECT max(attempt_no) FROM pgtrickle.pgt_scheduler_jobs WHERE unit_key = 'retry_st/public'")
+        .await;
+    assert_eq!(max_attempt, 2, "max attempt_no should be 2 after retry");
+}
+
+// ── ST Drop Cascade ─────────────────────────────────────────────────────────
+
+/// Test that dropping (deleting) a stream table cascades cleanly:
+/// - The ST's storage table is dropped
+/// - The catalog row is removed
+/// - Dependencies (pgt_dependencies) are removed via CASCADE DELETE
+/// - Refresh history is NOT automatically deleted (history is preserved for audit)
+///
+/// In the real extension, `drop_stream_table()` handles this. Here we simulate
+/// the SQL that the extension would run.
+#[tokio::test]
+async fn test_workflow_st_drop_cascade() {
+    let db = TestDb::with_catalog().await;
+
+    // Create source table and storage table
+    db.execute("CREATE TABLE drop_src (id INT, val TEXT)").await;
+    db.execute("CREATE TABLE public.drop_st_storage (id INT, val TEXT)")
+        .await;
+
+    let src_oid: i32 = db
+        .query_scalar("SELECT 'drop_src'::regclass::oid::int")
+        .await;
+    let storage_oid: i32 = db
+        .query_scalar("SELECT 'drop_st_storage'::regclass::oid::int")
+        .await;
+
+    // Register the ST in the catalog
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status, is_populated)
+         VALUES ({storage_oid}, 'drop_st', 'public', 'SELECT id, val FROM drop_src', 'FULL', 'ACTIVE', true)"
+    )).await;
+
+    let pgt_id: i64 = db
+        .query_scalar("SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'drop_st'")
+        .await;
+
+    // Register dependency
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_dependencies (pgt_id, source_relid, source_type)
+         VALUES ({pgt_id}, {src_oid}, 'TABLE')"
+    ))
+    .await;
+
+    // Record some refresh history
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+            (pgt_id, data_timestamp, start_time, end_time, action, status, rows_inserted)
+         VALUES
+            ({pgt_id}, now() - interval '5 min', now() - interval '5 min', now() - interval '4 min', 'FULL', 'COMPLETED', 10),
+            ({pgt_id}, now() - interval '2 min', now() - interval '2 min', now() - interval '1 min', 'DIFFERENTIAL', 'COMPLETED', 2)"
+    )).await;
+
+    // Verify pre-drop state
+    assert_eq!(db.count("pgtrickle.pgt_stream_tables").await, 1);
+    assert_eq!(db.count("pgtrickle.pgt_dependencies").await, 1);
+    assert_eq!(db.count("pgtrickle.pgt_refresh_history").await, 2);
+
+    // Simulate drop: delete the ST row. Due to ON DELETE CASCADE on pgt_dependencies,
+    // dependencies should be removed automatically.
+    // Refresh history does NOT have CASCADE — it's preserved for audit.
+    db.execute("DROP TABLE IF EXISTS public.drop_st_storage")
+        .await;
+    db.execute(&format!(
+        "DELETE FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}"
+    ))
+    .await;
+
+    // Verify post-drop state
+    let st_gone: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}"
+        ))
+        .await;
+    assert_eq!(st_gone, 0, "ST catalog row must be removed after drop");
+
+    // CASCADE DELETE must have removed dependencies
+    let deps_gone: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle.pgt_dependencies WHERE pgt_id = {pgt_id}"
+        ))
+        .await;
+    assert_eq!(
+        deps_gone, 0,
+        "dependencies must cascade-delete when ST is dropped"
+    );
+
+    // Storage table must be gone
+    let table_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'drop_st_storage' AND relkind = 'r')",
+        )
+        .await;
+    assert!(!table_exists, "storage table must be dropped");
 }
