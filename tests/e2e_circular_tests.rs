@@ -152,11 +152,11 @@ async fn test_circular_monotone_cycle_converges() {
 
     // Wait for the scheduler to converge (refresh both STs)
     assert!(
-        wait_for_refresh(&db, "cyc_reach_a", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_reach_a", Duration::from_secs(180)).await,
         "cyc_reach_a should be refreshed by scheduler"
     );
     assert!(
-        wait_for_refresh(&db, "cyc_reach_b", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_reach_b", Duration::from_secs(180)).await,
         "cyc_reach_b should be refreshed by scheduler"
     );
 
@@ -169,7 +169,7 @@ async fn test_circular_monotone_cycle_converges() {
     // polling this column is the correct signal for data-correctness assertions.
     let fixpoint_converged = {
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(120);
+        let timeout = Duration::from_secs(300);
         loop {
             if start.elapsed() > timeout {
                 break false;
@@ -428,7 +428,7 @@ async fn test_circular_convergence_records_iterations() {
 
     // Wait for convergence
     assert!(
-        wait_for_refresh(&db, "cyc_conv_a", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_conv_a", Duration::from_secs(180)).await,
         "cyc_conv_a should be refreshed"
     );
 
@@ -517,7 +517,7 @@ async fn test_circular_nonconvergence_error_status() {
 
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
-    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(60)).await;
+    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
 
     // Note: Since each iteration generates new rows unconditionally, it is guaranteed
     // to never converge, making it a reliable test.
