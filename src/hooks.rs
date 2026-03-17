@@ -131,6 +131,7 @@ enum DdlEventKind {
     TypeChange,
     DomainChange,
     PolicyChange,
+    ExtensionChange,
     Ignored,
 }
 
@@ -149,6 +150,7 @@ fn classify_ddl_event(object_type: &str, command_tag: &str) -> DdlEventKind {
         ("policy", "CREATE POLICY") | ("policy", "ALTER POLICY") | ("policy", "DROP POLICY") => {
             DdlEventKind::PolicyChange
         }
+        ("extension", "CREATE EXTENSION") => DdlEventKind::ExtensionChange,
         _ => DdlEventKind::Ignored,
     }
 }
@@ -180,6 +182,16 @@ fn handle_ddl_command(cmd: &DdlCommand) {
         }
         DdlEventKind::PolicyChange => {
             handle_policy_change(cmd);
+        }
+        DdlEventKind::ExtensionChange => {
+            if let Some(ref ident) = cmd.object_identity {
+                if ident == "pg_trickle" {
+                    pgrx::info!("pg_trickle extension loaded; checking for orphaned catalog entries to restore...");
+                    if let Err(e) = crate::api::restore_stream_tables() {
+                        pgrx::warning!("Failed to automatically restore stream tables: {}", e);
+                    }
+                }
+            }
         }
         DdlEventKind::Ignored => {}
     }
