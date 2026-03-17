@@ -1180,6 +1180,7 @@ impl ExecutionUnit {
             ExecutionUnitKind::Singleton => "s",
             ExecutionUnitKind::AtomicGroup => "a",
             ExecutionUnitKind::ImmediateClosure => "i",
+            ExecutionUnitKind::RepeatableReadGroup => "rg",
         };
         // member_pgt_ids are sorted during construction
         let ids: Vec<String> = self
@@ -1558,6 +1559,7 @@ impl ExecutionUnitDag {
                 ExecutionUnitKind::Singleton => singletons += 1,
                 ExecutionUnitKind::AtomicGroup => atomic_groups += 1,
                 ExecutionUnitKind::ImmediateClosure => immediate_closures += 1,
+                ExecutionUnitKind::RepeatableReadGroup => {},
             }
         }
 

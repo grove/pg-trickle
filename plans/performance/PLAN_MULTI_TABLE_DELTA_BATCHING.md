@@ -5,7 +5,7 @@
 **Goal:** `v0.9.0` (Milestone 3)
 **Remaining to do:** 
 - [x] **B3-3:** Write property-based correctness proofs for simultaneous multi-source changes (diamond-flow scenarios) using Z-set weight aggregation (`SUM(weight)`) instead of `DISTINCT ON` deduplication.
-- [ ] **B3-2:** Implement merged-delta generation logic in DVM parser using `GROUP BY __pgt_row_id, SUM(weight)`.
+- [x] **B3-2:** Implement merged-delta generation logic using Z-set block aggregation (`SUM(CASE WHEN action THEN 1...`) replacing DISTINCT ON.
 - [ ] **B3-1:** Implement intra-query delta branch pruning (skip `UNION ALL` branches entirely when a source has zero changes).
 
 ---

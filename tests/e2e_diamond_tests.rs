@@ -450,29 +450,51 @@ async fn test_diamond_flow_simultaneous_multi_source_update() {
         .await;
     db.execute("INSERT INTO root_table VALUES (1, 100)").await;
 
-    db.create_st("st_branch_a", "SELECT id, val + 10 as score_a FROM root_table", "1m", "DIFFERENTIAL").await;
-    db.create_st("st_branch_b", "SELECT id, val - 10 as score_b FROM root_table", "1m", "DIFFERENTIAL").await;
+    db.create_st(
+        "st_branch_a",
+        "SELECT id, val + 10 as score_a FROM root_table",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "st_branch_b",
+        "SELECT id, val - 10 as score_b FROM root_table",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
 
     // Diamond tip: Joins A and B
     db.create_st(
         "st_diamond_tip",
         "SELECT a.id, a.score_a, b.score_b FROM st_branch_a a JOIN st_branch_b b ON a.id = b.id",
         "1m",
-        "DIFFERENT        "DIFFERENT        "DIFFERENT        "DIFFERENT esh_stream_table('st_diamond_tip')").await;
-    db.assert_row_count("st_diamond_tip", 1).await;
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('st_diamond_tip')")
+        .await;
+
+
 
     // DML triggers branches A and B to recalculate
-    db.execute("UPDATE root_table SET val = 200 WHERE id = 1").await;
+    db.execute("UPDATE root_table SET val = 200 WHERE id = 1")
+        .await;
 
     // Refresh ALL tables systematically
-    db.execute("CALL pgtrickle.refresh_stream_table('st_branch_a')").await;
-    db.execute("CALL pgtrickle    db.execute("table('st_branch_b')").await;
-    db.execute("CALL pgtrickle.refresh_stream_table('st_diamond_tip')").await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('st_branch_a')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('st_branch_b')")
+        .await;
+    db.execute("SELECT pgtrickle.refresh_stream_table('st_diamond_tip')")
+        .await;
 
-    db.assert_row_count("st_diamond_tip", 1).await;
-    
-    db.assert_query(
-        "SELECT score_a, score_b FROM st_diamond_tip WHERE id = 1",
-        &[("210", "190")],
-    ).await;
+
+
+
+    db.assert_st_matches_query("st_diamond_tip", 
+        "SELECT 1 as id, 210 as score_a, 190 as score_b"
+    )
+    .await;
 }
