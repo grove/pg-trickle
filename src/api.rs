@@ -2423,7 +2423,34 @@ fn execute_manual_refresh(
             schema,
             table_name,
         );
-        execute_manual_full_refresh(st, schema, table_name, source_oids).map(|_| (0i64, 0i64))
+
+        // If the ST has an original_query (pre-rewrite, e.g. referencing
+        // views by name), use it for the FULL refresh so the current view
+        // definitions are resolved at execution time.  Then re-run the
+        // rewrite pipeline to update the stored defining_query for future
+        // differential refreshes.
+        let refresh_st = if let Some(oq) = &st.original_query {
+            let mut tmp = st.clone();
+            tmp.defining_query = oq.clone();
+            tmp
+        } else {
+            st.clone()
+        };
+
+        execute_manual_full_refresh(&refresh_st, schema, table_name, source_oids)?;
+
+        // After the FULL refresh has committed the correct data, re-run
+        // the rewrite pipeline to store the updated inlined query.
+        let updated = reinit_rewrite_if_needed(st)?;
+
+        // Clear the reinit flag after successful refresh.
+        Spi::run(&format!(
+            "UPDATE pgtrickle.pgt_stream_tables SET needs_reinit = FALSE WHERE pgt_id = {}",
+            updated.pgt_id,
+        ))
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        Ok((0i64, 0i64))
     } else {
         match st.refresh_mode {
             RefreshMode::Full => execute_manual_full_refresh(st, schema, table_name, source_oids)
@@ -2475,6 +2502,42 @@ fn execute_manual_refresh(
 
 /// Execute a FULL manual refresh: truncate + repopulate from the defining query.
 ///
+/// Re-run the query rewrite pipeline when `needs_reinit` is set and
+/// the ST has an `original_query` (indicating the defining query was
+/// rewritten, e.g. by view inlining). Updates the catalog's
+/// `defining_query` so the full refresh uses the current view/function
+/// definitions.
+pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta, PgTrickleError> {
+    let original = match &st.original_query {
+        Some(oq) => oq.clone(),
+        None => return Ok(st.clone()),
+    };
+
+    let new_defining = run_query_rewrite_pipeline(&original)?;
+    if new_defining == st.defining_query {
+        return Ok(st.clone());
+    }
+
+    pgrx::info!(
+        "Stream table {}.{}: re-inlined view/function definitions for reinit",
+        st.pgt_schema,
+        st.pgt_name,
+    );
+
+    // Update the catalog with the new defining query.
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET defining_query = $1, updated_at = now() \
+         WHERE pgt_id = $2",
+        &[new_defining.clone().into(), st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    let mut updated = st.clone();
+    updated.defining_query = new_defining;
+    Ok(updated)
+}
+
 /// When user triggers are detected (and the GUC is not `"off"`), they are
 /// suppressed during the TRUNCATE + INSERT via `DISABLE TRIGGER USER` /
 /// `ENABLE TRIGGER USER`. A `NOTIFY pgtrickle_refresh` is emitted so
