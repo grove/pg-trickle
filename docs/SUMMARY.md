@@ -11,6 +11,7 @@
 - [Configuration](CONFIGURATION.md)
 - [Installation](installation.md)
 - [Upgrading](UPGRADING.md)
+- [Backup and Restore](BACKUP_AND_RESTORE.md)
 - [Contributing](contributing.md)
 
 ---
