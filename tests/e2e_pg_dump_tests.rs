@@ -25,7 +25,7 @@ async fn test_pg_dump_and_restore() {
 
     // 1. pg_dump the database
     let dump_output = Command::new("docker")
-        .args(&[
+        .args([
             "exec",
             container_id,
             "pg_dump",
@@ -48,7 +48,7 @@ async fn test_pg_dump_and_restore() {
 
     // 2. Drop the original schema to simulate starting fresh
     let create_db_output = Command::new("docker")
-        .args(&[
+        .args([
             "exec",
             container_id,
             "psql",
@@ -65,7 +65,7 @@ async fn test_pg_dump_and_restore() {
 
     // 3. Section 1 Validate Restoring Pre-Data
     let restore_output = Command::new("docker")
-        .args(&[
+        .args([
             "exec",
             container_id,
             "pg_restore",
@@ -85,7 +85,7 @@ async fn test_pg_dump_and_restore() {
 
     // 4. Section 2 Validate Restoring Data
     let restore_data = Command::new("docker")
-        .args(&[
+        .args([
             "exec",
             container_id,
             "pg_restore",
@@ -114,7 +114,7 @@ async fn test_pg_dump_and_restore() {
 
     // 6. Restore post-data to load triggers properly
     let restore_post = Command::new("docker")
-        .args(&[
+        .args([
             "exec",
             container_id,
             "pg_restore",
