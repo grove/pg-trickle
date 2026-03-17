@@ -2698,9 +2698,25 @@ fn compute_adaptive_threshold(current: f64, incr_ms: f64, full_ms: f64) -> f64 {
 }
 
 /// Execute a reinitialize refresh: full recompute after schema change.
+///
+/// If the ST has an `original_query`, uses it for the FULL refresh
+/// (so current view definitions are resolved at execution time), then
+/// re-runs the rewrite pipeline to store the updated inlined query.
 pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    // Same as full refresh but also clears the reinit flag
-    let result = execute_full_refresh(st)?;
+    // Use original_query for the refresh so current view/function
+    // definitions are resolved at execution time.
+    let refresh_st = if let Some(oq) = &st.original_query {
+        let mut tmp = st.clone();
+        tmp.defining_query = oq.clone();
+        tmp
+    } else {
+        st.clone()
+    };
+
+    let result = execute_full_refresh(&refresh_st)?;
+
+    // After refresh, re-run the rewrite pipeline to update stored query.
+    let _ = crate::api::reinit_rewrite_if_needed(st);
 
     // Clear reinit flag
     Spi::run(&format!(

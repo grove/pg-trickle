@@ -1202,41 +1202,41 @@ light-E2E limitations).
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 1 | Fix `tests/e2e/light.rs` `assert_st_matches_query` to use `EXCEPT ALL` | All keyless/set-op tests gain multiset verification | Small |
-| 2 | Add `assert_st_matches_query` to `rows_from_tests` (6 tests) | 6 smoke tests → 6 correctness tests | Small |
-| 3 | Add `assert_st_matches_query` to `expression_tests` (41 tests) | 41 smoke tests → 41 correctness tests | Medium |
-| 4 | Add `assert_st_matches_query` to `ivm_tests` (26 tests) | Core IVM loop fully validated | Medium |
+| 1 | ~~Fix `tests/e2e/light.rs` `assert_st_matches_query` to use `EXCEPT ALL`~~ | DONE | Small |
+| 2 | ~~Add `assert_st_matches_query` to `rows_from_tests` (6 tests)~~ | DONE | Small |
+| 3 | ~~Add `assert_st_matches_query` to `expression_tests` (41 tests)~~ | DONE | Medium |
+| 4 | ~~Add `assert_st_matches_query` to `ivm_tests` (26 tests)~~ | DONE | Medium |
 
 ### P1 — High (should address soon)
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 5 | Add `assert_st_matches_query` to `getting_started_tests` | Tutorial walkthrough fully validated | Small |
-| 6 | Add `assert_st_matches_query` to `lateral_subquery_tests` | 13 tests gain full verification | Small |
-| 7 | Add `assert_st_matches_query` to `topk_tests` (10 most critical) | Top-N content verified, not just counts | Medium |
-| 8 | Add error-path tests to `create_or_replace_tests` | Currently zero error tests | Small |
-| 9 | Add error message checks to `error_tests` | Most tests only check `is_err()` | Medium |
+| 5 | ~~Add `assert_st_matches_query` to `getting_started_tests`~~ | DONE | Small |
+| 6 | ~~Add `assert_st_matches_query` to `lateral_subquery_tests`~~ | DONE | Small |
+| 7 | ~~Add `assert_st_matches_query` to `topk_tests` (10 most critical)~~ | DONE | Medium |
+| 8 | ~~Add error-path tests to `create_or_replace_tests`~~ | DONE | Small |
+| 9 | ~~Add error message checks to `error_tests`~~ | DONE | Medium |
 
 ### P2 — Medium (address during regular maintenance)
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 10 | Harden `monitoring_tests` with value validation | Staleness/history actually verified | Medium |
-| 11 | Add `assert_st_matches_query` to `create_tests` (5 complex cases) | Creation correctness verified | Small |
-| 12 | Add `assert_st_matches_query` to `alter_tests` post-alter | Altered STs verified correct | Small |
-| 13 | Verify `consecutive_errors` in `dag_error_tests` | Error tracking validated | Small |
-| 14 | Add `assert_st_matches_query` to `concurrent_tests` post-op | Concurrency correctness verified | Small |
-| 15 | Add correctness check after DDL hooks in `view_tests` | Post-reinit correctness verified | Small |
+| 10 | ~~Harden `monitoring_tests` with value validation~~ | DONE | Medium |
+| 11 | ~~Add `assert_st_matches_query` to `create_tests` (5 complex cases)~~ | DONE | Small |
+| 12 | ~~Add `assert_st_matches_query` to `alter_tests` post-alter~~ | DONE | Small |
+| 13 | ~~Verify `consecutive_errors` in `dag_error_tests`~~ | DONE | Small |
+| 14 | ~~Add `assert_st_matches_query` to `concurrent_tests` post-op~~ | DONE | Small |
+| 15 | ~~Add correctness check after DDL hooks in `view_tests`~~ | DONE | Small |
 
 ### P3 — Low (backlog)
 
 | # | Action | Impact | Effort |
 |---|--------|--------|--------|
-| 16 | Add error-path tests to CTE, expression, lateral files | Error handling coverage | Medium |
-| 17 | Add NULL edge cases to set_operation, window, lateral | Edge case coverage | Medium |
-| 18 | Add FETCH NEXT syntax test to topk | SQL compliance coverage | Small |
-| 19 | Add multi-row unmatched FULL JOIN test | Edge case coverage | Small |
-| 20 | Add LAG/LEAD NULL test to multi_window | Edge case coverage | Small |
+| 16 | ~~Add error-path tests to CTE, expression, lateral files~~ | DONE | Medium |
+| 17 | ~~Add NULL edge cases to set_operation, window, lateral~~ | DONE | Medium |
+| 18 | ~~Add FETCH NEXT syntax test to topk~~ | DONE | Small |
+| 19 | ~~Add multi-row unmatched FULL JOIN test~~ | DONE | Small |
+| 20 | ~~Add LAG/LEAD NULL test to multi_window~~ | DONE | Small |
 
 ---
 

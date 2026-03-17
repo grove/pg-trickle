@@ -204,3 +204,24 @@ async fn test_window_over_aggregate_differential() {
     db.refresh_st("wa_st").await;
     db.assert_st_matches_query("wa_st", q).await;
 }
+
+#[tokio::test]
+async fn test_multi_window_lag_lead_nulls() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE mwin_ll_src (id INT, grp INT, val INT)")
+        .await;
+    db.execute("INSERT INTO mwin_ll_src VALUES (1, 1, NULL), (2, 1, 10), (3, 1, NULL)")
+        .await;
+
+    let q = "SELECT id, grp, val, LAG(val) OVER (PARTITION BY grp ORDER BY id) as l1, LEAD(val) OVER (PARTITION BY grp ORDER BY id) as l2 FROM mwin_ll_src";
+
+    db.create_st("mwin_ll_st", q, "1m", "DIFFERENTIAL").await;
+
+    db.assert_st_matches_query("mwin_ll_st", q).await;
+
+    db.execute("INSERT INTO mwin_ll_src VALUES (4, 1, 40)")
+        .await;
+    db.refresh_st("mwin_ll_st").await;
+
+    db.assert_st_matches_query("mwin_ll_st", q).await;
+}

@@ -28,7 +28,39 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+#### Comprehensive property-based and topological invariant tests
+
+The test suite has been significantly expanded with property-based invariants
+that systematically exercise DAG, circular, snapshot, and topology scenarios.
+
+- New `tests/e2e/property_support.rs` module provides shared seeded-random
+  generation helpers so property tests are reproducible across runs.
+- `tests/e2e_property_dag_tests.rs` adds seeded DAG property invariant tests
+  covering orphan detection, dependency ordering, and multi-hop refresh
+  correctness.
+- `tests/e2e_property_circular_tests.rs` adds property invariants for
+  circular (SCC) refresh: convergence under monotone pipelines, rejection of
+  unsafe cycles, and non-convergence safety limits.
+- `tests/e2e_property_snapshot_tests.rs` adds snapshot/full-refresh property
+  invariants ensuring consistency after arbitrary insert/update/delete
+  sequences.
+- `tests/e2e_dag_topology_tests.rs` (phase 6) covers boundary and stress cases
+  such as wide fanout, deep chains, diamond dependencies, and mixed-mode
+  topologies.
+- `tests/e2e_dag_autorefresh_tests.rs` adds topology-aware auto-refresh
+  ordering tests.
+- `tests/property_tests.rs` adds pure-Rust (no DB) property expansion tests
+  for the DVM rewrite pipeline.
+- `tests/e2e_dag_error_tests.rs` expanded with 303 additional lines covering
+  error paths in circular and deep-chain drop scenarios.
+
 ### Fixed
+
+- Fixed a stack overflow when recursively dropping a large circular dependency
+  chain (`src/api.rs`): the recursive drop walk is now iterative, preventing
+  unbounded stack growth for deep or circular graphs.
 
 #### Internal: Char-Boundary Panic Bugs in Set-Op SQL Splitters
 
@@ -52,6 +84,8 @@ Completed a full hardening pass of the integration test suite, bringing all item
 - **Resilience and edge cases** — Test coverage for ST drop cascades verifying dependent object removal, exact error escalation thresholds, and scheduler job lifecycles avoiding untestable seams.
 - **Catalog DDL drift detection** — Expanded `catalog_compat_tests.rs` with static DDL verification ensuring the generated catalog SQL maintains parity with expected columns in test mock states.
 - **Cleanups** — Standardized naming practices (`test_workflow_*`, `test_infra_*`) and eliminated clock-bound flakes by widening staleness assertions.
+- Clippy `unusual_byte_groupings` lint warnings silenced across test and source
+  files to keep `just lint` clean.
 
 #### Internal Code Quality: Comprehensive Unit Test Suite
 

@@ -22,6 +22,39 @@ mod e2e;
 
 use e2e::E2eDb;
 
+const Q_TREE: &str = "WITH RECURSIVE tree AS (
+            SELECT id, name, parent_id, name AS path, 0 AS depth
+            FROM departments
+            WHERE parent_id IS NULL
+            UNION ALL
+            SELECT d.id, d.name, d.parent_id,
+                   tree.path || ' > ' || d.name AS path,
+                   tree.depth + 1
+            FROM departments d
+            JOIN tree ON d.parent_id = tree.id
+        )
+        SELECT id, name, parent_id, path, depth FROM tree";
+
+const Q_STATS: &str = "SELECT
+                t.id          AS department_id,
+                t.name        AS department_name,
+                t.path        AS full_path,
+                t.depth,
+                COUNT(e.id)                AS headcount,
+                COALESCE(SUM(e.salary), 0) AS total_salary,
+                COALESCE(AVG(e.salary), 0) AS avg_salary
+            FROM department_tree t
+            LEFT JOIN employees e ON e.department_id = t.id
+            GROUP BY t.id, t.name, t.path, t.depth";
+
+const Q_REPORT: &str = "SELECT
+            split_part(full_path, ' > ', 2) AS division,
+            SUM(headcount)                  AS total_headcount,
+            SUM(total_salary)               AS total_payroll
+        FROM department_stats
+        WHERE depth >= 1
+        GROUP BY 1";
+
 // ── Base table setup helpers ─────────────────────────────────────────────────
 
 /// Create `departments` and `employees` tables exactly as shown in Step 1.
@@ -83,68 +116,30 @@ async fn setup_base_tables(db: &E2eDb) {
 
 /// Create `department_tree` — recursive CTE, '1m', DIFFERENTIAL (Step 2).
 async fn create_department_tree(db: &E2eDb) {
-    db.create_st(
-        "department_tree",
-        "WITH RECURSIVE tree AS (
-            SELECT id, name, parent_id, name AS path, 0 AS depth
-            FROM departments
-            WHERE parent_id IS NULL
-            UNION ALL
-            SELECT d.id, d.name, d.parent_id,
-                   tree.path || ' > ' || d.name AS path,
-                   tree.depth + 1
-            FROM departments d
-            JOIN tree ON d.parent_id = tree.id
-        )
-        SELECT id, name, parent_id, path, depth FROM tree",
-        "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+    db.create_st("department_tree", Q_TREE, "1m", "DIFFERENTIAL")
+        .await;
 }
 
 /// Create `department_stats` — LEFT JOIN + agg, NULL schedule, DIFFERENTIAL (Step 3).
 async fn create_department_stats(db: &E2eDb) {
     // NULL schedule = CALCULATED mode (inherit from downstream).
     // The helper only accepts &str, so use execute() directly.
-    db.execute(
+    db.execute(&format!(
         "SELECT pgtrickle.create_stream_table(
             'department_stats',
-            $$
-            SELECT
-                t.id          AS department_id,
-                t.name        AS department_name,
-                t.path        AS full_path,
-                t.depth,
-                COUNT(e.id)                AS headcount,
-                COALESCE(SUM(e.salary), 0) AS total_salary,
-                COALESCE(AVG(e.salary), 0) AS avg_salary
-            FROM department_tree t
-            LEFT JOIN employees e ON e.department_id = t.id
-            GROUP BY t.id, t.name, t.path, t.depth
-            $$,
+            $${}$$,
             'calculated',
             'DIFFERENTIAL'
         )",
-    )
+        Q_STATS
+    ))
     .await;
 }
 
 /// Create `department_report` — ordinal GROUP BY 1, '1m', DIFFERENTIAL (Step 3).
 async fn create_department_report(db: &E2eDb) {
-    db.create_st(
-        "department_report",
-        "SELECT
-            split_part(full_path, ' > ', 2) AS division,
-            SUM(headcount)                  AS total_headcount,
-            SUM(total_salary)               AS total_payroll
-        FROM department_stats
-        WHERE depth >= 1
-        GROUP BY 1",
-        "1m",
-        "DIFFERENTIAL",
-    )
-    .await;
+    db.create_st("department_report", Q_REPORT, "1m", "DIFFERENTIAL")
+        .await;
 }
 
 // ── Step 2 ───────────────────────────────────────────────────────────────────

@@ -2738,3 +2738,19 @@ async fn test_recursive_cte_immediate_mode_depth_guard() {
     db.alter_system_reset_and_wait("pg_trickle.ivm_recursive_max_depth", &default_depth)
         .await;
 }
+
+#[tokio::test]
+async fn test_cte_invalid_query_fails() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE cte_err_src (id INT PRIMARY KEY)")
+        .await;
+
+    let result = db.try_execute(
+        "SELECT pgtrickle.create_stream_table('cte_err_st', 'WITH bad AS (SELECT non_existent FROM cte_err_src) SELECT * FROM bad', '1m', 'DIFFERENTIAL')"
+    ).await;
+
+    assert!(
+        result.is_err(),
+        "Creation with invalid CTE query should fail"
+    );
+}

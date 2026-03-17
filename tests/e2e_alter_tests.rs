@@ -35,6 +35,12 @@ async fn test_alter_schedule() {
         )
         .await;
     assert_eq!(schedule_after, "5m", "Schedule should be updated to '5m'");
+
+    db.execute("INSERT INTO al_src VALUES (2)").await;
+    db.refresh_st("al_sched_st").await;
+
+    db.assert_st_matches_query("al_sched_st", "SELECT id FROM al_src")
+        .await;
 }
 
 #[tokio::test]
@@ -56,6 +62,12 @@ async fn test_alter_refresh_mode() {
 
     let (_, mode_after, _, _) = db.pgt_status("al_mode_st").await;
     assert_eq!(mode_after, "FULL");
+
+    db.execute("INSERT INTO al_mode VALUES (2)").await;
+    db.refresh_st("al_mode_st").await;
+
+    db.assert_st_matches_query("al_mode_st", "SELECT id FROM al_mode")
+        .await;
 }
 
 #[tokio::test]
