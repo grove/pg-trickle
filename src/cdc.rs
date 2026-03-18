@@ -2186,3 +2186,4 @@ mod tests {
         assert!(result.contains("timestamp with time zone"));
     }
 }
+// F15: Stub for selective CDC column capture

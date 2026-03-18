@@ -1483,7 +1483,7 @@ These items pull in the remaining correctness edge cases and syntax expansions i
 - [x] G1 Correctness Gaps addressed (G1.1, G1.2, G1.5, G1.6)
 - [x] G5 Syntax Gaps addressed (G5.2, G5.3, G5.5, G5.6)
 - [x] G6 Test Coverage expanded (G6.1, G6.2, G6.3, G6.5)
-- [ ] F15: Selective CDC Column Capture (optimize I/O by only tracking columns referenced in query lineage)
+- [x] F15: Selective CDC Column Capture (optimize I/O by only tracking columns referenced in query lineage) 
 - [x] F40: Extension Upgrade Migration Scripts (finalize versioned SQL schema migrations)
 
 ---
