@@ -1,12 +1,12 @@
 # PLAN: Multi-Table Delta Batching (B-3)
 
-## Status: 🟡 IN PROGRESS
+## Status: 🟢 DONE
 
 **Goal:** `v0.9.0` (Milestone 3)
 **Remaining to do:** 
 - [x] **B3-3:** Write property-based correctness proofs for simultaneous multi-source changes (diamond-flow scenarios) using Z-set weight aggregation (`SUM(weight)`) instead of `DISTINCT ON` deduplication.
 - [x] **B3-2:** Implement merged-delta generation logic using Z-set block aggregation (`SUM(CASE WHEN action THEN 1...`) replacing DISTINCT ON.
-- [ ] **B3-1:** Implement intra-query delta branch pruning (skip `UNION ALL` branches entirely when a source has zero changes).
+- [x] **B3-1:** Implement intra-query delta branch pruning (skip `UNION ALL` branches entirely when a source has zero changes).
 
 ---
 
@@ -40,6 +40,6 @@ final_delta AS (
 *Why:* Generates the `UNION ALL` + `GROUP BY` logic dynamically.
 *Where:* `DiffEngine::diff_node()`.
 
-### 3. Intra-query Delta-Branch Pruning (B3-1) `🔴 Not Started`
+### 3. Intra-query Delta-Branch Pruning (B3-1) `🟢 Done`
 *What:* Optimize the generated `UNION ALL` statements. If 3 tables are in a join but only 1 changed, completely skip gen*What:* Optimize the generated `UNION ALL` statements. Ifar*What:* Optimize tPo*What:* Optimize the gand execution latency.
 *Where:*W`src/refresh.rs` checking `any_changes` per buffer.
