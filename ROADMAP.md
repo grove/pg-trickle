@@ -1305,70 +1305,34 @@ that re-links orphaned catalog entries on extension restore.
 
 ## v0.9.0 — Multi-Table Delta Batching & Polish
 
-**Goal:** Finalize multi-table delta batching, selective CDC column capture, and upgrade migration scripts. 
+**Goal:** Finalize multi-table delta batching, selective CDC column capture, and upgrade migration scripts.
 (Note: Algebraic aggregate shortcuts, advanced syntax features, and Phase 7 syntax gap implementations were successfully delivered earlier in the v0.9.0 development cycle).
 
 ### Algebraic Aggregate Shortcuts (B-1)
 
-> **Goal & Status:** Implemented in the 0.9.0 cycle. Dramatically reduces per-group refresh time for decomposable aggregates (COUNT, SUM, AVG, MIN, MAX, STDDEV).
+> **Goal & Status:** ✅ Implemented in the 0.9.0 cycle. Dramatically reduces per-group refresh time for decomposable aggregates (COUNT, SUM, AVG, MIN, MAX, STDDEV).
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B1-1 | Algebraic rules: COUNT, SUM, AVG, STDDEV/VAR, MIN/MAX with rescan guard | 3-4 wk | ✅ Implemented | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-2 | Auxiliary column management (`__pgt_aux_sum_*`,| B1-2 | Auxiliary column management (`__pgt_aux_FF.| B1-2 | Auxiliary column management (`__pgtd)| B1-2 | Au Migration story for existing aggregate stream tables | 1 wk | ✅ Implemented | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-4 | Fallback to full-group recomputation for non-decomposable| B1-4 | Fallback to full-group recomputation for non-decomposable| B1-4 | Fallback to full-group recomputation for non-decomposable| B1-4 | Fallback to full-group recompuImplemented | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-
-### Advanced SQL Syntax & DVM Capabilities (B-2)
-
-> **Goal & Status:** Implemented in the 0.9.0 cycle. Expand the DVM engine to handle richer SQL constructs and consistency models.
+| B1-1 | Algebraic rules: COUNT, SUM,| B1-1 | Algebraic rules: COUNT, SUan| B1-1 | Algebraic rules: COUNT,  | [PLAN_NEW_STUFF.md §B-1](| B1-1 | Algeance/PLAN_NEW_ST| B1-1 | Algebraic rules: COUNTlu| B1-1 | Algebraic rules: COUNT, SUtc| B1-1 | Algebraic rpl| B1-1 | Algebraic rules: COUNT, SUMplans/performance/PLAN_NEW_STUFF.md) |
+| B1-3 | Migration story for existin| B1-3 | Migration story for existin| B1-3 | Migration story for exismd §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation f✅ Implemented in the 0.9.0 cycle. Expand t| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomput
+| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `Oed | [GAP_SQL_PHASE_1.md](plans/sql/GAP_SQL_PHASE_1.md) |
+| B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** ImImplemented in the 0.9.0 cycle. Support multi-source updates in a single refresh cycle.
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Implemented | [PLAN_NEW_STUFF.m| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Implemented | [PLAN_NEW_STUFF.m| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Implemented | [PLAN_NEW_STUFF.m| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSE| [GAP_SQL_PHASE_1.md](plans/sql/GAP_SQL_PHASE_1.md) |
-| B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented | [PLAN_NEW_STUFF.md](plans/sql/PLAN_NEW_STUFF.md) |
-| B2-5 | **Snapshot Consistency.** Cross-source consistency models. | ~1-2 wk | ✅ Implemented | [PLAN_NEW_STUFF.md](plans/sql/PLAN_NEW_STUFF.md) |
-| B2-6 | **Non-Determinism Guarding.** Prevent non-immutable functions in materialized clauses. | ~1 wk | ✅ Implemented | [PLAN_NEW_STUFF.md](plans/sql/PLAN_NEW_STUFF.md) |
+| B3-1 | **Delta Consolidation.** Multi-source updates in a single topological step. | ~3 wk  | ✅ Implemented | [PLAN_MULTI_TABLE_DELTA_BATCHING.md](plans/performance/PLAN_MULTI_TABLE_DELTA_BATCHING.md) |
+| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling .md](plans/sql/GAP_SQL_PHASE_7.md) |
 
-### Multi-Table De### Multi-Table De### Multi-Table De### Multi-source updates in a single refresh cycle.
+### Final v0### Final v0### Final v0### Final v0### Finallose remaining critical gaps in v0.9.0 for user-facing safety and robust extension state handling.
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B3-1 | **Multi-Source Delta Consolidation.** Process triggers from multiple base tables in a single DVM invocation, resolving diamond dependencies correctly. | ~4-6 wk | Pending | [PLAN_NEW_STUFF.md](plans/sql/PLAN_NEW_STUFF.md) |
-| B3-2 | **Cross-Delta Row-ID Collisions.** Deduplicate batched inserts/updates arriving from different lineage paths without losing differential weight. | ~1-2 wk | Pending | [PLAN_NEW_STUFF.md](plans/sql/PLAN_NEW_STUFF.md) |
+| F16 | **Selective CDC Column Capture** (Instead of full rows) | ~2 wk | ⏳ Pending | [GAP_SQL_PHASE_6.md](plans/sql/GAP_SQL_PHASE_6.md) |
+| F40 | **Extension Upgrade Migrations & DB Schema Stability** | ~2-3 wk | ⏳ Pending | [REPORT_DB_SCHEMA_STABILITY.md](plans/sql/REPORT_DB_SCHEMA_STABILITY.md) |
 
-> ⚠️ Cross-delta deduplication **> ⚠️ Cross-delta deduplication **> ⚠️ Cross-delta deduplication **> ⚠️ Cross-delta deduplication **> ⚠️ Cross-delta deduplication * Testing)
-
-> **Goal & Status:** Correctness gaps successfully resolved during 0.9.0.
-
-| Item | Description | Effort | Status | Ref |
-|------|-------------|--------|--------|-----|
-| G1.1 | **JOIN Key Column Changes.** Handle updates modifying JOIN keys. | 3-5d | ✅ Implemented | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) | G1.1 | **JOIN Key Column Changes.** Handle ** Tracking range changes. | 4-6d | ✅ Implemented | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
-| G1.5/G7.1 | **Keyless Table Duplicate Identity.** Resolve `__pgt_row_id` collisions. | 3-5d | ✅ Implemented | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
-| G5.6 | **Range Aggregates.** `RANGE_AGG` / `RANGE_INTERSECT_AGG`. | 1-2d | ✅ Implemented | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
-| G5.3 | **XML Expression Parsing.** Native DVM handling for `T_XmlExpr`. | 1-2d | ✅ Implemented | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
-| G5.5 | **NATURAL JOIN Drift Tracking.** DVM tracking of schema shifts. | 2-3d | | G5.5 | **NATURAL JOIN Drift Tracking.** DVM tracking of schema shifts. F15 | **Selective CDC Column Capture.** Limit row| G5.5 | **NATURAL JOIN Drift Tracking.** DVMue| G5.5 | **NATURAL JOIN Drift Tracking.** DVM t_6.md](plans/sql/GAP_SQL_PHASE_6.md) |
-| F40 | **Extension Upgrade Migrations.** Robust versioned SQL schema migrations. | 1-2 wk | Pending | [REPORT_DB_SCHEMA_STABILITY.md](plans/sql/REPORT_DB_SCHEMA_STABILITY.md) |
-
-### Additional Query Engine Improvements
-
-| Item | Description | Effort | Status | Ref |
-|------|-------------|--------|--------|-----|
-| A1 | Circular dependency support (SCC fixpoint iteration) | ~40h | ✅ Implemented | [CIRCULAR_REFERENCES.md](plans/sql/CIRCULAR_REFERENCES.md) |
-| A7 | Skip-unchanged-column scanning in delta SQL | ~1-2d | ✅ Implemented | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) |
-
-> **v0.9.0 Remaining Target Effort: ~5-10 weeks**
-
-**Exit criteria:**
-- [x] Algebraic Aggregate Shortcuts implemented and tested (B-1)
-- [x] Advanced SQL Syntax Capabilities shipped (B-2)
-- [x] Phase 7 correctness gaps and syntax features addressed
-- [x] Circular dependency cycle mitigation shipped
-- [ ] B3-1: Multi-Source Delta Consolidation
-- [ ] B3-2: Cross-Delta Row-ID Collisions
-- [ ] F15: Selective CDC Column Capture
-- [ ] F40: Extension Upgrade Migration Scripts
-
----
+> **v0.9.0 Remaining Target Effort: ~4-5 weeks**
 
 ## v0.10.0 — Connection Pooler Compatibility, Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep
 
