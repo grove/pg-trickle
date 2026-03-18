@@ -17,6 +17,21 @@ triggers the [Release workflow](../.github/workflows/release.yml), which:
 - Push access to the repository (or a PR merged by a maintainer)
 - All CI checks passing on `main`
 - The version in `Cargo.toml` matches the tag you intend to push
+- Required GitHub secrets configured (see [Required GitHub Secrets](#required-github-secrets) below)
+
+## Required GitHub Secrets
+
+The release automation uses the following GitHub Actions secrets. Set them
+under **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | Used by | Description |
+|--------|---------|-------------|
+| `PGXN_USERNAME` | `pgxn.yml` | Your PGXN account username. Required to authenticate the `pgxn upload` command when publishing source archives to the [PostgreSQL Extension Network](https://pgxn.org/). |
+| `PGXN_PASSWORD` | `pgxn.yml` | Password for the PGXN account above. Never hardcode this — it must be stored as a secret so it is never exposed in logs or committed to the repository. |
+
+> **Note:** The `GITHUB_TOKEN` secret is provided automatically by GitHub
+> Actions and does not need to be configured manually. It is used by the
+> release and Docker workflows to create GitHub Releases and push images to GHCR.
 
 ## Step-by-Step
 
