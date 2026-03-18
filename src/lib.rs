@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_scheduler_jobs (
     dag_version     BIGINT NOT NULL,
     unit_key        TEXT NOT NULL,
     unit_kind       TEXT NOT NULL
-                     CHECK (unit_kind IN ('singleton', 'atomic_group', 'immediate_closure')),
+                     CHECK (unit_kind IN ('singleton', 'atomic_group', 'immediate_closure', 'cyclic_scc')),
     member_pgt_ids  BIGINT[] NOT NULL,
     root_pgt_id     BIGINT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'QUEUED'

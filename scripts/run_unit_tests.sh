@@ -51,7 +51,18 @@ OS="$(uname)"
 case "$OS" in
     Darwin)
         STUB_LIB="$CARGO_TARGET_DIR/libpg_stub.dylib"
-        STUB_CC_FLAGS="-shared -install_name @rpath/libpg_stub.dylib"
+        # On Apple Silicon, native toolchain binaries (cc, ld) are compiled as
+        # arm64e.  DYLD_INSERT_LIBRARIES requires the injected dylib to match
+        # the architecture of the receiving process.  arm64e dylibs are also
+        # loadable by plain arm64 processes (system libraries such as
+        # libSystem.dylib are arm64e and are used by arm64 binaries every day),
+        # so a single arm64e slice serves both the toolchain and the Rust test
+        # binary on all Apple Silicon machines.
+        if [[ "$(uname -m)" == "arm64" ]]; then
+            STUB_CC_FLAGS="-shared -arch arm64e -install_name @rpath/libpg_stub.dylib"
+        else
+            STUB_CC_FLAGS="-shared -install_name @rpath/libpg_stub.dylib"
+        fi
         PRELOAD_VAR="DYLD_INSERT_LIBRARIES"
         ;;
     *)

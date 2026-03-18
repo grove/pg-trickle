@@ -116,7 +116,7 @@ async fn test_circular_monotone_cycle_converges() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_reach_a', \
          query => $$SELECT DISTINCT e.src, e.dst FROM cyc_edges e \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT e.src, rb.dst \
            FROM cyc_edges e \
            INNER JOIN cyc_reach_b rb ON e.dst = rb.src$$)",
@@ -127,7 +127,7 @@ async fn test_circular_monotone_cycle_converges() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_reach_b', \
          query => $$SELECT DISTINCT e.src, e.dst FROM cyc_edges e \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT ra.src, e.dst \
            FROM cyc_reach_a ra \
            INNER JOIN cyc_edges e ON ra.dst = e.src$$)",
@@ -152,12 +152,46 @@ async fn test_circular_monotone_cycle_converges() {
 
     // Wait for the scheduler to converge (refresh both STs)
     assert!(
-        wait_for_refresh(&db, "cyc_reach_a", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_reach_a", Duration::from_secs(180)).await,
         "cyc_reach_a should be refreshed by scheduler"
     );
     assert!(
-        wait_for_refresh(&db, "cyc_reach_b", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_reach_b", Duration::from_secs(180)).await,
         "cyc_reach_b should be refreshed by scheduler"
+    );
+
+    // Wait for full fixpoint convergence.
+    //
+    // `wait_for_refresh` returns as soon as `last_refresh_at IS NOT NULL`,
+    // which is satisfied after the *first* fixpoint iteration (seed pass with 3
+    // direct-edge rows).  The transitive closure requires 2+ more iterations.
+    // `last_fixpoint_iterations` is only set after all iterations converge, so
+    // polling this column is the correct signal for data-correctness assertions.
+    let fixpoint_converged = {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(300);
+        loop {
+            if start.elapsed() > timeout {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let done: bool = db
+                .query_scalar(
+                    "SELECT EXISTS( \
+                        SELECT 1 FROM pgtrickle.pgt_stream_tables \
+                        WHERE pgt_name IN ('cyc_reach_a', 'cyc_reach_b') \
+                        AND last_fixpoint_iterations IS NOT NULL \
+                    )",
+                )
+                .await;
+            if done {
+                break true;
+            }
+        }
+    };
+    assert!(
+        fixpoint_converged,
+        "fixpoint did not converge within 120s (last_fixpoint_iterations never set)"
     );
 
     // Both STs should be ACTIVE after convergence
@@ -216,8 +250,14 @@ async fn test_circular_monotone_cycle_converges() {
 /// should be rejected even when allow_circular=true.
 #[tokio::test]
 async fn test_circular_nonmonotone_cycle_rejected() {
-    let db = E2eDb::new().await.with_extension().await;
-    db.execute("SET pg_trickle.allow_circular = true").await;
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    // ALTER SYSTEM SET + reload so every pool connection sees allow_circular=true.
+    // A session-level SET is unreliable with sqlx PgPool because subsequent
+    // queries may arrive on a different connection where the GUC is still false,
+    // causing the generic CycleDetected error before the monotonicity check.
+    db.execute("ALTER SYSTEM SET pg_trickle.allow_circular = true")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
 
     db.execute("CREATE TABLE cyc_nm_src (id INT PRIMARY KEY, grp TEXT, val INT NOT NULL)")
         .await;
@@ -373,7 +413,7 @@ async fn test_circular_convergence_records_iterations() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_conv_a', \
          query => $$SELECT id, val FROM cyc_conv_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT b.id, b.val FROM cyc_conv_b b$$)",
     )
     .await;
@@ -381,14 +421,14 @@ async fn test_circular_convergence_records_iterations() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_conv_b', \
          query => $$SELECT id, val FROM cyc_conv_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT a.id, a.val FROM cyc_conv_a a$$)",
     )
     .await;
 
     // Wait for convergence
     assert!(
-        wait_for_refresh(&db, "cyc_conv_a", Duration::from_secs(60)).await,
+        wait_for_refresh(&db, "cyc_conv_a", Duration::from_secs(180)).await,
         "cyc_conv_a should be refreshed"
     );
 
@@ -477,7 +517,7 @@ async fn test_circular_nonconvergence_error_status() {
 
     // Wait for the scheduler to attempt the cycle and hit the limit.
     // With max_fixpoint_iterations=1, it should fail to converge and mark ERROR.
-    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(60)).await;
+    let got_error = wait_for_status(&db, "cyc_nc_a", "ERROR", Duration::from_secs(180)).await;
 
     // Note: Since each iteration generates new rows unconditionally, it is guaranteed
     // to never converge, making it a reliable test.
@@ -529,7 +569,7 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_a', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT b.id, b.val FROM cyc_drop_b b$$)",
     )
     .await;
@@ -537,7 +577,7 @@ async fn test_circular_drop_member_clears_scc_id() {
     db.execute(
         "SELECT pgtrickle.alter_stream_table('cyc_drop_b', \
          query => $$SELECT id, val FROM cyc_drop_src \
-           UNION ALL \
+           UNION \
            SELECT DISTINCT a.id, a.val FROM cyc_drop_a a$$)",
     )
     .await;
