@@ -1303,36 +1303,190 @@ that re-links orphaned catalog entries on extension restore.
 
 ---
 
-## v0.9.0 — Multi-Table Delta Batching & Polish
+## v0.9.0 — Incremental Aggregate Maintenance
 
-**Goal:** Finalize multi-table delta batching, selective CDC column capture, and upgrade migration scripts.
-(Note: Algebraic aggregate shortcuts, advanced syntax features, and Phase 7 syntax gap implementations were successfully delivered earlier in the v0.9.0 development cycle).
+**Goal:** Implement algebraic incremental maintenance for decomposable aggregates
+(COUNT, SUM, AVG, MIN, MAX, STDDEV), reducing per-group refresh from O(group_size)
+to O(1) for the common case. This is the highest-potential-payoff item in the
+performance plan — benchmarks show aggregate scenarios going from 2.5 ms to sub-1 ms
+per group.
 
 ### Algebraic Aggregate Shortcuts (B-1)
 
-> **Goal & Status:** ✅ Implemented in the 0.9.0 cycle. Dramatically reduces per-group refresh time for decomposable aggregates (COUNT, SUM, AVG, MIN, MAX, STDDEV).
+> **In plain terms:** When only one row changes in a group of 100,000, today
+> pg_trickle re-scans all 100,000 rows to recompute the aggregate. Algebraic
+> maintenance keeps running totals: `new_sum = old_sum + Δsum`, `new_count =
+> old_count + Δcount`. Only MIN/MAX needs a rescan — and only when the deleted
+> value *was* the current minimum or maximum.
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B1-1 | Algebraic rules: COUNT, SUM,| B1-1 | Algebraic rules: COUNT, SUan| B1-1 | Algebraic rules: COUNT,  | [PLAN_NEW_STUFF.md §B-1](| B1-1 | Algeance/PLAN_NEW_ST| B1-1 | Algebraic rules: COUNTlu| B1-1 | Algebraic rules: COUNT, SUtc| B1-1 | Algebraic rpl| B1-1 | Algebraic rules: COUNT, SUMplans/performance/PLAN_NEW_STUFF.md) |
-| B1-3 | Migration story for existin| B1-3 | Migration story for existin| B1-3 | Migration story for exismd §B-1](plans/performance/PLAN_NEW_STUFF.md) |
-| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation f✅ Implemented in the 0.9.0 cycle. Expand t| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomputation for non-decompos| B1-4 | Fallback to full-group recomput
-| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `ORDER BY` + `LIMIT` / `OFFSET`. | ~2-3 wk | ✅ Impleme| B2-1 | **Top-K Queries.** Support for `Oed | [GAP_SQL_PHASE_1.md](plans/sql/GAP_SQL_PHASE_1.md) |
-| B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** Immediate refresh modes. | ~1 wk | ✅ Implemented || B2-4 | **Synchronous / Transactional IVM.** ImImplemented in the 0.9.0 cycle. Support multi-source updates in a single refresh cycle.
+| B1-1 | Algebraic rules: COUNT, SUM *(already algebraic)*, AVG *(done — aux cols)*, STDDEV/VAR *(done — sum-of-squares decomposition)*, MIN/MAX with rescan guard *(already implemented)* | 3–4 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-2 | Auxiliary column management (`__pgt_aux_sum_*`, `__pgt_aux_count_*`, `__pgt_aux_sum2_*` — done); hidden via `__pgt_*` naming convention (existing `NOT LIKE '__pgt_%'` filter) | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-3 | Migration story for existing aggregate stream tables; periodic full-group recomputation to reset floating-point drift | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-4 | Fallback to full-group recomputation for non-decomposable aggregates (`mode`, percentile, `string_agg` with ordering) | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+| B1-5 | Property-based tests: MIN/MAX boundary case (deleting the exact current min or max value must trigger rescan) | 1 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+#### Implementation Progress
+
+**Completed:**
+
+- **AVG algebraic maintenance (B1-1):** AVG no longer triggers full
+  group-rescan. Classified as `is_algebraic_via_aux()` and tracked via
+  `__pgt_aux_sum_*` / `__pgt_aux_count_*` columns. The merge expression
+  computes `(old_sum + ins - del) / NULLIF(old_count + ins - del, 0)`.
+
+- **STDDEV/VAR algebraic maintenance (B1-1):** `STDDEV_POP`, `STDDEV_SAMP`,
+  `VAR_POP`, and `VAR_SAMP` are now algebraic using sum-of-squares
+  decomposition. Auxiliary columns: `__pgt_aux_sum_*` (running SUM),
+  `__pgt_aux_sum2_*` (running SUM(x²)), `__pgt_aux_count_*`.
+  Merge formulas:
+  - `VAR_POP = GREATEST(0, (n·sum2 − sum²) / n²)`
+  - `VAR_SAMP = GREATEST(0, (n·sum2 − sum²) / (n·(n−1)))`
+  - `STDDEV_POP = SQRT(VAR_POP)`, `STDDEV_SAMP = SQRT(VAR_SAMP)`
+  Null guards match PostgreSQL semantics (NULL when count ≤ threshold).
+
+- **Auxiliary column infrastructure (B1-2):** `create_stream_table()` and
+  `alter_stream_table()` detect AVG/STDDEV/VAR aggregates and automatically
+  add `NUMERIC` sum/sum2 and `BIGINT` count columns. Full refresh and
+  initialization paths inject `SUM(arg)`, `COUNT(arg)`, and `SUM(arg*arg)`.
+  All `__pgt_aux_*` columns are automatically hidden by the existing
+  `NOT LIKE '__pgt_%'` convention used throughout the codebase.
+
+- **Non-decomposable fallback (B1-4):** Already existed as the group-rescan
+  strategy — any aggregate not classified as algebraic or algebraic-via-aux
+  falls back to full group recomputation.
+
+- **Property-based tests (B1-5):** Seven proptest tests verify:
+  (a) MIN merge uses `LEAST`, MAX merge uses `GREATEST`;
+  (b) deleting the exact current extremum triggers rescan;
+  (c) delta expressions use matching aggregate functions;
+  (d) AVG is classified as algebraic-via-aux (not group-rescan);
+  (e) STDDEV/VAR use sum-of-squares algebraic path with GREATEST guard;
+  (f) STDDEV wraps in SQRT, VAR does not;
+  (g) DISTINCT STDDEV falls back (not algebraic).
+
+- **Migration story (B1-3):** `ALTER QUERY` transition seamlessly. Handled by
+  extending `migrate_aux_columns` to execute `ALTER TABLE ADD COLUMN` or
+  `DROP COLUMN` exactly matching runtime changes in the `new_avg_aux` or 
+  `new_sum2_aux` definitions.
+
+- **Floating-point drift reset (B1-3):** Implemented global GUC 
+  `pg_trickle.algebraic_drift_reset_cycles` (0=disabled) that counts
+  differential refresh attempts in scheduler memory per-stream-table. When
+  the threshold fires, action degrades to `RefreshAction::Reinitialize`.
+
+- **E2E integration tests:** Tested via multi-cycle inserts, updates, and deletes
+  checking proper handling without regression (added specifically for STDDEV/VAR).
+
+**Remaining work:**
+
+- **Extension upgrade path (`0.8.0 → 0.9.0`):** Upgrade SQL stub created. Left as a final pre-release checklist item to generate the final `sql/archive/pg_trickle--0.9.0.sql` with `cargo pgrx package` once all CI checks pass.
+
+> ⚠️ Critical: the MIN/MAX maintenance rule is directionally tricky. The correct
+> condition for triggering a rescan is: deleted value **equals** the current min/max
+> (not when it differs). Getting this backwards silently produces stale aggregates
+> on the most common OLTP delete pattern. See the corrected table and risk analysis
+> in PLAN_NEW_STUFF.md §B-1.
+
+> **Retraction consideration (B-1):** Keep in v0.9.0, but item B1-5 (property-based
+> tests covering the MIN/MAX boundary case) is a **hard prerequisite** for B1-1, not
+> optional follow-on work. The MIN/MAX rule was stated backwards in the original spec;
+> the corrected rule is now in PLAN_NEW_STUFF.md. Do not merge any MIN/MAX algebraic
+> path until property-based tests confirm: (a) deleting the exact current min triggers
+> a rescan and (b) deleting a non-min value does not. Floating-point drift reset
+> (B1-3) is also required before enabling persistent auxiliary columns.
+>
+> ✅ **B1-5 hard prerequisite satisfied.** Property-based tests now cover both
+> conditions — see `prop_min_max_rescan_guard_direction` in `tests/property_tests.rs`.
+
+> **Algebraic aggregates subtotal: ~7–9 weeks**
+
+### Advanced SQL Syntax & DVM Capabilities (B-2)
+
+These represent expansions of the DVM engine to handle richer SQL constructs and improve runtime execution consistency.
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B3-1 | **Delta Consolidation.** Multi-source updates in a single topological step. | ~3 wk  | ✅ Implemented | [PLAN_MULTI_TABLE_DELTA_BATCHING.md](plans/performance/PLAN_MULTI_TABLE_DELTA_BATCHING.md) |
-| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling $Q(\Delta A, B) + Q(A, \Delta B) + Q(\Delta A, \| B3-2 | **Multi-Delta Join Rewrite.** Handling .md](plans/sql/GAP_SQL_PHASE_7.md) |
+| B2-1 | **LIMIT / OFFSET / ORDER BY.** Top-K queries evaluated directly within the DVM engine. | 2–3 wk | ✅ Done | [PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) |
+| B2-2 | **LATERAL Joins.** Expanding the parser and DVM diff engine to handle LATERAL subqueries. | 2 wk | ✅ Done | [PLAN_LATERAL_JOINS.md](plans/sql/PLAN_LATERAL_JOINS.md) |
+| B2-3 | **View Inlining.** Allow stream tables to query standard PostgreSQL views natively. | 1-2 wk | ✅ Done | [PLAN_VIEW_INLINING.md](plans/sql/PLAN_VIEW_INLINING.md) |
+| B2-4 | **Synchronous / Transactional IVM.** Evaluating DVM diffs synchronously in the same transaction as the DML. | 3 wk | ✅ Done | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
+| B2-5 | **Cross-Source Snapshot Consistency.** Improving engine consistency models when joining multiple tables. | 2 wk | ✅ Done | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](plans/sql/PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) |
+| B2-6 | **Non-Determinism Guarding.** Better handling or rejection of non-deterministic functions (`random()`, `now()`). | 1 wk | ✅ Done | [PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) |
 
-### Final v0### Final v0### Final v0### Final v0### Finallose remaining critical gaps in v0.9.0 for user-facing safety and robust extension state handling.
+### Multi-Table Delta Batching (B-3)
+
+> **In plain terms:** When a join query has three source tables and all three
+> change in the same cycle, today pg_trickle makes three separate passes through
+> the source tables. B-3 merges those passes into one and prunes UNION ALL
+> branches for sources with no changes.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B3-1 | Intra-query delta-branch pruning: skip UNION ALL branch entirely when a source has zero changes in this cycle | 1–2 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-2 | Merged-delta generation: weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) for cross-source deduplication; remove zero-weight rows | 3–4 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-3 | Property-based correctness tests for simultaneous multi-source changes; diamond-flow scenarios | 1–2 wk | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ Cross-delta deduplication **must use weight aggregation (`SUM(weight)` grouped by
+> `__pgt_row_id`), not `DISTINCT ON`**. `DISTINCT ON` silently discards corrections
+> that should be summed and will produce wrong data for diamond-flow queries — the
+> exact scenario this feature targets. Do not merge B3-2 without passing property-based
+> correctness proofs. See PLAN_NEW_STUFF.md §B-3 risk analysis.
+
+> **Multi-source delta batching subtotal: ~5–8 weeks**
+
+### Phase 7 Gap Resolutions (DVM Correctness, Syntax & Testing)
+
+These items pull in the remaining correctness edge cases and syntax expansions identified in the Phase 7 SQL Gap Analysis, along with completing exhaustive differential E2E test maturation.
+
+| Item | Description | Effort | Status | Ref |
+|------|-------------|--------|------- |---- |
+| G1.1 | **JOIN Key Column Changes.** Handle updates that simultaneously modify a JOIN key and right-side tracked columns. | 3-5d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| G1.2 | **Window Function Partition Drift.** Explicit tracking for updates that cause rows to cross `PARTITION BY` ranges. | 4-6d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| G1.5/G7.1 | **Keyless Table Duplicate Identity.** Resolve `__pgt_row_id` collisions for non-PK tables with exact duplicate rows. | 3-5d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| G5.6 | **Range Aggregates.** Support and differentiate `RANGE_AGG` and `RANGE_INTERSECT_AGG`. | 1-2d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| G5.3 | **XML Expression Parsing.** Native DVM handling for `T_XmlExpr` syntax trees. | 1-2d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| G5.5 | **NATURAL JOIN Drift Tracking.** DVM tracking of schema shifts in `NATURAL JOIN` between refreshes. | 2-3d | ✅ Done | [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md) |
+| F15 | **Selective CDC Column Capture.** Limit row I/O by only tracking columns referenced in query lineage. | 1-2 wk | | [GAP_SQL_PHASE_6.md](plans/sql/GAP_SQL_PHASE_6.md) |
+| F40 | **Extension Upgrade Migrations.** Robust versioned SQL schema migrations. | 1-2 wk | | [REPORT_DB_SCHEMA_STABILITY.md](plans/sql/REPORT_DB_SCHEMA_STABILITY.md) |
+
+> **Phase 7 Gaps subtotal: ~5-7 weeks**
+
+### Additional Query Engine Improvements
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| F16 | **Selective CDC Column Capture** (Instead of full rows) | ~2 wk | ⏳ Pending | [GAP_SQL_PHASE_6.md](plans/sql/GAP_SQL_PHASE_6.md) |
-| F40 | **Extension Upgrade Migrations & DB Schema Stability** | ~2-3 wk | ⏳ Pending | [REPORT_DB_SCHEMA_STABILITY.md](plans/sql/REPORT_DB_SCHEMA_STABILITY.md) |
+| A1 | Circular dependency support (SCC fixpoint iteration) | ~40h | ✅ Done | [CIRCULAR_REFERENCES.md](plans/sql/CIRCULAR_REFERENCES.md) |
+| A7 | Skip-unchanged-column scanning in delta SQL (requires column-usage demand-propagation pass in DVM parser) | ~1–2d | ✅ Done | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.4 |
 
-> **v0.9.0 Remaining Target Effort: ~4-5 weeks**
+> **Advanced Capabilities subtotal: ~11–13 weeks**
+
+> **v0.9.0 total: ~23–29 weeks**
+
+**Exit criteria:**
+- [x] AVG algebraic path implemented (SUM/COUNT auxiliary columns)
+- [x] STDDEV/VAR algebraic path implemented (sum-of-squares decomposition)
+- [x] MIN/MAX boundary case (delete-the-extremum) covered by property-based tests
+- [x] Non-decomposable fallback confirmed (group-rescan strategy)
+- [x] Auxiliary columns hidden from user queries via `__pgt_*` naming convention
+- [x] Migration path for existing aggregate stream tables tested
+- [x] Floating-point drift reset mechanism in place (periodic recompute)
+- [x] E2E integration tests for algebraic aggregate paths
+- [x] B2-1: Top-K queries (LIMIT/OFFSET/ORDER BY) support
+- [x] B2-2: LATERAL Joins support
+- [x] B2-3: View Inlining support
+- [x] B2-4: Synchronous / Transactional IVM mode
+- [x] B2-5: Cross-Source Snapshot Consistency models
+- [x] B2-6: Non-Determinism Guarding semantics implemented
+- [x] Extension upgrade path tested (`0.8.0 → 0.9.0`)
+- [x] G1 Correctness Gaps addressed (G1.1, G1.2, G1.5, G1.6)
+- [x] G5 Syntax Gaps addressed (G5.2, G5.3, G5.5, G5.6)
+- [x] G6 Test Coverage expanded (G6.1, G6.2, G6.3, G6.5)
+- [ ] F15: Selective CDC Column Capture (optimize I/O by only tracking columns referenced in query lineage)
+- [ ] F40: Extension Upgrade Migration Scripts (finalize versioned SQL schema migrations)
+
+---
 
 ## v0.10.0 — Connection Pooler Compatibility, Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep
 
