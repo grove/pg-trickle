@@ -1,5 +1,10 @@
 # pg_trickle — Implementation Plan
 
+> **Implementation Status (v0.9.0 Cycle)**
+> Most core architectural phases (Phases 1-12) are now implemented. The remaining critical features necessary to fully close out the v0.9.0 milestone are:
+> - **F15**: Selective CDC Column Capture (Phase 6 Integration)
+> - **F40**: Extension Upgrade Migrations & DB Schema Stability (Phase 7 & 12 Integration)
+
 ## Streaming tables for PostgreSQL 18 as a Rust Extension
 
 A loadable PostgreSQL 18 extension, written in Rust (pgrx), that provides declarative Stream Tables with automated lag-based scheduling and incremental view maintenance (IVM), implementing Delayed View Semantics (DVS). Users create Stream Tables via SQL functions specifying a defining query, target lag, and refresh mode. A background worker scheduler maintains the DAG of STs, triggers refreshes, and applies incremental deltas computed via a query differentiation engine.
