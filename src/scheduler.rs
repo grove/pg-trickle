@@ -322,7 +322,17 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
         }
 
         // Wake every 10 s or on SIGHUP/SIGTERM.
-        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(10))) {
+        let should_continue = BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(10)));
+
+        unsafe {
+            if pg_sys::ConfigReloadPending != 0 {
+                pg_sys::ConfigReloadPending = 0;
+                pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+pgrx::info!("pg_trickle scheduler: SIGHUP processed, allow_circular is now {}", config::pg_trickle_allow_circular()); 
+            }
+        }
+
+        if !should_continue {
             log!("pg_trickle launcher shutting down");
             break;
         }
@@ -495,6 +505,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
             "singleton" => execute_worker_singleton(&job),
             "atomic_group" => execute_worker_atomic_group(&job),
             "immediate_closure" => execute_worker_immediate_closure(&job),
+            "cyclic_scc" => execute_worker_cyclic_scc(&job),
             _ => {
                 warning!(
                     "pg_trickle refresh worker: unknown unit_kind '{}' for job {}",
@@ -768,6 +779,110 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
     };
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref())
+}
+
+/// Execute a full cyclic Strongly Connected Component in parallel mode.
+///
+/// Runs iterative fixed-point refresh until convergence.
+fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: cyclic SCC — {} members (job {})",
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    let max_iter = config::pg_trickle_max_fixpoint_iterations();
+    let gated_oids = load_gated_source_oids();
+    let member_ids = &job.member_pgt_ids;
+
+    if member_ids.is_empty() { return RefreshOutcome::Success; }
+
+    for &pgt_id in member_ids {
+        if let Some(st) = load_st_by_id(pgt_id) {
+            if st.refresh_mode != RefreshMode::Differential {
+                pgrx::warning!(
+                    "pg_trickle refresh worker: SCC fixpoint — {}.{} uses {} mode, \
+                     only DIFFERENTIAL is supported in cyclic dependencies",
+                    st.pgt_schema, st.pgt_name, st.refresh_mode.as_str()
+                );
+                return RefreshOutcome::PermanentFailure;
+            }
+        }
+    }
+
+    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
+        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+    } else { None };
+
+    let mut prev_row_counts: HashMap<i64, i64> = member_ids
+        .iter()
+        .map(|&id| (id, get_st_row_count(id).unwrap_or(0)))
+        .collect();
+
+    for iteration in 0..max_iter {
+        let mut iteration_ok = true;
+        let mut any_refreshed = false;
+
+        {
+            let subtxn = SubTransaction::begin();
+
+            for &pgt_id in member_ids {
+                let st = match load_st_by_id(pgt_id) {
+                    Some(st) => st,
+                    None => continue,
+                };
+
+                if st.status != StStatus::Active && st.status != StStatus::Initializing {
+                    continue;
+                }
+
+                if is_any_source_gated(pgt_id, &gated_oids) {
+                    log_gated_skip(&st);
+                    continue;
+                }
+
+                // Inside SCCs, always use FULL refresh action to evaluate defining query each pass.
+                let outcome = execute_scheduled_refresh(&st, RefreshAction::Full, tick_watermark.as_deref());
+                match outcome {
+                    RefreshOutcome::Success => {
+                        any_refreshed = true;
+                    }
+                    RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                        log!("pg_trickle refresh worker: fixpoint iteration {} failed on {}.{}", iteration + 1, st.pgt_schema, st.pgt_name);
+                        iteration_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            if !iteration_ok {
+                subtxn.rollback();
+                return RefreshOutcome::RetryableFailure;
+            }
+
+            subtxn.commit();
+        }
+
+        if !any_refreshed { continue; }
+
+        let mut total_changes: i64 = 0;
+        for &pgt_id in member_ids {
+            let new_count = get_st_row_count(pgt_id).unwrap_or(0);
+            let old_count = prev_row_counts.get(&pgt_id).copied().unwrap_or(0);
+            total_changes += (new_count - old_count).abs();
+            prev_row_counts.insert(pgt_id, new_count);
+        }
+
+        if total_changes == 0 {
+            log!("pg_trickle refresh worker: fixpoint reached after {} iteration(s)", iteration + 1);
+            return RefreshOutcome::Success;
+        }
+
+        log!("pg_trickle refresh worker: fixpoint iteration {} yielded {} change(s), continuing...", iteration + 1, total_changes);
+    }
+
+    pgrx::warning!("pg_trickle refresh worker: SCC fixpoint failed to converge after {} iterations", max_iter);
+    RefreshOutcome::PermanentFailure
 }
 
 // ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
@@ -1298,6 +1413,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         };
         let should_continue =
             BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
+
+        unsafe {
+            if pg_sys::ConfigReloadPending != 0 {
+                pg_sys::ConfigReloadPending = 0;
+                pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP);
+pgrx::info!("pg_trickle scheduler: SIGHUP processed, allow_circular is now {}", config::pg_trickle_allow_circular()); 
+            }
+        }
 
         if !should_continue {
             // SIGTERM received — shut down gracefully.

@@ -1120,6 +1120,9 @@ pub enum ExecutionUnitKind {
     /// An IMMEDIATE-trigger closure — the root scheduled refresh fires
     /// synchronous downstream updates inside the same transaction.
     ImmediateClosure,
+    /// A cyclic Strongly Connected Component — members are refreshed
+    /// iteratively until fixpoint convergence is reached.
+    CyclicScc,
 }
 
 impl ExecutionUnitKind {
@@ -1128,6 +1131,7 @@ impl ExecutionUnitKind {
             ExecutionUnitKind::Singleton => "singleton",
             ExecutionUnitKind::AtomicGroup => "atomic_group",
             ExecutionUnitKind::ImmediateClosure => "immediate_closure",
+            ExecutionUnitKind::CyclicScc => "cyclic_scc",
         }
     }
 }
@@ -1167,6 +1171,7 @@ impl ExecutionUnit {
             ExecutionUnitKind::Singleton => "s",
             ExecutionUnitKind::AtomicGroup => "a",
             ExecutionUnitKind::ImmediateClosure => "i",
+            ExecutionUnitKind::CyclicScc => "c",
         };
         // member_pgt_ids are sorted during construction
         let ids: Vec<String> = self
@@ -1221,6 +1226,50 @@ impl ExecutionUnitDag {
             id
         };
 
+        let mut assigned_pgt_ids: HashSet<i64> = HashSet::new();
+
+        // Step 0: Identify Cyclic SCCs and eagerly build execution units for them.
+        for scc in st_dag.condensation_order() {
+            if scc.is_cyclic {
+                let mut pgt_ids: Vec<i64> = scc
+                    .nodes
+                    .iter()
+                    .filter_map(|n| {
+                        if let NodeId::StreamTable(id) = n {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if pgt_ids.is_empty() {
+                    continue;
+                }
+
+                pgt_ids.sort();
+                pgt_ids.dedup();
+
+                let id = alloc_id();
+                let root = pgt_ids[0];
+                let label = format_unit_members(st_dag, &pgt_ids);
+
+                let unit = ExecutionUnit {
+                    id,
+                    kind: ExecutionUnitKind::CyclicScc,
+                    member_pgt_ids: pgt_ids.clone(),
+                    root_pgt_id: root,
+                    label,
+                };
+
+                eu_dag.units.insert(id, unit);
+                for &pgt_id in &pgt_ids {
+                    eu_dag.pgt_to_unit.insert(pgt_id, id);
+                    assigned_pgt_ids.insert(pgt_id);
+                }
+            }
+        }
+
         // Step 1: Compute consistency groups from the StDag.
         let groups = st_dag.compute_consistency_groups();
 
@@ -1245,7 +1294,6 @@ impl ExecutionUnitDag {
         // Strategy: For each consistency group, check if any member triggers
         // IMMEDIATE downstream propagation. If so, detect the full IMMEDIATE
         // closure and merge into a single unit.
-        let mut assigned_pgt_ids: HashSet<i64> = HashSet::new();
 
         for group in &groups {
             let pgt_ids: Vec<i64> = group
@@ -1537,6 +1585,7 @@ impl ExecutionUnitDag {
         let mut singletons = 0u32;
         let mut atomic_groups = 0u32;
         let mut immediate_closures = 0u32;
+        let mut cyclic_sccs = 0u32;
         let mut total_sts = 0usize;
 
         for unit in self.units.values() {
@@ -1545,6 +1594,7 @@ impl ExecutionUnitDag {
                 ExecutionUnitKind::Singleton => singletons += 1,
                 ExecutionUnitKind::AtomicGroup => atomic_groups += 1,
                 ExecutionUnitKind::ImmediateClosure => immediate_closures += 1,
+                ExecutionUnitKind::CyclicScc => cyclic_sccs += 1,
             }
         }
 
@@ -1553,11 +1603,12 @@ impl ExecutionUnitDag {
         let n_levels = self.topological_levels().map(|l| l.len()).unwrap_or(0);
 
         format!(
-            "{} units ({} singleton, {} atomic, {} immediate), {} STs, {} edges, {} levels, {} initially ready",
+            "{} units ({} singleton, {} atomic, {} immediate, {} cyclic SCCs), {} STs, {} edges, {} levels, {} initially ready",
             self.units.len(),
             singletons,
             atomic_groups,
             immediate_closures,
+            cyclic_sccs,
             total_sts,
             edges,
             n_levels,
