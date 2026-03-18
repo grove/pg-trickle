@@ -26,12 +26,15 @@ under **Settings → Secrets and variables → Actions → New repository secret
 
 | Secret | Used by | Description |
 |--------|---------|-------------|
-| `PGXN_USERNAME` | `pgxn.yml` | Your PGXN account username. Required to authenticate the `pgxn upload` command when publishing source archives to the [PostgreSQL Extension Network](https://pgxn.org/). |
+| `PGXN_USERNAME` | `pgxn.yml` | Your PGXN account username. Required to authenticate the `pgxn upload` command when publishing source archives to the [PostgreSQL Extension Network](https://pgxn.org/). Register at [pgxn.org](https://pgxn.org/). |
 | `PGXN_PASSWORD` | `pgxn.yml` | Password for the PGXN account above. Never hardcode this — it must be stored as a secret so it is never exposed in logs or committed to the repository. |
+| `CODECOV_TOKEN` | `coverage.yml` | Upload token for [Codecov](https://codecov.io/). Used to publish unit and E2E coverage reports. Obtain it from the Codecov dashboard after linking the repository. The workflow degrades gracefully (`fail_ci_if_error: false`) if absent. |
+| `BENCHER_API_TOKEN` | `benchmarks.yml` | API token for [Bencher](https://bencher.dev/), the continuous benchmarking platform. Used to track Criterion benchmark results on `main` and detect regressions on pull requests. The benchmark steps are **skipped entirely** when this secret is absent, so CI still passes without it. Create a project at bencher.dev and copy the token from the project settings. |
 
 > **Note:** The `GITHUB_TOKEN` secret is provided automatically by GitHub
 > Actions and does not need to be configured manually. It is used by the
-> release and Docker workflows to create GitHub Releases and push images to GHCR.
+> release workflow to create GitHub Releases, by the Docker workflow to push
+> images to GHCR, and by Bencher to post PR comments.
 
 ## Step-by-Step
 
