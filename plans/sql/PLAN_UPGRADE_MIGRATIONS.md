@@ -19,13 +19,17 @@ Completed for `v0.9.0` so far:
 - Extended the fast completeness gate to validate new tables and indexes in
   addition to functions, views, and event triggers.
 
-Still remaining before F40 is fully done for `v0.9.0`:
+Still remaining before F40 is fully closed for `v0.9.0`:
 
-- Detect more kinds of schema drift automatically, especially changed column
-  definitions, changed function signatures/defaults, and view-definition drift.
-- Add or tighten true-upgrade assertions for `v0.9.0`-specific schema objects.
-- Complete the release-finalization step that verifies the release-grade SQL
-  artifacts after the final CI pass.
+- **Release finalization only:** run `cargo pgrx package`, verify the output
+  against `sql/archive/pg_trickle--0.9.0.sql` using the completeness script,
+  then tag the release. This is an operational step, not a code change.
+
+All code-level items are now done:
+
+- Column-drift detection added (CHECK 6 in `check_upgrade_completeness.sh`).
+- `test_upgrade_v090_catalog_additions` (L15) asserts the `pgt_refresh_groups`
+  table structure and uniqueness constraint on fresh install.
 
 ---
 

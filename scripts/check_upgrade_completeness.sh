@@ -117,6 +117,29 @@ extract_tables() {
         | sort -u
 }
 
+# ── Helper: extract column names for a named pgtrickle table ────────────
+# Prints one lowercase column name per line from the CREATE TABLE block.
+# Uses grep -n to locate the block start, then awk to parse until ");".
+extract_table_columns_for() {
+    local sqlfile="$1"
+    local tablename="$2"
+    local lineno
+    lineno=$(grep -n "CREATE TABLE.*pgtrickle\.$tablename" "$sqlfile" 2>/dev/null | head -1 | cut -d: -f1)
+    [[ -z "$lineno" ]] && return
+    tail -n +"$((lineno + 1))" "$sqlfile" | head -200 | awk '
+        /^[[:space:]]*\);/ { exit }
+        /^[[:space:]]+[A-Za-z_]/ {
+            gsub(/^[[:space:]]+/, "")
+            split($0, parts, /[[:space:]]/)
+            col = tolower(parts[1])
+            if (col != "constraint" && col != "check" && col != "primary" &&
+                col != "foreign" && col != "unique" && col != "exclude") {
+                print col
+            }
+        }
+    ' | sort -u
+}
+
 # ── Helper: extract index names from a SQL file ─────────────────────────
 extract_indexes() {
     local sqlfile="$1"
@@ -279,6 +302,52 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+# CHECK 6: Column drift in existing tables
+# Detect new columns added to existing pgtrickle tables that are not
+# covered by ALTER TABLE ... ADD COLUMN in the upgrade script.
+# ═══════════════════════════════════════════════════════════════════════
+echo "━━━ Check 6: Column drift in existing tables ━━━"
+
+: > "$TMPDIR/missing_columns.txt"
+MISSING_COL_COUNT=0
+NEW_COL_TOTAL=0
+
+# All ADD COLUMN column-names mentioned in the upgrade script
+# Extract the trailing identifier (the column name) from each match
+grep -oiE 'ADD COLUMN (IF NOT EXISTS )?[a-z_][a-z0-9_]*' "$UPGRADE_SQL" 2>/dev/null \
+    | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*$' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sort -u > "$TMPDIR/upgrade_add_columns.txt"
+
+if [[ -n "$FULL_SQL_OLD" ]]; then
+    while IFS= read -r table; do
+        # Only check tables present in the OLD SQL too (existing tables, not new ones)
+        if grep -q "pgtrickle\.$table" "$FULL_SQL_OLD" 2>/dev/null; then
+            extract_table_columns_for "$FULL_SQL_NEW" "$table" > "$TMPDIR/cols_new_${table}.txt"
+            extract_table_columns_for "$FULL_SQL_OLD" "$table" > "$TMPDIR/cols_old_${table}.txt"
+            comm -23 "$TMPDIR/cols_new_${table}.txt" "$TMPDIR/cols_old_${table}.txt" > "$TMPDIR/cols_added_${table}.txt"
+            while IFS= read -r col; do
+                NEW_COL_TOTAL=$((NEW_COL_TOTAL + 1))
+                if ! grep -qx "$col" "$TMPDIR/upgrade_add_columns.txt"; then
+                    echo "pgtrickle.${table}.${col}" >> "$TMPDIR/missing_columns.txt"
+                    MISSING_COL_COUNT=$((MISSING_COL_COUNT + 1))
+                fi
+            done < "$TMPDIR/cols_added_${table}.txt"
+        fi
+    done < <(extract_tables "$FULL_SQL_NEW")
+fi
+
+if [[ "$MISSING_COL_COUNT" -gt 0 ]]; then
+    echo "  ERROR: ${MISSING_COL_COUNT} new column(s) missing ADD COLUMN in upgrade script:"
+    while IFS= read -r entry; do
+        echo "    - ${entry}"
+    done < "$TMPDIR/missing_columns.txt"
+    ERRORS=$((ERRORS + MISSING_COL_COUNT))
+else
+    echo "  OK: ${NEW_COL_TOTAL} new column(s) in existing tables all covered."
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 # Summary
 # ═══════════════════════════════════════════════════════════════════════
 echo ""
@@ -297,5 +366,6 @@ else
     echo "  Event triggers: $(wc -l < "$TMPDIR/new_triggers.txt" | tr -d ' ') total (${NEW_TRIG_COUNT} new)"
     echo "  Tables:         $(wc -l < "$TMPDIR/new_tables.txt" | tr -d ' ') total (${NEW_TABLE_COUNT} new)"
     echo "  Indexes:        $(wc -l < "$TMPDIR/new_indexes.txt" | tr -d ' ') total (${NEW_INDEX_COUNT} new)"
+    echo "  Column drift:   ${NEW_COL_TOTAL} new column(s) in existing tables, all covered."
     exit 0
 fi

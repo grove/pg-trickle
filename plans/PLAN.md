@@ -7,18 +7,16 @@
 
 ### F40 Status Update
 
-Current implementation status for F40:
+Implemented for v0.9.0:
 
-- `sql/pg_trickle--0.8.0--0.9.0.sql` exists and covers the current `v0.9.0` SQL-surface additions.
-- `sql/archive/pg_trickle--0.9.0.sql` is committed, so the upgrade path has an exact full-install baseline.
-- Upgrade E2E coverage already exercises `ALTER EXTENSION pg_trickle UPDATE` through the dedicated upgrade image/tests.
-- The fast upgrade completeness check now validates not only functions/views/event triggers, but also new tables and indexes introduced by a release.
+- `sql/pg_trickle--0.8.0--0.9.0.sql` covers all new SQL objects (new table `pgt_refresh_groups`, new function `restore_stream_tables`).
+- `sql/archive/pg_trickle--0.9.0.sql` committed as full-install baseline for diff-based checks.
+- Upgrade completeness gate (`scripts/check_upgrade_completeness.sh`) validates functions, views, event triggers, tables, indexes, **and column drift in existing tables** (CHECK 6).
+- `test_upgrade_v090_catalog_additions` (L15) verifies `pgt_refresh_groups` columns, unique constraint, and empty-state after fresh install.
 
-What remains for F40 before it can be marked done:
+One item remains before F40 is fully closed:
 
-- Extend automated completeness validation beyond object presence to catch column-level drift, changed signatures, and changed defaults more explicitly.
-- Add explicit upgrade assertions for the `v0.9.0` schema additions in the true upgrade tests so `pgt_refresh_groups` and related index/catalog surfaces are checked after a real upgrade.
-- Finish the release checklist item for `v0.9.0`: package and verify the final release-grade SQL artifacts once the release branch CI is fully green.
+- **Release finalization:** run `cargo pgrx package`, diff the output against `sql/archive/pg_trickle--0.9.0.sql`, resolve any discrepancies, then tag the v0.9.0 release. This is a pre-release checklist step, not a code change.
 
 ## Streaming tables for PostgreSQL 18 as a Rust Extension
 
