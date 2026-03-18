@@ -7,16 +7,38 @@ This document describes how to create a release of **pg_trickle**.
 Releases are fully automated via GitHub Actions. Pushing a version tag (`v*`)
 triggers the [Release workflow](../.github/workflows/release.yml), which:
 
-1. Builds extension packages for Linux (amd64), macOS (arm64), and Windows (amd64)
-2. Smoke-tests the Linux artifact against a live PostgreSQL 18 instance
-3. Creates a GitHub Release with archives and SHA256 checksums
-4. Builds and pushes a multi-arch extension image to GHCR (for CNPG Image Volumes)
+1. Runs a preflight version-sync check to ensure all version references match the tag
+2. Builds extension packages for Linux (amd64), macOS (arm64), and Windows (amd64)
+3. Smoke-tests the Linux artifact against a live PostgreSQL 18 instance
+4. Creates a GitHub Release with archives and SHA256 checksums
+5. Builds and pushes a multi-arch extension image to GHCR (for CNPG Image Volumes)
+
+A separate [PGXN workflow](../.github/workflows/pgxn.yml) also fires on the same
+`v*` tag and publishes the source archive to the [PostgreSQL Extension Network](https://pgxn.org/).
 
 ## Prerequisites
 
 - Push access to the repository (or a PR merged by a maintainer)
 - All CI checks passing on `main`
 - The version in `Cargo.toml` matches the tag you intend to push
+- Required GitHub secrets configured (see [Required GitHub Secrets](#required-github-secrets) below)
+
+## Required GitHub Secrets
+
+The release automation uses the following GitHub Actions secrets. Set them
+under **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret | Used by | Description |
+|--------|---------|-------------|
+| `PGXN_USERNAME` | `pgxn.yml` | Your PGXN account username. Required to authenticate the `pgxn upload` command when publishing source archives to the [PostgreSQL Extension Network](https://pgxn.org/). Register at [pgxn.org](https://pgxn.org/). |
+| `PGXN_PASSWORD` | `pgxn.yml` | Password for the PGXN account above. Never hardcode this — it must be stored as a secret so it is never exposed in logs or committed to the repository. |
+| `CODECOV_TOKEN` | `coverage.yml` | Upload token for [Codecov](https://codecov.io/). Used to publish unit and E2E coverage reports. Obtain it from the Codecov dashboard after linking the repository. The workflow degrades gracefully (`fail_ci_if_error: false`) if absent. |
+| `BENCHER_API_TOKEN` | `benchmarks.yml` | API token for [Bencher](https://bencher.dev/), the continuous benchmarking platform. Used to track Criterion benchmark results on `main` and detect regressions on pull requests. The benchmark steps are **skipped entirely** when this secret is absent, so CI still passes without it. Create a project at bencher.dev and copy the token from the project settings. |
+
+> **Note:** The `GITHUB_TOKEN` secret is provided automatically by GitHub
+> Actions and does not need to be configured manually. It is used by the
+> release workflow to create GitHub Releases, by the Docker workflow to push
+> images to GHCR, and by Bencher to post PR comments.
 
 ## Step-by-Step
 
@@ -31,22 +53,37 @@ Follow [Semantic Versioning](https://semver.org/):
 | Bug fix, no API change             | Patch   | `0.2.0 → 0.2.1` |
 | Pre-release / release candidate    | Suffix  | `0.3.0-rc.1`     |
 
-### 2. Update the version in `Cargo.toml`
+### 2. Update the version
+
+Three files must have their version bumped together:
 
 ```bash
-# Edit Cargo.toml — change the version field
-# e.g., version = "0.2.0"
+# 1. Cargo.toml — the canonical version source
+#    Change:  version = "0.7.0"  →  version = "0.8.0"
+
+# 2. META.json — the PGXN package metadata
+#    Change both top-level "version" and the nested "provides" version
+
+# 3. CHANGELOG.md
+#    Rename ## [Unreleased] → ## [0.8.0] — YYYY-MM-DD
+#    Add a new empty ## [Unreleased] section at the top
 ```
 
-The extension control file (`pgtrickle.control`) uses
-`default_version = '@CARGO_VERSION@'`, which pgrx replaces automatically at
-build time — no manual edit needed.
+The extension control file (`pg_trickle.control`) uses
+`default_version = '@CARGO_VERSION@'`, which pgrx substitutes automatically at
+build time — **no manual edit needed** there.
+
+After editing, verify all version-related files are in sync:
+
+```bash
+just check-version-sync
+```
 
 ### 3. Commit the version bump
 
 ```bash
-git add Cargo.toml
-git commit -m "release: v0.2.0"
+git add Cargo.toml META.json CHANGELOG.md
+git commit -m "release: v0.8.0"
 git push origin main
 ```
 
@@ -77,12 +114,21 @@ This triggers the Release workflow automatically.
 ### 6. Monitor the release
 
 Watch the [Actions tab](../../actions/workflows/release.yml) for progress.
-The workflow runs these jobs in order:
+The release workflow runs these jobs in order:
 
 ```
-build-release (linux, macos, windows)  ──►  test-release  ──►  publish-release
-                                                           ──►  publish-docker
+preflight  ──►  build-release (linux, macos, windows)
+                      │
+                      ▼
+                test-release  ──►  publish-release
+                              ──►  publish-docker-arch (linux/amd64 + linux/arm64)
+                                         │
+                                         ▼
+                                   publish-docker (merge manifest + push :latest)
 ```
+
+The PGXN workflow (`pgxn.yml`) runs independently and publishes the source
+archive to pgxn.org in parallel with the release workflow.
 
 ### 7. Make the GHCR package public (first release only)
 
@@ -104,12 +150,13 @@ After that first change:
 
 ### 8. Verify the release
 
-Once the workflow completes:
+Once both workflows complete:
 
 - [ ] Check the [GitHub Releases](../../releases) page for the new release
 - [ ] Verify all three platform archives are attached (`.tar.gz` for Linux/macOS, `.zip` for Windows)
 - [ ] Verify `SHA256SUMS.txt` is present
 - [ ] Verify the extension image is available at `ghcr.io/grove/pg_trickle-ext:<version>`
+- [ ] Verify the PGXN upload succeeded: `pgxn info pg_trickle` should show the new version
 - [ ] Optionally verify the extension image layout:
 
 ```bash
@@ -181,6 +228,7 @@ Every release requires manual updates to the files below. Missing any of them le
 | File | What to change | Why |
 |------|----------------|-----|
 | `Cargo.toml` | `version = "x.y.z"` field | The canonical version source. pgrx reads this at build time and substitutes it into `pg_trickle.control` via `@CARGO_VERSION@`. The git tag must match. |
+| `META.json` | Both `"version"` fields (top-level and inside `"provides"`) | The PGXN package manifest. The `pgxn.yml` workflow uploads this file as part of the source archive; a stale version here means the wrong version appears on pgxn.org. |
 | `CHANGELOG.md` | Rename `## [Unreleased]` → `## [x.y.z] — YYYY-MM-DD`; add a new empty `## [Unreleased]` at the top | Keeps the public changelog accurate and gives downstream users a dated record of changes. |
 | `ROADMAP.md` | Update the preamble's latest-release/current-milestone lines; mark the released milestone done; advance the "We are here" pointer to the next milestone | Keeps the forward-looking plan aligned with reality. Leaves no confusion about what just shipped versus what is next. |
 | `README.md` | Update test-count line (`~N unit tests + M E2E tests`) if test counts changed significantly | The README is the first thing users read; stale numbers erode trust. |
@@ -195,6 +243,7 @@ Every release requires manual updates to the files below. Missing any of them le
 
 ```
 [ ] Cargo.toml — version bumped
+[ ] META.json — both "version" fields updated to match
 [ ] CHANGELOG.md — [Unreleased] renamed to [x.y.z] with date; new empty [Unreleased] added
 [ ] ROADMAP.md — preamble updated; released milestone marked done
 [ ] README.md — test counts current (if materially changed)
@@ -203,6 +252,7 @@ Every release requires manual updates to the files below. Missing any of them le
 [ ] sql/pg_trickle--<old>--<new>.sql — covers every SQL-surface change
 [ ] sql/archive/pg_trickle--<new>.sql — archived full install SQL committed
 [ ] Upgrade automation defaults — CI/local upgrade checks and E2E target the new version
+[ ] just check-version-sync — all version references in sync
 [ ] git tag matches Cargo.toml version
 ```
 
@@ -261,10 +311,11 @@ If the workflow created a draft or partial Release before failing:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Version mismatch error | `Cargo.toml` version doesn't match the git tag | Update `Cargo.toml`, commit, delete tag, re-tag (Option B) |
+| Version mismatch error | `Cargo.toml` version doesn't match the git tag | Run `just check-version-sync`, fix any skew, commit, delete tag, re-tag (Option B) |
 | Build failure | Compilation error in release profile | Fix on `main`, re-tag (Option B) |
 | Docker push failed | Missing permissions | Verify `packages: write` is in the workflow and `GITHUB_TOKEN` has GHCR access, then re-run (Option A) |
 | Smoke test failed | Extension doesn't load in PostgreSQL | Fix the issue, re-tag (Option B) |
+| PGXN upload failed | Missing `PGXN_USERNAME` / `PGXN_PASSWORD` secrets, or `META.json` version not updated | Add the secrets in repository settings; verify `META.json` version matches the tag; re-run the `pgxn.yml` workflow from the Actions tab |
 | Rate limited | GitHub API or GHCR throttling | Wait a few minutes, then re-run (Option A) |
 
 ### Yanking a release
