@@ -8,6 +8,9 @@
 > - **A8**: `pgt_refresh_groups` SQL API — ✅ **Complete**
 > - **P3-4**: Index-aware MERGE planning (seqscan disable for small deltas) — ✅ **Complete**
 > - **P3-5**: `auto_backoff` GUC for falling-behind stream tables — ✅ **Complete**
+> - **B3-1**: Delta-branch pruning for zero-change sources — ✅ **Complete**
+> - **P3-3**: Scalar subquery C₀ gating behind inner-delta existence check — ✅ **Complete**
+> - **P3-1**: Window partition O(partition_size) cost documented — ✅ **Complete**
 
 ### F40 Status Update
 
@@ -30,6 +33,9 @@ One item remains before F40 is fully closed:
 > - **A8**: `pgt_refresh_groups` SQL API — ✅ **Complete**
 > - **P3-4**: Index-aware MERGE planning (seqscan disable for small deltas) — ✅ **Complete**
 > - **P3-5**: `auto_backoff` GUC for falling-behind stream tables — ✅ **Complete**
+> - **B3-1**: Delta-branch pruning for zero-change sources — ✅ **Complete**
+> - **P3-3**: Scalar subquery C₀ gating behind inner-delta existence check — ✅ **Complete**
+> - **P3-1**: Window partition O(partition_size) cost documented — ✅ **Complete**
 
 ### F15 Status Update (Selective CDC Column Capture)
 

@@ -1436,7 +1436,7 @@ These represent expansions of the DVM engine to handle richer SQL constructs and
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| B3-1 | Intra-query delta-branch pruning: skip UNION ALL branch entirely when a source has zero changes in this cycle | 1–2 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-1 | Intra-query delta-branch pruning: skip UNION ALL branch entirely when a source has zero changes in this cycle | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
 | B3-2 | Merged-delta generation: weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) for cross-source deduplication; remove zero-weight rows | 3–4 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
 | B3-3 | Property-based correctness tests for simultaneous multi-source changes; diamond-flow scenarios | 1–2 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
 
@@ -1498,9 +1498,9 @@ These items are correct as implemented but scale with data size rather than delt
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| P3-1 | **Window partition full recompute.** Any single-row change in a window partition triggers recomputation of the entire partition. Add a partition-size heuristic: if the affected partition exceeds a configurable row threshold, downgrade to FULL refresh for that cycle and emit a `pgrx::info!()` message. At minimum, document the O(partition_size) cost prominently. | 1 wk | ⬜ Not started | [src/dvm/operators/window.rs](src/dvm/operators/window.rs) |
+| P3-1 | **Window partition full recompute.** Any single-row change in a window partition triggers recomputation of the entire partition. Add a partition-size heuristic: if the affected partition exceeds a configurable row threshold, downgrade to FULL refresh for that cycle and emit a `pgrx::info!()` message. At minimum, document the O(partition_size) cost prominently. | 1 wk | ✅ Done (documented) | [src/dvm/operators/window.rs](src/dvm/operators/window.rs) |
 | P3-2 | **Welford auxiliary columns for CORR/COVAR/REGR_\* aggregates.** `CORR`, `COVAR_POP`, `COVAR_SAMP`, `REGR_*` currently use O(group_size) group-rescan. Implement Welford-style auxiliary column accumulation (`__pgt_aux_sumx_*`, `__pgt_aux_sumy_*`, `__pgt_aux_sumxy_*`) to reach O(1) algebraic maintenance identical to the STDDEV/VAR path. | 2–3 wk | ⬜ Not started | [src/dvm/operators/aggregate.rs](src/dvm/operators/aggregate.rs) |
-| P3-3 | **Scalar subquery C₀ EXCEPT ALL scan.** Part 2 of the scalar subquery delta computes `C₀ = C_current EXCEPT ALL Δ_inserts UNION ALL Δ_deletes` by scanning the full outer snapshot. For large outer tables with an unstable inner source, this scan is proportional to the outer table size. Profile and gate the scan behind an existence check on inner-source stability to avoid it when possible; the `WHERE EXISTS (SELECT 1 FROM delta_subquery)` guard already handles the trivial case. | 1 wk | ⬜ Not started | [src/dvm/operators/scalar_subquery.rs](src/dvm/operators/scalar_subquery.rs) |
+| P3-3 | **Scalar subquery C₀ EXCEPT ALL scan.** Part 2 of the scalar subquery delta computes `C₀ = C_current EXCEPT ALL Δ_inserts UNION ALL Δ_deletes` by scanning the full outer snapshot. For large outer tables with an unstable inner source, this scan is proportional to the outer table size. Profile and gate the scan behind an existence check on inner-source stability to avoid it when possible; the `WHERE EXISTS (SELECT 1 FROM delta_subquery)` guard already handles the trivial case. | 1 wk | ✅ Done |arted | [src/dvm/operators/scalar_subquery.rs](src/dvm/operators/scalar_subquery.rs) |
 | P3-4 | **Index-aware MERGE planning.** For small deltas against large stream tables (e.g. 5 delta rows, 10M-row ST), the PostgreSQL planner often chooses a sequential scan of the stream table for the MERGE join on `__pgt_row_id`, yielding O(n) full-table I/O when an index lookup would be O(log n). Emit `SET LOCAL enable_seqscan = off` within the MERGE transaction when the delta row count is below a configurable threshold fraction of the ST row count (`pg_trickle.merge_seqscan_threshold` GUC, default 0.001). | 1–2 wk | ✅ Done | [src/refresh.rs](src/refresh.rs) · [src/config.rs](src/config.rs) · [plans/performance/PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
 | P3-5 | **`auto_backoff` GUC for falling-behind stream tables.** EC-11 implemented the `scheduler_falling_behind` NOTIFY alert at 80% of the refresh budget. The companion `auto_backoff` GUC that automatically doubles the effective refresh interval when a stream table consistently runs behind was explicitly deferred. Add a `pg_trickle.auto_backoff` bool GUC (default off); when enabled, track a per-ST exponential backoff factor in scheduler shared state and reset it on the first on-time cycle. Saves CPU runaway when operators are offline to respond manually. | 1–2d | ✅ Done | [src/scheduler.rs](src/scheduler.rs) · [src/config.rs](src/config.rs) · [plans/PLAN_EDGE_CASES.md §EC-11](plans/PLAN_EDGE_CASES.md) |
 
@@ -1536,7 +1536,7 @@ These items are correct as implemented but scale with data size rather than delt
 - [x] G6 Test Coverage expanded (G6.1, G6.2, G6.3, G6.5)
 - [x] F15: Selective CDC Column Capture (optimize I/O by only tracking columns referenced in query lineage) 
 - [x] F40: Extension Upgrade Migration Scripts (finalize versioned SQL schema migrations)
-- [ ] B3-1: Delta-branch pruning for zero-change sources (skip UNION ALL branch when source has no changes)
+- [x] B3-1: Delta-branch pruning for zero-change sources (skip UNION ALL branch when source has no changes)
 - [ ] B3-2: Merged-delta weight aggregation (`SUM(weight) GROUP BY __pgt_row_id`) for cross-source deduplication
 - [ ] B3-3: Property-based correctness tests for simultaneous multi-source and diamond-flow scenarios
 - [x] EC-03: WARNING emitted when window-in-expression query silently falls back from DIFFERENTIAL to FULL refresh mode
@@ -1545,9 +1545,9 @@ These items are correct as implemented but scale with data size rather than delt
 - [ ] P2-2: SUM NULL-transition rescan eliminated for FULL OUTER JOIN aggregates in the common case
 - [ ] P2-3: DISTINCT `__pgt_count` lookup scoped to O(delta) I/O per cycle
 - [ ] P2-4: Materialized view sources accepted in IMMEDIATE mode via polling-change-detection wrapper
-- [ ] P3-1: Window partition O(partition_size) cost documented; heuristic downgrade implemented or explicitly deferred
+- [x] P3-1: Window partition O(partition_size) cost documented; heuristic downgrade implemented or explicitly deferred
 - [ ] P3-2: CORR/COVAR_*/REGR_* Welford auxiliary columns implemented or explicitly deferred to v0.10.0+
-- [ ] P3-3: Scalar subquery C₀ EXCEPT ALL scan gated behind inner-source stability check or explicitly deferred
+- [x] P3-3: Scalar subquery C₀ EXCEPT ALL scan gated behind inner-source stability check or explicitly deferred
 - [x] D1: Recursive CTE DIFFERENTIAL mode limitation documented in SQL_REFERENCE.md and DVM_OPERATORS.md
 - [x] D2: `pgt_refresh_groups` table schema and interim workflow documented in SQL_REFERENCE.md
 - [x] G-1: `panic!()` replaced with `pgrx::error!()` in `source_gates()` and `watermarks()` SQL functions

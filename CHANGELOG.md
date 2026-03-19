@@ -46,6 +46,15 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   (default `0.001`). When the delta-to-stream-table row ratio is below this threshold,
   `SET LOCAL enable_seqscan = off` is applied to the MERGE transaction, coercing PostgreSQL
   into using the `__pgt_row_id` index instead of a full sequential scan.
+- **Delta-branch pruning for zero-change sources** (B3-1): Multi-source join queries now
+  skip delta branches at plan time when a source has zero changes in the current cycle.
+  The LSN-range predicate is replaced with `FALSE`, allowing PostgreSQL's planner to recognise
+  the scan CTE as empty and avoid materialising the join branch entirely. For a 3-source
+  join where only 1 source changed, this eliminates 2/3 of the delta computation work.
+- **Scalar subquery C₀ gating** (P3-3): The pre-change outer snapshot reconstruction
+  (`C₀ = C_current EXCEPT ALL ...`) is now gated behind a single-evaluation CTE that checks
+  whether the inner subquery has any delta rows. When the inner source is stable, the full
+  outer table scan is skipped entirely, avoiding O(|outer table|) I/O per cycle.
 
 ### Fixed
 - **Backend crash on SPI error in `source_gates()` and `watermarks()`** (G-1): Both SQL-callable
@@ -69,6 +78,10 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 - **`pgt_refresh_groups` catalog table** (D2): Added table schema, column descriptions, and
   an interim manual INSERT/DELETE workflow to [docs/SQL_REFERENCE.md](docs/SQL_REFERENCE.md).
   The user-facing API functions (A8) are now implemented.
+- **Window partition recomputation cost** (P3-1): Added a "Known Limitation" callout to
+  [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) documenting the O(partition_size) cost
+  of window function maintenance. Includes mitigation strategies: use fine-grained
+  PARTITION BY keys, restructure as GROUP BY when equivalent, or accept FULL refresh mode.
 
 ---
 
