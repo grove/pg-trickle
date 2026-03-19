@@ -710,7 +710,13 @@ mod tests {
         let pred = binop(">", colref("val"), lit("10"));
         let f = filter(pred, s);
         let result = ctx.diff_node(&f).unwrap();
-        assert!(result.cte_name.contains("filter"));
+        // P2-7: predicate is pushed into the scan CTE, so the result
+        // comes from the scan operator rather than a separate filter CTE.
+        assert!(
+            result.cte_name.contains("scan") || result.cte_name.contains("filter"),
+            "expected scan (pushdown) or filter CTE, got: {}",
+            result.cte_name,
+        );
     }
 
     #[test]
