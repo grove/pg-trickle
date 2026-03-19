@@ -13569,6 +13569,28 @@ unsafe fn extract_aggregates(
                     filter,
                     order_within_group: None,
                 });
+            } else if unsafe { expr_contains_agg(rt.val) } {
+                // Non-aggregate function wrapping nested aggregate(s),
+                // e.g. ROUND(STDDEV_POP(amount), 2). Treat as ComplexExpression
+                // so the group-rescan path re-evaluates it correctly.
+                let raw_expr = unsafe { node_to_expr(rt.val)? };
+                let raw_sql = raw_expr.to_sql();
+
+                let alias = if !rt.name.is_null() {
+                    pg_cstr_to_str(rt.name).unwrap_or("complex_agg").to_string()
+                } else {
+                    format!("complex_agg_{}", aggs.len())
+                };
+
+                aggs.push(AggExpr {
+                    function: AggFunc::ComplexExpression(raw_sql),
+                    argument: None,
+                    alias,
+                    is_distinct: false,
+                    second_arg: None,
+                    filter: None,
+                    order_within_group: None,
+                });
             } else {
                 let expr = unsafe { node_to_expr(rt.val)? };
                 non_aggs.push(expr);
