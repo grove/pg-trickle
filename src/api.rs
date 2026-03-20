@@ -1603,6 +1603,33 @@ fn alter_stream_table_query(
         }
     }
 
+    // Sync CDC trigger functions and change buffer columns for kept sources.
+    // When ALTER QUERY adds references to new source columns (e.g. a query
+    // changing from `SELECT id, val` to `SELECT id, val, status`), the change
+    // buffer for the unchanged source still lacks `new_status`/`old_status`.
+    // Rebuilding the trigger function re-reads the updated catalog dependency
+    // and calls sync_change_buffer_columns to add the missing columns.
+    if !refresh_mode.is_immediate() {
+        for (source_oid, source_type) in &dep_diff.kept {
+            if source_type == "TABLE" {
+                let cdc_mode = old_deps
+                    .iter()
+                    .find(|d| d.source_relid == *source_oid)
+                    .map(|d| d.cdc_mode)
+                    .unwrap_or(CdcMode::Trigger);
+                if matches!(cdc_mode, CdcMode::Trigger)
+                    && let Err(e) = cdc::rebuild_cdc_trigger_function(*source_oid, &change_schema)
+                {
+                    pgrx::warning!(
+                        "pg_trickle: failed to sync CDC trigger for kept source {}: {}",
+                        source_oid.to_u32(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     // Register view soft-dependencies if view inlining was applied
     if original_query_opt.is_some()
         && let Ok(original_sources) = extract_source_relations(&original_new_query)
