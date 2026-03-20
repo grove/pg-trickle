@@ -140,7 +140,9 @@ fn classify_ddl_event(object_type: &str, command_tag: &str) -> DdlEventKind {
     match (object_type, command_tag) {
         ("table", "ALTER TABLE") => DdlEventKind::AlterTable,
         ("table", "CREATE TABLE") => DdlEventKind::CreateTable,
-        ("view", "CREATE VIEW") | ("view", "ALTER VIEW") => DdlEventKind::ViewChange,
+        ("view", "CREATE VIEW") | ("view", "CREATE OR REPLACE VIEW") | ("view", "ALTER VIEW") => {
+            DdlEventKind::ViewChange
+        }
         ("trigger", "CREATE TRIGGER") => DdlEventKind::CreateTrigger,
         ("function", "CREATE FUNCTION") | ("function", "ALTER FUNCTION") => {
             DdlEventKind::FunctionChange
@@ -1778,6 +1780,14 @@ mod tests {
     fn test_classify_create_view() {
         assert_eq!(
             classify_ddl_event("view", "CREATE VIEW"),
+            DdlEventKind::ViewChange,
+        );
+    }
+
+    #[test]
+    fn test_classify_create_or_replace_view() {
+        assert_eq!(
+            classify_ddl_event("view", "CREATE OR REPLACE VIEW"),
             DdlEventKind::ViewChange,
         );
     }
