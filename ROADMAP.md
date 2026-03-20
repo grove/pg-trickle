@@ -1561,12 +1561,16 @@ These items are correct as implemented but scale with data size rather than delt
 
 ---
 
-## v0.10.0 — Connection Pooler Compatibility, Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep
+## v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Prometheus & Grafana Observability, Anomaly Detection & Infrastructure Prep
 
-**Goal:** Enable cloud-native PgBouncer transaction-mode deployments via an opt-in compatibility mode, ship ready-made Prometheus/Grafana monitoring so the product is
-externally visible and monitored; protect against anomalous change spikes
-with a configurable fuse; and complete the pre-1.0 packaging and
-deployment infrastructure.
+**Goal:** Land deferred DVM correctness and performance improvements
+(recursive CTE DRed, FULL OUTER JOIN aggregate fix, LATERAL scoping,
+Welford regression aggregates, multi-source delta merging), enable
+cloud-native PgBouncer transaction-mode deployments via an opt-in
+compatibility mode, ship ready-made Prometheus/Grafana monitoring so the
+product is externally visible and monitored; protect against anomalous
+change spikes with a configurable fuse; and complete the pre-1.0 packaging
+and deployment infrastructure.
 
 ### Connection Pooler Compatibility
 
@@ -1644,7 +1648,31 @@ action.
 
 > **Anomalous change detection subtotal: ~10–14 hours**
 
-> **v0.10.0 total: ~22–26 hours**
+### DVM Correctness & Performance (deferred from v0.9.0)
+
+> **In plain terms:** These items were evaluated during v0.9.0 and deferred
+> because the current implementations are **correct** — they just scale with
+> data size rather than delta size in certain edge cases. All produce correct
+> results today; this work makes them faster.
+
+| Item | Description | Effort | Status | Ref |
+|------|-------------|--------|--------|-----|
+| P2-1 | **Recursive CTE DRed in DIFFERENTIAL mode.** DELETE/UPDATE against a recursive CTE source falls back to O(n) full recompute + diff. Implement DRed for `DeltaSource::ChangeBuffer` to maintain O(delta) cost. | 2–3 wk | ⬜ Not started | [src/dvm/operators/recursive_cte.rs](src/dvm/operators/recursive_cte.rs) |
+| P2-2 | **SUM NULL-transition rescan for FULL OUTER JOIN aggregates.** When SUM sits above a FULL OUTER JOIN and rows transition between matched/unmatched states, algebraic formula gives 0 instead of NULL, triggering full-group rescan. Implement targeted correction. | 1–2 wk | ⬜ Not started | [src/dvm/operators/aggregate.rs](src/dvm/operators/aggregate.rs) |
+| P2-4 | **Materialized view sources in IMMEDIATE mode (EC-09).** Implement polling-change-detection wrapper for `REFRESH MATERIALIZED VIEW`-sourced queries in IMMEDIATE mode. | 2–3 wk | ⬜ Not started | [plans/PLAN_EDGE_CASES.md §EC-09](plans/PLAN_EDGE_CASES.md) |
+| P2-6 | **LATERAL subquery inner-source scoped re-execution.** Gate outer-table scan behind a join to inner delta rows so only correlated outer rows are re-executed, reducing O(\|outer\|) to O(delta). | 1–2 wk | ⬜ Not started | [src/dvm/operators/lateral_subquery.rs](src/dvm/operators/lateral_subquery.rs) |
+| P3-2 | **Welford auxiliary columns for CORR/COVAR/REGR_\* aggregates.** Implement Welford-style accumulation to reach O(1) algebraic maintenance identical to the STDDEV/VAR path. | 2–3 wk | ⬜ Not started | [src/dvm/operators/aggregate.rs](src/dvm/operators/aggregate.rs) |
+| B3-2 | **Merged-delta weight aggregation.** `GROUP BY __pgt_row_id, SUM(weight)` for cross-source deduplication; remove zero-weight rows. | 3–4 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-3 | **Property-based correctness tests** for simultaneous multi-source changes; diamond-flow scenarios. Hard prerequisite for B3-2. | 1–2 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ B3-2 must **not** use `DISTINCT ON` — it silently discards corrections that
+> should be summed. Weight aggregation (`SUM(weight)` grouped by `__pgt_row_id`) is
+> the only correct approach. Do not merge B3-2 without property-based correctness
+> proofs (B3-3).
+
+> **DVM deferred items subtotal: ~12–19 weeks**
+
+> **v0.10.0 total: ~34–48 hours + ~12–19 weeks DVM work**
 
 ### Scheduler & DAG Scalability
 
@@ -1664,6 +1692,13 @@ These items address scheduler CPU efficiency and DAG maintenance overhead at sca
 - [ ] All public documentation current and reviewed
 - [ ] G-7: Tiered scheduling (Hot/Warm/Cold/Frozen) implemented; `pg_trickle.tiered_scheduling` GUC gating the feature
 - [ ] G-8: Incremental DAG rebuild implemented; DDL-triggered edge-delta replaces full O(V+E) re-query
+- [ ] P2-1: Recursive CTE DRed for DIFFERENTIAL mode (O(delta) instead of O(n) recompute)
+- [ ] P2-2: SUM NULL-transition correction for FULL OUTER JOIN aggregates
+- [ ] P2-4: Materialized view sources supported in IMMEDIATE mode
+- [ ] P2-6: LATERAL subquery inner-source scoped re-execution (O(delta) instead of O(|outer|))
+- [ ] P3-2: CORR/COVAR_*/REGR_* Welford auxiliary columns for O(1) algebraic maintenance
+- [ ] B3-2: Merged-delta weight aggregation passes property-based correctness proofs
+- [ ] B3-3: Property-based tests for simultaneous multi-source changes
 
 ---
 
@@ -1792,8 +1827,6 @@ implementation, and widen the deployment target to PG 16–18.
 > **v0.12.0 total: ~13–19 weeks**
 
 **Exit criteria:**
-- [ ] Intra-query delta-branch pruning: zero-change sources produce no UNION ALL branch
-- [ ] Merged-delta path passes property-based correctness tests for simultaneous multi-source changes
 - [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
 - [ ] WAL decoder validated against PG 16–17 `pgoutput` format
