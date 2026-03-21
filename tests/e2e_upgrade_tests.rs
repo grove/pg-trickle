@@ -315,6 +315,14 @@ async fn test_upgrade_monitoring_views_present() {
 /// Consistency table (pgt_refresh_groups) and its structure.
 #[tokio::test]
 async fn test_upgrade_v090_catalog_additions() {
+    if upgrade_image_available() {
+        eprintln!(
+            "SKIP: test_upgrade_v090_catalog_additions is a fresh-install schema \
+             assertion for the standard E2E image"
+        );
+        return;
+    }
+
     let db = E2eDb::new().await.with_extension().await;
 
     // This test asserts schema additions introduced in the current development
