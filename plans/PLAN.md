@@ -19,8 +19,8 @@
 > - **P2-4**: Materialized view sources in IMMEDIATE mode — ⏭️ **Deferred to v0.10.0** (requires external polling wrapper; out of scope)
 > - **P2-6**: LATERAL subquery inner-source scoping — ⏭️ **Deferred to v0.10.0** (requires correlation predicate extraction; full re-execution is correct)
 > - **P3-2**: Welford auxiliary columns for CORR/COVAR/REGR_* — ⏭️ **Deferred to v0.10.0** (group-rescan strategy already works correctly)
-> - **B3-2**: Merged-delta weight aggregation — ⏭️ **Deferred to v0.10.0** (very high silent-corruption risk; needs property-based proofs)
-> - **B3-3**: Property-based tests for B3-2 — ⏭️ **Deferred to v0.10.0** (blocked on B3-2)
+> - **B3-2**: Merged-delta weight aggregation — ✅ **Done** (replaces `DISTINCT ON` with `GROUP BY __pgt_row_id, SUM(weight)` + `HAVING <> 0`; correctness proven by B3-3 property tests)
+> - **B3-3**: Property-based tests for B3-2 — ✅ **Done** (6 diamond-flow E2E property tests: inner join, left join, full join, aggregate, multi-root, deep diamond)
 
 ### F40 Status Update
 
@@ -54,8 +54,8 @@ One item remains before F40 is fully closed:
 > - **P2-4**: Materialized view sources in IMMEDIATE mode — ⏭️ **Deferred to v0.10.0** (requires external polling wrapper; out of scope)
 > - **P2-6**: LATERAL subquery inner-source scoping — ⏭️ **Deferred to v0.10.0** (requires correlation predicate extraction; full re-execution is correct)
 > - **P3-2**: Welford auxiliary columns for CORR/COVAR/REGR_* — ⏭️ **Deferred to v0.10.0** (group-rescan strategy already works correctly)
-> - **B3-2**: Merged-delta weight aggregation — ⏭️ **Deferred to v0.10.0** (very high silent-corruption risk; needs property-based proofs)
-> - **B3-3**: Property-based tests for B3-2 — ⏭️ **Deferred to v0.10.0** (blocked on B3-2)
+> - **B3-2**: Merged-delta weight aggregation — ✅ **Done** (replaces `DISTINCT ON` with `GROUP BY __pgt_row_id, SUM(weight)` + `HAVING <> 0`; correctness proven by B3-3 property tests)
+> - **B3-3**: Property-based tests for B3-2 — ✅ **Done** (6 diamond-flow E2E property tests: inner join, left join, full join, aggregate, multi-root, deep diamond)
 
 ### F15 Status Update (Selective CDC Column Capture)
 

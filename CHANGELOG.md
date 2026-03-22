@@ -110,6 +110,42 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   generation of nonnull-count delta tracking, auxiliary column
   propagation, and the absence of rescan CTEs in the generated SQL.
 
+- **B3-2: Merged-delta weight aggregation** — The MERGE USING clause
+  previously wrapped non-deduplicated deltas in
+  `SELECT DISTINCT ON (__pgt_row_id) ... ORDER BY __pgt_action DESC`,
+  which silently discards overlapping corrections that should be
+  algebraically combined.  This is a correctness bug for diamond-flow
+  queries where multiple delta branches produce corrections to the same
+  `__pgt_row_id` (e.g., both sides of a join changed in the same cycle).
+
+  The new approach uses **weight aggregation** instead:
+  ```sql
+  SELECT __pgt_row_id,
+         CASE WHEN SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) > 0
+              THEN 'I' ELSE 'D' END AS __pgt_action,
+         col1, col2, ...
+  FROM (...delta...) __raw
+  GROUP BY __pgt_row_id, col1, col2, ...
+  HAVING SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) <> 0
+  ```
+  Net weight > 0 → INSERT, < 0 → DELETE, = 0 → filtered out (no-op).
+  This correctly implements DBSP Z-set algebra for delta composition.
+
+- **B3-3: Property-based correctness tests for diamond-flow topologies** —
+  Six new E2E property-based tests verify the key DBSP invariant
+  (`Contents(ST) = Result(defining_query)`) under simultaneous
+  multi-source changes in diamond-shaped DAG topologies:
+  1. Diamond with INNER JOIN at tip (single root)
+  2. Diamond with LEFT JOIN + filter-boundary crossings
+  3. Diamond with JOIN + GROUP BY + SUM aggregate at tip
+  4. Two independent base tables with simultaneous DML
+  5. Diamond with FULL OUTER JOIN (9-part delta)
+  6. Deep diamond (3 levels of intermediaries)
+
+  Each test uses deterministic seeded RNG for reproducibility, 15 initial
+  rows, and 8 cycles of mixed INSERT/UPDATE/DELETE.  These tests serve as
+  the correctness proof required before B3-2 could be merged.
+
 ---
 
 ## [0.9.0] — 2026-03-20

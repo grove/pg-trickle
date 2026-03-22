@@ -672,6 +672,29 @@ fn build_is_distinct_clause(user_cols: &[String]) -> String {
     }
 }
 
+/// B3-2: Build a USING clause with weight aggregation for cross-source
+/// deduplication.
+///
+/// Replaces the previous `DISTINCT ON (__pgt_row_id)` approach which silently
+/// discarded corrections that should be algebraically combined.  Weight
+/// aggregation correctly handles diamond-flow queries where multiple delta
+/// branches produce overlapping corrections for the same `__pgt_row_id`:
+///
+/// - Net weight > 0 → INSERT
+/// - Net weight < 0 → DELETE
+/// - Net weight = 0 → filtered out (no-op)
+fn build_weight_agg_using(delta_sql: &str, user_col_list: &str) -> String {
+    format!(
+        "(SELECT __pgt_row_id, \
+                CASE WHEN SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) > 0 \
+                     THEN 'I' ELSE 'D' END AS __pgt_action, \
+                {user_col_list} \
+         FROM ({delta_sql}) __raw \
+         GROUP BY __pgt_row_id, {user_col_list} \
+         HAVING SUM(CASE WHEN __pgt_action = 'I' THEN 1 ELSE -1 END) <> 0)"
+    )
+}
+
 /// EC-06: Build a counted DELETE template for keyless sources.
 ///
 /// For keyless tables, multiple stream table rows can share the same
@@ -868,23 +891,23 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     let delta_sql_template =
         dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_result.delta_sql);
 
-    // Build the USING clause — skip DISTINCT ON when the delta is already
+    // Build the USING clause — skip deduplication when the delta is already
     // deduplicated (G-M1 optimization for scan-chain queries).
     //
     // EC-06: For keyless sources the delta is never deduplicated (multiple
-    // rows can share the same __pgt_row_id). Skip DISTINCT ON unconditionally.
+    // rows can share the same __pgt_row_id). Skip deduplication unconditionally.
+    //
+    // B3-2: For non-deduplicated deltas, use weight aggregation instead of
+    // DISTINCT ON.  Weight aggregation correctly handles diamond-flow queries
+    // where multiple delta branches produce overlapping corrections.
     let using_clause = if delta_result.is_deduplicated {
         format!("({delta_sql_template})")
     } else if st.has_keyless_source {
-        // Keyless: do NOT collapse with DISTINCT ON — duplicate row_ids are
-        // intentional (one per net insert/delete).
+        // Keyless: do NOT collapse — duplicate row_ids are intentional
+        // (one per net insert/delete).
         format!("({delta_sql_template})")
     } else {
-        format!(
-            "(SELECT DISTINCT ON (__pgt_row_id) * \
-             FROM ({delta_sql_template}) __raw \
-             ORDER BY __pgt_row_id, __pgt_action DESC)"
-        )
+        build_weight_agg_using(&delta_sql_template, &user_col_list)
     };
 
     // B-1: IS DISTINCT FROM guard to skip no-op UPDATEs.
@@ -2112,16 +2135,14 @@ pub fn execute_differential_refresh(
             dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_sql.clone())
         };
 
-        // Build template USING clause — skip DISTINCT ON when deduplicated (G-M1)
-        // EC-06: For keyless sources, never collapse with DISTINCT ON.
+        // Build template USING clause — skip deduplication when deduplicated (G-M1)
+        // EC-06: For keyless sources, never collapse.
+        // B3-2: Use weight aggregation instead of DISTINCT ON for correctness
+        // on diamond-flow queries.
         let template_using = if is_dedup || st.has_keyless_source {
             format!("({delta_sql_template})")
         } else {
-            format!(
-                "(SELECT DISTINCT ON (__pgt_row_id) * \
-                 FROM ({delta_sql_template}) __raw \
-                 ORDER BY __pgt_row_id, __pgt_action DESC)"
-            )
+            build_weight_agg_using(&delta_sql_template, &user_col_list)
         };
 
         // ── B-1: IS DISTINCT FROM guard to skip no-op UPDATEs ───────

@@ -1439,14 +1439,11 @@ These represent expansions of the DVM engine to handle richer SQL constructs and
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
 | B3-1 | Intra-query delta-branch pruning: skip UNION ALL branch entirely when a source has zero changes in this cycle | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
-| B3-2 | Merged-delta generation: weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) for cross-source deduplication; remove zero-weight rows | 3–4 wk | ⏭️ Deferred to v0.10.0 | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
-| B3-3 | Property-based correctness tests for simultaneous multi-source changes; diamond-flow scenarios | 1–2 wk | ⏭️ Deferred to v0.10.0 | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-2 | Merged-delta generation: weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) for cross-source deduplication; remove zero-weight rows | 3–4 wk | ✅ Done (v0.10.0) | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-3 | Property-based correctness tests for simultaneous multi-source changes; diamond-flow scenarios | 1–2 wk | ✅ Done (v0.10.0) | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
 
-> ⚠️ Cross-delta deduplication **must use weight aggregation (`SUM(weight)` grouped by
-> `__pgt_row_id`), not `DISTINCT ON`**. `DISTINCT ON` silently discards corrections
-> that should be summed and will produce wrong data for diamond-flow queries — the
-> exact scenario this feature targets. Do not merge B3-2 without passing property-based
-> correctness proofs. See PLAN_NEW_STUFF.md §B-3 risk analysis.
+> ✅ B3-2 correctly uses weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) instead
+> of `DISTINCT ON`. B3-3 property-based tests (6 diamond-flow scenarios) verify correctness.
 
 > **Multi-source delta batching subtotal: ~5–8 weeks**
 
@@ -1539,8 +1536,8 @@ These items are correct as implemented but scale with data size rather than delt
 - [x] F15: Selective CDC Column Capture (optimize I/O by only tracking columns referenced in query lineage) 
 - [x] F40: Extension Upgrade Migration Scripts (finalize versioned SQL schema migrations)
 - [x] B3-1: Delta-branch pruning for zero-change sources (skip UNION ALL branch when source has no changes)
-- [x] B3-2: Merged-delta weight aggregation — **deferred to v0.10.0** (very high silent-corruption risk; requires property-based proofs before implementation)
-- [x] B3-3: Property-based correctness tests for B3-2 — **deferred to v0.10.0** (blocked on B3-2)
+- [x] B3-2: Merged-delta weight aggregation — **implemented in v0.10.0** (weight aggregation replaces DISTINCT ON; B3-3 property tests verify correctness)
+- [x] B3-3: Property-based correctness tests for B3-2 — **implemented in v0.10.0** (6 diamond-flow E2E property tests)
 - [x] EC-03: WARNING emitted when window-in-expression query silently falls back from DIFFERENTIAL to FULL refresh mode
 - [x] A8: `pgt_refresh_groups` SQL API (`pgt_add_refresh_group`, `pgt_remove_refresh_group`, `pgt_list_refresh_groups`)
 - [x] P2-1: Recursive CTE DRed for DIFFERENTIAL mode — **deferred to v0.10.0** (high risk; ChangeBuffer mode lacks old-state context for safe rederivation; recomputation fallback is correct)
@@ -1610,13 +1607,12 @@ incompatible with PgBouncer transaction-mode pooling. This section introduces an
 | P2-4 | **Materialized view sources in IMMEDIATE mode (EC-09).** Implement polling-change-detection wrapper for `REFRESH MATERIALIZED VIEW`-sourced queries in IMMEDIATE mode. | 2–3 wk | ⬜ Not started | [plans/PLAN_EDGE_CASES.md §EC-09](plans/PLAN_EDGE_CASES.md) |
 | P2-6 | **LATERAL subquery inner-source scoped re-execution.** Gate outer-table scan behind a join to inner delta rows so only correlated outer rows are re-executed, reducing O(\|outer\|) to O(delta). | 1–2 wk | ⬜ Not started | [src/dvm/operators/lateral_subquery.rs](src/dvm/operators/lateral_subquery.rs) |
 | P3-2 | **Welford auxiliary columns for CORR/COVAR/REGR_\* aggregates.** Implement Welford-style accumulation to reach O(1) algebraic maintenance identical to the STDDEV/VAR path. | 2–3 wk | ⬜ Not started | [src/dvm/operators/aggregate.rs](src/dvm/operators/aggregate.rs) |
-| B3-2 | **Merged-delta weight aggregation.** `GROUP BY __pgt_row_id, SUM(weight)` for cross-source deduplication; remove zero-weight rows. | 3–4 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
-| B3-3 | **Property-based correctness tests** for simultaneous multi-source changes; diamond-flow scenarios. Hard prerequisite for B3-2. | 1–2 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-2 | **Merged-delta weight aggregation.** `GROUP BY __pgt_row_id, SUM(weight)` for cross-source deduplication; remove zero-weight rows. | 3–4 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
+| B3-3 | **Property-based correctness tests** for simultaneous multi-source changes; diamond-flow scenarios. Hard prerequisite for B3-2. | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §B-3](plans/performance/PLAN_NEW_STUFF.md) |
 
-> ⚠️ B3-2 must **not** use `DISTINCT ON` — it silently discards corrections that
-> should be summed. Weight aggregation (`SUM(weight)` grouped by `__pgt_row_id`) is
-> the only correct approach. Do not merge B3-2 without property-based correctness
-> proofs (B3-3).
+> ✅ B3-2 correctly uses weight aggregation (`GROUP BY __pgt_row_id, SUM(weight)`) instead
+> of `DISTINCT ON`. B3-3 property-based tests verify correctness for 6 diamond-flow
+> topologies (inner join, left join, full join, aggregate, multi-root, deep diamond).
 
 > **DVM deferred items subtotal: ~12–19 weeks**
 
@@ -1672,8 +1668,8 @@ These items address scheduler CPU efficiency and DAG maintenance overhead at sca
 - [ ] P2-4: Materialized view sources supported in IMMEDIATE mode
 - [ ] P2-6: LATERAL subquery inner-source scoped re-execution (O(delta) instead of O(|outer|))
 - [ ] P3-2: CORR/COVAR_*/REGR_* Welford auxiliary columns for O(1) algebraic maintenance
-- [ ] B3-2: Merged-delta weight aggregation passes property-based correctness proofs
-- [ ] B3-3: Property-based tests for simultaneous multi-source changes
+- [x] B3-2: Merged-delta weight aggregation passes property-based correctness proofs — **implemented; replaces DISTINCT ON with GROUP BY + SUM(weight) + HAVING**
+- [x] B3-3: Property-based tests for simultaneous multi-source changes — **implemented; 6 diamond-flow E2E property tests**
 - [ ] A-4: Covering index auto-created on `__pgt_row_id`; planner hint prevents seq-scan on small delta; `SET LOCAL` confirmed (not `SET`) so hint reverts at transaction end
 - [ ] B-2: Predicate pushdown reduces delta volume for selective queries (E2E benchmark)
 - [ ] C-4: Compaction uses `seq` PK; correct under concurrent VACUUM; serialised with advisory lock
