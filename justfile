@@ -432,6 +432,8 @@ pgxn-publish:
     # PGXN Manager returns 200 on success or 3xx redirect-after-POST.
     if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 400 ]; then
         echo "Successfully uploaded pg_trickle-$VERSION to PGXN!"
+    elif [ "$HTTP_STATUS" = "409" ] && grep -q "already exists" /tmp/pgxn_response.txt; then
+        echo "pg_trickle-$VERSION already exists on PGXN — nothing to do."
     else
         echo "Error: PGXN upload failed with HTTP $HTTP_STATUS"
         echo "Response body:"
