@@ -262,6 +262,32 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   correctly attributed to the parent table. Previously, post-creation
   partitioning caused a silent CDC stall (no error, stream table frozen).
 
+### Performance Optimizations
+
+- **A-4: Covering index auto-creation on `__pgt_row_id`** — Stream tables
+  with ≤8 output columns now automatically get a covering index with
+  `INCLUDE (col1, col2, ...)` on `__pgt_row_id`. This enables index-only
+  scans during MERGE, eliminating heap fetches for matched rows and
+  reducing MERGE time 20–50% for small-delta/large-target scenarios.
+  Completes the A-4 feature (planner hints were already shipped as P3-4).
+
+- **C-4: Change buffer compaction** — New `pg_trickle.compact_threshold`
+  GUC (default 100,000 rows) triggers automatic compaction before each
+  refresh cycle when pending changes exceed the threshold. Compaction
+  eliminates net-zero INSERT→DELETE pairs and collapses multi-change
+  groups to first+last rows per `pk_hash`, reducing delta scan overhead
+  by 50–90% for high-churn tables. Uses `change_id` (not `ctid`) for
+  safe deletion under concurrent VACUUM, and `pg_try_advisory_xact_lock`
+  to avoid blocking concurrent refreshes.
+
+- **B-4: Cost-based refresh strategy (verified active)** — Confirmed that
+  the cost-based adaptive threshold system (`estimate_cost_based_threshold`
+  + `compute_adaptive_threshold` with 60/40 blend) is fully wired into the
+  refresh path since v0.9.0. The system learns from `pgt_refresh_history`
+  to compute a crossover delta ratio, blends it with ratio-based timing
+  feedback, and stores per-ST adaptive thresholds. Cold-start fallback
+  uses the fixed `differential_max_change_ratio` GUC (default 0.15).
+
 ---
 
 ## [0.9.0] — 2026-03-20

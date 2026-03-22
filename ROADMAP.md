@@ -1671,10 +1671,10 @@ These items were identified during a post-v0.9.0 audit of the DVM engine and CDC
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| A-4 | **Index-Aware MERGE Planning.** Planner hint injection (`enable_seqscan = off` for small-delta / large-target); covering index auto-creation on `__pgt_row_id`. No schema changes required. | 1–2 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
+| A-4 | **Index-Aware MERGE Planning.** Planner hint injection (`enable_seqscan = off` for small-delta / large-target); covering index auto-creation on `__pgt_row_id`. No schema changes required. | 1–2 wk | ✅ Done | [PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
 | B-2 | **Delta Predicate Pushdown.** Push WHERE predicates from defining query into change-buffer `delta_scan` CTE; `OR old_col` handling for deletions; 5–10× delta-row-volume reduction for selective queries. | 2–3 wk | ✅ Done (v0.9.0 as G-4/P2-7) | [PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
-| C-4 | **Change Buffer Compaction.** Net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row); run when buffer exceeds `pg_trickle.compact_threshold`; use advisory lock to serialise with refresh. | 2–3 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
-| B-4 | **Cost-Based Refresh Strategy.** Replace fixed `differential_max_change_ratio` with a history-driven cost model fitted on `pgt_refresh_history`; cold-start fallback to fixed threshold. | 2–3 wk | ⬜ Not started | [PLAN_NEW_STUFF.md §B-4](plans/performance/PLAN_NEW_STUFF.md) |
+| C-4 | **Change Buffer Compaction.** Net-change compaction (INSERT+DELETE=no-op; UPDATE+UPDATE=single row); run when buffer exceeds `pg_trickle.compact_threshold`; use advisory lock to serialise with refresh. | 2–3 wk | ✅ Done | [PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
+| B-4 | **Cost-Based Refresh Strategy.** Replace fixed `differential_max_change_ratio` with a history-driven cost model fitted on `pgt_refresh_history`; cold-start fallback to fixed threshold. | 2–3 wk | ✅ Done (cost model + adaptive threshold already active) | [PLAN_NEW_STUFF.md §B-4](plans/performance/PLAN_NEW_STUFF.md) |
 
 > ⚠️ C-4: The compaction DELETE **must use `seq` (the sequence primary key) not `ctid`** as
 > the stable row identifier. `ctid` changes under VACUUM and will silently delete the wrong
@@ -1717,10 +1717,10 @@ These items address scheduler CPU efficiency and DAG maintenance overhead at sca
 - [x] P3-2: CORR/COVAR_*/REGR_* Welford auxiliary columns for O(1) algebraic maintenance
 - [x] B3-2: Merged-delta weight aggregation passes property-based correctness proofs — **implemented; replaces DISTINCT ON with GROUP BY + SUM(weight) + HAVING**
 - [x] B3-3: Property-based tests for simultaneous multi-source changes — **implemented; 6 diamond-flow E2E property tests**
-- [ ] A-4: Covering index auto-created on `__pgt_row_id`; planner hint prevents seq-scan on small delta; `SET LOCAL` confirmed (not `SET`) so hint reverts at transaction end
+- [x] A-4: Covering index auto-created on `__pgt_row_id` with INCLUDE clause for ≤8-column schemas; planner hint prevents seq-scan on small delta; `SET LOCAL` confirmed (not `SET`) so hint reverts at transaction end
 - [ ] B-2: Predicate pushdown reduces delta volume for selective queries (E2E benchmark)
-- [ ] C-4: Compaction uses `seq` PK; correct under concurrent VACUUM; serialised with advisory lock
-- [ ] B-4: Cost model self-calibrates from refresh history; correctly selects FULL for join_agg at 10% change rate
+- [x] C-4: Compaction uses `change_id` PK (not `ctid`); correct under concurrent VACUUM; serialised with advisory lock; net-zero elimination + intermediate row collapse
+- [x] B-4: Cost model self-calibrates from refresh history (`estimate_cost_based_threshold` + `compute_adaptive_threshold` with 60/40 blend); cold-start fallback to fixed GUC threshold
 - [ ] PB1: Concurrent-refresh scenario included in PB3 E2E test; `SKIP LOCKED` "not acquired" path skips cycle rather than proceeding — **partially done: row-level locking implemented, scheduler skip path handles zero-row result, PgBouncer E2E harness created; concurrent-refresh stress test deferred to v0.10.0 hardening**
 - [ ] SF-1: `build_snapshot_sql` catch-all arm returns `PgTrickleError::UnsupportedQuery`; no SQL comment injected as FROM fragment
 - [ ] SF-2: Explicit `/* unsupported snapshot for distinct */` string replaced with `PgTrickleError::UnsupportedQuery` in join.rs

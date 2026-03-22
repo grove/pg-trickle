@@ -32,6 +32,9 @@
 > - **SF-8**: Lateral inner-change branch sentinel — ✅ **Done** (changed from `0` to `i64::MIN`)
 > - **SF-5**: EC-01 pre-change snapshot boundary — ✅ **Done** (≤2-scan threshold documented with 5 boundary tests + DVM_OPERATORS.md limitation note)
 > - **SF-11**: WAL publication post-creation partitioning — ✅ **Done** (`check_publication_health()` detects and rebuilds stale publications)
+> - **A-4**: Index-Aware MERGE Planning — ✅ **Done** (covering index with INCLUDE for ≤8-column schemas + P3-4 planner hints)
+> - **C-4**: Change Buffer Compaction — ✅ **Done** (`compact_change_buffer()` with net-zero elimination, advisory lock, `change_id` PK)
+> - **B-4**: Cost-Based Refresh Strategy — ✅ **Done** (cost model + adaptive threshold already active since v0.9.0; verified and documented)
 
 ### F40 Status Update
 
@@ -78,6 +81,9 @@ One item remains before F40 is fully closed:
 > - **SF-8**: Lateral inner-change branch sentinel — ✅ **Done** (changed from `0` to `i64::MIN`)
 > - **SF-5**: EC-01 pre-change snapshot boundary — ✅ **Done** (≤2-scan threshold documented with 5 boundary tests + DVM_OPERATORS.md limitation note)
 > - **SF-11**: WAL publication post-creation partitioning — ✅ **Done** (`check_publication_health()` detects and rebuilds stale publications)
+> - **A-4**: Index-Aware MERGE Planning — ✅ **Done** (covering index with INCLUDE for ≤8-column schemas + P3-4 planner hints)
+> - **C-4**: Change Buffer Compaction — ✅ **Done** (`compact_change_buffer()` with net-zero elimination, advisory lock, `change_id` PK)
+> - **B-4**: Cost-Based Refresh Strategy — ✅ **Done** (cost model + adaptive threshold already active since v0.9.0; verified and documented)
 
 ### F15 Status Update (Selective CDC Column Capture)
 

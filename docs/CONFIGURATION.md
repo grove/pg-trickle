@@ -31,6 +31,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
   - [Guardrails & Limits](#guardrails--limits)
     - [pg\_trickle.block\_source\_ddl](#pg_trickleblock_source_ddl)
     - [pg\_trickle.buffer\_alert\_threshold](#pg_tricklebuffer_alert_threshold)
+    - [pg\_trickle.compact\_threshold](#pg_tricklecompact_threshold)
     - [pg\_trickle.max\_grouping\_set\_branches](#pg_tricklemax_grouping_set_branches)
     - [pg\_trickle.ivm\_topk\_max\_limit](#pg_trickleivm_topk_max_limit)
     - [pg\_trickle.ivm\_recursive\_max\_depth](#pg_trickleivm_recursive_max_depth)
@@ -634,6 +635,29 @@ SET pg_trickle.buffer_alert_threshold = 500000;
 
 ---
 
+### pg_trickle.compact_threshold
+
+When a source table's pending change buffer exceeds this many rows,
+compaction is triggered before the next refresh cycle. Compaction eliminates
+net-zero INSERT+DELETE pairs (rows inserted then deleted within the same
+refresh window) and collapses multi-change groups to first+last rows per
+`pk_hash`, reducing delta scan overhead by 50–90% for high-churn tables.
+
+Set to `0` to disable compaction.
+
+**Default:** `100000` (100K rows)  
+**Range:** `0` – `100000000`
+
+```sql
+-- Trigger compaction at 50K pending rows
+SET pg_trickle.compact_threshold = 50000;
+
+-- Disable compaction
+SET pg_trickle.compact_threshold = 0;
+```
+
+---
+
 ### pg_trickle.max_grouping_set_branches
 
 Maximum allowed grouping set branches in `CUBE`/`ROLLUP` queries.
@@ -910,6 +934,7 @@ pg_trickle.user_triggers = 'auto'
 # Guardrails & limits
 pg_trickle.block_source_ddl = false
 pg_trickle.buffer_alert_threshold = 1000000
+pg_trickle.compact_threshold = 100000
 pg_trickle.max_grouping_set_branches = 64
 pg_trickle.ivm_topk_max_limit = 1000
 pg_trickle.ivm_recursive_max_depth = 100
