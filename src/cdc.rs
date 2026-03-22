@@ -439,6 +439,116 @@ pub fn create_change_buffer_table(
     Ok(())
 }
 
+/// C-4: Compact a change buffer by eliminating net-zero pk_hash groups
+/// (INSERT followed by DELETE that cancel out) and collapsing multi-change
+/// groups to retain only the first and last entries per pk_hash.
+///
+/// Returns the number of rows deleted, or 0 if compaction was skipped
+/// (buffer below threshold or advisory lock unavailable).
+///
+/// Uses `pg_try_advisory_xact_lock` to serialise with concurrent refresh
+/// operations — if the lock cannot be acquired, compaction is skipped
+/// rather than blocking.
+///
+/// **Safety:** Uses `change_id` (the BIGSERIAL primary key) for deletion,
+/// never `ctid` which is unstable under concurrent VACUUM.
+pub fn compact_change_buffer(
+    change_schema: &str,
+    source_oid: u32,
+    prev_lsn: &str,
+    new_lsn: &str,
+) -> Result<i64, PgTrickleError> {
+    let threshold = crate::config::pg_trickle_compact_threshold();
+    if threshold <= 0 {
+        return Ok(0);
+    }
+
+    // Quick count check — skip if below threshold.
+    let pending_count: i64 = Spi::get_one::<i64>(&format!(
+        "SELECT count(*)::bigint FROM (\
+           SELECT 1 FROM \"{schema}\".changes_{oid} \
+           WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn \
+           LIMIT {limit}\
+         ) __pgt_cnt",
+        schema = change_schema,
+        oid = source_oid,
+        limit = threshold + 1,
+    ))
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if pending_count <= threshold {
+        return Ok(0);
+    }
+
+    // Advisory lock keyed on source OID to serialise with refresh.
+    // Use a fixed namespace offset to avoid collisions with other locks.
+    let lock_key = 0x5047_5400_i64 | (source_oid as i64);
+    let got_lock = Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({lock_key})"))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+
+    if !got_lock {
+        pgrx::debug1!(
+            "[pg_trickle] C-4: skipping compaction for changes_{} (advisory lock busy)",
+            source_oid,
+        );
+        return Ok(0);
+    }
+
+    // Compact: remove net-zero groups (INSERT→DELETE) and intermediate rows.
+    //
+    // For each pk_hash in the pending LSN range:
+    // - If first_action='I' and last_action='D' → all rows are net no-op
+    // - For remaining groups, keep only first (rn_asc=1) and last (rn_desc=1)
+    //   rows, removing intermediates.
+    //
+    // The delta query pipeline handles 2-row groups (first + last) correctly
+    // via FIRST_VALUE/LAST_VALUE window functions.
+    let compact_sql = format!(
+        "DELETE FROM \"{schema}\".changes_{oid} \
+         WHERE change_id IN (\
+           SELECT change_id FROM (\
+             SELECT change_id, \
+                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id) AS rn_asc, \
+                    ROW_NUMBER() OVER (PARTITION BY pk_hash ORDER BY change_id DESC) AS rn_desc, \
+                    FIRST_VALUE(action) OVER (\
+                      PARTITION BY pk_hash ORDER BY change_id\
+                    ) AS first_act, \
+                    LAST_VALUE(action) OVER (\
+                      PARTITION BY pk_hash ORDER BY change_id \
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\
+                    ) AS last_act \
+             FROM \"{schema}\".changes_{oid} \
+             WHERE lsn > '{prev_lsn}'::pg_lsn AND lsn <= '{new_lsn}'::pg_lsn\
+           ) __pgt_ranked \
+           WHERE (first_act = 'I' AND last_act = 'D') \
+              OR (rn_asc > 1 AND rn_desc > 1)\
+         )",
+        schema = change_schema,
+        oid = source_oid,
+    );
+
+    let deleted = Spi::connect_mut(|client| {
+        let result = client
+            .update(&compact_sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(format!("C-4 compaction failed: {}", e)))?;
+        Ok::<i64, PgTrickleError>(result.len() as i64)
+    })?;
+
+    if deleted > 0 {
+        pgrx::info!(
+            "[pg_trickle] C-4: compacted changes_{} — removed {} rows ({} pending → {})",
+            source_oid,
+            deleted,
+            pending_count,
+            pending_count - deleted,
+        );
+    }
+
+    Ok(deleted)
+}
+
 /// Task 3.3: Check whether the given source table's effective refresh schedule
 /// warrants auto-partitioning (>= 30 s).
 fn should_auto_partition(source_oid: pg_sys::Oid) -> bool {

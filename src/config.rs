@@ -158,6 +158,16 @@ pub static PGS_BLOCK_SOURCE_DDL: GucSetting<bool> = GucSetting::<bool>::new(fals
 /// both high-throughput workloads (raise) and small tables (lower).
 pub static PGS_BUFFER_ALERT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
 
+/// C-4: Change buffer compaction threshold (pending change row count).
+///
+/// When a source table's pending change buffer exceeds this many rows,
+/// compaction is triggered before the next refresh cycle. Compaction
+/// eliminates net-zero INSERT+DELETE pairs and collapses multi-change
+/// groups to first+last rows per pk_hash.
+///
+/// Set to 0 to disable compaction. Typical values: 10_000–1_000_000.
+pub static PGS_COMPACT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
 /// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
 pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
@@ -536,6 +546,18 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_trickle.compact_threshold",
+        c"Change buffer compaction threshold (pending change row count).",
+        c"When a source table's pending changes exceed this count, compaction removes \
+           net-zero INSERT+DELETE pairs and collapses multi-change groups. Set to 0 to disable.",
+        &PGS_COMPACT_THRESHOLD,
+        0,           // min: 0 (disabled)
+        100_000_000, // max: 100M rows
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_trickle.max_grouping_set_branches",
         c"Maximum allowed grouping set branches in CUBE/ROLLUP queries.",
         c"Prevents parsing memory exhaustion during combinatorial expansion. \
@@ -850,6 +872,12 @@ pub fn pg_trickle_block_source_ddl() -> bool {
 /// Returns the buffer alert threshold (row count).
 pub fn pg_trickle_buffer_alert_threshold() -> i64 {
     PGS_BUFFER_ALERT_THRESHOLD.get() as i64
+}
+
+/// Returns the change buffer compaction threshold (row count).
+/// Returns 0 when compaction is disabled.
+pub fn pg_trickle_compact_threshold() -> i64 {
+    PGS_COMPACT_THRESHOLD.get() as i64
 }
 
 /// Returns the buffer partitioning mode: `"off"`, `"on"`, or `"auto"`.

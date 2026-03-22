@@ -1664,6 +1664,22 @@ pub fn execute_differential_refresh(
     // thread-local queue is empty.
     cleanup_change_buffers_by_frontier(&change_schema, &catalog_source_oids);
 
+    // C-4: Compact change buffers that exceed the configured threshold.
+    // This reduces delta scan overhead by eliminating net-zero changes
+    // (INSERT→DELETE pairs) and collapsing multi-change groups.
+    for &oid in &catalog_source_oids {
+        let prev_lsn = prev_frontier.get_lsn(oid);
+        let new_lsn = new_frontier.get_lsn(oid);
+        if let Err(e) = crate::cdc::compact_change_buffer(&change_schema, oid, &prev_lsn, &new_lsn)
+        {
+            pgrx::debug1!(
+                "[pg_trickle] C-4: compaction failed for changes_{}: {}",
+                oid,
+                e,
+            );
+        }
+    }
+
     let t_decision_start = Instant::now();
 
     // ── E-1: Ultra-fast EXISTS for no-data short-circuit ─────────────
