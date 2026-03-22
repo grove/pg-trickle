@@ -146,6 +146,38 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   rows, and 8 cycles of mixed INSERT/UPDATE/DELETE.  These tests serve as
   the correctness proof required before B3-2 could be merged.
 
+- **P2-4: Materialized view sources in DIFFERENTIAL mode** — Materialized
+  views can now be used as sources in DIFFERENTIAL-mode stream tables when
+  `pg_trickle.matview_polling = on` is set. Uses the same snapshot-comparison
+  (EXCEPT ALL) polling mechanism as foreign table support: a local shadow
+  table stores the previous matview contents and the delta is computed on
+  each refresh cycle. New GUC `pg_trickle.matview_polling` (default `off`),
+  new functions `setup_matview_polling` / `poll_matview_changes` in the CDC
+  module, and updated refresh paths to include MATVIEW sources alongside
+  TABLE and FOREIGN_TABLE for change buffer cleanup and frontier tracking.
+
+- **P2-6: LATERAL subquery scoped inner-source re-execution** — When a
+  LATERAL subquery's WHERE clause contains correlation predicates
+  (`inner.col = outer.col`), the differential engine now uses scoped EXISTS
+  joins against the change buffer instead of a full-scan LIMIT 1-style
+  probe. Correlation predicates are extracted at parse time from the raw
+  parse tree (simple equalities and AND conjunctions). The inner-change
+  branch builds `EXISTS (SELECT 1 FROM changes WHERE new_<col> = outer.<col>
+  OR old_<col> = outer.<col>)`, reducing inner-source change detection from
+  O(|outer|) to O(|delta|). Falls back to the full-scan approach for queries
+  without extractable correlation predicates.
+
+- **P3-2: Algebraic maintenance for CORR/COVAR/REGR aggregates** — All
+  twelve regression/correlation aggregates (CORR, COVAR_POP, COVAR_SAMP,
+  REGR_AVGX, REGR_AVGY, REGR_COUNT, REGR_INTERCEPT, REGR_R2, REGR_SLOPE,
+  REGR_SXX, REGR_SXY, REGR_SYY) are now maintained algebraically using
+  five cross-product auxiliary columns per aggregate: `__pgt_aux_sumx_*`,
+  `__pgt_aux_sumy_*`, `__pgt_aux_sumxy_*`, `__pgt_aux_sumx2_*`,
+  `__pgt_aux_sumy2_*`. These replace the previous O(group_size) group-rescan
+  approach with O(1) incremental updates using Welford-style accumulation.
+  Merge formulas implement the full SQL-standard semantics including
+  edge-case handling for REGR_R2 and CORR when denominators are zero.
+
 ---
 
 ## [0.9.0] — 2026-03-20
