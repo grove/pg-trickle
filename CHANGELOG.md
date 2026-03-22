@@ -30,6 +30,38 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased] — v0.10.0 work-in-progress
 
+### PgBouncer Compatibility
+
+- **PB1: Row-level locking replaces advisory locks.** The background
+  scheduler now uses `SELECT ... FOR UPDATE SKIP LOCKED` on the
+  `pgt_stream_tables` catalog row instead of `pg_advisory_lock()` /
+  `pg_advisory_unlock()` for concurrency control. This makes lock
+  acquisition transaction-scoped and fully compatible with transaction-mode
+  connection poolers. The `check_skip_needed()` probe uses a subtransaction
+  (via `Spi::connect`) so the lock is released immediately; the actual
+  refresh holds the row lock for its full duration.
+
+- **PB2: Per-stream-table `pooler_compatibility_mode`.** A new boolean
+  column `pooler_compatibility_mode` (default `false`) on
+  `pgt_stream_tables` controls whether a stream table operates in
+  pooler-safe mode:
+  - When `true`: prepared statements (`PREPARE`/`EXECUTE`) are bypassed
+    in the refresh engine (inline SQL used instead), and all `NOTIFY`
+    emissions (alerts, refresh completions) are suppressed for that ST.
+  - When `false` (default): behaviour is unchanged from v0.9.0.
+
+  Set via `create_stream_table(..., pooler_compatibility_mode => true)` or
+  `alter_stream_table('name', pooler_compatibility_mode => true)`.
+
+- **PB3: PgBouncer E2E test suite.** New test file
+  `tests/e2e_pgbouncer_tests.rs` boots a PgBouncer container in
+  transaction-pool mode alongside the pg_trickle E2E image on a shared
+  Docker network. Tests cover: connectivity through PgBouncer, creating
+  stream tables with pooler mode, manual FULL refresh through the pooler,
+  source-change re-refresh, alter to enable pooler mode, NOTIFY
+  suppression verification, and drop through PgBouncer.
+  Run with `just test-pgbouncer`.
+
 ### DVM Correctness & Performance
 
 - **P2-1: DRed for DIFFERENTIAL mode** — Recursive CTE stream tables in

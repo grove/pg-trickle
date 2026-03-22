@@ -133,6 +133,16 @@ test-pgrx:
 [group: "test"]
 test-all: test-unit test-integration test-e2e test-pgrx
 
+# Run PgBouncer compatibility E2E tests (requires E2E image + Docker)
+[group: "test"]
+test-pgbouncer: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_pgbouncer_tests
+
+# Run PgBouncer tests, skip Docker image rebuild
+[group: "test"]
+test-pgbouncer-fast:
+    ./scripts/run_e2e_tests.sh --test e2e_pgbouncer_tests
+
 # ── Pipeline DAG Tests ───────────────────────────────────────────────────
 
 # Run multi-level DAG pipeline tests (rebuilds Docker image)
