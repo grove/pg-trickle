@@ -640,14 +640,15 @@ SELECT pgtrickle.create_stream_table(
 - CDC triggers and change buffer tables are created automatically for each source table.
 - The ST is registered in the dependency DAG; cycles are rejected.
 - Non-recursive CTEs are inlined as subqueries during parsing (Tier 1). Multi-reference CTEs share delta computation (Tier 2).
-- Recursive CTEs in DIFFERENTIAL mode use three strategies, auto-selected per refresh: **semi-naive evaluation** for INSERT-only changes, **recomputation fallback** for mixed DELETE/UPDATE changes (see known limitation below), and **recomputation fallback** when CTE columns don’t match ST storage columns. **Non-monotone recursive terms** (containing EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, or INTERSECT SET) automatically fall back to recomputation to ensure correctness.
+- Recursive CTEs in DIFFERENTIAL mode use three strategies, auto-selected per refresh: **semi-naive evaluation** for INSERT-only changes, **DRed (Delete-and-Rederive)** for mixed DELETE/UPDATE changes, and **recomputation fallback** when CTE columns do not match ST storage columns. **Non-monotone recursive terms** (containing EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, or INTERSECT SET) automatically fall back to recomputation to ensure correctness.
 
-> ⚠️ **Known Limitation — Recursive CTE DIFFERENTIAL mode and mixed changes**
-> In DIFFERENTIAL mode, when the change buffer contains DELETE or UPDATE rows for a
-> recursive CTE source, pg_trickle falls back to full **recomputation** (Strategy 3),
-> not Delete-and-Rederive. DRed is only active in **IMMEDIATE mode**. Use
-> `refresh_mode = 'IMMEDIATE'` for recursive CTE stream tables with frequent
-> DELETE/UPDATE workloads on their sources. Tracked as P2-1 in the v0.9.0 roadmap.
+> **Recursive CTE DIFFERENTIAL mode -- DRed algorithm (P2-1)**
+> In DIFFERENTIAL mode, mixed DELETE/UPDATE changes now use the DRed (Delete-and-Rederive)
+> algorithm: (1) semi-naive INSERT propagation; (2) over-deletion cascade from ST storage;
+> (3) rederivation from current source tables; (4) combine net deletions. DRed correctly
+> handles derived-column changes such as path rebuilds under a renamed ancestor node.
+> When CTE output columns differ from ST storage columns (mismatch), recomputation is used.
+> Implemented in v0.10.0 (P2-1).
 - LATERAL SRFs in DIFFERENTIAL mode use row-scoped recomputation: when a source row changes, only the SRF expansions for that row are re-evaluated.
 - LATERAL subqueries in DIFFERENTIAL mode also use row-scoped recomputation: when an outer row changes, the correlated subquery is re-executed only for that row.
 - WHERE subqueries (`EXISTS`, `IN`, scalar) are parsed into dedicated semi-join, anti-join, and scalar subquery operators with specialized delta computation.
