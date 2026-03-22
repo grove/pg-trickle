@@ -27,6 +27,9 @@
 > - **SF-10**: TRUNCATE + INSERT ordering — ✅ **Done** (verified safe: full refresh reads source directly)
 > - **SF-12**: DiamondSchedulePolicy CPU cost documentation — ✅ **Done** (added to CONFIGURATION.md)
 > - **SF-13**: B-2 roadmap inconsistency — ✅ **Done** (marked as completed by G-4/P2-7 in v0.9.0)
+> - **SF-4**: Project node in aggregate rescan FROM clause — ✅ **Done** (`child_to_from_sql` wraps Project in subquery with projected expressions)
+> - **SF-6**: EXCEPT/INTERSECT count columns through Project — ✅ **Done** (`diff_project` forwards `__pgt_count_l`/`__pgt_count_r`)
+> - **SF-8**: Lateral inner-change branch sentinel — ✅ **Done** (changed from `0` to `i64::MIN`)
 
 ### F40 Status Update
 
@@ -68,6 +71,9 @@ One item remains before F40 is fully closed:
 > - **SF-10**: TRUNCATE + INSERT ordering — ✅ **Done** (verified safe: full refresh reads source directly)
 > - **SF-12**: DiamondSchedulePolicy CPU cost documentation — ✅ **Done** (added to CONFIGURATION.md)
 > - **SF-13**: B-2 roadmap inconsistency — ✅ **Done** (marked as completed by G-4/P2-7 in v0.9.0)
+> - **SF-4**: Project node in aggregate rescan FROM clause — ✅ **Done** (`child_to_from_sql` wraps Project in subquery with projected expressions)
+> - **SF-6**: EXCEPT/INTERSECT count columns through Project — ✅ **Done** (`diff_project` forwards `__pgt_count_l`/`__pgt_count_r`)
+> - **SF-8**: Lateral inner-change branch sentinel — ✅ **Done** (changed from `0` to `i64::MIN`)
 
 ### F15 Status Update (Selective CDC Column Capture)
 

@@ -216,6 +216,32 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   Pushdown) was listed as "Not started" in v0.10.0 but was already completed
   as G-4/P2-7 in v0.9.0. Marked B-2 as done in the v0.10.0 table.
 
+### DVM Correctness Fixes
+
+- **SF-4: Project node handled in aggregate rescan FROM reconstruction** —
+  `child_to_from_sql()` previously recursed through `Project` nodes ignoring
+  the projected expressions and aliases. When a Project with column renames
+  (e.g. `EXTRACT(year FROM orderdate) AS o_year`) sat between an aggregate
+  and its source, the rescan CTE's GROUP BY and aggregate expressions could
+  not resolve the aliased column names against the raw child FROM clause.
+  Now wraps the child's FROM in a subquery with the projected expressions,
+  preserving aliased column names for the rescan CTE.
+
+- **SF-6: EXCEPT/INTERSECT count columns forwarded through Project** —
+  `diff_project()` previously returned only the user-aliased columns in
+  its `DiffResult`, silently dropping `__pgt_count_l` and `__pgt_count_r`
+  from EXCEPT/INTERSECT children. The MERGE step then never updated the
+  per-branch multiplicity counts, causing rows to become permanently stale.
+  Project now detects and forwards dual-count columns when present.
+
+- **SF-8: Lateral inner-change branch sentinel changed to `i64::MIN`** —
+  `build_inner_change_branch()` previously used `0::BIGINT` as a placeholder
+  `__pgt_row_id` for outer rows re-executed due to inner source changes.
+  Since the xxHash function produces values spanning the full i64 range, a
+  real outer row could hash to 0, causing weight aggregation to conflate it
+  with dummy entries. Changed to `(-9223372036854775808)::BIGINT` (i64::MIN),
+  reducing collision probability to ~1/2^64.
+
 ---
 
 ## [0.9.0] — 2026-03-20
