@@ -1228,6 +1228,11 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         if !sum2_aux.is_empty() {
             eq = crate::api::inject_sum2_aux(&eq, &sum2_aux);
         }
+        // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
+        let nonnull_aux = crate::dvm::query_nonnull_aux_columns(query);
+        if !nonnull_aux.is_empty() {
+            eq = crate::api::inject_nonnull_aux(&eq, &nonnull_aux);
+        }
         eq
     } else {
         query.clone()

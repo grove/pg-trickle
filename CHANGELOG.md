@@ -88,6 +88,28 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `test_dred_differential_reparent_updates_depth`,
   `test_dred_differential_multi_level_path_cascade`).
 
+- **P2-2: SUM NULL-transition rescan eliminated for FULL OUTER JOIN
+  aggregates** — When `SUM` sits above a `FULL OUTER JOIN` and matched
+  rows transition to unmatched (null-padded) rows, the algebraic formula
+  `old + ins − del` previously gave `0` instead of `NULL`. This was
+  corrected by a full-group rescan on every cycle where rows crossed the
+  matched/unmatched boundary — an O(n) cost even when only a few rows
+  changed.
+
+  The new approach maintains a hidden `__pgt_aux_nonnull_<alias> BIGINT`
+  auxiliary column on the stream table, tracking how many non-NULL
+  argument values exist in each group:
+  - When `nonnull_count > 0`: the algebraic SUM formula is used directly
+    (O(delta) cost).
+  - When `nonnull_count == 0`: the result is definitively `NULL` without
+    any rescan.
+
+  This eliminates the full-group rescan entirely from the SUM + FULL JOIN
+  path. The transformation is correct for all argument types and respects
+  `FILTER (WHERE ...)` clauses. Three new unit tests verify the correct
+  generation of nonnull-count delta tracking, auxiliary column
+  propagation, and the absence of rescan CTEs in the generated SQL.
+
 ---
 
 ## [0.9.0] — 2026-03-20

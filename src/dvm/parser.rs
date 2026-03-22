@@ -1256,6 +1256,65 @@ impl OpTree {
         }
     }
 
+    /// Whether this operator tree contains a FULL OUTER JOIN node at any depth.
+    ///
+    /// Used to determine whether SUM aggregates above this tree need
+    /// `__pgt_aux_nonnull_*` auxiliary columns for P2-2 NULL-transition
+    /// correction.
+    pub fn contains_full_join(&self) -> bool {
+        match self {
+            OpTree::FullJoin { .. } => true,
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. } => child.contains_full_join(),
+            OpTree::InnerJoin { left, right, .. } | OpTree::LeftJoin { left, right, .. } => {
+                left.contains_full_join() || right.contains_full_join()
+            }
+            _ => false,
+        }
+    }
+
+    /// For each non-DISTINCT SUM aggregate above a FULL OUTER JOIN child,
+    /// returns a tuple of `(nonnull_col_name, arg_sql)`:
+    /// - `nonnull_col_name`: `__pgt_aux_nonnull_{alias}` — stores running
+    ///   count of non-NULL argument values in the group
+    /// - `arg_sql`: the SQL expression for the aggregate argument
+    ///
+    /// This auxiliary column enables algebraic NULL-transition correction
+    /// (P2-2): when `nonnull_count > 0` the algebraic SUM formula is valid;
+    /// when it drops to 0 the result is definitively NULL without rescanning.
+    ///
+    /// Returns an empty vec if no SUM aggregates sit above a FULL JOIN, or
+    /// if the operator tree is not an aggregate query.
+    pub fn nonnull_aux_columns(&self) -> Vec<(String, String)> {
+        match self {
+            OpTree::Aggregate {
+                aggregates, child, ..
+            } => {
+                if !child.contains_full_join() {
+                    return Vec::new();
+                }
+                let mut aux = Vec::new();
+                for agg in aggregates {
+                    if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
+                        let arg_sql = agg
+                            .argument
+                            .as_ref()
+                            .map(|e| e.to_sql())
+                            .unwrap_or_else(|| "0".to_string());
+                        aux.push((format!("__pgt_aux_nonnull_{}", agg.alias), arg_sql));
+                    }
+                }
+                aux
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. }
+            | OpTree::Window { child, .. } => child.nonnull_aux_columns(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether this operator represents a UNION (without ALL) that needs
     /// deduplication counting via `__pgt_count` in a wrapped UNION ALL form.
     pub fn needs_union_dedup_count(&self) -> bool {

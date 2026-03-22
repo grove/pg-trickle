@@ -15,7 +15,7 @@
 > - **P2-3**: DISTINCT index-driven `__pgt_count` lookup — ✅ **Complete**
 > - **P2-7**: Delta predicate pushdown into scan CTE — ✅ **Complete**
 > - **P2-1**: Recursive CTE DRed for DIFFERENTIAL mode — ⏭️ **Deferred to v0.10.0** (high risk; fallback to recomputation is correct)
-> - **P2-2**: SUM NULL-transition rescan optimization — ⏭️ **Deferred to v0.10.0** (requires auxiliary nonnull-count columns; rescan is correct)
+> - **P2-2**: SUM NULL-transition rescan optimization — ✅ **Done** (`__pgt_aux_nonnull_*` auxiliary column; algebraic NULL-transition correction; full-group rescan eliminated)
 > - **P2-4**: Materialized view sources in IMMEDIATE mode — ⏭️ **Deferred to v0.10.0** (requires external polling wrapper; out of scope)
 > - **P2-6**: LATERAL subquery inner-source scoping — ⏭️ **Deferred to v0.10.0** (requires correlation predicate extraction; full re-execution is correct)
 > - **P3-2**: Welford auxiliary columns for CORR/COVAR/REGR_* — ⏭️ **Deferred to v0.10.0** (group-rescan strategy already works correctly)
@@ -50,7 +50,7 @@ One item remains before F40 is fully closed:
 > - **P2-3**: DISTINCT index-driven `__pgt_count` lookup — ✅ **Complete**
 > - **P2-7**: Delta predicate pushdown into scan CTE — ✅ **Complete**
 > - **P2-1**: Recursive CTE DRed for DIFFERENTIAL mode — ⏭️ **Deferred to v0.10.0** (high risk; fallback to recomputation is correct)
-> - **P2-2**: SUM NULL-transition rescan optimization — ⏭️ **Deferred to v0.10.0** (requires auxiliary nonnull-count columns; rescan is correct)
+> - **P2-2**: SUM NULL-transition rescan optimization — ✅ **Done** (`__pgt_aux_nonnull_*` auxiliary column; algebraic NULL-transition correction; full-group rescan eliminated)
 > - **P2-4**: Materialized view sources in IMMEDIATE mode — ⏭️ **Deferred to v0.10.0** (requires external polling wrapper; out of scope)
 > - **P2-6**: LATERAL subquery inner-source scoping — ⏭️ **Deferred to v0.10.0** (requires correlation predicate extraction; full re-execution is correct)
 > - **P3-2**: Welford auxiliary columns for CORR/COVAR/REGR_* — ⏭️ **Deferred to v0.10.0** (group-rescan strategy already works correctly)

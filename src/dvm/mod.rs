@@ -428,6 +428,16 @@ pub fn query_sum2_aux_columns(defining_query: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Returns `(nonnull_col_name, arg_sql)` tuples for each non-DISTINCT SUM
+/// aggregate above a FULL JOIN child that needs an auxiliary nonnull-count
+/// column (`__pgt_aux_nonnull_*`) for P2-2 NULL-transition correction.
+/// Empty if no such aggregates exist.
+pub fn query_nonnull_aux_columns(defining_query: &str) -> Vec<(String, String)> {
+    parse_defining_query(defining_query)
+        .map(|tree| tree.nonnull_aux_columns())
+        .unwrap_or_default()
+}
+
 /// Check whether a defining query is an INTERSECT or EXCEPT that needs
 /// dual-count columns (`__pgt_count_l`, `__pgt_count_r`).
 pub fn query_needs_dual_count(defining_query: &str) -> bool {

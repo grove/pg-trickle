@@ -853,7 +853,6 @@ fn build_rescan_cte(
     // When `force_all_aggs` is true (HAVING context), include ALL aggregates
     // so that the merge CTE can use the correct full aggregate value for
     // groups that were absent from the ST (below the HAVING threshold).
-    let has_full_join_child = child_has_full_join(child);
     let rescan_aggs: Vec<&AggExpr> = if force_all_aggs {
         aggregates.iter().collect()
     } else {
@@ -863,10 +862,9 @@ fn build_rescan_cte(
                 a.is_distinct
                     || a.function.is_group_rescan()
                     || matches!(a.function, AggFunc::Min | AggFunc::Max)
-                    // SUM over a FULL JOIN child needs rescan because the algebraic
-                    // `old + ins − del` formula gives 0 instead of NULL when a
-                    // matched row transitions to a null-padded (unmatched) row.
-                    || (has_full_join_child && matches!(a.function, AggFunc::Sum))
+                // P2-2: SUM over a FULL JOIN child no longer needs a rescan CTE.
+                // The __pgt_aux_nonnull_* auxiliary column provides algebraic
+                // NULL-transition correction without rescanning source data.
             })
             .collect()
     };
@@ -1346,6 +1344,24 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
                 delta_selects.push(format!("{ins_sum2} AS {}", quote_ident(&sum2_alias_i)));
                 delta_selects.push(format!("{del_sum2} AS {}", quote_ident(&sum2_alias_d)));
             }
+
+            // P2-2: SUM over a FULL JOIN child — track nonnull-count delta so the
+            // merge can maintain __pgt_aux_nonnull_{alias} algebraically and decide
+            // NULL vs algebraic SUM without a full-group rescan.
+            let has_full_join_for_delta = child_has_full_join(child);
+            if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && has_full_join_for_delta {
+                let (ins_nonnull, del_nonnull) = agg_nonnull_delta_exprs(agg, child_cols);
+                let nonnull_alias_i = format!("__ins_nonnull_{}", agg.alias);
+                let nonnull_alias_d = format!("__del_nonnull_{}", agg.alias);
+                delta_selects.push(format!(
+                    "{ins_nonnull} AS {}",
+                    quote_ident(&nonnull_alias_i)
+                ));
+                delta_selects.push(format!(
+                    "{del_nonnull} AS {}",
+                    quote_ident(&nonnull_alias_d)
+                ));
+            }
         }
 
         let delta_sql = format!(
@@ -1482,18 +1498,25 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // For SUM aggregates on top of a FULL JOIN child: the algebraic
     // `old + ins − del` formula gives 0 instead of NULL when all newly
     // inserted rows carry NULL for the aggregate column (matched rows
-    // transitioning to null-padded unmatched rows). Use the rescan CTE's
-    // value for those aggregates instead.
+    // transitioning to null-padded unmatched rows).
     //
-    // SUM(DISTINCT ...) already has a rescan CTE built (via `a.is_distinct`)
-    // and gets the correct `r.{alias}` path in agg_merge_expr_mapped, so
-    // the plain-SUM gate only applies to non-DISTINCT SUM.
-    let sum_has_rescan = has_rescan && child_has_full_join(child);
+    // P2-2: SUM over a FULL JOIN child now uses __pgt_aux_nonnull_* for
+    // algebraic NULL-transition correction instead of a rescan CTE.
+    // The flag is used per-aggregate below when building merge selects.
+    let sum_has_full_join_child = child_has_full_join(child);
 
     // Per-aggregate new values + old values for G-S1 change detection
     for agg in aggregates {
+        // For non-DISTINCT SUM over a FULL JOIN child: use nonnull-count aux
+        // (P2-2) for algebraic NULL-transition correction.
+        // SUM is NEVER routed through the rescan CTE:
+        //   - FULL JOIN child: corrected by __pgt_aux_nonnull_* (P2-2)
+        //   - Any other child: algebraic formula is already correct
+        let agg_has_nonnull_aux =
+            matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child;
         let agg_has_rescan = if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct {
-            sum_has_rescan
+            // SUM is always algebraic — never use the rescan path
+            false
         } else {
             has_rescan
         };
@@ -1501,6 +1524,7 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             agg,
             agg_has_rescan,
             use_having_rescan,
+            agg_has_nonnull_aux,
             &st_col_name(&agg.alias),
         );
         merge_selects.push(format!(
@@ -1547,6 +1571,18 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             merge_selects.push(format!(
                 "COALESCE(st.{aux_sum2}, 0) + COALESCE(d.{ins_sum2}, 0) - COALESCE(d.{del_sum2}, 0) AS {}",
                 quote_ident(&format!("new___pgt_aux_sum2_{}", agg.alias)),
+            ));
+        }
+
+        // P2-2: SUM over FULL JOIN — update the nonnull-count auxiliary column.
+        if agg_has_nonnull_aux {
+            let st_alias = st_col_name(&agg.alias);
+            let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_alias}"));
+            let ins_nonnull = quote_ident(&format!("__ins_nonnull_{}", agg.alias));
+            let del_nonnull = quote_ident(&format!("__del_nonnull_{}", agg.alias));
+            merge_selects.push(format!(
+                "COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0) AS {}",
+                quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias)),
             ));
         }
     }
@@ -1647,6 +1683,10 @@ END AS __pgt_meta_action"
         if agg.function.needs_sum_of_squares() && !agg.is_distinct {
             output_cols.push(format!("__pgt_aux_sum2_{}", agg.alias));
         }
+        // P2-2: SUM over FULL JOIN — propagate nonnull-count auxiliary column
+        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child {
+            output_cols.push(format!("__pgt_aux_nonnull_{}", agg.alias));
+        }
     }
 
     let group_col_refs = group_output
@@ -1723,6 +1763,18 @@ END AS __pgt_meta_action"
 
             agg_cases.push(format!(
                 "CASE WHEN m.__pgt_meta_action = 'D' THEN 0 ELSE m.{new_aux_sum2} END AS {aux_sum2_alias}",
+            ));
+        }
+
+        // P2-2: SUM over FULL JOIN — propagate the nonnull-count auxiliary column.
+        // D events reset to 0 (group deleted). I/U events use the algebraically
+        // maintained new value.
+        if matches!(agg.function, AggFunc::Sum) && !agg.is_distinct && sum_has_full_join_child {
+            let new_aux_nonnull = quote_ident(&format!("new___pgt_aux_nonnull_{}", agg.alias));
+            let aux_nonnull_alias = quote_ident(&format!("__pgt_aux_nonnull_{}", agg.alias));
+
+            agg_cases.push(format!(
+                "CASE WHEN m.__pgt_meta_action = 'D' THEN 0 ELSE m.{new_aux_nonnull} END AS {aux_nonnull_alias}",
             ));
         }
     }
@@ -1949,6 +2001,37 @@ fn agg_sum2_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String
     )
 }
 
+/// Generate non-NULL COUNT expressions for SUM nonnull-count auxiliary tracking (P2-2).
+///
+/// Returns `(ins_nonnull_expr, del_nonnull_expr)` — counts of non-NULL argument
+/// values in the insert and delete sides of the delta. SUM over a FULL JOIN
+/// needs these to maintain its `__pgt_aux_nonnull_{alias}` column algebraically,
+/// which enables NULL-transition correction without a full-group rescan.
+fn agg_nonnull_delta_exprs(agg: &AggExpr, child_cols: &[String]) -> (String, String) {
+    let filter_sql = agg
+        .filter
+        .as_ref()
+        .map(|f| resolve_expr_for_child(f, child_cols));
+    let filter_and = filter_sql
+        .as_ref()
+        .map(|f| format!(" AND {f}"))
+        .unwrap_or_default();
+
+    let col = agg
+        .argument
+        .as_ref()
+        .map(|e| resolve_expr_for_child(e, child_cols))
+        .unwrap_or_else(|| "1".to_string());
+    (
+        format!(
+            "SUM(CASE WHEN __pgt_action = 'I' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+        ),
+        format!(
+            "SUM(CASE WHEN __pgt_action = 'D' AND {col} IS NOT NULL{filter_and} THEN 1 ELSE 0 END)::bigint"
+        ),
+    )
+}
+
 /// Generate the merge expression for computing the new aggregate value.
 ///
 /// When `has_rescan` is true, group-rescan aggregates reference the rescan
@@ -1961,6 +2044,7 @@ fn agg_merge_expr_mapped(
     agg: &AggExpr,
     has_rescan: bool,
     having_rescan: bool,
+    has_nonnull_aux: bool,
     st_col: &str,
 ) -> String {
     let alias = &agg.alias;
@@ -2004,12 +2088,31 @@ fn agg_merge_expr_mapped(
         AggFunc::Sum => {
             let ins = quote_ident(&format!("__ins_{alias}"));
             let del = quote_ident(&format!("__del_{alias}"));
-            if has_rescan {
-                // Rescan CTE available (e.g., FULL JOIN child or HAVING context):
-                // use the re-aggregated value for any changed group. This correctly
-                // handles NULL transitions (matched → unmatched) in FULL/LEFT JOINs
-                // where the algebraic formula produces 0 instead of NULL, and also
-                // covers HAVING threshold crossings for new groups.
+            if has_nonnull_aux {
+                // P2-2: Nonnull-count auxiliary available — use algebraic
+                // NULL-transition correction.
+                //
+                // new_nonnull = old_nonnull + ins_nonnull - del_nonnull
+                //   > 0 → at least one non-NULL argument value remains in the
+                //          group: the algebraic SUM formula is safe.
+                //   = 0 → all argument values in the group are now NULL:
+                //          SUM should be NULL (no rescan required).
+                //
+                // This replaces the previous full-group rescan that was
+                // triggered by child_has_full_join() (P2-2 optimization).
+                let aux_nonnull = quote_ident(&format!("__pgt_aux_nonnull_{st_col}"));
+                let ins_nonnull = quote_ident(&format!("__ins_nonnull_{alias}"));
+                let del_nonnull = quote_ident(&format!("__del_nonnull_{alias}"));
+                format!(
+                    "CASE \
+                     WHEN (COALESCE(st.{aux_nonnull}, 0) + COALESCE(d.{ins_nonnull}, 0) - COALESCE(d.{del_nonnull}, 0)) > 0 \
+                     THEN COALESCE(st.{qt}, 0) + COALESCE(d.{ins}, 0) - COALESCE(d.{del}, 0) \
+                     ELSE NULL \
+                     END",
+                )
+            } else if has_rescan {
+                // Rescan CTE available (HAVING context):
+                // use the re-aggregated value for any changed group.
                 format!(
                     "CASE WHEN COALESCE(d.{ins}, 0) > 0 OR COALESCE(d.{del}, 0) > 0 \
                      THEN r.{r_qt} \
@@ -2162,9 +2265,9 @@ fn agg_merge_expr_mapped(
 
 /// Convenience wrapper: uses the aggregate's own alias as the ST column name.
 ///
-/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, &agg.alias)`.
+/// Equivalent to `agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias)`.
 pub fn agg_merge_expr(agg: &AggExpr, has_rescan: bool) -> String {
-    agg_merge_expr_mapped(agg, has_rescan, false, &agg.alias)
+    agg_merge_expr_mapped(agg, has_rescan, false, false, &agg.alias)
 }
 
 #[cfg(test)]
@@ -4186,6 +4289,136 @@ mod tests {
             &sql,
             "COALESCE(d.\"__ins_total\", 0) - COALESCE(d.\"__del_total\", 0)",
         );
+    }
+
+    // ── P2-2: SUM NULL-transition correction for FULL OUTER JOIN ────────
+
+    #[test]
+    fn test_p2_2_sum_full_join_uses_nonnull_aux_not_rescan() {
+        // P2-2: SUM above a FULL OUTER JOIN should use the __pgt_aux_nonnull_*
+        // auxiliary column for algebraic NULL-transition correction instead of
+        // a full-group rescan CTE.
+        let mut ctx = test_ctx_with_st("public", "st");
+        let left = scan(1, "l", "public", "l", &["id", "amount"]);
+        let right = scan(2, "r", "public", "r", &["id", "value"]);
+        let join_child = full_join(
+            binop("=", qcolref("l", "id"), qcolref("r", "id")),
+            left,
+            right,
+        );
+        let tree = aggregate(
+            vec![qcolref("l", "id")],
+            vec![sum_col("value", "total")],
+            join_child,
+        );
+
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // Must NOT produce a rescan CTE (P2-2: nonnull-count replaces rescan)
+        assert!(
+            !sql.contains("agg_rescan"),
+            "P2-2: SUM above FULL JOIN should not use rescan CTE, got:\n{sql}"
+        );
+
+        // Must track nonnull delta in the delta CTE
+        assert_sql_contains(&sql, "__ins_nonnull_total");
+        assert_sql_contains(&sql, "__del_nonnull_total");
+
+        // Merge CTE must update the nonnull-count auxiliary column
+        assert_sql_contains(&sql, "new___pgt_aux_nonnull_total");
+
+        // The merge expression for SUM must use the CASE … nonnull > 0 form
+        assert_sql_contains(&sql, "__pgt_aux_nonnull_total");
+
+        // Output columns must include the nonnull auxiliary
+        assert!(
+            result
+                .columns
+                .contains(&"__pgt_aux_nonnull_total".to_string()),
+            "output_cols should include __pgt_aux_nonnull_total: {:?}",
+            result.columns
+        );
+    }
+
+    #[test]
+    fn test_p2_2_sum_plain_scan_no_nonnull_aux() {
+        // P2-2: SUM above a plain scan (no FULL JOIN) must NOT generate any
+        // nonnull-count auxiliary columns or modify the algebraic path.
+        let mut ctx = test_ctx_with_st("public", "st");
+        let child = scan(1, "t", "public", "t", &["region", "amount"]);
+        let tree = aggregate(
+            vec![colref("region")],
+            vec![sum_col("amount", "total")],
+            child,
+        );
+
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // No rescan CTE — plain scan, purely algebraic
+        assert!(
+            !sql.contains("agg_rescan"),
+            "SUM above plain scan should not use rescan CTE:\n{sql}"
+        );
+
+        // No nonnull-count columns
+        assert!(
+            !sql.contains("nonnull"),
+            "SUM above plain scan should not generate nonnull columns:\n{sql}"
+        );
+
+        // Standard algebraic expression
+        assert_sql_contains(
+            &sql,
+            "COALESCE(d.\"__ins_total\", 0) - COALESCE(d.\"__del_total\", 0)",
+        );
+
+        // No nonnull auxiliary in output columns
+        assert!(
+            !result.columns.iter().any(|c| c.contains("nonnull")),
+            "output_cols should not contain nonnull columns for plain SUM: {:?}",
+            result.columns
+        );
+    }
+
+    #[test]
+    fn test_p2_2_sum_full_join_correct_null_transition_formula() {
+        // Verify the exact CASE expression used for SUM over a FULL JOIN:
+        //   CASE WHEN (__pgt_aux_nonnull_total + ins_nonnull - del_nonnull) > 0
+        //        THEN COALESCE(st.total, 0) + ins - del
+        //        ELSE NULL
+        //   END
+        let mut ctx = test_ctx_with_st("public", "st");
+        let left = scan(1, "l", "public", "l", &["id", "score"]);
+        let right = scan(2, "r", "public", "r", &["id", "score"]);
+        let join_child = full_join(
+            binop("=", qcolref("l", "id"), qcolref("r", "id")),
+            left,
+            right,
+        );
+        let tree = aggregate(
+            vec![qcolref("l", "id")],
+            vec![sum_col("score", "sum_score")],
+            join_child,
+        );
+
+        let result = diff_aggregate(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // The nonnull-guard CASE expression must be present
+        assert_sql_contains(&sql, "__pgt_aux_nonnull_sum_score");
+        assert_sql_contains(&sql, "ELSE NULL");
+
+        // The algebraic sum formula should appear inside the THEN branch
+        assert_sql_contains(
+            &sql,
+            "COALESCE(d.\"__ins_sum_score\", 0) - COALESCE(d.\"__del_sum_score\", 0)",
+        );
+
+        // Delta CTE nonnull tracking
+        assert_sql_contains(&sql, "__ins_nonnull_sum_score");
+        assert_sql_contains(&sql, "__del_nonnull_sum_score");
     }
 
     #[test]

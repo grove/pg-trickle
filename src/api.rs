@@ -475,6 +475,10 @@ struct ValidatedQuery {
     /// Sum-of-squares auxiliary columns: `(sum2_col_name, arg_sql)` tuples
     /// for algebraic STDDEV/VAR maintenance. Empty if no non-DISTINCT STDDEV/VAR.
     sum2_aux_columns: Vec<(String, String)>,
+    /// Nonnull-count auxiliary columns: `(nonnull_col_name, arg_sql)` tuples
+    /// for non-DISTINCT SUM aggregates above FULL JOIN children (P2-2).
+    /// Empty if no such aggregates exist.
+    nonnull_aux_columns: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,6 +819,11 @@ fn validate_and_parse_query(
         .map(|pr| pr.tree.sum2_aux_columns())
         .unwrap_or_default();
 
+    let nonnull_aux_columns = parsed_tree
+        .as_ref()
+        .map(|pr| pr.tree.nonnull_aux_columns())
+        .unwrap_or_default();
+
     Ok(ValidatedQuery {
         columns,
         parsed_tree,
@@ -827,6 +836,7 @@ fn validate_and_parse_query(
         source_relids,
         avg_aux_columns,
         sum2_aux_columns,
+        nonnull_aux_columns,
     })
 }
 
@@ -844,6 +854,7 @@ fn setup_storage_table(
     parsed_tree: Option<&crate::dvm::ParseResult>,
     avg_aux_columns: &[(String, String, String)],
     sum2_aux_columns: &[(String, String)],
+    nonnull_aux_columns: &[(String, String)],
 ) -> Result<pg_sys::Oid, PgTrickleError> {
     let storage_needs_pgt_count = needs_pgt_count;
     let storage_ddl = build_create_table_sql(
@@ -854,6 +865,7 @@ fn setup_storage_table(
         needs_dual_count,
         avg_aux_columns,
         sum2_aux_columns,
+        nonnull_aux_columns,
     );
     Spi::run(&storage_ddl)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to create storage table: {}", e)))?;
@@ -1197,8 +1209,8 @@ fn migrate_storage_table_compatible(
 }
 
 /// Manage auxiliary columns (__pgt_count, __pgt_count_l/r, __pgt_aux_sum_*,
-/// __pgt_aux_count_*, __pgt_aux_sum2_*) during ALTER QUERY when the query
-/// type or aggregate composition changes.
+/// __pgt_aux_count_*, __pgt_aux_sum2_*, __pgt_aux_nonnull_*) during ALTER QUERY
+/// when the query type or aggregate composition changes.
 #[allow(clippy::too_many_arguments)]
 fn migrate_aux_columns(
     schema: &str,
@@ -1212,6 +1224,8 @@ fn migrate_aux_columns(
     new_avg_aux: &[(String, String, String)],
     old_sum2_aux: &[(String, String)],
     new_sum2_aux: &[(String, String)],
+    old_nonnull_aux: &[(String, String)],
+    new_nonnull_aux: &[(String, String)],
 ) -> Result<(), PgTrickleError> {
     let quoted_table = format!(
         "{}.{}",
@@ -1349,6 +1363,35 @@ fn migrate_aux_columns(
         }
     }
 
+    // Transition: nonnull-count auxiliary columns (__pgt_aux_nonnull_*)
+    // for SUM NULL-transition correction (P2-2).
+    let old_nonnull_names: std::collections::HashSet<&str> =
+        old_nonnull_aux.iter().map(|(n, _)| n.as_str()).collect();
+    let new_nonnull_names: std::collections::HashSet<&str> =
+        new_nonnull_aux.iter().map(|(n, _)| n.as_str()).collect();
+    // Add new nonnull aux columns
+    for (col_name, _) in new_nonnull_aux {
+        if !old_nonnull_names.contains(col_name.as_str()) {
+            Spi::run(&format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} BIGINT NOT NULL DEFAULT 0",
+                quoted_table,
+                quote_identifier(col_name),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+    // Drop removed nonnull aux columns
+    for (col_name, _) in old_nonnull_aux {
+        if !new_nonnull_names.contains(col_name.as_str()) {
+            Spi::run(&format!(
+                "ALTER TABLE {} DROP COLUMN IF EXISTS {}",
+                quoted_table,
+                quote_identifier(col_name),
+            ))
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1409,6 +1452,7 @@ fn alter_stream_table_query(
     let old_needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
     let old_avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
     let old_sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
+    let old_nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
 
     // ── Phase 1: Suspend ──
     StreamTableMeta::update_status(st.pgt_id, StStatus::Suspended)?;
@@ -1503,6 +1547,7 @@ fn alter_stream_table_query(
                 vq.parsed_tree.as_ref(),
                 &vq.avg_aux_columns,
                 &vq.sum2_aux_columns,
+                &vq.nonnull_aux_columns,
             )?
         }
     };
@@ -1521,6 +1566,8 @@ fn alter_stream_table_query(
             &vq.avg_aux_columns,
             &old_sum2_aux,
             &vq.sum2_aux_columns,
+            &old_nonnull_aux,
+            &vq.nonnull_aux_columns,
         )?;
     }
 
@@ -1909,6 +1956,7 @@ fn create_stream_table_impl(
         vq.parsed_tree.as_ref(),
         &vq.avg_aux_columns,
         &vq.sum2_aux_columns,
+        &vq.nonnull_aux_columns,
     )?;
 
     // Insert catalog entry + dependency edges
@@ -1980,6 +2028,7 @@ fn create_stream_table_impl(
             vq.topk_info.as_ref(),
             &vq.avg_aux_columns,
             &vq.sum2_aux_columns,
+            &vq.nonnull_aux_columns,
         )?;
         let init_ms = t_init.elapsed().as_secs_f64() * 1000.0;
 
@@ -2843,6 +2892,11 @@ fn execute_manual_full_refresh(
         let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
         if !sum2_aux.is_empty() {
             eq = inject_sum2_aux(&eq, &sum2_aux);
+        }
+        // Also inject nonnull-count columns for SUM NULL-transition correction (P2-2).
+        let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+        if !nonnull_aux.is_empty() {
+            eq = inject_nonnull_aux(&eq, &nonnull_aux);
         }
         eq
     } else {
@@ -5157,6 +5211,7 @@ fn assign_scc_ids_from_dag() -> Result<(), PgTrickleError> {
 }
 
 /// Build CREATE TABLE DDL for the storage table.
+#[allow(clippy::too_many_arguments)]
 fn build_create_table_sql(
     schema: &str,
     name: &str,
@@ -5165,6 +5220,7 @@ fn build_create_table_sql(
     needs_dual_count: bool,
     avg_aux_columns: &[(String, String, String)],
     sum2_aux_columns: &[(String, String)],
+    nonnull_aux_columns: &[(String, String)],
 ) -> String {
     let col_defs: Vec<String> = columns
         .iter()
@@ -5218,14 +5274,25 @@ fn build_create_table_sql(
         ));
     }
 
+    // Add nonnull-count auxiliary columns (__pgt_aux_nonnull_*) for
+    // SUM NULL-transition correction (P2-2).
+    let mut nonnull_aux_sql = String::new();
+    for (nonnull_col, _arg_sql) in nonnull_aux_columns {
+        nonnull_aux_sql.push_str(&format!(
+            ",\n    {} BIGINT NOT NULL DEFAULT 0",
+            quote_identifier(nonnull_col),
+        ));
+    }
+
     format!(
-        "CREATE TABLE {}.{} (\n    __pgt_row_id BIGINT,\n{}{}{}{}\n)",
+        "CREATE TABLE {}.{} (\n    __pgt_row_id BIGINT,\n{}{}{}{}{}\n)",
         quote_identifier(schema),
         quote_identifier(name),
         col_defs.join(",\n"),
         aux_cols,
         avg_aux_sql,
         sum2_aux_sql,
+        nonnull_aux_sql,
     )
 }
 
@@ -5259,6 +5326,7 @@ fn initialize_st(
     topk_info: Option<&crate::dvm::TopKInfo>,
     avg_aux_columns: &[(String, String, String)],
     sum2_aux_columns: &[(String, String)],
+    nonnull_aux_columns: &[(String, String)],
 ) -> Result<(), PgTrickleError> {
     // EC-25/EC-26: Set the internal_refresh flag so DML guard triggers
     // allow the initialization INSERT into the storage table.
@@ -5283,6 +5351,12 @@ fn initialize_st(
     // columns for sum-of-squares tracking.
     if !sum2_aux_columns.is_empty() {
         effective_query = inject_sum2_aux(&effective_query, sum2_aux_columns);
+    }
+
+    // For SUM NULL-transition correction (P2-2), inject COUNT(IS NOT NULL)
+    // auxiliary columns for nonnull-count tracking.
+    if !nonnull_aux_columns.is_empty() {
+        effective_query = inject_nonnull_aux(&effective_query, nonnull_aux_columns);
     }
 
     // Compute row_id using the same hash formula as the delta query so
@@ -5451,6 +5525,31 @@ pub fn inject_sum2_aux(query: &str, sum2_aux_columns: &[(String, String)]) -> St
             extra.push_str(&format!(
                 ", SUM(({arg_sql}) * ({arg_sql})) AS {}",
                 quote_identifier(sum2_col),
+            ));
+        }
+        format!("{}{extra} {}", query[..pos].trim_end(), &query[pos..],)
+    } else {
+        query.to_string()
+    }
+}
+
+/// Inject nonnull-count auxiliary columns (`COUNT(CASE WHEN arg IS NOT NULL ...)`)
+/// for SUM NULL-transition correction (P2-2).
+///
+/// These populate the `__pgt_aux_nonnull_*` storage columns during initial
+/// population and full refresh so the differential path can perform algebraic
+/// NULL-transition correction without rescanning source data.
+pub fn inject_nonnull_aux(query: &str, nonnull_aux_columns: &[(String, String)]) -> String {
+    if nonnull_aux_columns.is_empty() {
+        return query.to_string();
+    }
+
+    if let Some(pos) = find_top_level_keyword(query, "FROM") {
+        let mut extra = String::new();
+        for (nonnull_col, arg_sql) in nonnull_aux_columns {
+            extra.push_str(&format!(
+                ", COUNT(CASE WHEN ({arg_sql}) IS NOT NULL THEN 1 END) AS {}",
+                quote_identifier(nonnull_col),
             ));
         }
         format!("{}{extra} {}", query[..pos].trim_end(), &query[pos..],)
