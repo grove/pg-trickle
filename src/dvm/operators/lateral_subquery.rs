@@ -22,11 +22,16 @@ use crate::error::PgTrickleError;
 
 /// Sentinel row_id for inner-change-branch dummy rows.
 ///
-/// Uses `i64::MIN` to minimise collision probability with real
+/// Uses `i64::MIN + 1` to minimise collision probability with real
 /// `pg_trickle_hash` values (which span the full i64 range via
 /// bit-pattern cast from xxHash). The previous value `0` was within
 /// the common output range of the hash function.
-const LATERAL_INNER_DUMMY_ROW_ID: i64 = i64::MIN; // -9223372036854775808
+///
+/// Note: `i64::MIN` (-9223372036854775808) cannot be written as a
+/// PostgreSQL bigint literal because the parser sees it as
+/// `-(9223372036854775808::BIGINT)` and `9223372036854775808 > i64::MAX`,
+/// producing "bigint out of range". `i64::MIN + 1` avoids this.
+const LATERAL_INNER_DUMMY_ROW_ID: i64 = i64::MIN + 1; // -9223372036854775807
 
 /// Differentiate a LateralSubquery node via row-scoped recomputation.
 ///
