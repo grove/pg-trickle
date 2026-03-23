@@ -43,11 +43,17 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
+    // Disable auto-backoff so 1-second schedules never get stretched in slow
+    // CI containers — the default (true since v0.10.0) would double the
+    // effective interval once a refresh takes > 950 ms.
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
+    db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
 
