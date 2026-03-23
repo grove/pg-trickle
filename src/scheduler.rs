@@ -2341,9 +2341,16 @@ fn check_cdc_transition_health() {
 ///
 /// Uses `SELECT ... FOR UPDATE SKIP LOCKED` on the catalog row to detect
 /// concurrent refreshes.  If another session holds the row lock the query
-/// returns zero rows and we skip.  The probe runs inside `Spi::connect`
-/// (subtransaction) so the lock is released immediately — this is a
+/// returns zero rows and we skip.
+///
+/// The probe runs inside an internal sub-transaction so the row lock is
+/// released immediately when the sub-transaction commits — this is a
 /// lightweight check, not the authoritative lock acquisition.
+///
+/// NOTE: `Spi::connect` does NOT create a PostgreSQL sub-transaction — it
+/// only opens/closes an SPI connection.  We therefore must use an explicit
+/// `BeginInternalSubTransaction` / `ReleaseCurrentSubTransaction` to
+/// guarantee the lock does not persist in the caller's transaction context.
 ///
 /// PB1: replaces the previous `pg_try_advisory_lock` approach for
 /// PgBouncer transaction‐mode compatibility.
@@ -2352,9 +2359,10 @@ fn check_cdc_transition_health() {
 fn check_skip_needed(st: &StreamTableMeta) -> bool {
     let pgt_id = st.pgt_id;
 
-    // Probe inside a subtransaction so the row lock is released at the
-    // end of the closure, regardless of the result.
-    Spi::connect(|client| {
+    // Wrap in a real sub-transaction so the FOR UPDATE row lock is released
+    // when the sub-transaction commits, regardless of the caller's context.
+    let subtxn = SubTransaction::begin();
+    let result = Spi::connect(|client| {
         let row = client
             .select(
                 "SELECT 1 FROM pgtrickle.pgt_stream_tables \
@@ -2365,7 +2373,9 @@ fn check_skip_needed(st: &StreamTableMeta) -> bool {
             .unwrap_or_else(|_| pgrx::error!("check_skip_needed: SPI select failed"));
         // Zero rows → the row is locked by another session.
         row.is_empty()
-    })
+    });
+    subtxn.commit();
+    result
 }
 
 // ── Time Helper ────────────────────────────────────────────────────────────
