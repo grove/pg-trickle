@@ -648,6 +648,16 @@ fn validate_and_parse_query(
         let base = info.base_query.clone();
         (base, Some(info))
     } else {
+        // NS-1: Warn when the query has ORDER BY but no LIMIT.
+        // ORDER BY without LIMIT has no effect on a stream table because
+        // the underlying storage table row order is undefined.
+        if crate::dvm::has_order_by_without_limit(query) {
+            pgrx::warning!(
+                "pg_trickle: ORDER BY without LIMIT has no effect on stream tables — \
+                 storage row order is undefined. Use ORDER BY with LIMIT for TopK, \
+                 or remove ORDER BY."
+            );
+        }
         (query.to_string(), None)
     };
     let q = if topk_info.is_some() {
@@ -2045,6 +2055,8 @@ fn create_stream_table_impl(
     } else {
         None
     };
+    // Capture before schedule_str is moved into insert_catalog_and_deps.
+    let is_calculated = schedule_str.is_none();
     let pgt_id = insert_catalog_and_deps(
         pgt_relid,
         &schema,
@@ -2063,6 +2075,56 @@ fn create_stream_table_impl(
 
     // ── Phase 2: CDC / IVM trigger setup ──
     setup_trigger_infrastructure(&vq.source_relids, refresh_mode, pgt_id, pgt_relid, query)?;
+
+    // ── NS-5: Diamond consistency NOTICE ──
+    // When the user explicitly opted out of atomic reads (diamond_consistency='none'),
+    // check if this new ST is a diamond convergence point and advise.
+    if dc == DiamondConsistency::None
+        && let Ok(dag) = StDag::build_from_catalog(config::pg_trickle_default_schedule_seconds())
+    {
+        let diamonds = dag.detect_diamonds();
+        if diamonds
+            .iter()
+            .any(|d| d.convergence == NodeId::StreamTable(pgt_id))
+        {
+            pgrx::notice!(
+                "pg_trickle: Diamond dependency detected for \"{}\".\"{}\" and \
+                 diamond_consistency is 'none' — cross-branch reads may be inconsistent. \
+                 Consider diamond_consistency='atomic' for consistent results.",
+                schema,
+                table_name
+            );
+        }
+    }
+
+    // ── NS-7: CALCULATED schedule with no downstream NOTICE ──
+    // CALCULATED stream tables inherit their schedule from downstream dependents.
+    // If none exist yet, their schedule falls back to the default GUC and the user
+    // may not realise rows won't be refreshed on their intended cadence.
+    if is_calculated && !refresh_mode.is_immediate() {
+        let has_downstream = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS(\
+               SELECT 1 FROM pgtrickle.pgt_dependencies d \
+               WHERE d.source_relid = {relid} AND d.pgt_id != {pid}\
+             )",
+            relid = pgt_relid.to_u32(),
+            pid = pgt_id,
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if !has_downstream {
+            let fallback_secs = config::pg_trickle_default_schedule_seconds();
+            pgrx::notice!(
+                "pg_trickle: Stream table \"{}\".\"{}\" uses CALCULATED schedule but has no \
+                 downstream dependents yet — it will fall back to the default schedule \
+                 (pg_trickle.default_schedule_seconds = {}s). Add a downstream stream table \
+                 that references this one to activate the intended schedule.",
+                schema,
+                table_name,
+                fallback_secs
+            );
+        }
+    }
 
     // ── Phase 2a: CYC-6 — Assign SCC IDs when circular dependencies exist ──
     if config::pg_trickle_allow_circular() {

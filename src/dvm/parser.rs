@@ -8304,6 +8304,30 @@ fn strip_order_by_and_limit(query: &str) -> String {
 ///
 /// Emits a `pgrx::warning!()` for each such occurrence. Does **not** reject
 /// the query — LIMIT with ORDER BY is a legitimate, deterministic pattern.
+/// NS-1: Returns `true` when the top-level SELECT has an `ORDER BY` clause
+/// but no `LIMIT`. This is a no-op in a stream table context because the
+/// storage table row order is undefined, so the user is likely confused.
+pub fn has_order_by_without_limit(query: &str) -> bool {
+    let select = match parse_first_select(query) {
+        Ok(Some(s)) => unsafe { &*s },
+        _ => return false,
+    };
+    // Only warn for plain (non-set-operation) SELECTs.
+    if select.op != pg_sys::SetOperation::SETOP_NONE {
+        return false;
+    }
+    // Has ORDER BY ...
+    if select.sortClause.is_null() {
+        return false;
+    }
+    let sort_list = pg_list::<pg_sys::Node>(select.sortClause);
+    if sort_list.is_empty() {
+        return false;
+    }
+    // ... but no LIMIT
+    select.limitCount.is_null()
+}
+
 pub fn warn_limit_without_order_in_subqueries(query: &str) {
     let select = match parse_first_select(query) {
         Ok(Some(s)) => unsafe { &*s },

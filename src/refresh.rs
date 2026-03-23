@@ -109,6 +109,14 @@ thread_local! {
     static PENDING_CLEANUP: RefCell<Vec<PendingCleanup>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    // NS-3: Consecutive failure counts for deferred cleanup per source OID.
+    // Emits a WARNING after the 3rd consecutive failure so operators are
+    // alerted to persistent cleanup problems without flooding the log.
+    static CLEANUP_FAILURE_COUNTS: RefCell<std::collections::HashMap<u32, u32>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
 /// Execute any pending cleanups from previous refresh cycles.
 ///
 /// Called at the start of `execute_differential_refresh` to drain the
@@ -241,12 +249,43 @@ fn drain_pending_cleanups() {
             continue;
         }
 
+        // NS-3: record a failed cleanup attempt; warn after 3 consecutive failures.
+        let record_cleanup_failure = |oid: u32, operation: &str, msg: &str| {
+            CLEANUP_FAILURE_COUNTS.with(|m| {
+                let mut m = m.borrow_mut();
+                let count = m.entry(oid).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    pgrx::warning!(
+                        "[pg_trickle] Deferred cleanup {} failed {} consecutive times for \
+                         changes_{}: {}",
+                        operation,
+                        count,
+                        oid,
+                        msg
+                    );
+                } else {
+                    pgrx::debug1!(
+                        "[pg_trickle] Deferred cleanup {} failed (attempt {}): {}",
+                        operation,
+                        count,
+                        msg
+                    );
+                }
+            });
+        };
+
         if can_truncate {
-            if let Err(e) = Spi::run(&format!(
+            match Spi::run(&format!(
                 "TRUNCATE \"{schema}\".changes_{oid}",
                 schema = change_schema,
             )) {
-                pgrx::debug1!("[pg_trickle] Deferred cleanup TRUNCATE failed: {}", e);
+                Ok(()) => {
+                    CLEANUP_FAILURE_COUNTS.with(|m| {
+                        m.borrow_mut().remove(&oid);
+                    });
+                }
+                Err(e) => record_cleanup_failure(oid, "TRUNCATE", &e.to_string()),
             }
         } else {
             let delete_sql = format!(
@@ -254,8 +293,13 @@ fn drain_pending_cleanups() {
                  WHERE lsn <= '{safe_lsn}'::pg_lsn",
                 schema = change_schema,
             );
-            if let Err(e) = Spi::run(&delete_sql) {
-                pgrx::debug1!("[pg_trickle] Deferred cleanup DELETE failed: {}", e);
+            match Spi::run(&delete_sql) {
+                Ok(()) => {
+                    CLEANUP_FAILURE_COUNTS.with(|m| {
+                        m.borrow_mut().remove(&oid);
+                    });
+                }
+                Err(e) => record_cleanup_failure(oid, "DELETE", &e.to_string()),
             }
         }
     }
@@ -1757,7 +1801,7 @@ pub fn execute_differential_refresh(
         });
 
         if has_non_insert {
-            pgrx::info!(
+            pgrx::warning!(
                 "[pg_trickle] Append-only stream table {}.{} received DELETE/UPDATE — \
                  reverting to MERGE path.",
                 schema,
@@ -1774,6 +1818,14 @@ pub fn execute_differential_refresh(
             }
             // Flush MERGE template cache so next cycle rebuilds with MERGE path.
             crate::shmem::bump_cache_generation();
+            // NS-2: Emit NOTIFY alert so operators are informed of the revert.
+            crate::monitor::emit_alert(
+                crate::monitor::AlertEvent::AppendOnlyReverted,
+                schema,
+                name,
+                "",
+                st.pooler_compatibility_mode,
+            );
         }
     }
 
@@ -1919,7 +1971,7 @@ pub fn execute_differential_refresh(
     }
 
     if should_fallback {
-        pgrx::info!(
+        pgrx::notice!(
             "[pg_trickle] Adaptive fallback: change ratio exceeds threshold {:.0}% — using FULL refresh",
             max_ratio * 100.0,
         );
