@@ -2362,7 +2362,7 @@ fn check_skip_needed(st: &StreamTableMeta) -> bool {
                 None,
                 &[pgt_id.into()],
             )
-            .unwrap_or_else(|_| panic!("check_skip_needed: SPI select failed"));
+            .unwrap_or_else(|_| pgrx::error!("check_skip_needed: SPI select failed"));
         // Zero rows → the row is locked by another session.
         row.is_empty()
     })

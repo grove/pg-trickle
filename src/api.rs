@@ -3097,6 +3097,8 @@ fn execute_manual_full_refresh(
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
     // refresh occurred.
     if has_triggers {
+        // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be
+        // parameterized; quoted_table is a PostgreSQL-quoted identifier.
         Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
@@ -3104,6 +3106,8 @@ fn execute_manual_full_refresh(
         if !st.pooler_compatibility_mode {
             let escaped_name = table_name.replace('\'', "''");
             let escaped_schema = schema.replace('\'', "''");
+            // nosemgrep: rust.spi.run.dynamic-format — NOTIFY does not support
+            // parameterized payloads; single quotes are escaped above.
             Spi::run(&format!(
                 "NOTIFY pgtrickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
                  \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\"}}'"

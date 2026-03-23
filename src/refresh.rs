@@ -1381,6 +1381,9 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             // Escape single quotes in the JSON payload.
             let escaped_name = name.replace('\'', "''");
             let escaped_schema = schema.replace('\'', "''");
+            // nosemgrep: rust.spi.run.dynamic-format — NOTIFY does not support
+            // parameterized payloads in PostgreSQL; single quotes are escaped
+            // above and rows_inserted is a plain integer.
             Spi::run(&format!(
                 "NOTIFY pgtrickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
                  \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\", \"rows\": {rows_inserted}}}'"
