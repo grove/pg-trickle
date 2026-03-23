@@ -587,13 +587,14 @@ detection (skip tick if no pending changes)
 **Impact:** 15–26× improvement for Q18, Q20, Q21 type queries  
 **Risk:** Low — restricted to SemiJoin operator diff, no architectural changes
 
-#### R5: Cost-Based Refresh Strategy Selection (v0.12)
+#### ~~R5: Cost-Based Refresh Strategy Selection~~ — Done in v0.10.0
 
-**Current:** Adaptive threshold uses simple ratio-based heuristic  
-**Recommendation:** Integrate historical timing data more aggressively  
-**Impact:** Eliminates unnecessary FULL refreshes when INCREMENTAL would be
-faster; eliminates slow INCREMENTAL refreshes when FULL would be faster  
-**Risk:** Low — extends existing D-3 adaptive logic with better cost model
+> **Status:** ✅ Implemented as item B-4 in v0.10.0. The `estimate_cost_based_threshold` +
+> `compute_adaptive_threshold` functions apply a 60/40 blend of ratio-based and
+> history-driven cost model from `pgt_refresh_history`; cold-start fallback to the
+> fixed GUC threshold.
+
+~~**Recommendation:** Integrate historical timing data more aggressively~~
 
 ### 10.2 Medium Priority — Scalability
 
@@ -682,14 +683,14 @@ Good error messages are essential.
 **Risk:** High — requires C-level output plugin development and maintenance;
 pgoutput is the standard
 
-#### R15: Multi-Table Delta Batching (v0.13+)
+#### ~~R15: Multi-Table Delta Batching~~ — Done in v0.10.0
 
-**Current:** Each source's delta computed independently  
-**Recommendation:** Merge delta computation for co-scheduled STs with shared
-sources  
-**Impact:** Reduces redundant change buffer scans for fan-out patterns  
-**Risk:** Medium — correctness proofs needed (B3-3 partially done);
-Z-set weight aggregation required (DISTINCT ON is incorrect)
+> **Status:** ✅ Implemented as items B3-2 + B3-3 in v0.10.0. Weight aggregation
+> (`GROUP BY __pgt_row_id, SUM(weight) HAVING SUM(weight) != 0`) correctly replaces
+> the incorrect DISTINCT ON approach. Six diamond-flow property-based tests verify
+> correctness.
+
+~~**Recommendation:** Merge delta computation for co-scheduled STs with shared sources~~
 
 #### R16: Adaptive Scheduler Wake Interval (v0.12)
 
@@ -699,21 +700,23 @@ Z-set weight aggregation required (DISTINCT ON is incorrect)
 **Risk:** Medium — adds trigger→scheduler signaling path; needs NOTIFY
 coalescing to avoid thundering herd
 
-#### R17: MERGE Bypass for Append-Only Patterns (v0.13)
+#### ~~R17: MERGE Bypass for Append-Only Patterns~~ — Done in v0.5.0
 
-**Current:** Append-only fast path skips DELETE/UPDATE checks but still uses
-MERGE  
-**Recommendation:** Use direct INSERT for pure append patterns (no MERGE
-overhead)  
-**Impact:** Eliminates MERGE plan+execute overhead for INSERT-only workloads  
-**Risk:** Low — requires confident detection of append-only pattern
+> **Status:** ✅ Implemented as item A-3a in v0.5.0. The `APPEND ONLY` declaration on
+> `CREATE STREAM TABLE` enables a direct INSERT path (no MERGE). A heuristic
+> automatically reverts to full MERGE on first observed DELETE or UPDATE, emitting
+> a `WARNING` + `pgtrickle_alert` NOTIFY.
 
-#### R18: Index-Aware MERGE Planning (v0.14)
+~~**Recommendation:** Use direct INSERT for pure append patterns~~
 
-**Current:** Generic MERGE with planner hints  
-**Recommendation:** Hint index usage based on change buffer PK distribution  
-**Impact:** Better join strategy selection for MERGE when delta is small  
-**Risk:** Low — extends existing planner hints infrastructure
+#### ~~R18: Index-Aware MERGE Planning~~ — Done in v0.10.0
+
+> **Status:** ✅ Implemented as item A-4 in v0.10.0. `SET LOCAL enable_seqscan = off`
+> is injected when delta row count is below `merge_seqscan_threshold` (0.001 × ST
+> size). Covering index auto-created on `__pgt_row_id` with INCLUDE clause for
+> ≤8-column schemas. Reverts at transaction end via `SET LOCAL` (not `SET`).
+
+~~**Recommendation:** Hint index usage based on change buffer PK distribution~~
 
 ---
 
@@ -733,23 +736,18 @@ overhead)
 | ID | Recommendation | Effort | Impact |
 |----|---------------|--------|--------|
 | R2 | UNLOGGED change buffers | Medium | ~30% CDC write reduction |
-| R3 | Adaptive scheduler wake | Medium | 4× latency reduction |
-| R5 | Cost-based strategy selection | Medium | Better FULL/DIFF decisions |
+| R3/R16 | Adaptive scheduler wake interval | Medium | 4× latency reduction |
 | R6 | Partitioned stream tables | High | Unlocks 10M+ row STs |
+| R7 | Auto buffer partitioning for high-throughput sources | Low | Faster cleanup |
 | R11 | Tiered scheduling on by default | Low | Resource efficiency |
-| R13 | Wider column bitmask | Low | Wide table support |
+| R12 | Block source DDL by default | Low | Safety |
+| R13 | Wider column bitmask (>63 columns) | Low | Wide table support |
 
 ### Medium-Term (v0.13–v0.14)
 
 | ID | Recommendation | Effort | Impact |
 |----|---------------|--------|--------|
-| R7 | Auto buffer partitioning | Low | Faster cleanup |
 | R8 | Shared change buffers | Medium | Fan-out efficiency |
-| R12 | Block source DDL by default | Low | Safety |
-| R15 | Multi-table delta batching | High | Throughput for shared sources |
-| R16 | Event-driven scheduler wake | Medium | Near-zero latency |
-| R17 | MERGE bypass for append-only | Medium | Eliminate MERGE overhead |
-| R18 | Index-aware MERGE | Low | Better join strategies |
 
 ### Long-Term (v1.0+)
 
