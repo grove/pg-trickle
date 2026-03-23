@@ -8,7 +8,6 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [0.10.1 — 2026-03-23](#0101--2026-03-23)
 - [0.10.0 — 2026-03-23](#0100--2026-03-23)
 - [0.9.0 — 2026-03-20](#090--2026-03-20)
 - [0.8.0 — 2026-03-17](#080--2026-03-17)
@@ -29,16 +28,22 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [0.10.1] — 2026-03-23
+## [0.10.0] — 2026-03-23
 
-### Improved
+The headline features of 0.10.0 are **cloud deployment compatibility**, **query
+engine correctness**, **refresh performance**, and **improved developer
+experience for `auto_backoff`**. pg_trickle now works reliably
+behind PgBouncer — the connection pooler used by default on Supabase, Railway,
+Neon, and other managed PostgreSQL platforms. A broad set of correctness issues
+in the incremental query engine are fixed. And several performance optimizations
+cut refresh time for large tables and busy deployments.
 
-#### `auto_backoff` is now much friendlier on developer machines
+### `auto_backoff` Is Now Much Friendlier on Developer Machines
 
 When `pg_trickle.auto_backoff = true` is enabled, the scheduler automatically
 slows down stream tables whose refresh cost exceeds their schedule budget — a
-good safeguard in production. Prior to this release, the feature was
-too aggressive for developer environments with short schedules (e.g. `'1s'`):
+good safeguard in production. This release makes the feature safe to use
+alongside short schedules (e.g. `'1s'`) in developer and CI environments:
 
 - **Trigger threshold raised from 80 % → 95 %.** Backoff now only activates
   when a refresh consumes more than 95 % of the schedule window. A 900 ms
@@ -53,24 +58,8 @@ too aggressive for developer environments with short schedules (e.g. `'1s'`):
 
 - **Backoff events now emit `WARNING` instead of `INFO`.** When the scheduler
   stretches or resets a stream table's effective interval, you will see a
-  `WARNING` message in your PostgreSQL client. This makes it obvious why a
-  stream table has stopped refreshing at the expected rate, rather than leaving
-  developers puzzled by silent slowdowns.
-
-These changes make `auto_backoff = true` safe to enable in local and CI
-environments alongside short schedules, without sacrificing the production
-safety the feature was designed to provide.
-
----
-
-## [0.10.0] — 2026-03-23
-
-The headline features of 0.10.0 are **cloud deployment compatibility**, **query
-engine correctness**, and **refresh performance**. pg_trickle now works reliably
-behind PgBouncer — the connection pooler used by default on Supabase, Railway,
-Neon, and other managed PostgreSQL platforms. A broad set of correctness issues
-in the incremental query engine are fixed. And several performance optimizations
-cut refresh time for large tables and busy deployments.
+  `WARNING` message in your PostgreSQL client, including the new effective
+  interval — rather than a silent slowdown with no explanation.
 
 ### Works Behind PgBouncer
 
