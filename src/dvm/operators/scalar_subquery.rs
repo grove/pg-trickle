@@ -83,10 +83,11 @@ pub fn diff_scalar_subquery(
     let subquery_alias = subquery.alias();
     let subquery_cols = &subquery_result.columns;
     if subquery_cols.is_empty() {
-        panic!(
-            "pg_trickle: scalar subquery returned no output columns for alias '{}'",
+        return Err(PgTrickleError::UnsupportedOperator(format!(
+            "scalar subquery '{}' produced no output columns; \
+             unable to differentiate — wrap it in a CTE or derived table",
             alias
-        );
+        )));
     }
     let scalar_col = subquery_cols[0].clone();
 

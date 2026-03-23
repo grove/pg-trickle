@@ -245,8 +245,13 @@ pub fn build_snapshot_sql(op: &OpTree) -> String {
             )
         }
         _ => {
-            panic!(
-                "pg_trickle: unsupported operator in snapshot SQL: {}",
+            // This node type cannot appear as a direct join child in a snapshot.
+            // Raise a PostgreSQL-level error so the user gets a clear message
+            // instead of a SQL syntax error from an injected comment.
+            pgrx::error!(
+                "pg_trickle: operator '{}' is not supported as a direct join source \
+                 in DIFFERENTIAL/IMMEDIATE mode; rewrite the defining query to \
+                 place this subquery in a named CTE or derived table.",
                 op.node_kind()
             );
         }

@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported operator in snapshot SQL")]
+    #[should_panic]
     fn test_get_current_table_ref_non_scan() {
         let node = OpTree::Distinct {
             child: Box::new(scan(1, "t", "public", "t", &["id"])),
