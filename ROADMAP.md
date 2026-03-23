@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-03-20
-> **Latest release:** 0.9.0 (2026-03-20)
-> **Current milestone:** v0.10.0 — Connection Pooler Compatibility, DVM Hardening & Infrastructure Prep
+> **Last updated:** 2026-03-23
+> **Latest release:** 0.10.0 (2026-03-23)
+> **Current milestone:** v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability & Operational Scale
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -47,9 +47,9 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
 1.0 and beyond.
 
 ```
-                                                                                                                   We are here
-                                                                                                                     │
-                                                                                                                     ▼
+                                                                                                                              We are here
+                                                                                                                                │
+                                                                                                                                ▼
                                                                    ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
                                                                    │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 0.6.0  │ │ 0.7.0  │
                                                                    │Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│
@@ -58,8 +58,8 @@ phases are complete. This roadmap tracks the path from the v0.1.x series to
                                                                      │
                                                                      └─ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
                                                                         │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │
-                                                                        │Pooler  │─│Incr.Agg│─│Pooler   │─│Partn.   │─│Fuse,    │
-                                                                        │Compat. │ │IVM     │ │&DVM     │ │Obs.&Sc. │ │CDC&PGBk │
+                                                                        │Released│─│Released│─│Released │─│Partn.   │─│Fuse,    │
+                                                                        │ ✅      │ │ ✅      │ │ ✅       │ │Obs.&Sc. │ │CDC&PGBk │
                                                                         └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘
               │
               └─ ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐
@@ -1560,6 +1560,8 @@ These items are correct as implemented but scale with data size rather than delt
 
 ## v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Core Refresh Optimizations & Infrastructure Prep
 
+**Status: Released (2026-03-23).**
+
 **Goal:** Land deferred DVM correctness and performance improvements
 (recursive CTE DRed, FULL OUTER JOIN aggregate fix, LATERAL scoping,
 Welford regression aggregates, multi-source delta merging), fix a class of
@@ -1713,13 +1715,13 @@ These items address scheduler CPU efficiency and DAG maintenance overhead at sca
 
 | Item | Description | Effort | Status | Ref |
 |------|-------------|--------|--------|-----|
-| NS-1 | **Warn on ORDER BY without LIMIT.** Emit `WARNING` at `create_stream_table` / `alter_stream_table` time when query contains `ORDER BY` without `LIMIT`: "ORDER BY without LIMIT has no effect on stream tables — storage row order is undefined." | 2–4h | ⬜ Not started | [src/api.rs](src/api.rs) |
-| NS-2 | **Warn on append_only auto-revert.** Upgrade the `info!()` to `warning!()` when `append_only` is automatically reverted due to DELETE/UPDATE. Add a `pgtrickle_alert` NOTIFY with category `append_only_reverted`. | 1–2h | ⬜ Not started | [src/refresh.rs](src/refresh.rs) |
-| NS-3 | **Promote cleanup errors after consecutive failures.** Track consecutive `drain_pending_cleanups()` error count in thread-local state; promote from `debug1` to `WARNING` after 3 consecutive failures for the same source OID. | 2–4h | ⬜ Not started | [src/refresh.rs](src/refresh.rs) |
-| NS-4 | **Document `__pgt_*` auxiliary columns in SQL_REFERENCE.** Add a dedicated subsection listing all implicit columns (`__pgt_row_id`, `__pgt_count`, `__pgt_sum`, `__pgt_sum2`, `__pgt_nonnull`, `__pgt_covar_*`, `__pgt_count_l`, `__pgt_count_r`) with the aggregate functions that trigger each. | 2–4h | ⬜ Not started | [docs/SQL_REFERENCE.md](docs/SQL_REFERENCE.md) |
-| NS-5 | **NOTICE on diamond detection with `diamond_consistency='none'`.** When `create_stream_table` detects a diamond dependency and the user hasn't explicitly set `diamond_consistency`, emit `NOTICE`: "Diamond dependency detected — consider setting diamond_consistency='atomic' for consistent cross-branch reads." | 2–4h | ⬜ Not started | [src/api.rs](src/api.rs) · [src/dag.rs](src/dag.rs) |
-| NS-6 | **NOTICE on differential→full fallback.** Upgrade the existing `info!()` in adaptive fallback to `NOTICE` so it appears at default `client_min_messages` level. | 0.5–1h | ⬜ Not started | [src/refresh.rs](src/refresh.rs) |
-| NS-7 | **NOTICE on isolated CALCULATED schedule.** When `create_stream_table` creates an ST with `schedule='calculated'` that has no downstream dependents, emit `NOTICE`: "No downstream dependents found — schedule will fall back to pg_trickle.default_schedule_seconds (currently Ns)." | 1–2h | ⬜ Not started | [src/api.rs](src/api.rs) |
+| NS-1 | **Warn on ORDER BY without LIMIT.** Emit `WARNING` at `create_stream_table` / `alter_stream_table` time when query contains `ORDER BY` without `LIMIT`: "ORDER BY without LIMIT has no effect on stream tables — storage row order is undefined." | 2–4h | ✅ Done | [src/api.rs](src/api.rs) |
+| NS-2 | **Warn on append_only auto-revert.** Upgrade the `info!()` to `warning!()` when `append_only` is automatically reverted due to DELETE/UPDATE. Add a `pgtrickle_alert` NOTIFY with category `append_only_reverted`. | 1–2h | ✅ Done | [src/refresh.rs](src/refresh.rs) |
+| NS-3 | **Promote cleanup errors after consecutive failures.** Track consecutive `drain_pending_cleanups()` error count in thread-local state; promote from `debug1` to `WARNING` after 3 consecutive failures for the same source OID. | 2–4h | ✅ Done | [src/refresh.rs](src/refresh.rs) |
+| NS-4 | **Document `__pgt_*` auxiliary columns in SQL_REFERENCE.** Add a dedicated subsection listing all implicit columns (`__pgt_row_id`, `__pgt_count`, `__pgt_sum`, `__pgt_sum2`, `__pgt_nonnull`, `__pgt_covar_*`, `__pgt_count_l`, `__pgt_count_r`) with the aggregate functions that trigger each. | 2–4h | ✅ Done | [docs/SQL_REFERENCE.md](docs/SQL_REFERENCE.md) |
+| NS-5 | **NOTICE on diamond detection with `diamond_consistency='none'`.** When `create_stream_table` detects a diamond dependency and the user hasn't explicitly set `diamond_consistency`, emit `NOTICE`: "Diamond dependency detected — consider setting diamond_consistency='atomic' for consistent cross-branch reads." | 2–4h | ✅ Done | [src/api.rs](src/api.rs) · [src/dag.rs](src/dag.rs) |
+| NS-6 | **NOTICE on differential→full fallback.** Upgrade the existing `info!()` in adaptive fallback to `NOTICE` so it appears at default `client_min_messages` level. | 0.5–1h | ✅ Done | [src/refresh.rs](src/refresh.rs) |
+| NS-7 | **NOTICE on isolated CALCULATED schedule.** When `create_stream_table` creates an ST with `schedule='calculated'` that has no downstream dependents, emit `NOTICE`: "No downstream dependents found — schedule will fall back to pg_trickle.default_schedule_seconds (currently Ns)." | 1–2h | ✅ Done | [src/api.rs](src/api.rs) |
 
 > **"No Surprises" subtotal: ~10–20 hours**
 
