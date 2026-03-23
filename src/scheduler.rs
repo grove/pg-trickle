@@ -1746,16 +1746,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 // If the SPI snapshot captured at tick start pre-dates that commit,
                 // the catalog query misses the new ST and the DAG is built without
                 // it.  Detect this by checking whether every invalidated id is
-                // present; if not, skip updating dag_version so the next tick
-                // rebuilds with a fresh snapshot that includes all committed STs.
-                //
-                // We do NOT call signal_dag_rebuild() here — skipping the
-                // dag_version update alone is sufficient to guarantee retry:
-                // the next tick will see current_version != dag_version and
-                // rebuild again.  The drain already cleared the ring in THIS
-                // tick, so the next tick will do a full build_from_catalog()
-                // with a fresh transaction snapshot, which will include the
-                // committed row.
+                // present; if not, trigger a full-rebuild signal and skip updating
+                // dag_version so the next tick rebuilds with a fresh snapshot that
+                // includes all committed STs.
                 let stale_snapshot_detected = if let (Some(ids), Some(d)) = (&invalidated, &dag) {
                     ids.iter().any(|&id| !d.has_st_node(id))
                 } else {
@@ -1765,12 +1758,20 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 if stale_snapshot_detected {
                     log!(
                         "pg_trickle: DAG rebuild used stale snapshot — some invalidated pgt_ids \
-                         not yet visible (version={}); will retry on next tick",
+                         not yet visible (version={}); triggering full rebuild next tick",
                         current_version
                     );
+                    // Signal a full rebuild (overflow) so the next tick uses a fresh
+                    // snapshot.  This is necessary because without the overflow flag,
+                    // an incremental rebuild for a *different* pgt_id arriving between
+                    // ticks could satisfy the version-mismatch check while still
+                    // missing the not-yet-committed ST — permanently excluding it from
+                    // the DAG.  The overflow path forces a full build_from_catalog()
+                    // on the next tick regardless of what else arrives in the ring.
+                    //
                     // Do NOT update dag_version — the stale tick's version is not
-                    // trusted.  The next tick will see current_version != dag_version
-                    // and rebuild with a fresh snapshot.
+                    // trusted.
+                    shmem::signal_dag_rebuild();
                 } else {
                     dag_version = current_version;
                 }
