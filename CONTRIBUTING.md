@@ -42,6 +42,7 @@ just test-unit          # fast, no DB
 just test-integration   # Testcontainers
 just test-light-e2e     # PR-equivalent Light E2E tier (stock postgres)
 just test-e2e           # full E2E (builds Docker image)
+just test-pgbouncer     # PgBouncer transaction-pool compatibility tests
 ```
 
 Full setup instructions are in [INSTALL.md](INSTALL.md).

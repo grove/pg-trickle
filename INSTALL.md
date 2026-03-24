@@ -122,7 +122,7 @@ pgxn install pg_trickle
 To install a specific version:
 
 ```bash
-pgxn install pg_trickle=0.9.0
+pgxn install pg_trickle=0.10.0
 ```
 
 > **Note:** After installation, follow the [PostgreSQL Configuration](#postgresql-configuration) and
