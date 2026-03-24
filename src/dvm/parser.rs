@@ -5181,6 +5181,13 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
     )> = Vec::new();
 
     for sq in &scalar_subqueries {
+        // Scalar subqueries with LIMIT/OFFSET cannot be rewritten as CROSS JOINs
+        // because the DVM parser rejects LIMIT inside FROM-clause subqueries.
+        // Leave them as opaque scalar subquery expressions in the WHERE clause —
+        // node_to_expr() deparses them as Expr::Raw and the filter is applied as-is.
+        if sq.has_limit_or_offset {
+            continue;
+        }
         if sq.is_correlated(&outer_tables) {
             // Dot-qualified correlation (e.g., "outer_table.col") — skip
             continue;
@@ -5513,6 +5520,9 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
             subquery_sql: st.subquery_sql.clone(),
             expr_sql: format!("({})", st.subquery_sql),
             inner_tables: inner_tables.clone(),
+            // has_limit_or_offset is not used for the correlation check below;
+            // the LIMIT guard is applied separately via inner.limitCount.
+            has_limit_or_offset: !inner.limitCount.is_null() || !inner.limitOffset.is_null(),
         };
 
         // Check dot-qualified correlation first (e.g., "d.id" in subquery)
@@ -5525,6 +5535,15 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         }
 
         // ── Decorrelate this correlated scalar subquery ──────────────
+
+        // Scalar subqueries with LIMIT/OFFSET cannot be correctly decorrelated:
+        // removing the LIMIT from the derived-table rewrite changes semantics
+        // (e.g. ORDER BY … LIMIT 1 picks the top row; a full LEFT JOIN returns
+        // all matching rows from the same partition).  Leave them as opaque
+        // expressions so the DVM parser treats them as Expr::Raw.
+        if !inner.limitCount.is_null() || !inner.limitOffset.is_null() {
+            continue;
+        }
 
         // Parse the inner WHERE to separate correlation from inner conditions
         if inner.whereClause.is_null() {
@@ -5836,6 +5855,10 @@ struct ScalarSubqueryExtract {
     expr_sql: String,
     /// Table names referenced in the subquery's FROM clause (lowercase).
     inner_tables: Vec<String>,
+    /// True if the inner SELECT has a LIMIT or OFFSET clause.  Such subqueries
+    /// are skipped by the CROSS-JOIN and decorrelation rewrites so that the DVM
+    /// parser treats them as opaque `Expr::Raw` expressions.
+    has_limit_or_offset: bool,
 }
 
 impl ScalarSubqueryExtract {
@@ -5956,18 +5979,23 @@ fn collect_scalar_sublinks_in_where(
 
                 // Collect table names from the subquery's FROM clause
                 // for correlation detection.
-                let inner_tables = if let Some(inner_select) =
+                let (inner_tables, has_limit_or_offset) = if let Some(inner_select) =
                     cast_node!(sublink.subselect, T_SelectStmt, pg_sys::SelectStmt)
                 {
-                    collect_from_clause_table_names(inner_select)
+                    let tables = collect_from_clause_table_names(inner_select);
+                    // SAFETY: inner_select is a valid SelectStmt pointer from cast_node!
+                    let has_lim =
+                        !inner_select.limitCount.is_null() || !inner_select.limitOffset.is_null();
+                    (tables, has_lim)
                 } else {
-                    Vec::new()
+                    (Vec::new(), false)
                 };
 
                 out.push(ScalarSubqueryExtract {
                     subquery_sql: inner_sql,
                     expr_sql,
                     inner_tables,
+                    has_limit_or_offset,
                 });
             }
         }
@@ -18576,6 +18604,7 @@ mod tests {
             subquery_sql: "SELECT avg(amount) FROM orders".to_string(),
             expr_sql: "(SELECT avg(\"amount\") FROM \"orders\")".to_string(),
             inner_tables: vec!["orders".to_string()],
+            has_limit_or_offset: false,
         };
         assert!(extract.subquery_sql.contains("avg"));
         assert!(extract.expr_sql.starts_with('('));
