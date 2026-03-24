@@ -55,6 +55,8 @@ async fn test_upgrade_catalog_schema_stability() {
         ("pgt_name", "text"),
         ("pgt_relid", "oid"),
         ("pgt_schema", "text"),
+        ("pooler_compatibility_mode", "boolean"),
+        ("refresh_tier", "text"),
         ("requested_cdc_mode", "text"),
         ("refresh_mode", "text"),
         ("scc_id", "integer"),
