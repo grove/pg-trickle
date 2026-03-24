@@ -5911,18 +5911,12 @@ impl ScalarSubqueryExtract {
                 continue;
             }
             // Check if the outer table name appears as a qualified column
-            // reference prefix (e.g., "p_partkey" where "p" is from the
-            // subquery text referencing an outer table alias like "part").
-            // Heuristic: if any word in the subquery text matches an outer
-            // table/alias name in a dot-qualified position, it's correlated.
-            //
-            // Simpler heuristic: subqueries that share table names with
-            // the outer FROM clause are very likely correlated if the
-            // shared table is NOT in the inner FROM clause.
-            // For now, just check if the outer table name appears as a
-            // word boundary in the subquery SQL.
-            let pattern = format!("{}.", outer_table);
-            if sq_lower.contains(&pattern) {
+            // reference prefix. The deparsed SQL may use either unquoted
+            // (`i.col`) or quoted (`"i"."col"`) column references, so we
+            // check for both patterns.
+            let unquoted = format!("{}.", outer_table);
+            let quoted = format!("\"{}\".", outer_table);
+            if sq_lower.contains(&unquoted) || sq_lower.contains(&quoted) {
                 return true;
             }
         }

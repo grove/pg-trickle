@@ -166,66 +166,10 @@ pub fn diff_lateral_subquery(
     };
     ctx.add_cte(changed_sources_cte.clone(), changed_sources_sql);
 
-    // ── CTE 2: Old ST rows for changed source rows (DELETE actions) ────
-    let old_rows_cte = ctx.next_cte_name("lat_sq_old");
-
-    // Build a join condition: match st.{st_col} = cs.{child_col}
-    // The ST may use aliased names, while the changed_sources CTE uses
-    // the child's original column names.
-    // Only join on columns that actually exist in the ST (col_in_st).
-    let join_parts: Vec<String> = child_cols
-        .iter()
-        .enumerate()
-        .zip(st_child_cols.iter())
-        .filter_map(|((i, child_c), st_c)| {
-            if col_in_st[i] {
-                let qc_child = quote_ident(child_c);
-                let qc_st = quote_ident(st_c);
-                Some(format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}"))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let join_on_child_cols = if join_parts.is_empty() {
-        "TRUE".to_string()
-    } else {
-        join_parts.join(" AND ")
-    };
-
-    // SELECT st columns with aliases back to the expected output names.
-    // Columns that don't exist in the ST (projected away) are NULL-padded.
-    let all_cols_st = all_output_cols
-        .iter()
-        .enumerate()
-        .zip(st_col_names.iter())
-        .map(|((i, out_c), st_c)| {
-            if col_in_st[i] {
-                let qst = quote_ident(st_c);
-                let qout = quote_ident(out_c);
-                if st_c == out_c {
-                    format!("st.{qst}")
-                } else {
-                    format!("st.{qst} AS {qout}")
-                }
-            } else {
-                format!("NULL AS {}", quote_ident(out_c))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let old_rows_sql = format!(
-        "SELECT st.\"__pgt_row_id\", {all_cols_st}\n\
-         FROM {st_table} st\n\
-         WHERE EXISTS (\n\
-             SELECT 1 FROM {changed_sources_cte} cs\n\
-             WHERE {join_on_child_cols}\n\
-         )",
-    );
-    ctx.add_cte(old_rows_cte.clone(), old_rows_sql);
-
-    // ── CTE 3: Re-execute subquery for inserted/updated source rows ────
+    // ── CTE 2: Re-execute subquery for inserted/updated source rows ────
+    //
+    // Defined BEFORE old_rows so that old_rows can reference expand's
+    // column types when NULL-padding absent columns (see CTE 3 below).
     let expand_cte = ctx.next_cte_name("lat_sq_expand");
 
     // Build column references for the subquery result
@@ -306,6 +250,89 @@ pub fn diff_lateral_subquery(
          WHERE {action_filter_prefix}",
     );
     ctx.add_cte(expand_cte.clone(), expand_sql);
+
+    // ── CTE 3: Old ST rows for changed source rows (DELETE actions) ────
+    let old_rows_cte = ctx.next_cte_name("lat_sq_old");
+
+    // Build a join condition: match st.{st_col} = cs.{child_col}
+    // The ST may use aliased names, while the changed_sources CTE uses
+    // the child's original column names.
+    // Only join on columns that actually exist in the ST (col_in_st).
+    let join_parts: Vec<String> = child_cols
+        .iter()
+        .enumerate()
+        .zip(st_child_cols.iter())
+        .filter_map(|((i, child_c), st_c)| {
+            if col_in_st[i] {
+                let qc_child = quote_ident(child_c);
+                let qc_st = quote_ident(st_c);
+                Some(format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let join_on_child_cols = if join_parts.is_empty() {
+        "TRUE".to_string()
+    } else {
+        join_parts.join(" AND ")
+    };
+
+    // SELECT st columns with aliases back to the expected output names.
+    // Columns that don't exist in the ST (projected away) are NULL-padded.
+    let all_cols_st = all_output_cols
+        .iter()
+        .enumerate()
+        .zip(st_col_names.iter())
+        .map(|((i, out_c), st_c)| {
+            if col_in_st[i] {
+                let qst = quote_ident(st_c);
+                let qout = quote_ident(out_c);
+                if st_c == out_c {
+                    format!("st.{qst}")
+                } else {
+                    format!("st.{qst} AS {qout}")
+                }
+            } else {
+                format!("NULL AS {}", quote_ident(out_c))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // When some columns are absent from the ST (col_in_st has false entries),
+    // the bare `NULL AS "col"` values in the old_rows CTE resolve to `text`
+    // type. This causes a UNION type mismatch in the final CTE where expand
+    // has the correctly typed columns (e.g., integer). To fix this, prefix
+    // old_rows with `SELECT * FROM {expand_cte} WHERE FALSE` — this returns
+    // zero rows but establishes the correct column types via PostgreSQL's
+    // UNION type resolution. The expand CTE is defined earlier in the chain,
+    // so it's available for reference.
+    let has_absent_cols = col_in_st.iter().any(|&b| !b);
+
+    let old_rows_sql = if has_absent_cols {
+        format!(
+            "SELECT \"__pgt_row_id\", {all_cols_name} FROM {expand_cte} WHERE FALSE\n\
+             UNION ALL\n\
+             SELECT st.\"__pgt_row_id\", {all_cols_st}\n\
+             FROM {st_table} st\n\
+             WHERE EXISTS (\n\
+                 SELECT 1 FROM {changed_sources_cte} cs\n\
+                 WHERE {join_on_child_cols}\n\
+             )",
+            all_cols_name = col_list(&all_output_cols),
+        )
+    } else {
+        format!(
+            "SELECT st.\"__pgt_row_id\", {all_cols_st}\n\
+             FROM {st_table} st\n\
+             WHERE EXISTS (\n\
+                 SELECT 1 FROM {changed_sources_cte} cs\n\
+                 WHERE {join_on_child_cols}\n\
+             )",
+        )
+    };
+    ctx.add_cte(old_rows_cte.clone(), old_rows_sql);
 
     // ── CTE 4: Final delta — DELETE old + INSERT new ───────────────────
     let final_cte = ctx.next_cte_name("lat_sq_final");
@@ -1010,6 +1037,9 @@ mod tests {
         // Absent columns should be NULL-padded in the old_rows CTE.
         assert_sql_contains(&sql, "NULL AS \"id\"");
         assert_sql_contains(&sql, "NULL AS \"__pgt_scalar_1\"");
+        // When absent columns exist, old_rows should include a type-hint
+        // branch from expand to establish correct column types.
+        assert_sql_contains(&sql, "WHERE FALSE");
     }
 
     /// Regression: When the inner LATERAL subquery references the same

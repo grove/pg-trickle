@@ -11,7 +11,7 @@
 //! kept — net result: INSERT into the ST. The converse is also correct.
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
-use crate::dvm::parser::{Expr, OpTree};
+use crate::dvm::parser::{Expr, OpTree, unwrap_transparent};
 use crate::error::PgTrickleError;
 
 /// Differentiate a Filter node.
@@ -96,6 +96,26 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     // below would remain in the ST with stale data.
     let has_st = ctx.st_qualified_name.is_some();
 
+    // ── Lateral child DELETE bypass ──────────────────────────────────
+    //
+    // When the child is a LateralSubquery or LateralFunction, DELETE rows
+    // from the old_rows CTE have NULL-padded lateral columns (columns that
+    // don't exist in the ST are filled with NULL). The filter predicate
+    // often references these lateral columns (e.g., `price >= __pgt_scalar_1`),
+    // causing `price >= NULL` to evaluate to NULL/false, blocking ALL DELETE
+    // rows from passing through. This means rows that should be removed
+    // from the ST are never deleted.
+    //
+    // It is safe to let DELETE rows bypass the filter unconditionally because
+    // the lateral subquery's final CTE only produces DELETE from old_rows
+    // and INSERT from expand — there are no child-delta DELETE rows that
+    // could cause incorrect weight cancellation. Spurious DELETEs for
+    // rows already absent from the ST are handled as no-ops by MERGE.
+    let is_lateral_child = matches!(
+        unwrap_transparent(child),
+        OpTree::LateralSubquery { .. } | OpTree::LateralFunction { .. }
+    );
+
     let sql = if is_having && has_st {
         let st_table = ctx.st_qualified_name.as_deref().unwrap();
         format!(
@@ -120,6 +140,15 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
             child_cte = child_result.cte_name,
             predicate = predicate_sql,
             st_table = st_table,
+        )
+    } else if is_lateral_child {
+        format!(
+            "SELECT __pgt_row_id, __pgt_action, {cols}\n\
+             FROM {child_cte}\n\
+             WHERE \"__pgt_action\" = 'D' OR ({predicate})",
+            cols = col_refs.join(", "),
+            child_cte = child_result.cte_name,
+            predicate = predicate_sql,
         )
     } else {
         format!(
@@ -645,5 +674,56 @@ mod tests {
 
         // Should have a separate filter CTE (no pushdown)
         assert!(result.cte_name.contains("filter"));
+    }
+
+    // ── Lateral child DELETE bypass tests ────────────────────────────
+
+    #[test]
+    fn test_diff_filter_lateral_child_bypasses_delete_rows() {
+        // When the child is a LateralSubquery, DELETE rows must pass
+        // through the filter unconditionally because lateral columns
+        // in those rows are NULL-padded and the predicate would block them.
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        ctx.st_user_columns = Some(vec!["name".to_string(), "price".to_string()]);
+
+        let child_scan = scan(
+            1,
+            "products",
+            "public",
+            "products",
+            &["id", "name", "price"],
+        );
+        let lat = lateral_subquery(
+            "SELECT min_price FROM thresholds LIMIT 1",
+            "__pgt_sq_1",
+            vec!["__pgt_scalar_1"],
+            vec!["min_price"],
+            false,
+            vec![2],
+            child_scan,
+        );
+        let tree = filter(binop(">=", colref("price"), colref("__pgt_scalar_1")), lat);
+        let result = diff_filter(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // The filter CTE should allow DELETE rows to bypass the predicate
+        assert_sql_contains(&sql, "__pgt_action\" = 'D'");
+        assert_sql_contains(&sql, "OR");
+    }
+
+    #[test]
+    fn test_diff_filter_non_lateral_child_does_not_bypass() {
+        // Normal filter over a Scan child should NOT bypass DELETEs.
+        let mut ctx = test_ctx();
+        let child = scan(1, "t", "public", "t", &["id", "amount"]);
+        let tree = filter(binop(">", colref("amount"), lit("100")), child);
+        let result = diff_filter(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // Should NOT contain the DELETE bypass
+        assert!(
+            !sql.contains("__pgt_action\" = 'D' OR"),
+            "Normal filter should not bypass DELETE rows.\nSQL:\n{sql}"
+        );
     }
 }
