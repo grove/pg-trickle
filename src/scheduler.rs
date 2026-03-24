@@ -2345,16 +2345,17 @@ fn check_cdc_transition_health() {
 ///
 /// Uses `SELECT ... FOR UPDATE SKIP LOCKED` on the catalog row to detect
 /// concurrent refreshes.  If another session holds the row lock the query
-/// returns zero rows and we skip.
+/// returns zero rows and we skip.  The row lock, once acquired, is held for
+/// the remainder of the caller's transaction — this is intentional, as the
+/// lock prevents concurrent refreshes until the tick transaction commits.
 ///
-/// The probe runs inside an internal sub-transaction so the row lock is
-/// released immediately when the sub-transaction commits — this is a
-/// lightweight check, not the authoritative lock acquisition.
-///
-/// NOTE: `Spi::connect` does NOT create a PostgreSQL sub-transaction — it
-/// only opens/closes an SPI connection.  We therefore must use an explicit
-/// `BeginInternalSubTransaction` / `ReleaseCurrentSubTransaction` to
-/// guarantee the lock does not persist in the caller's transaction context.
+/// IMPORTANT: `Spi::get_one_with_args` is used here (not `Spi::connect` +
+/// `client.select`) because pgrx's `select` passes `read_only =
+/// Spi::is_xact_still_immutable()`, which evaluates to `true` when no prior
+/// mutation has assigned a transaction XID yet.  PostgreSQL rejects `FOR
+/// UPDATE` in a read-only SPI context with "SELECT FOR UPDATE is not allowed
+/// in a non-volatile function".  `get_one_with_args` routes through
+/// `connect_mut` / `update`, which always uses `read_only = false`.
 ///
 /// PB1: replaces the previous `pg_try_advisory_lock` approach for
 /// PgBouncer transaction‐mode compatibility.
@@ -2363,23 +2364,18 @@ fn check_cdc_transition_health() {
 fn check_skip_needed(st: &StreamTableMeta) -> bool {
     let pgt_id = st.pgt_id;
 
-    // Wrap in a real sub-transaction so the FOR UPDATE row lock is released
-    // when the sub-transaction commits, regardless of the caller's context.
-    let subtxn = SubTransaction::begin();
-    let result = Spi::connect(|client| {
-        let row = client
-            .select(
-                "SELECT 1 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
-                None,
-                &[pgt_id.into()],
-            )
-            .unwrap_or_else(|_| pgrx::error!("check_skip_needed: SPI select failed"));
-        // Zero rows → the row is locked by another session.
-        row.is_empty()
-    });
-    subtxn.commit();
-    result
+    // FOR UPDATE SKIP LOCKED requires read_only=false (mutating SPI context).
+    // Returns Some(pgt_id) if lock acquired, None if row is locked by another session.
+    let row_found = Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(None)
+    .is_some();
+
+    // Zero rows → the row is locked by another session → skip.
+    !row_found
 }
 
 // ── Time Helper ────────────────────────────────────────────────────────────
