@@ -109,6 +109,25 @@ pub fn diff_lateral_subquery(
     };
     let st_child_cols: Vec<String> = st_col_names[..child_cols.len()].to_vec();
 
+    // Determine which output columns actually exist in the stream table.
+    // When a Project above narrows the defining query's output, some of
+    // this operator's columns (e.g., source PK not in SELECT, scalar
+    // subquery alias from WHERE rewrite) won't exist in the ST.
+    let col_in_st: Vec<bool> = if let Some(ref st_cols) = ctx.st_user_columns {
+        if st_cols.len() >= all_output_cols.len() {
+            vec![true; all_output_cols.len()]
+        } else {
+            let st_set: std::collections::HashSet<&str> =
+                st_cols.iter().map(|s| s.as_str()).collect();
+            all_output_cols
+                .iter()
+                .map(|c| st_set.contains(c.as_str()))
+                .collect()
+        }
+    } else {
+        vec![true; all_output_cols.len()]
+    };
+
     // ── CTE 1: Find source rows that changed ───────────────────────────
     //
     // Starts with rows from the child delta (outer table changes).
@@ -153,28 +172,44 @@ pub fn diff_lateral_subquery(
     // Build a join condition: match st.{st_col} = cs.{child_col}
     // The ST may use aliased names, while the changed_sources CTE uses
     // the child's original column names.
-    let join_on_child_cols = child_cols
+    // Only join on columns that actually exist in the ST (col_in_st).
+    let join_parts: Vec<String> = child_cols
         .iter()
+        .enumerate()
         .zip(st_child_cols.iter())
-        .map(|(child_c, st_c)| {
-            let qc_child = quote_ident(child_c);
-            let qc_st = quote_ident(st_c);
-            format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}")
+        .filter_map(|((i, child_c), st_c)| {
+            if col_in_st[i] {
+                let qc_child = quote_ident(child_c);
+                let qc_st = quote_ident(st_c);
+                Some(format!("st.{qc_st} IS NOT DISTINCT FROM cs.{qc_child}"))
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>()
-        .join(" AND ");
+        .collect();
+    let join_on_child_cols = if join_parts.is_empty() {
+        "TRUE".to_string()
+    } else {
+        join_parts.join(" AND ")
+    };
 
-    // SELECT st columns with aliases back to the expected output names
+    // SELECT st columns with aliases back to the expected output names.
+    // Columns that don't exist in the ST (projected away) are NULL-padded.
     let all_cols_st = all_output_cols
         .iter()
+        .enumerate()
         .zip(st_col_names.iter())
-        .map(|(out_c, st_c)| {
-            let qst = quote_ident(st_c);
-            let qout = quote_ident(out_c);
-            if st_c == out_c {
-                format!("st.{qst}")
+        .map(|((i, out_c), st_c)| {
+            if col_in_st[i] {
+                let qst = quote_ident(st_c);
+                let qout = quote_ident(out_c);
+                if st_c == out_c {
+                    format!("st.{qst}")
+                } else {
+                    format!("st.{qst} AS {qout}")
+                }
             } else {
-                format!("st.{qst} AS {qout}")
+                format!("NULL AS {}", quote_ident(out_c))
             }
         })
         .collect::<Vec<_>>()
@@ -323,18 +358,19 @@ fn build_inner_change_branch(
         return None;
     }
 
-    // Filter to inner OIDs that are NOT the child's own OID (the child
-    // delta is already handled by the main branch).
-    let child_oid = child.source_oids();
-    let inner_only: Vec<u32> = inner_oids
-        .iter()
-        .copied()
-        .filter(|oid| !child_oid.contains(oid))
-        .collect();
-
-    if inner_only.is_empty() {
+    if inner_oids.is_empty() {
         return None;
     }
+
+    // Deduplicate inner OIDs (a shared OID may appear in both the child
+    // and the inner subquery, e.g. a self-referencing LATERAL join).
+    // We must NOT filter out OIDs that overlap with the child's own OID:
+    // while the child delta covers new/changed outer rows, EXISTING
+    // (unchanged) outer rows still need LATERAL recomputation when the
+    // shared table has changes that affect the inner subquery result.
+    let mut unique_inner_oids: Vec<u32> = inner_oids.to_vec();
+    unique_inner_oids.sort_unstable();
+    unique_inner_oids.dedup();
 
     let outer_snap = build_snapshot_sql(child);
     let outer_alias = child.alias();
@@ -348,7 +384,7 @@ fn build_inner_change_branch(
     // For each inner OID, check if we have a correlation predicate that
     // connects an inner column to an outer column. If so, use it to
     // scope the change buffer scan.
-    let exists_checks: Vec<String> = inner_only
+    let exists_checks: Vec<String> = unique_inner_oids
         .iter()
         .map(|oid| {
             let change_table =
@@ -930,6 +966,82 @@ mod tests {
         assert!(
             !sql.contains("-9223372036854775808::BIGINT"),
             "Should not use i64::MIN (out of range as a PG bigint literal)"
+        );
+    }
+
+    /// Regression: When a Project above narrows the output (e.g.,
+    /// `SELECT name, price FROM products CROSS JOIN LATERAL (...)`),
+    /// the ST has only [name, price] but the child Scan includes PK
+    /// column "id". The old_rows CTE must NOT reference st."id".
+    #[test]
+    fn test_diff_lateral_subquery_narrowed_st_no_absent_col_ref() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        // Simulate a Project above having set st_user_columns to only
+        // the projected columns (no "id" PK column).
+        ctx.st_user_columns = Some(vec!["name".to_string(), "price".to_string()]);
+
+        let child = scan(
+            1,
+            "products",
+            "public",
+            "products",
+            &["id", "name", "price"],
+        );
+        let tree = lateral_subquery(
+            "SELECT min_price FROM thresholds LIMIT 1",
+            "__pgt_sq_1",
+            vec!["__pgt_scalar_1"],
+            vec!["min_price"],
+            false,
+            vec![2],
+            child,
+        );
+        let result = diff_lateral_subquery(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // The old_rows CTE must NOT reference st."id" (absent from ST).
+        assert!(
+            !sql.contains("st.\"id\""),
+            "Should not reference st.\"id\" — column was projected away.\nSQL:\n{sql}"
+        );
+        // It SHOULD reference st."name" and st."price" (present in ST).
+        assert_sql_contains(&sql, "st.\"name\"");
+        assert_sql_contains(&sql, "st.\"price\"");
+        // Absent columns should be NULL-padded in the old_rows CTE.
+        assert_sql_contains(&sql, "NULL AS \"id\"");
+        assert_sql_contains(&sql, "NULL AS \"__pgt_scalar_1\"");
+    }
+
+    /// Regression: When the inner LATERAL subquery references the same
+    /// table as the outer child (self-referencing LATERAL join), the
+    /// inner change branch must NOT be skipped. Existing unchanged outer
+    /// rows need recomputation because the inner subquery result depends
+    /// on the same table that received new rows.
+    #[test]
+    fn test_diff_lateral_subquery_shared_oid_generates_inner_branch() {
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        // Both child and inner subquery reference OID 1 (same table)
+        let child = scan(1, "items", "public", "i", &["id", "category", "score"]);
+        let tree = lateral_subquery(
+            "SELECT src.id FROM items src WHERE src.category = i.category ORDER BY src.score DESC LIMIT 1",
+            "__pgt_lat_1",
+            vec!["top_id"],
+            vec!["id"],
+            true,
+            vec![1], // same OID as child
+            child,
+        );
+        let result = diff_lateral_subquery(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // The inner change branch should exist (check for change buffer
+        // EXISTS on OID 1), not be skipped.
+        assert_sql_contains(&sql, "changes_1");
+        // The changed_sources CTE should have UNION ALL for the inner branch
+        let changed_cte = sql.split("lat_sq_changed").nth(1).unwrap_or("");
+        assert!(
+            changed_cte.contains("UNION ALL"),
+            "Shared-OID inner branch should produce UNION ALL in changed_sources.\nSQL:\n{sql}"
         );
     }
 }
