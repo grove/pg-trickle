@@ -152,3 +152,70 @@ async fn test_scalar_subquery_null_result_differential() {
     db.refresh_st("ss_null_st").await;
     db.assert_st_matches_query("ss_null_st", q).await;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: correlated scalar subquery with LIMIT in AUTO mode
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Before the parse_scalar_target_subquery fallback fix, a correlated scalar
+/// subquery that uses `ORDER BY ... LIMIT 1` caused `parse_select_stmt` to
+/// return an error ("LIMIT is not supported in the DVM pipeline"), which was
+/// propagated upward and made AUTO mode downgrade to FULL.
+///
+/// After the fix `parse_scalar_target_subquery` returns `Ok(None)` for such
+/// inner queries, letting `node_to_expr` deparse the sublink as an opaque
+/// `Expr::Raw`.  The stream table is then maintained as DIFFERENTIAL.
+#[tokio::test]
+async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE cssl_items (id INT PRIMARY KEY, category TEXT, score INT)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO cssl_items VALUES \
+         (1, 'A', 10), (2, 'A', 30), (3, 'B', 20), (4, 'B', 5)",
+    )
+    .await;
+
+    // Correlated scalar subquery with ORDER BY + LIMIT 1 — the pattern
+    // produced by OSI-generated reverse-projection queries that triggered
+    // the regression.  Each outer row looks up the top-scoring item in
+    // the same category.
+    let q = "SELECT i.id, i.category, i.score, \
+               (SELECT src.id FROM cssl_items src \
+                WHERE src.category = i.category \
+                ORDER BY src.score DESC LIMIT 1) AS top_id \
+             FROM cssl_items i";
+
+    db.create_st("cssl_st", q, "1m", "AUTO").await;
+
+    let (status, mode, populated, errors) = db.pgt_status("cssl_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(
+        mode,
+        "DIFFERENTIAL",
+        "Correlated scalar subquery with LIMIT must not prevent DIFFERENTIAL mode \
+         (parse_scalar_target_subquery fallback regression)"
+    );
+    assert!(populated);
+    assert_eq!(errors, 0);
+
+    // Initial data correctness
+    db.assert_st_matches_query("cssl_st", q).await;
+
+    // Incremental update: add a new high-scorer in category A
+    db.execute("INSERT INTO cssl_items VALUES (5, 'A', 50)")
+        .await;
+    db.refresh_st("cssl_st").await;
+    db.assert_st_matches_query("cssl_st", q).await;
+
+    // id=5 should now be the top_id for all category-A rows
+    let top_for_id1: i32 = db
+        .query_scalar(
+            "SELECT top_id FROM public.cssl_st WHERE id = 1",
+        )
+        .await;
+    assert_eq!(top_for_id1, 5, "Category A top_id should be 5 after insert");
+}

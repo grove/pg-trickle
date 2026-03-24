@@ -1140,6 +1140,63 @@ async fn test_json_table_differential_mode() {
     assert_eq!(count, 5, "Should have 5 tags after insert");
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: NULLIF in AUTO mode must resolve to DIFFERENTIAL (not FULL)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Before the AEXPR_NULLIF fix, `NULLIF(col, '')::bigint` in the SELECT list
+/// caused `parse_defining_query_full` to emit "A_Expr kind AEXPR_NULLIF is
+/// not supported in defining queries", which made AUTO mode silently
+/// downgrade to FULL.  After the fix, NULLIF is deparsed as Expr::Raw and
+/// the DVM pipeline proceeds normally.
+#[tokio::test]
+async fn test_nullif_in_select_auto_mode_resolves_to_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE nullif_regr_src (id INT PRIMARY KEY, raw_rank TEXT, val INT)",
+    )
+    .await;
+    db.execute(
+        "INSERT INTO nullif_regr_src VALUES \
+         (1, '3', 100), (2, '', 200), (3, NULL, 300), (4, '1', 400)",
+    )
+    .await;
+
+    // NULLIF(raw_rank, '')::bigint mirrors the pattern in OSI-generated
+    // _rev_* queries that triggered the regression.
+    let q = "SELECT id, NULLIF(raw_rank, '')::bigint AS safe_rank, val \
+             FROM nullif_regr_src";
+
+    db.create_st("nullif_regr_st", q, "1m", "AUTO").await;
+
+    let (status, mode, populated, errors) = db.pgt_status("nullif_regr_st").await;
+    assert_eq!(status, "ACTIVE");
+    assert_eq!(
+        mode,
+        "DIFFERENTIAL",
+        "NULLIF in SELECT list must not prevent DIFFERENTIAL mode (AEXPR_NULLIF regression)"
+    );
+    assert!(populated);
+    assert_eq!(errors, 0);
+
+    // Initial data correctness: empty string → NULL, NULL stays NULL
+    db.assert_st_matches_query("nullif_regr_st", q).await;
+
+    // Incremental update and re-check
+    db.execute("UPDATE nullif_regr_src SET raw_rank = '5' WHERE id = 2")
+        .await;
+    db.refresh_st("nullif_regr_st").await;
+    db.assert_st_matches_query("nullif_regr_st", q).await;
+
+    let rank: Option<i64> = db
+        .query_scalar_opt(
+            "SELECT safe_rank FROM public.nullif_regr_st WHERE id = 2",
+        )
+        .await;
+    assert_eq!(rank, Some(5), "Updated NULLIF rank should be 5");
+}
+
 #[tokio::test]
 async fn test_expression_invalid_query_fails() {
     let db = E2eDb::new().await.with_extension().await;
