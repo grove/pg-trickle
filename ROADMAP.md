@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-03-23
 > **Latest release:** 0.10.0 (2026-03-23)
-> **Current milestone:** v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability & Operational Scale
+> **Current milestone:** v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -27,7 +27,7 @@ coverage, all in plain language.
 - [v0.8.0 — pg_dump Support & Test Hardening](#v080--pg_dump-support--test-hardening)
 - [v0.9.0 — Incremental Aggregate Maintenance](#v090--incremental-aggregate-maintenance)
 - [v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Core Refresh Optimizations & Infrastructure Prep](#v0100--dvm-hardening-connection-pooler-compatibility-core-refresh-optimizations--infrastructure-prep)
-- [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability & Operational Scale](#v0110--partitioned-stream-tables-prometheus--grafana-observability--operational-scale)
+- [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness](#v0110--partitioned-stream-tables-prometheus--grafana-observability-safety-hardening--correctness)
 - [v0.12.0 — Anomalous Change Detection, CDC Research & PG Backward Compatibility](#v0120--anomalous-change-detection-cdc-research--pg-backward-compatibility)
 - [v0.13.0 — Scalability Foundations & UNLOGGED Buffers](#v0130--scalability-foundations--unlogged-buffers)
 - [v0.14.0 — Native DDL Syntax, External Test Suites & Integration](#v0140--native-ddl-syntax-external-test-suites--integration)
@@ -1770,12 +1770,15 @@ These items address scheduler CPU efficiency and DAG maintenance overhead at sca
 
 ---
 
-## v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability & Operational Scale
+## v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness
 
 **Goal:** Enable stream table storage to be declaratively partitioned (scope MERGE
 to affected partitions for 100× I/O reduction on large tables), add per-database worker
 quotas for multi-tenant environments, and ship ready-made Prometheus/Grafana
-monitoring so the product is externally visible and monitored.
+monitoring so the product is externally visible and monitored. Additionally closes
+several high-priority correctness, safety, and performance gaps: wide-column bitmask
+correctness, anomalous change fuse, external query corpus gating, worker panic hardening,
+SemiJoin delta-key pre-filtering, and `block_source_ddl` default flip.
 
 ### Partitioned Stream Tables — Storage (A-1)
 
@@ -1853,20 +1856,100 @@ revert if needed.
 | DEF-2 | ~~**Flip `auto_backoff` default to `true`.**~~ ✅ Done in v0.10.0 — default flipped to `true`; trigger threshold raised to 95%, cap reduced to 8×, log level raised to WARNING. CONFIGURATION.md updated. | 1–2h | [REPORT_OVERALL_STATUS.md §R10](plans/performance/REPORT_OVERALL_STATUS.md) |
 | DEF-3 | **SemiJoin delta-key pre-filter (O-1).** SemiJoin Part 2 currently rescans the full left table even when only a handful of left-side rows match the delta. Inject a `WHERE left_key IN (SELECT key FROM delta)` pre-filter before the full join. TPC-H Q18, Q20, Q21 are the canonical slow queries. Effort estimate from PLAN_TPC_H_BENCHMARKING.md: 8–10h, expected 15–26× speedup. | 8–10h | [REPORT_OVERALL_STATUS.md §R4](plans/performance/REPORT_OVERALL_STATUS.md) · [PLAN_TPC_H_BENCHMARKING.md](plans/performance/PLAN_TPC_H_BENCHMARKING.md) §O-1 |
 | DEF-4 | **Increase invalidation ring capacity from 32 to 128 slots.** Deployments with frequent DDL (CI pipelines, dbt model rebuilds, schema migrations) can overflow the 32-slot ring, forcing a full O(V+E) DAG rebuild on every tick. Increasing capacity is a one-line constant change with negligible shared-memory cost. | 0.5h | [REPORT_OVERALL_STATUS.md §R9](plans/performance/REPORT_OVERALL_STATUS.md) |
+| DEF-5 | **Flip `block_source_ddl` default to `true`.** Currently source DDL (`ALTER TABLE … ADD/DROP COLUMN`, `ALTER TYPE`) silently invalidates stream tables — the ST is marked for reinit on its next scheduler tick with no warning at the DDL site. Blocking DDL at the source gives operators an explicit prompt to decide whether to `ALTER STREAM TABLE` before proceeding. Error message must explain the cause and the `block_source_ddl = false` escape hatch. | 2–4h | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> **Default tuning subtotal: ~12–17 hours**
+> **Default tuning subtotal: ~14–21 hours**
 
-> **v0.11.0 total: ~7–10 weeks + ~12 hours observability + ~12–17 hours default tuning**
+### Safety & Resilience Hardening (Must-Ship)
+
+> **In plain terms:** The background worker should never silently hang or leave a
+> stream table in an undefined state when an internal operation fails. These items
+> replace `panic!`/`unwrap()` in code paths reachable from the background worker
+> with structured errors and graceful recovery.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| SAF-1 | **Replace worker-path panics with structured errors.** The `check_skip_needed` function and several scheduler SPI calls currently call `panic!` / `unwrap_or_else(panic)` on failure. Replace with `PgTrickleError` propagation, log at `WARNING`, and continue to the next stream table rather than crashing the worker. Audit all `panic!` / `unwrap()` calls in `scheduler.rs`, `refresh.rs`, and `hooks.rs` for paths reachable from the worker loop. | 4–8h | [src/scheduler.rs](src/scheduler.rs) |
+| SAF-2 | **Failure-injection E2E test.** Add an E2E test that forces an SPI failure path in the scheduler loop (e.g. by revoking permissions mid-run) and asserts that the remaining stream tables continue refreshing and the worker does not crash. | 3–4h | `tests/e2e_scheduler_tests.rs` |
+
+> **Safety hardening subtotal: ~7–12 hours**
+
+### Should-Ship Additions
+
+#### Wider Changed-Column Bitmask (>63 columns)
+
+> **In plain terms:** Stream tables built on source tables with more than 63 columns
+> fall back silently to tracking every column on every UPDATE, losing all CDC selectivity.
+> Extending the `changed_cols` field from a `BIGINT` to a `BYTEA` vector removes this
+> cliff without breaking existing deployments.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| WB-1 | Extend the CDC trigger `changed_cols` column from `BIGINT` to `BYTEA`; update bitmask encoding/decoding in `cdc.rs`; add schema migration for existing change buffer tables (tables with <64 columns are unaffected at the data level). | 1–2 wk | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| WB-2 | E2E test: wide (>63 column) source table; verify only referenced columns trigger delta propagation; benchmark UPDATE selectivity before/after. | 2–4h | `tests/e2e_cdc_tests.rs` |
+
+> **Wider bitmask subtotal: ~1–2 weeks + ~4h testing**
+
+#### Fuse — Anomalous Change Detection
+
+> **In plain terms:** A circuit breaker that stops a stream table from processing
+> an unexpectedly large batch of changes (runaway script, mass delete, data migration)
+> without operator review. A blown fuse halts refresh and emits a `pgtrickle_alert`
+> NOTIFY; `reset_fuse()` resumes with a chosen recovery action (`apply`,
+> `reinitialize`, or `skip_changes`).
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| FUSE-1 | Catalog: fuse state columns on `pgt_stream_tables` (`fuse_mode`, `fuse_state`, `fuse_ceiling`, `fuse_sensitivity`, `blown_at`, `blow_reason`) | 1–2h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+| FUSE-2 | `alter_stream_table()` new params: `fuse`, `fuse_ceiling`, `fuse_sensitivity` | 1h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+| FUSE-3 | `reset_fuse(name, action => 'apply'\|'reinitialize'\|'skip_changes')` SQL function | 1h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+| FUSE-4 | `fuse_status()` introspection function | 1h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+| FUSE-5 | Scheduler pre-check: count change buffer rows; evaluate threshold; blow fuse + NOTIFY if exceeded | 2–3h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+| FUSE-6 | E2E tests: normal baseline, spike → blow, reset (`apply`/`reinitialize`/`skip_changes`), diamond/DAG interaction | 4–6h | [PLAN_FUSE.md](plans/sql/PLAN_FUSE.md) |
+
+> **Fuse subtotal: ~10–14 hours**
+
+#### External Correctness Gate (TS1 or TS2)
+
+> **In plain terms:** Run an independent public query corpus through pg_trickle's
+> DIFFERENTIAL mode and assert the results match a vanilla PostgreSQL execution.
+> This catches blind spots that the extension's own test suite cannot, and
+> provides an objective correctness baseline before v1.0.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TS1 | **sqllogictest suite.** Run the PostgreSQL sqllogic suite through pg_trickle DIFFERENTIAL mode; gate CI on zero correctness mismatches. *Preferred choice: broadest query coverage.* | 2–3d | [PLAN_TESTING_GAPS.md §J](plans/testing/PLAN_TESTING_GAPS.md) |
+| TS2 | **JOB (Join Order Benchmark).** Correctness baseline and refresh latency profiling on realistic multi-join analytical queries. *Alternative if sqllogictest setup is too costly.* | 1–2d | [PLAN_TESTING_GAPS.md §J](plans/testing/PLAN_TESTING_GAPS.md) |
+
+Deliver **one** of TS1 or TS2; whichever is completed first meets the exit criterion.
+
+> **External correctness gate subtotal: ~1–3 days**
+
+### Stretch Goals (if capacity allows after Must-Ship)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| STRETCH-1 | **Adaptive/event-driven scheduler wake.** Add a `pg_notify('pgtrickle_wake', '')` call from CDC triggers so the scheduler wakes immediately when changes arrive instead of waiting up to `scheduler_interval_ms`. Coalesce rapid-fire notifications with a 10 ms debounce. Drops median end-to-end latency from ~515 ms to ~15 ms for low-volume workloads. Falls back to poll-based wake when idle. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R16](plans/performance/REPORT_OVERALL_STATUS.md) |
+| STRETCH-2 | **Partitioned stream tables — design spike only.** Produce a written implementation plan (2–4 days) before committing to A1-1. Validates partition-key predicate injection, per-partition MERGE loop feasibility, and catalog requirements. Full A-1 implementation only starts if the spike is complete and the RFC is approved. | 2–4d | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **Stretch subtotal: ~2–3 weeks (STRETCH-1) + 2–4 days (STRETCH-2 spike)**
+
+> **v0.11.0 total: ~7–10 weeks (partitioning + isolation) + ~12h observability + ~14–21h default tuning + ~7–12h safety hardening + ~2–4 weeks should-ship (bitmask + fuse + external corpus)**
 
 **Exit criteria:**
-- [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog
-- [ ] Partition-scoped MERGE benchmark: 10M-row ST, 0.1% change rate (expect ~100× I/O reduction)
+- [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog *(or STRETCH-2 design spike complete with RFC)*
+- [ ] Partition-scoped MERGE benchmark: 10M-row ST, 0.1% change rate (expect ~100× I/O reduction) *(applies only when full A-1 is implemented)*
 - [ ] Per-database worker quotas enforced; burst reclaimed within 1 scheduler cycle
 - [ ] Prometheus queries + alerting rules + Grafana dashboard shipped
 - [ ] DEF-1: `parallel_refresh_mode` default is `'on'`; concurrent-refresh E2E test passes
 - [x] DEF-2: `auto_backoff` default is `true`; CONFIGURATION.md updated — ✅ Done in v0.10.0
 - [ ] DEF-3: SemiJoin delta-key pre-filter implemented; TPC-H Q18/Q20/Q21 re-benchmarked
 - [ ] DEF-4: Invalidation ring capacity is 128 slots; validated under rapid DDL E2E test
+- [ ] DEF-5: `block_source_ddl` default is `true`; error message includes escape-hatch instructions; E2E test verifies ALTER is blocked and escape hatch works
+- [ ] SAF-1+2: No `panic!`/`unwrap()` in background worker hot paths; failure-injection E2E test passes
+- [ ] WB-1+2: Changed-column bitmask supports >63 columns; wide-table CDC selectivity E2E passes; schema migration tested
+- [ ] FUSE-1–6: Fuse blows on configurable change-count threshold; `reset_fuse()` recovers in all three action modes; diamond/DAG interaction tested
+- [ ] TS1 or TS2: At least one external query corpus passes with zero correctness mismatches in DIFFERENTIAL mode
 - [ ] Extension upgrade path tested (`0.10.0 → 0.11.0`)
 
 ---
@@ -1963,24 +2046,27 @@ large design changes; all build on existing infrastructure.
 | PERF-1 | **Adaptive scheduler wake interval.** The scheduler wakes every `scheduler_interval_ms` (1 s) even when all sources have zero pending changes. Implement event-driven wake: CDC triggers `pg_notify('pgtrickle_wake', '')` on each buffer INSERT; the scheduler listens and wakes immediately. Coalesces rapid-fire notifications using a 10ms debounce window to prevent thundering herd. Falls back to the configured interval when the channel is idle. Impact: median end-to-end latency drops from ~515ms to ~15ms for low-volume workloads. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
 | PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source's change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
 | PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-4 | **Flip `block_source_ddl` default to `true`.** Currently source DDL (`ALTER TABLE ... ADD/DROP COLUMN`, `ALTER TYPE`) silently invalidates stream tables — the ST is marked for reinit on its next scheduler tick with no warning at the DDL site. Blocking DDL at the source gives operators an explicit prompt to decide whether to `ALTER STREAM TABLE` before proceeding. Error message must explain the cause and the `block_source_ddl = false` escape hatch. | 2–4h | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-5 | **Wider changed-column bitmask (>63 columns).** The current `BIGINT` bitmask silently falls back to full-column capture for tables with >63 columns. Extend to an arbitrarily wide bitmask using a `BYTEA` column in the change buffer schema. Preserve backward compatibility via a schema migration for existing change buffer tables; existing tables with <64 columns are unaffected. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PERF-1 | **Adaptive scheduler wake interval.** The scheduler wakes every `scheduler_interval_ms` (1 s) even when all sources have zero pending changes. Implement event-driven wake: CDC triggers `pg_notify('pgtrickle_wake', '')` on each buffer INSERT; the scheduler listens and wakes immediately. Coalesces rapid-fire notifications using a 10ms debounce window to prevent thundering herd. Falls back to the configured interval when the channel is idle. Impact: median end-to-end latency drops from ~515ms to ~15ms for low-volume workloads. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source’s change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-4~~ | ~~**Flip `block_source_ddl` default to `true`.**~~ ➡️ Pulled forward to v0.11.0 as DEF-5. | — | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-5~~ | ~~**Wider changed-column bitmask (>63 columns).**~~ ➡️ Pulled forward to v0.11.0 as WB-1/WB-2. | — | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
 
 > **Performance defaults & scalability subtotal: ~5–9 weeks**
 
 > **v0.12.0 total: ~13–19 weeks + ~5–9 weeks defaults/scalability**
 
 **Exit criteria:**
-- [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers
+- [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers *(skip if FUSE-1–6 shipped in v0.11.0)*
 - [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
 - [ ] WAL decoder validated against PG 16–17 `pgoutput` format
 - [ ] CI matrix covers PG 16, 17, 18
-- [ ] PERF-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads
+- [ ] PERF-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads *(skip if STRETCH-1 shipped in v0.11.0)*
 - [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
 - [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
-- [ ] PERF-4: `block_source_ddl` default is `true`; error message includes escape hatch instructions
-- [ ] PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested
+- [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
+- [x] ~~PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested~~ ➡️ Pulled to v0.11.0 as WB-1/WB-2
 - [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
 
 ---
@@ -2081,13 +2167,17 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 
 Validate correctness against independent query corpora beyond TPC-H.
 
+> ➡️ **TS1 and TS2 pulled forward to v0.11.0.** Delivering one of TS1 or TS2 is an
+> exit criterion for 0.11.0. TS3 (Nexmark) remains in 0.14.0. If TS1/TS2 slip
+> from 0.11.0, they land here.
+
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| TS1 | sqllogictest: run PostgreSQL sqllogic suite through pg_trickle DIFFERENTIAL mode | 2–3d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
-| TS2 | JOB (Join Order Benchmark): correctness baseline and refresh latency profiling | 1–2d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
+| ~~TS1~~ | ~~sqllogictest: run PostgreSQL sqllogic suite through pg_trickle DIFFERENTIAL mode~~ ➡️ Pulled to v0.11.0 | 2–3d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
+| ~~TS2~~ | ~~JOB (Join Order Benchmark): correctness baseline and refresh latency profiling~~ ➡️ Pulled to v0.11.0 | 1–2d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
 | TS3 | Nexmark streaming benchmark: sustained high-frequency DML correctness | 1–2d | [PLAN_TESTING_GAPS.md](plans/testing/PLAN_TESTING_GAPS.md) §J |
 
-> **External test suites subtotal: ~4–7 days**
+> **External test suites subtotal: ~1–2 days (TS3 only; TS1/TS2 in v0.11.0)**
 
 ### Integration & Release Prep
 
@@ -2227,7 +2317,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.8.0 — pg_dump Support & Test Hardening | ~16–21d | — | |
 | v0.9.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
 | v0.10.0 — DVM Hardening, Connection Pooler Compat, Core Refresh Opts & Infra Prep | ~7–10d + ~26–40 wk | — | |
-| v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana & Operational Scale | ~7–10 wk + ~12h | — | |
+| v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
 | v0.12.0 — Anomalous Change Detection, CDC Research & PG Backward Compat | ~13–19 wk + ~10–14h | — | |
 | v0.13.0 — Scalability Foundations & UNLOGGED Buffers | ~9–18 wk | — | |
 | v0.14.0 — Native DDL Syntax, External Test Suites & Integration | ~140–230h | — | |
