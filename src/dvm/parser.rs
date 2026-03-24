@@ -5181,13 +5181,6 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
     )> = Vec::new();
 
     for sq in &scalar_subqueries {
-        // Scalar subqueries with LIMIT/OFFSET cannot be rewritten as CROSS JOINs
-        // because the DVM parser rejects LIMIT inside FROM-clause subqueries.
-        // Leave them as opaque scalar subquery expressions in the WHERE clause —
-        // node_to_expr() deparses them as Expr::Raw and the filter is applied as-is.
-        if sq.has_limit_or_offset {
-            continue;
-        }
         if sq.is_correlated(&outer_tables) {
             // Dot-qualified correlation (e.g., "outer_table.col") — skip
             continue;
@@ -5228,16 +5221,30 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
         next_idx += 1;
         let sq_alias = format!("__pgt_sq_{idx}");
         let scalar_alias = format!("__pgt_scalar_{idx}");
-        let inner_alias = format!("__pgt_v_{idx}");
-        let inner_col = format!("__pgt_c_{idx}");
-        // The inner scalar subquery returns exactly 1 column and 1 row.
-        // We wrap it so the DVM parser sees a subquery with a valid FROM clause:
-        //   (SELECT v."c" AS "scalar" FROM (original_subquery) AS v("c")) AS "sq"
-        extra_joins.push(format!(
-            "CROSS JOIN (SELECT \"{inner_alias}\".\"{inner_col}\" AS \"{scalar_alias}\" \
-             FROM ({sq_sql}) AS \"{inner_alias}\"(\"{inner_col}\")) AS \"{sq_alias}\"",
-            sq_sql = sq.subquery_sql,
-        ));
+
+        if sq.has_limit_or_offset {
+            // Scalar subqueries with LIMIT/OFFSET cannot be nested inside a
+            // derived-table wrapper (the DVM parser rejects LIMIT in FROM-clause
+            // subqueries).  Use CROSS JOIN LATERAL instead: the inner SQL is
+            // evaluated as-is (LIMIT preserved) and the DVM registers the inner
+            // source in `subquery_source_oids`, enabling diff_lateral_subquery to
+            // re-evaluate ALL outer rows when the scalar source changes.
+            extra_joins.push(format!(
+                "CROSS JOIN LATERAL ({inner_sql}) AS \"{sq_alias}\"(\"{scalar_alias}\")",
+                inner_sql = sq.subquery_sql,
+            ));
+        } else {
+            let inner_alias = format!("__pgt_v_{idx}");
+            let inner_col = format!("__pgt_c_{idx}");
+            // The inner scalar subquery returns exactly 1 column and 1 row.
+            // We wrap it so the DVM parser sees a subquery with a valid FROM clause:
+            //   (SELECT v."c" AS "scalar" FROM (original_subquery) AS v("c")) AS "sq"
+            extra_joins.push(format!(
+                "CROSS JOIN (SELECT \"{inner_alias}\".\"{inner_col}\" AS \"{scalar_alias}\" \
+                 FROM ({sq_sql}) AS \"{inner_alias}\"(\"{inner_col}\")) AS \"{sq_alias}\"",
+                sq_sql = sq.subquery_sql,
+            ));
+        }
         let replacement = format!("\"{sq_alias}\".\"{scalar_alias}\"");
         where_replacements.push((sq.expr_sql.clone(), replacement));
     }
@@ -5536,12 +5543,38 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
 
         // ── Decorrelate this correlated scalar subquery ──────────────
 
-        // Scalar subqueries with LIMIT/OFFSET cannot be correctly decorrelated:
-        // removing the LIMIT from the derived-table rewrite changes semantics
-        // (e.g. ORDER BY … LIMIT 1 picks the top row; a full LEFT JOIN returns
-        // all matching rows from the same partition).  Leave them as opaque
-        // expressions so the DVM parser treats them as Expr::Raw.
+        // Correlated scalar subqueries with LIMIT/OFFSET cannot be correctly
+        // decorrelated by the standard LEFT JOIN + GROUP BY approach because
+        // removing LIMIT changes the semantics (e.g. ORDER BY … LIMIT 1 picks
+        // the top row per group; a plain LEFT JOIN with all matching rows is
+        // wrong).
+        //
+        // Instead, rewrite them as LEFT JOIN LATERAL, preserving the full inner
+        // SQL (including ORDER BY + LIMIT) so that PostgreSQL evaluates it
+        // correctly for each outer row.  The DVM handles LATERAL subqueries via
+        // `diff_lateral_subquery`, which correctly re-evaluates ALL affected
+        // outer rows when the inner source table changes.
         if !inner.limitCount.is_null() || !inner.limitOffset.is_null() {
+            let lat_idx = next_sq_idx;
+            next_sq_idx += 1;
+            let lat_alias = format!("__pgt_lat_{lat_idx}");
+            let scalar_alias = format!("__pgt_scalar_{lat_idx}");
+
+            // Use the original inner SQL verbatim inside a LATERAL subquery.
+            // The outer table alias (e.g. `i.category`) is a valid lateral
+            // reference and PostgreSQL evaluates it for every outer row.
+            let left_join_sql = format!(
+                "LEFT JOIN LATERAL ({inner_sql}) AS \"{lat_alias}\"(\"{scalar_alias}\") ON TRUE",
+                inner_sql = st.subquery_sql,
+            );
+            let scalar_ref = format!("\"{lat_alias}\".\"{scalar_alias}\"");
+
+            decorrelations.push(SelectScalarDecorrelation {
+                target_idx: st.target_idx,
+                left_join_sql,
+                scalar_ref,
+                alias: st.alias.clone(),
+            });
             continue;
         }
 
