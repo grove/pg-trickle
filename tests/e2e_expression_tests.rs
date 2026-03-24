@@ -1153,10 +1153,8 @@ async fn test_json_table_differential_mode() {
 async fn test_nullif_in_select_auto_mode_resolves_to_differential() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute(
-        "CREATE TABLE nullif_regr_src (id INT PRIMARY KEY, raw_rank TEXT, val INT)",
-    )
-    .await;
+    db.execute("CREATE TABLE nullif_regr_src (id INT PRIMARY KEY, raw_rank TEXT, val INT)")
+        .await;
     db.execute(
         "INSERT INTO nullif_regr_src VALUES \
          (1, '3', 100), (2, '', 200), (3, NULL, 300), (4, '1', 400)",
@@ -1173,8 +1171,7 @@ async fn test_nullif_in_select_auto_mode_resolves_to_differential() {
     let (status, mode, populated, errors) = db.pgt_status("nullif_regr_st").await;
     assert_eq!(status, "ACTIVE");
     assert_eq!(
-        mode,
-        "DIFFERENTIAL",
+        mode, "DIFFERENTIAL",
         "NULLIF in SELECT list must not prevent DIFFERENTIAL mode (AEXPR_NULLIF regression)"
     );
     assert!(populated);
@@ -1190,9 +1187,7 @@ async fn test_nullif_in_select_auto_mode_resolves_to_differential() {
     db.assert_st_matches_query("nullif_regr_st", q).await;
 
     let rank: Option<i64> = db
-        .query_scalar_opt(
-            "SELECT safe_rank FROM public.nullif_regr_st WHERE id = 2",
-        )
+        .query_scalar_opt("SELECT safe_rank FROM public.nullif_regr_st WHERE id = 2")
         .await;
     assert_eq!(rank, Some(5), "Updated NULLIF rank should be 5");
 }

@@ -169,10 +169,8 @@ async fn test_scalar_subquery_null_result_differential() {
 async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differential() {
     let db = E2eDb::new().await.with_extension().await;
 
-    db.execute(
-        "CREATE TABLE cssl_items (id INT PRIMARY KEY, category TEXT, score INT)",
-    )
-    .await;
+    db.execute("CREATE TABLE cssl_items (id INT PRIMARY KEY, category TEXT, score INT)")
+        .await;
     db.execute(
         "INSERT INTO cssl_items VALUES \
          (1, 'A', 10), (2, 'A', 30), (3, 'B', 20), (4, 'B', 5)",
@@ -194,8 +192,7 @@ async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differ
     let (status, mode, populated, errors) = db.pgt_status("cssl_st").await;
     assert_eq!(status, "ACTIVE");
     assert_eq!(
-        mode,
-        "DIFFERENTIAL",
+        mode, "DIFFERENTIAL",
         "Correlated scalar subquery with LIMIT must not prevent DIFFERENTIAL mode \
          (parse_scalar_target_subquery fallback regression)"
     );
@@ -213,9 +210,7 @@ async fn test_correlated_scalar_subquery_with_limit_auto_mode_resolves_to_differ
 
     // id=5 should now be the top_id for all category-A rows
     let top_for_id1: i32 = db
-        .query_scalar(
-            "SELECT top_id FROM public.cssl_st WHERE id = 1",
-        )
+        .query_scalar("SELECT top_id FROM public.cssl_st WHERE id = 1")
         .await;
     assert_eq!(top_for_id1, 5, "Category A top_id should be 5 after insert");
 }
