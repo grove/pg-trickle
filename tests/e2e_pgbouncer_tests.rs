@@ -239,11 +239,11 @@ async fn test_pgbouncer_basic_connectivity() {
     let db = PgBouncerTestDb::new().await;
 
     // Direct connection should work
-    let direct: i64 = db.admin_query_scalar("SELECT 1").await;
+    let direct: i32 = db.admin_query_scalar("SELECT 1").await;
     assert_eq!(direct, 1);
 
     // PgBouncer connection should work
-    let bouncer: i64 = db.bouncer_query_scalar("SELECT 1").await;
+    let bouncer: i32 = db.bouncer_query_scalar("SELECT 1").await;
     assert_eq!(bouncer, 1);
 
     // Extension catalog should be visible through PgBouncer
