@@ -503,8 +503,8 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
             .await;
     }
 
-    // Wait for the cascade
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    // Wait for the full cascade to propagate through all 3 layers
+    wait_for_refresh_cycle(&db, "prop_auto_l3", Duration::from_secs(30)).await;
 
     for cycle in 1..=(config.cycles / 2).max(1) {
         let op = rng.usize_range(0, 100);
@@ -527,8 +527,8 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
             }
         }
 
-        // Wait to allow auto-refresh
-        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        // Wait for the cascade to propagate the DML change
+        wait_for_refresh_cycle(&db, "prop_auto_l3", Duration::from_secs(30)).await;
 
         assert_st_query_invariants(&db, &AUTO_INVARIANTS, seed, cycle, "auto").await;
     }
