@@ -1605,12 +1605,47 @@ impl OpTree {
                 // population would hit duplicate __pgt_row_id values. Those
                 // shapes must fall back to the generic row_number()-based
                 // hash via `None` instead.
+                //
+                // Exception: Project(Filter(Scan)) where the Filter exposes
+                // WHERE-clause columns in its output (needed by the predicate
+                // but not in the SELECT list). Standard positional mapping is
+                // unreliable here, but we can still recover the correct
+                // PK-based row_id by mapping child key columns through the
+                // explicit Project expressions. This case is critical for
+                // queries like `SELECT id, val AS vb FROM t WHERE side >= 2`
+                // where the differential refresh uses PK-based hash(id) and
+                // the full refresh must produce the same value.
                 if child_out.len() != aliases.len() {
-                    return if matches!(unwrapped, OpTree::CteScan { .. }) {
-                        Some(aliases.clone())
-                    } else {
-                        None
-                    };
+                    if matches!(unwrapped, OpTree::CteScan { .. }) {
+                        return Some(aliases.clone());
+                    }
+                    // Try expression-based key column mapping: for each child
+                    // key column, find the Project expression that outputs it
+                    // (as a plain ColumnRef) and map to the corresponding alias.
+                    if let Some(child_keys) = child.row_id_key_columns() {
+                        let mapped: Vec<String> = child_keys
+                            .iter()
+                            .filter_map(|k| {
+                                let pos = expressions.iter().position(|expr| {
+                                    matches!(
+                                        expr,
+                                        Expr::ColumnRef { column_name, .. }
+                                            if column_name == k
+                                    )
+                                })?;
+                                aliases.get(pos).cloned()
+                            })
+                            .collect();
+                        let out = self.output_columns();
+                        // Only accept if ALL key columns were mapped and all
+                        // mapped names appear in the projected output.
+                        if mapped.len() == child_keys.len()
+                            && mapped.iter().all(|m| out.contains(m))
+                        {
+                            return Some(mapped);
+                        }
+                    }
+                    return None;
                 }
                 match child.row_id_key_columns() {
                     Some(keys) => {
@@ -16919,6 +16954,74 @@ mod tests {
             tree.row_id_key_columns(),
             Some(vec!["id".to_string(), "active".to_string()])
         );
+    }
+
+    #[test]
+    fn test_row_id_key_columns_project_filter_scan_where_not_in_select() {
+        // Regression test: SELECT id, val AS vb FROM t WHERE side >= 2
+        // The Filter exposes all Scan columns (id, val, side) in its output,
+        // but the Project aliases only contain (id, vb) — 2 items vs 3 in
+        // child_out. Previously this caused row_id_key_columns() to return
+        // None, leading to row_to_json-based __pgt_row_id in the full refresh
+        // but PK-hash-based in the differential, causing MERGE mismatches and
+        // stale rows after UPDATEs that change the WHERE-clause column.
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".to_string(),
+            schema: "public".to_string(),
+            columns: vec![
+                make_column("id"),
+                make_column("val"),
+                make_column("side"),
+            ],
+            pk_columns: vec!["id".to_string()],
+            alias: "t".to_string(),
+        };
+        let filter = OpTree::Filter {
+            predicate: Expr::BinaryOp {
+                op: ">=".to_string(),
+                left: Box::new(col("side")),
+                right: Box::new(Expr::Literal("2".to_string())),
+            },
+            child: Box::new(scan),
+        };
+        let tree = OpTree::Project {
+            expressions: vec![col("id"), col("val")],
+            aliases: vec!["id".to_string(), "vb".to_string()],
+            child: Box::new(filter),
+        };
+        // Must return Some(["id"]) — the PK, not None.
+        assert_eq!(tree.row_id_key_columns(), Some(vec!["id".to_string()]));
+    }
+
+    #[test]
+    fn test_row_id_key_columns_project_filter_scan_pk_not_projected_returns_none() {
+        // When the PK column is NOT in the SELECT list, the row_id key
+        // cannot be determined — return None so the fallback row_to_json
+        // hash is used consistently for both full and differential refresh.
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".to_string(),
+            schema: "public".to_string(),
+            columns: vec![
+                make_column("id"),
+                make_column("name"),
+                make_column("amount"),
+            ],
+            pk_columns: vec!["id".to_string()],
+            alias: "t".to_string(),
+        };
+        let filter = OpTree::Filter {
+            predicate: col("amount"),
+            child: Box::new(scan),
+        };
+        // SELECT name FROM t WHERE amount > 0 — PK "id" is NOT projected.
+        let tree = OpTree::Project {
+            expressions: vec![col("name")],
+            aliases: vec!["name".to_string()],
+            child: Box::new(filter),
+        };
+        assert_eq!(tree.row_id_key_columns(), None);
     }
 
     #[test]
