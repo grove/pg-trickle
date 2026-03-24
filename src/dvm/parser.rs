@@ -8921,6 +8921,24 @@ fn deparse_select_to_sql(select_node: *mut pg_sys::Node) -> Result<String, PgTri
         sql.push_str(&format!(" HAVING {}", having_expr.to_sql()));
     }
 
+    // Deparse ORDER BY
+    let order = deparse_order_clause(select);
+    if !order.is_empty() {
+        sql.push_str(&order);
+    }
+
+    // Deparse LIMIT
+    if !select.limitCount.is_null() {
+        let limit_expr = unsafe { node_to_expr(select.limitCount)? };
+        sql.push_str(&format!(" LIMIT {}", limit_expr.to_sql()));
+    }
+
+    // Deparse OFFSET
+    if !select.limitOffset.is_null() {
+        let offset_expr = unsafe { node_to_expr(select.limitOffset)? };
+        sql.push_str(&format!(" OFFSET {}", offset_expr.to_sql()));
+    }
+
     Ok(sql)
 }
 
