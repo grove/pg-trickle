@@ -1874,6 +1874,76 @@ revert if needed.
 
 > **Safety hardening subtotal: ~7–12 hours**
 
+### Correctness & Code Quality Quick Wins (from REPORT_OVERALL_STATUS.md §12–§15)
+
+> **In plain terms:** Six self-contained improvements identified in the deep gap
+> analysis. Each takes under a day and substantially reduces silent failure
+> modes, operator confusion, and diagnostic friction.
+
+#### Quick Fixes (< 1 hour each)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| QF-1 | **Fix unguarded debug `println!`.** `refresh.rs:2269` emits `println!("MERGE SQL TEMPLATE:\n{}")` on every refresh cycle, visible in PostgreSQL server logs. Replace with `pgrx::log!()` guarded by a new `pg_trickle.log_merge_sql` GUC (default `off`). | ~30 min | [src/refresh.rs](src/refresh.rs) |
+| QF-2 | **Upgrade AUTO mode downgrade log level.** When DIFFERENTIAL mode silently falls back to FULL, the log message is currently `info!()` — invisible at default logging levels. Raise to `warning!()`. | ~30 min | [plans/performance/REPORT_OVERALL_STATUS.md §12](plans/performance/REPORT_OVERALL_STATUS.md) |
+| QF-3 | **Warn when `append_only` auto-reverts.** When a stream table configured with `append_only=true` receives a DELETE or UPDATE and silently reverts the flag to `false`, emit a `WARNING` identifying the table and the operation. | ~30 min | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| QF-4 | **Document parser `unwrap()` invariants.** Four `unwrap()` sites in `dvm/parser.rs` (lines 7123, 9048, 9389, 14324) are genuinely unreachable given validated input, but lack an `// INVARIANT:` comment. Add comments explaining why each is safe. | ~1–2h | [src/dvm/parser.rs](src/dvm/parser.rs) |
+
+> **Quick-fix subtotal: ~3–4 hours**
+
+#### Effective Refresh Mode Tracking (G12-ERM)
+
+> **In plain terms:** When a stream table is configured as `AUTO`, operators
+> currently have no way to discover which mode is *actually* being used at
+> runtime without reading warning logs. Storing the resolved mode in the catalog
+> and exposing a diagnostic function closes this observability gap.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G12-ERM-1 | Add `effective_refresh_mode` column to `pgt_stream_tables`; populate on each refresh with the resolved mode (`'FULL'` or `'DIFFERENTIAL'`). | ~2–3h | [src/catalog.rs](src/catalog.rs) |
+| G12-ERM-2 | Add `explain_refresh_mode(name TEXT)` SQL function — returns a human-readable explanation of the current mode (configured, effective, downgrade reason if any). | ~2–4h | [plans/performance/REPORT_OVERALL_STATUS.md §12](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Effective refresh mode subtotal: ~4–7 hours**
+
+#### Correctness Guards (G12-2, G12-AGG)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G12-2 | **TopK runtime validation.** The TopK refresh path in `refresh.rs` validates its `LIMIT`/`OFFSET` assumption only at creation time. Add a runtime assertion on each refresh; if the assumption is violated, fall back to FULL refresh with a `WARNING` rather than silently returning incorrect results. | ~2h | [src/refresh.rs](src/refresh.rs) |
+| G12-AGG | **Group-rescan aggregate warning.** At `create_stream_table` time, when the query uses a group-rescan aggregate (`STRING_AGG`, `ARRAY_AGG`, `JSON_AGG`, `JSONB_AGG`, `JSONB_OBJECT_AGG`, `BIT_AND`, `BIT_OR`, `BOOL_AND`, `BOOL_OR`, `XML_AGG`, `RANGE_AGG`) in `DIFFERENTIAL` mode, emit a `WARNING` explaining that these require a full re-aggregation of the group on every delta. Also expose the aggregate strategy classification in `explain_st()`. | ~3–4h | [plans/performance/REPORT_OVERALL_STATUS.md §12](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Correctness guards subtotal: ~5–6 hours**
+
+#### Parameter & Error Hardening (G15-PV, G13-EH)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G15-PV | **Validate incompatible parameter combinations.** At `create_stream_table` and `alter_stream_table` time, reject: (a) `cdc_mode='wal'` combined with `refresh_mode='IMMEDIATE'` (WAL-based CDC cannot deliver synchronous IMMEDIATE refresh), (b) `diamond_schedule_policy` set to a non-default value without `diamond_consistency='atomic'`. Return a structured error with `DETAIL` + `HINT` explaining the fix. | ~2–4h | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G13-EH | **Structured error HINT/DETAIL fields.** Add PostgreSQL `DETAIL` and `HINT` fields to the four most user-facing errors: `UnsupportedOperator`, `CycleDetected`, `UpstreamSchemaChanged`, and `QueryParseError`. Replace bare `ereport!(ERROR, errmsg(…))` with full `errdetail(…)` + `errhint(…)` so `psql` and client drivers surface actionable guidance. | ~4–8h | [src/error.rs](src/error.rs) |
+
+> **Parameter & error hardening subtotal: ~6–12 hours**
+
+#### Testing: EC-01 Boundary Regression (G17-EC01B-NEG)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G17-EC01B-NEG | Add a negative regression test asserting that ≥3-scan join right subtrees currently fall back to FULL refresh (not phantom-row drop). Include a `// TODO: Remove this test when EC01B-1/EC01B-2 are fixed in v0.12.0` comment. | ~2h | `tests/e2e_dvm_tests.rs` |
+
+> **EC-01 boundary regression subtotal: ~2 hours**
+
+#### Documentation Quick Wins (G16-GS, G16-SM, G16-MQR, G15-GUC)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G16-GS | **Restructure `GETTING_STARTED.md` with progressive complexity.** Five chapters: (1) Hello World — single-table ST with no join; (2) Multi-table join; (3) Scheduling & backpressure; (4) Monitoring — 5 key functions; (5) Advanced — FUSE, wide bitmask, partitions. Remove the current flat wall-of-SQL structure. | ~1–2d | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) |
+| G16-SM | **SQL/mode operator support matrix.** Add a table to `docs/DVM_OPERATORS.md`: rows = SQL construct, columns = `FULL` / `DIFFERENTIAL` / `AUTO` / `IMMEDIATE`; cells = ✅ / ⚠️ caveat / ❌ unsupported, with footnotes for caveats. | ~4–8h | [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) |
+| G16-MQR | **Monitoring quick reference.** Add a "Monitoring Quick Reference" section to `docs/GETTING_STARTED.md` covering `stream_table_status()`, `change_buffer_stats()`, `refresh_history()`, `refresh_metrics()`, and `scheduler_status()` with one-line examples. | ~2h | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) |
+| G15-GUC | **GUC interaction matrix.** Add to `docs/CONFIGURATION.md`: a matrix of GUCs with cross-dependencies (which GUCs interact, which override others), plus three named tuning profiles (low-latency, high-throughput, balanced). | ~4h | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+
+> **Documentation subtotal: ~2–3 days**
+
+> **Correctness quick-wins & documentation subtotal: ~1–2 days code + ~2–3 days docs**
+
 ### Should-Ship Additions
 
 #### Wider Changed-Column Bitmask (>63 columns)
@@ -1934,7 +2004,7 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 
 > **Stretch subtotal: ~2–3 weeks (STRETCH-1) + 2–4 days (STRETCH-2 spike)**
 
-> **v0.11.0 total: ~7–10 weeks (partitioning + isolation) + ~12h observability + ~14–21h default tuning + ~7–12h safety hardening + ~2–4 weeks should-ship (bitmask + fuse + external corpus)**
+> **v0.11.0 total: ~7–10 weeks (partitioning + isolation) + ~12h observability + ~14–21h default tuning + ~7–12h safety hardening + ~2–4 weeks should-ship (bitmask + fuse + external corpus) + ~1–2 days correctness quick-wins + ~2–3 days documentation**
 
 **Exit criteria:**
 - [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog *(or STRETCH-2 design spike complete with RFC)*
@@ -1950,6 +2020,14 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 - [ ] WB-1+2: Changed-column bitmask supports >63 columns; wide-table CDC selectivity E2E passes; schema migration tested
 - [ ] FUSE-1–6: Fuse blows on configurable change-count threshold; `reset_fuse()` recovers in all three action modes; diamond/DAG interaction tested
 - [ ] TS1 or TS2: At least one external query corpus passes with zero correctness mismatches in DIFFERENTIAL mode
+- [ ] QF-1–4: `println!` replaced with guarded `pgrx::log!()`; AUTO downgrades emit `WARNING`; `append_only` reversion emits `WARNING`; parser invariant sites annotated
+- [ ] G12-ERM: `effective_refresh_mode` column present in `pgt_stream_tables`; `explain_refresh_mode()` returns resolved mode with downgrade reason
+- [ ] G12-2: TopK path validates assumptions at refresh time; triggers FULL fallback with `WARNING` on violation
+- [ ] G12-AGG: Group-rescan aggregate warning fires at `create_stream_table` for DIFFERENTIAL mode; strategy visible in `explain_st()`
+- [ ] G15-PV: Incompatible `cdc_mode`/`refresh_mode` and `diamond_schedule_policy` combinations rejected at creation time with structured `HINT`
+- [ ] G13-EH: `UnsupportedOperator`, `CycleDetected`, `UpstreamSchemaChanged`, `QueryParseError` include `DETAIL` and `HINT` fields
+- [ ] G17-EC01B-NEG: Negative regression test documents ≥3-scan fall-back behavior; linked to v0.12.0 EC01B fix
+- [ ] G16-GS/SM/MQR/GUC: GETTING_STARTED restructured with progressive complexity; DVM_OPERATORS support matrix added; monitoring quick reference added; CONFIGURATION.md GUC matrix added
 - [ ] Extension upgrade path tested (`0.10.0 → 0.11.0`)
 
 ---
@@ -2022,6 +2100,40 @@ action.
 | BENCH-W2 | Publish results in `docs/BENCHMARK.md`; if WAL overhead > 30% of trigger cost, implement `pg_trickle.change_buffer_unlogged` GUC (`'off'` default; `'on'` unlogged; `'auto'` for high-throughput sources) | 1–2d | [PLAN_TRIGGERS_OVERHEAD.md](plans/performance/PLAN_TRIGGERS_OVERHEAD.md) |
 
 > **CDC write-side benchmark subtotal: ~3–5 days**
+
+### Developer Tooling & Observability Functions (from REPORT_OVERALL_STATUS.md §15)
+
+> **In plain terms:** pg_trickle's diagnostic toolbox today is limited to
+> `explain_st()` and `refresh_history()`. Operators debugging unexpected mode
+> changes, query rewrites, or error patterns must read source code or server
+> logs. This section adds four SQL-callable diagnostic functions that surface
+> internal state in a structured, queryable form.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DT-1 | **`explain_query_rewrite(query TEXT)`** — parse a query through the DVM pipeline and return the rewritten SQL plus a list of passes applied (operator rewrites, delta-key injections, TopK detection, group-rescan classification). Useful for debugging unexpected refresh behavior without creating a stream table. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| DT-2 | **`diagnose_errors(name TEXT)`** — return the last 5 error events for a stream table, classified by type (correctness, performance, config, infrastructure), with a suggested remediation for each class. | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| DT-3 | **`list_auxiliary_columns(name TEXT)`** — list all `__pgt_*` internal columns injected into the stream table's query plan with their purpose (delta tracking, row identity, compaction key). Helps users understand unexpected columns in `SELECT *` output. | ~1d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| DT-4 | **`validate_query(query TEXT)`** — parse and run DVM validation on a query without creating a stream table; return the resolved refresh mode, detected SQL constructs (group-rescan aggregates, non-equijoins, multi-scan subtrees), and any warnings. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Developer tooling subtotal: ~5–8 days**
+
+### Parser Safety, Concurrency & Query Coverage (from REPORT_OVERALL_STATUS.md §13/§12/§17)
+
+> Additional correctness and robustness items from the deep gap analysis:
+> a stack-overflow prevention guard for pathological queries, a concurrency
+> stress test for IMMEDIATE mode, and two investigations into known under-
+> documented query constructs.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G13-SD | **Parser recursion depth limit.** Add a recursion depth counter to all recursive parse-tree visitor functions in `dvm/parser.rs`. Return `PgTrickleError::QueryTooComplex` if depth exceeds `pg_trickle.max_parse_depth` (GUC, default 64). Prevents stack-overflow crashes on pathological queries. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G17-IMS | **IMMEDIATE mode concurrency stress test.** 100+ concurrent DML transactions on the same source table in `IMMEDIATE` refresh mode; assert zero lost updates, zero phantom rows, and no deadlocks. | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G12-SQL-IN | **Multi-column `IN (subquery)` correctness investigation.** Determine behavior when DVM encounters `EXPR IN (subquery returning multiple columns)`. Add a correctness test; if the construct is broken, fix it or document as unsupported with a structured error. | ~2–4d | [plans/performance/REPORT_OVERALL_STATUS.md §12](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G14-MDED | **MERGE deduplication profiling.** Profile how often concurrent-write scenarios produce duplicate key entries requiring pre-MERGE compaction. If ≥10% of refresh cycles need dedup, write an RFC for a two-pass MERGE strategy. | ~3–5d | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G17-MERGEEX | **MERGE template EXPLAIN validation in E2E tests.** Add `EXPLAIN (COSTS OFF)` dry-run checks for generated MERGE SQL templates at E2E test startup. Catches malformed templates before any data is processed. | ~1d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Parser safety & coverage subtotal: ~9–15 days**
 
 ### Differential Fuzzing (SQLancer)
 
@@ -2119,7 +2231,7 @@ large design changes; all build on existing infrastructure.
 
 > **Performance defaults & scalability subtotal: ~5–9 weeks**
 
-> **v0.12.0 total: ~18–27 weeks + ~5–9 weeks defaults/scalability**
+> **v0.12.0 total: ~18–27 weeks + ~5–9 weeks defaults/scalability + ~3–5 weeks developer tooling & observability**
 
 **Exit criteria:**
 - [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers *(skip if FUSE-1–6 shipped in v0.11.0)*
@@ -2136,6 +2248,12 @@ large design changes; all build on existing infrastructure.
 - [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
 - [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
 - [x] ~~PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested~~ ➡️ Pulled to v0.11.0 as WB-1/WB-2
+- [ ] DT-1–4: `explain_query_rewrite()`, `diagnose_errors()`, `list_auxiliary_columns()`, `validate_query()` all callable from SQL; each returns structured data
+- [ ] G13-SD: Parse-tree visitors enforce `max_parse_depth`; pathological query returns `QueryTooComplex` error rather than stack overflow
+- [ ] G17-IMS: IMMEDIATE mode concurrency stress test passes with 100+ concurrent DML transactions
+- [ ] G12-SQL-IN: Multi-column IN subquery behavior documented or fixed; regression test added
+- [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
+- [ ] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup
 - [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
 
 ---
@@ -2183,13 +2301,37 @@ buffers for reduced WAL amplification.
 
 > **D-1 subtotal: ~1–2 weeks**
 
-> **v0.13.0 total: ~9–18 weeks**
+### Documentation: Best-Practice Patterns Guide (G16-PAT)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G16-PAT | **Best-practice patterns guide.** Add `docs/PATTERNS.md`: bronze/silver/gold materialization strategies, event-sourcing pattern with ST as the projection layer, SCD type-1 and type-2, high-fan-out topology patterns. Each pattern includes worked SQL examples, anti-patterns, and a recommendation on which refresh mode to use. | ~1wk | [plans/performance/REPORT_OVERALL_STATUS.md §16](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Patterns guide subtotal: ~1 week**
+
+### Long-Running Stability & Multi-Database Testing (G17-SOAK, G17-MDB)
+
+> **In plain terms:** By v0.13.0 the core engine is mature enough to warrant
+> a 24-hour continuous-integration soak test and a multi-database isolation
+> test. Both gaps were identified in the §17 testing analysis.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G17-SOAK | **Long-running stability soak test.** 24h+ continuous mixed DML on 5+ source tables with `DIFFERENTIAL` refresh and Fuse enabled; assert zero worker crashes, zero zombie stream tables, and stable memory usage throughout. | ~1–2d setup | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G17-MDB | **Multi-database scheduler isolation test.** Two separate databases in the same PG cluster each with independent pg_trickle background workers; assert that one database's scheduler activity does not interfere with the other's worker quotas or shared-memory state. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Stability & multi-database testing subtotal: ~2–4 days**
+
+> **v0.13.0 total: ~9–18 weeks + ~1wk patterns guide + ~2–4 days stability tests**
 
 **Exit criteria:**
 - [ ] A-2: Bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
 - [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
 - [ ] D-1: UNLOGGED change buffers opt-in (`unlogged_buffers = false` by default); crash-recovery FULL-refresh path tested
+- [ ] G16-PAT: Patterns guide published in `docs/PATTERNS.md` covering at least 4 patterns (bronze/silver/gold, event sourcing, SCD type-1, SCD type-2)
+- [ ] G17-SOAK: 24h soak test passes with zero worker crashes, zero zombie stream tables, stable memory usage
+- [ ] G17-MDB: Multi-database scheduler isolation verified; no cross-database quota interference
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
 ---
@@ -2366,6 +2508,31 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
 | A6 | Buffer table partitioning by LSN range (`pg_trickle.buffer_partitioning` GUC) | ~3–4d | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.3 |
 | A8 | `ROWS FROM()` with multiple SRF functions — very low demand, deferred | ~1–2d | [PLAN_TRANSACTIONAL_IVM_PART_2.md](plans/sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) Task 2.3 |
+
+### Parser Modularization & Shared Template Cache (G13-PRF, G14-SHC)
+
+> **In plain terms:** Two large-effort research items identified in the deep gap
+> analysis. Parser modularization is a prerequisite for native DDL syntax (BC2);
+> shared template caching eliminates per-connection cold-start overhead.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G13-PRF | **Modularize `src/dvm/parser.rs`.** At ~19,700 lines (25% of all source), `parser.rs` is too large to maintain safely. Split into sub-modules by SQL construct: `parser/joins.rs`, `parser/aggregates.rs`, `parser/ctes.rs`, `parser/window.rs`, `parser/subqueries.rs`. No behavior change; prerequisite for BC2 (native DDL syntax). | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G14-SHC | **Shared-memory template caching (research spike).** Evaluate eliminating the per-connection MERGE SQL cold-start (~15–50ms overhead) via PostgreSQL DSM + lwlock. Write an RFC before implementing; validate with a prototype benchmark. | ~2–3wk | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Parser modularization & caching research subtotal: ~5–7 weeks**
+
+### Convenience API Functions (G15-BC, G15-EX)
+
+> **In plain terms:** Two quality-of-life API additions that simplify
+> programmatic stream table management, useful for dbt/CI pipelines.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| G15-BC | **`bulk_create(definitions JSONB)`** — create multiple stream tables and their CDC triggers in a single transaction. Useful for dbt/CI pipelines that manage many STs programmatically. | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G15-EX | **`export_definition(name TEXT)`** — export a stream table configuration as reproducible `CREATE STREAM TABLE … WITH (…)` DDL. Useful for backup, versioning, and schema migrations. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Convenience API subtotal: ~3–5 days**
 
 ---
 
