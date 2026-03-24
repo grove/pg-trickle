@@ -478,8 +478,58 @@ JOIN {delta_right} dr ON {cond}",
         } else {
             String::new()
         }
+    } else if use_r0 && is_simple_child(left) {
+        // EC-02: simultaneous left-key + right-value changes (Scan ⋈ Scan).
+        //
+        // When Part 1 is split into 1a/1b (use_r0=true) AND Part 2 uses
+        // L₀ via EXCEPT ALL (use_l0=true, left is a simple Scan), the
+        // combined formula is:
+        //
+        //   Part 1a: ΔL_I ⋈ R₁  = ΔL_I ⋈ R₀ + ΔL_I ⋈ ΔR_I - ΔL_I ⋈ ΔR_D
+        //   Part 1b: ΔL_D ⋈ R₀
+        //   Part 2:  L₀ ⋈ ΔR_I - L₀ ⋈ ΔR_D
+        //
+        // Summing: ΔL ⋈ R₀ + L₀ ⋈ ΔR + ΔL_I ⋈ ΔR_I - ΔL_I ⋈ ΔR_D
+        //
+        // The correct formula requires: ΔL ⋈ R₀ + L₀ ⋈ ΔR + (ΔL_I - ΔL_D) ⋈ (ΔR_I - ΔR_D)
+        //
+        // Missing term: -ΔL_D ⋈ ΔR_I + ΔL_D ⋈ ΔR_D
+        //
+        // Fix: emit correction rows for each (dl WHERE action='D') ⋈ dr with
+        // flipped dr action, producing the missing -ΔL_D ⋈ ΔR_I + ΔL_D ⋈ ΔR_D.
+        //
+        // Example: d4_left.key 2→4, d4_right.val changes (key stays at 2)
+        //   ΔL = {D(id=3, key=2), I(id=3, key=4)}, ΔR = {D(id=7, key=2), I(id=7, key=2)}
+        //   Part 1b: D(lid=3, rid=7)
+        //   Part 2:  D(lid=3, rid=7) + I(lid=3, rid=7, new_rv)  ← spurious INSERT
+        //   Correction: I(lid=3, rid=7) + D(lid=3, rid=7, new_rv)
+        //   Net: D=−1−1+1=−1 ✓; I(new_rv)=+1−1=0 (cancelled) ✓
+        let cond = rewrite_join_condition(condition, left, "dl", right, "dr");
+        // delta_left is referenced in Part 1a/1b and correction; mark NOT MATERIALIZED.
+        ctx.mark_cte_not_materialized(&left_result.cte_name);
+        let hash_correction =
+            "pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, dr.__pgt_row_id::TEXT])"
+                .to_string();
+        format!(
+            "
+
+UNION ALL
+
+-- Part 3: EC-02 correction — cancel -ΔL_D ⋈ ΔR_I and add ΔL_D ⋈ ΔR_D.
+-- When Part 1 uses R₁ for inserts (1a) and R₀ for deletes (1b), the
+-- cross-term ΔL_D ⋈ ΔR is double-counted. Flip dr actions to cancel.
+SELECT {hash_correction} AS __pgt_row_id,
+       CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END AS __pgt_action,
+       {all_cols_correction}
+FROM {delta_left} dl
+JOIN {delta_right} dr ON {cond}
+WHERE dl.__pgt_action = 'D'",
+            delta_left = left_result.cte_name,
+            delta_right = right_result.cte_name,
+        )
     } else {
-        // L₀ is used directly — no correction needed.
+        // L₀ is used directly, Part 1 not split or left is nested join —
+        // no correction needed for this combination.
         String::new()
     };
 
@@ -950,8 +1000,13 @@ mod tests {
         assert_sql_contains(&sql, "Part 2");
         // L₀ uses EXCEPT ALL for the pre-change snapshot
         assert_sql_contains(&sql, "EXCEPT ALL");
-        // No correction term — L₀ is exact for non-SemiJoin join children
-        assert_sql_not_contains(&sql, "Part 3");
+        // Outer join: left child is a nested join (not a Scan), so the
+        // outer join's CTE does NOT emit an EC-02 correction.
+        // (The inner 2-Scan join may have its own EC-02 correction.)
+        let outer_cte_marker = format!("{} AS", dr.cte_name);
+        let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
+        assert_sql_not_contains(outer_sql, "EC-02 correction");
+        assert_sql_not_contains(outer_sql, "Correction for nested join");
     }
 
     #[test]
@@ -994,9 +1049,12 @@ mod tests {
 
         // L₀ via EXCEPT ALL should be present in the outer join's Part 2
         assert_sql_contains(&sql, "EXCEPT ALL");
-        // No correction term — L₀ is exact
-        assert_sql_not_contains(&sql, "Correction for nested join");
-        assert_sql_not_contains(&sql, "Part 3");
+        // Outer join: left is nested join (not Scan) → no EC-02 or L₁ correction.
+        // (The inner 2-Scan join may have its own EC-02 correction.)
+        let outer_cte_marker = format!("{} AS", result.cte_name);
+        let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
+        assert_sql_not_contains(outer_sql, "Correction for nested join");
+        assert_sql_not_contains(outer_sql, "EC-02 correction");
         // Should still have valid structure: Part 1 + Part 2
         assert_sql_contains(&sql, "Part 1");
         assert_sql_contains(&sql, "Part 2");
@@ -1004,7 +1062,8 @@ mod tests {
 
     #[test]
     fn test_diff_inner_join_scan_no_correction() {
-        // For Scan left child, no Part 3 correction should be present
+        // For Scan ⋈ Scan, EC-02 correction IS present (simultaneous change fix).
+        // The old "Correction for nested join" (L₁ path) should NOT appear.
         let left = scan(1, "orders", "public", "o", &["id", "cust_id"]);
         let right = scan(2, "customers", "public", "c", &["id", "name"]);
         let cond = eq_cond("o", "cust_id", "c", "id");
@@ -1014,9 +1073,9 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Part 3 correction should NOT appear in the join CTE.
-        // Note: we check for the specific Part 3 comment marker, excluding
-        // UNION ALL counts which are inflated by scan delta CTEs.
+        // EC-02 correction is present for Scan ⋈ Scan (simultaneous-change fix).
+        assert_sql_contains(&sql, "EC-02 correction");
+        // L₁-based correction (for nested join children) should NOT appear.
         assert_sql_not_contains(&sql, "Correction for nested join");
     }
 

@@ -129,27 +129,28 @@ impl PgBouncerTestDb {
             .expect("CREATE EXTENSION failed");
 
         // ── Start PgBouncer in transaction mode ────────────────────────
-        // bitnami/pgbouncer uses env vars for configuration.
-        // `PGBOUNCER_DATABASE = *`  → wildcard pass-through of all databases
-        // `PGBOUNCER_POOL_MODE = transaction`  → the mode we want to test
-        let pgb_container = GenericImage::new("bitnami/pgbouncer", "1")
-            .with_exposed_port(6432_u16.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("pgbouncer start"))
-            .with_env_var("PGBOUNCER_DATABASE", "*")
-            .with_env_var("POSTGRESQL_HOST", &pg_hostname)
-            .with_env_var("POSTGRESQL_PORT", "5432")
-            .with_env_var("POSTGRESQL_USERNAME", "postgres")
-            .with_env_var("POSTGRESQL_PASSWORD", "postgres")
-            .with_env_var("PGBOUNCER_POOL_MODE", "transaction")
-            .with_env_var("PGBOUNCER_MAX_CLIENT_CONN", "100")
-            .with_env_var("PGBOUNCER_DEFAULT_POOL_SIZE", "20")
+        // edoburu/pgbouncer uses env vars for configuration.
+        // `DB_HOST` / `DB_USER` / `DB_PASSWORD` → upstream connection
+        // `POOL_MODE = transaction`  → the mode we want to test
+        // Default listen port is 5432.
+        let pgb_container = GenericImage::new("edoburu/pgbouncer", "latest")
+            .with_exposed_port(5432_u16.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("process up"))
+            .with_env_var("DB_HOST", &pg_hostname)
+            .with_env_var("DB_PORT", "5432")
+            .with_env_var("DB_USER", "postgres")
+            .with_env_var("DB_PASSWORD", "postgres")
+            .with_env_var("POOL_MODE", "transaction")
+            .with_env_var("MAX_CLIENT_CONN", "100")
+            .with_env_var("DEFAULT_POOL_SIZE", "20")
+            .with_env_var("AUTH_TYPE", "plain")
             .with_network(&network.name)
             .start()
             .await
             .expect("Failed to start PgBouncer container");
 
         let pgb_host_port = pgb_container
-            .get_host_port_ipv4(6432)
+            .get_host_port_ipv4(5432)
             .await
             .expect("failed to get PgBouncer host port");
 
@@ -238,11 +239,11 @@ async fn test_pgbouncer_basic_connectivity() {
     let db = PgBouncerTestDb::new().await;
 
     // Direct connection should work
-    let direct: i64 = db.admin_query_scalar("SELECT 1").await;
+    let direct: i32 = db.admin_query_scalar("SELECT 1").await;
     assert_eq!(direct, 1);
 
     // PgBouncer connection should work
-    let bouncer: i64 = db.bouncer_query_scalar("SELECT 1").await;
+    let bouncer: i32 = db.bouncer_query_scalar("SELECT 1").await;
     assert_eq!(bouncer, 1);
 
     // Extension catalog should be visible through PgBouncer

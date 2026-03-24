@@ -484,9 +484,12 @@ pub fn compact_change_buffer(
     // Advisory lock keyed on source OID to serialise with refresh.
     // Use a fixed namespace offset to avoid collisions with other locks.
     let lock_key = 0x5047_5400_i64 | (source_oid as i64);
-    let got_lock = Spi::get_one::<bool>(&format!("SELECT pg_try_advisory_xact_lock({lock_key})"))
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
+    let got_lock = Spi::get_one_with_args::<bool>(
+        "SELECT pg_try_advisory_xact_lock($1::bigint)",
+        &[lock_key.into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
 
     if !got_lock {
         pgrx::debug1!(
@@ -2184,11 +2187,15 @@ pub fn setup_matview_polling(
             PgTrickleError::NotFound(format!("Materialized view with OID {oid_u32} not found"))
         })?;
 
+        // nosemgrep: rust.spi.run.dynamic-format — DDL (LIKE) cannot use
+        // parameterized queries; snapshot_table is built from a PG OID and
+        // source_table is oid::regclass::text, both extension-controlled.
         Spi::run(&format!(
             "CREATE TABLE IF NOT EXISTS {snapshot_table} (LIKE {source_table} INCLUDING ALL)"
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
+        // nosemgrep: rust.spi.run.dynamic-format — same rationale as above.
         Spi::run(&format!(
             "INSERT INTO {snapshot_table} SELECT * FROM {source_table}"
         ))

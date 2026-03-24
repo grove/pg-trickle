@@ -1605,12 +1605,47 @@ impl OpTree {
                 // population would hit duplicate __pgt_row_id values. Those
                 // shapes must fall back to the generic row_number()-based
                 // hash via `None` instead.
+                //
+                // Exception: Project(Filter(Scan)) where the Filter exposes
+                // WHERE-clause columns in its output (needed by the predicate
+                // but not in the SELECT list). Standard positional mapping is
+                // unreliable here, but we can still recover the correct
+                // PK-based row_id by mapping child key columns through the
+                // explicit Project expressions. This case is critical for
+                // queries like `SELECT id, val AS vb FROM t WHERE side >= 2`
+                // where the differential refresh uses PK-based hash(id) and
+                // the full refresh must produce the same value.
                 if child_out.len() != aliases.len() {
-                    return if matches!(unwrapped, OpTree::CteScan { .. }) {
-                        Some(aliases.clone())
-                    } else {
-                        None
-                    };
+                    if matches!(unwrapped, OpTree::CteScan { .. }) {
+                        return Some(aliases.clone());
+                    }
+                    // Try expression-based key column mapping: for each child
+                    // key column, find the Project expression that outputs it
+                    // (as a plain ColumnRef) and map to the corresponding alias.
+                    if let Some(child_keys) = child.row_id_key_columns() {
+                        let mapped: Vec<String> = child_keys
+                            .iter()
+                            .filter_map(|k| {
+                                let pos = expressions.iter().position(|expr| {
+                                    matches!(
+                                        expr,
+                                        Expr::ColumnRef { column_name, .. }
+                                            if column_name == k
+                                    )
+                                })?;
+                                aliases.get(pos).cloned()
+                            })
+                            .collect();
+                        let out = self.output_columns();
+                        // Only accept if ALL key columns were mapped and all
+                        // mapped names appear in the projected output.
+                        if mapped.len() == child_keys.len()
+                            && mapped.iter().all(|m| out.contains(m))
+                        {
+                            return Some(mapped);
+                        }
+                    }
+                    return None;
                 }
                 match child.row_id_key_columns() {
                     Some(keys) => {
@@ -5186,16 +5221,30 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
         next_idx += 1;
         let sq_alias = format!("__pgt_sq_{idx}");
         let scalar_alias = format!("__pgt_scalar_{idx}");
-        let inner_alias = format!("__pgt_v_{idx}");
-        let inner_col = format!("__pgt_c_{idx}");
-        // The inner scalar subquery returns exactly 1 column and 1 row.
-        // We wrap it so the DVM parser sees a subquery with a valid FROM clause:
-        //   (SELECT v."c" AS "scalar" FROM (original_subquery) AS v("c")) AS "sq"
-        extra_joins.push(format!(
-            "CROSS JOIN (SELECT \"{inner_alias}\".\"{inner_col}\" AS \"{scalar_alias}\" \
-             FROM ({sq_sql}) AS \"{inner_alias}\"(\"{inner_col}\")) AS \"{sq_alias}\"",
-            sq_sql = sq.subquery_sql,
-        ));
+
+        if sq.has_limit_or_offset {
+            // Scalar subqueries with LIMIT/OFFSET cannot be nested inside a
+            // derived-table wrapper (the DVM parser rejects LIMIT in FROM-clause
+            // subqueries).  Use CROSS JOIN LATERAL instead: the inner SQL is
+            // evaluated as-is (LIMIT preserved) and the DVM registers the inner
+            // source in `subquery_source_oids`, enabling diff_lateral_subquery to
+            // re-evaluate ALL outer rows when the scalar source changes.
+            extra_joins.push(format!(
+                "CROSS JOIN LATERAL ({inner_sql}) AS \"{sq_alias}\"(\"{scalar_alias}\")",
+                inner_sql = sq.subquery_sql,
+            ));
+        } else {
+            let inner_alias = format!("__pgt_v_{idx}");
+            let inner_col = format!("__pgt_c_{idx}");
+            // The inner scalar subquery returns exactly 1 column and 1 row.
+            // We wrap it so the DVM parser sees a subquery with a valid FROM clause:
+            //   (SELECT v."c" AS "scalar" FROM (original_subquery) AS v("c")) AS "sq"
+            extra_joins.push(format!(
+                "CROSS JOIN (SELECT \"{inner_alias}\".\"{inner_col}\" AS \"{scalar_alias}\" \
+                 FROM ({sq_sql}) AS \"{inner_alias}\"(\"{inner_col}\")) AS \"{sq_alias}\"",
+                sq_sql = sq.subquery_sql,
+            ));
+        }
         let replacement = format!("\"{sq_alias}\".\"{scalar_alias}\"");
         where_replacements.push((sq.expr_sql.clone(), replacement));
     }
@@ -5478,6 +5527,9 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
             subquery_sql: st.subquery_sql.clone(),
             expr_sql: format!("({})", st.subquery_sql),
             inner_tables: inner_tables.clone(),
+            // has_limit_or_offset is not used for the correlation check below;
+            // the LIMIT guard is applied separately via inner.limitCount.
+            has_limit_or_offset: !inner.limitCount.is_null() || !inner.limitOffset.is_null(),
         };
 
         // Check dot-qualified correlation first (e.g., "d.id" in subquery)
@@ -5490,6 +5542,41 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         }
 
         // ── Decorrelate this correlated scalar subquery ──────────────
+
+        // Correlated scalar subqueries with LIMIT/OFFSET cannot be correctly
+        // decorrelated by the standard LEFT JOIN + GROUP BY approach because
+        // removing LIMIT changes the semantics (e.g. ORDER BY … LIMIT 1 picks
+        // the top row per group; a plain LEFT JOIN with all matching rows is
+        // wrong).
+        //
+        // Instead, rewrite them as LEFT JOIN LATERAL, preserving the full inner
+        // SQL (including ORDER BY + LIMIT) so that PostgreSQL evaluates it
+        // correctly for each outer row.  The DVM handles LATERAL subqueries via
+        // `diff_lateral_subquery`, which correctly re-evaluates ALL affected
+        // outer rows when the inner source table changes.
+        if !inner.limitCount.is_null() || !inner.limitOffset.is_null() {
+            let lat_idx = next_sq_idx;
+            next_sq_idx += 1;
+            let lat_alias = format!("__pgt_lat_{lat_idx}");
+            let scalar_alias = format!("__pgt_scalar_{lat_idx}");
+
+            // Use the original inner SQL verbatim inside a LATERAL subquery.
+            // The outer table alias (e.g. `i.category`) is a valid lateral
+            // reference and PostgreSQL evaluates it for every outer row.
+            let left_join_sql = format!(
+                "LEFT JOIN LATERAL ({inner_sql}) AS \"{lat_alias}\"(\"{scalar_alias}\") ON TRUE",
+                inner_sql = st.subquery_sql,
+            );
+            let scalar_ref = format!("\"{lat_alias}\".\"{scalar_alias}\"");
+
+            decorrelations.push(SelectScalarDecorrelation {
+                target_idx: st.target_idx,
+                left_join_sql,
+                scalar_ref,
+                alias: st.alias.clone(),
+            });
+            continue;
+        }
 
         // Parse the inner WHERE to separate correlation from inner conditions
         if inner.whereClause.is_null() {
@@ -5801,6 +5888,10 @@ struct ScalarSubqueryExtract {
     expr_sql: String,
     /// Table names referenced in the subquery's FROM clause (lowercase).
     inner_tables: Vec<String>,
+    /// True if the inner SELECT has a LIMIT or OFFSET clause.  Such subqueries
+    /// are skipped by the CROSS-JOIN and decorrelation rewrites so that the DVM
+    /// parser treats them as opaque `Expr::Raw` expressions.
+    has_limit_or_offset: bool,
 }
 
 impl ScalarSubqueryExtract {
@@ -5820,18 +5911,12 @@ impl ScalarSubqueryExtract {
                 continue;
             }
             // Check if the outer table name appears as a qualified column
-            // reference prefix (e.g., "p_partkey" where "p" is from the
-            // subquery text referencing an outer table alias like "part").
-            // Heuristic: if any word in the subquery text matches an outer
-            // table/alias name in a dot-qualified position, it's correlated.
-            //
-            // Simpler heuristic: subqueries that share table names with
-            // the outer FROM clause are very likely correlated if the
-            // shared table is NOT in the inner FROM clause.
-            // For now, just check if the outer table name appears as a
-            // word boundary in the subquery SQL.
-            let pattern = format!("{}.", outer_table);
-            if sq_lower.contains(&pattern) {
+            // reference prefix. The deparsed SQL may use either unquoted
+            // (`i.col`) or quoted (`"i"."col"`) column references, so we
+            // check for both patterns.
+            let unquoted = format!("{}.", outer_table);
+            let quoted = format!("\"{}\".", outer_table);
+            if sq_lower.contains(&unquoted) || sq_lower.contains(&quoted) {
                 return true;
             }
         }
@@ -5921,18 +6006,23 @@ fn collect_scalar_sublinks_in_where(
 
                 // Collect table names from the subquery's FROM clause
                 // for correlation detection.
-                let inner_tables = if let Some(inner_select) =
+                let (inner_tables, has_limit_or_offset) = if let Some(inner_select) =
                     cast_node!(sublink.subselect, T_SelectStmt, pg_sys::SelectStmt)
                 {
-                    collect_from_clause_table_names(inner_select)
+                    let tables = collect_from_clause_table_names(inner_select);
+                    // SAFETY: inner_select is a valid SelectStmt pointer from cast_node!
+                    let has_lim =
+                        !inner_select.limitCount.is_null() || !inner_select.limitOffset.is_null();
+                    (tables, has_lim)
                 } else {
-                    Vec::new()
+                    (Vec::new(), false)
                 };
 
                 out.push(ScalarSubqueryExtract {
                     subquery_sql: inner_sql,
                     expr_sql,
                     inner_tables,
+                    has_limit_or_offset,
                 });
             }
         }
@@ -8886,6 +8976,24 @@ fn deparse_select_to_sql(select_node: *mut pg_sys::Node) -> Result<String, PgTri
         sql.push_str(&format!(" HAVING {}", having_expr.to_sql()));
     }
 
+    // Deparse ORDER BY
+    let order = deparse_order_clause(select);
+    if !order.is_empty() {
+        sql.push_str(&order);
+    }
+
+    // Deparse LIMIT
+    if !select.limitCount.is_null() {
+        let limit_expr = unsafe { node_to_expr(select.limitCount)? };
+        sql.push_str(&format!(" LIMIT {}", limit_expr.to_sql()));
+    }
+
+    // Deparse OFFSET
+    if !select.limitOffset.is_null() {
+        let offset_expr = unsafe { node_to_expr(select.limitOffset)? };
+        sql.push_str(&format!(" OFFSET {}", offset_expr.to_sql()));
+    }
+
     Ok(sql)
 }
 
@@ -10456,10 +10564,23 @@ unsafe fn parse_scalar_target_subquery(
         }
 
         let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
-        let subquery = if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
-            unsafe { parse_set_operation(inner_select, cte_ctx)? }
+        // If the inner SELECT contains constructs that the DVM pipeline cannot
+        // parse fully (e.g. LIMIT/OFFSET, correlated sub-expressions with OR),
+        // fall back to `Ok(None)` so the caller's `node_to_expr` path deparsed
+        // the sublink as an opaque `Expr::Raw`.  This is safe because:
+        //   1. `extract_source_relations` uses the full PostgreSQL analyzer and
+        //      still records every inner table reference for dependency tracking.
+        //   2. The scheduler forces a FULL refresh whenever upstream stream-table
+        //      sources have newer data, so the raw-SQL expression is only exercised
+        //      for base-table-CDC differentials, where it is re-evaluated correctly
+        //      for each affected row.
+        let subquery = match if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
+            unsafe { parse_set_operation(inner_select, cte_ctx) }
         } else {
-            unsafe { parse_select_stmt(inner_select, "", cte_ctx)? }
+            unsafe { parse_select_stmt(inner_select, "", cte_ctx) }
+        } {
+            Ok(tree) => tree,
+            Err(_) => return Ok(None),
         };
 
         let mut source_oids = subquery.source_oids();
@@ -10485,10 +10606,14 @@ unsafe fn parse_scalar_target_subquery(
             ));
         }
     };
-    let subquery = if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
-        unsafe { parse_set_operation(inner_select, cte_ctx)? }
+    // Same graceful fallback for the raw-SQL code path.
+    let subquery = match if inner_select.op != pg_sys::SetOperation::SETOP_NONE {
+        unsafe { parse_set_operation(inner_select, cte_ctx) }
     } else {
-        unsafe { parse_select_stmt(inner_select, "", cte_ctx)? }
+        unsafe { parse_select_stmt(inner_select, "", cte_ctx) }
+    } {
+        Ok(tree) => tree,
+        Err(_) => return Ok(None),
     };
 
     let mut source_oids = subquery.source_oids();
@@ -11281,33 +11406,37 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
             }
             2 => {
                 let table_alias = unsafe { node_to_string(fields.get_ptr(0).unwrap())? };
-                let col_name = unsafe { node_to_string(fields.get_ptr(1).unwrap())? };
-                if col_name == "*" {
-                    Ok(Expr::Star {
+                let last = fields.get_ptr(1).unwrap();
+                // `table.*` arrives as ColumnRef with fields [T_String, T_A_Star].
+                // T_A_Star is not a T_String, so node_to_string falls back to
+                // "node_T_A_Star" — check explicitly before calling it.
+                if unsafe { pgrx::is_a(last, pg_sys::NodeTag::T_A_Star) } {
+                    return Ok(Expr::Star {
                         table_alias: Some(table_alias),
-                    })
-                } else {
-                    Ok(Expr::ColumnRef {
-                        table_alias: Some(table_alias),
-                        column_name: col_name,
-                    })
+                    });
                 }
+                let col_name = unsafe { node_to_string(last)? };
+                Ok(Expr::ColumnRef {
+                    table_alias: Some(table_alias),
+                    column_name: col_name,
+                })
             }
             3 => {
                 // schema.table.column — drop the schema, use table.column
                 let _schema = unsafe { node_to_string(fields.get_ptr(0).unwrap())? };
                 let table_alias = unsafe { node_to_string(fields.get_ptr(1).unwrap())? };
-                let col_name = unsafe { node_to_string(fields.get_ptr(2).unwrap())? };
-                if col_name == "*" {
-                    Ok(Expr::Star {
+                let last = fields.get_ptr(2).unwrap();
+                // `schema.table.*` — same T_A_Star guard as the 2-field case.
+                if unsafe { pgrx::is_a(last, pg_sys::NodeTag::T_A_Star) } {
+                    return Ok(Expr::Star {
                         table_alias: Some(table_alias),
-                    })
-                } else {
-                    Ok(Expr::ColumnRef {
-                        table_alias: Some(table_alias),
-                        column_name: col_name,
-                    })
+                    });
                 }
+                let col_name = unsafe { node_to_string(last)? };
+                Ok(Expr::ColumnRef {
+                    table_alias: Some(table_alias),
+                    column_name: col_name,
+                })
             }
             n => Err(PgTrickleError::QueryParseError(format!(
                 "Unexpected ColumnRef with {n} fields",
@@ -11436,6 +11565,36 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
                     right.to_sql()
                 )))
             }
+            pg_sys::A_Expr_Kind::AEXPR_LIKE => {
+                // [NOT] LIKE — name is "~~" (LIKE) or "!~~" (NOT LIKE).
+                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let op_name = unsafe { extract_operator_name(aexpr.name) }
+                    .unwrap_or_else(|_| "~~".to_string());
+                let kw = if op_name == "!~~" { "NOT LIKE" } else { "LIKE" };
+                Ok(Expr::Raw(format!(
+                    "{} {kw} {}",
+                    left.to_sql(),
+                    right.to_sql()
+                )))
+            }
+            pg_sys::A_Expr_Kind::AEXPR_ILIKE => {
+                // [NOT] ILIKE — name is "~~*" (ILIKE) or "!~~*" (NOT ILIKE).
+                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let op_name = unsafe { extract_operator_name(aexpr.name) }
+                    .unwrap_or_else(|_| "~~*".to_string());
+                let kw = if op_name == "!~~*" {
+                    "NOT ILIKE"
+                } else {
+                    "ILIKE"
+                };
+                Ok(Expr::Raw(format!(
+                    "{} {kw} {}",
+                    left.to_sql(),
+                    right.to_sql()
+                )))
+            }
             pg_sys::A_Expr_Kind::AEXPR_OP_ANY => {
                 // expr op ANY(array)
                 let left = unsafe { node_to_expr(aexpr.lexpr)? };
@@ -11454,6 +11613,19 @@ unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTrickleError> 
                 let op_name = unsafe { extract_operator_name(aexpr.name)? };
                 Ok(Expr::Raw(format!(
                     "{} {op_name} ALL({})",
+                    left.to_sql(),
+                    right.to_sql()
+                )))
+            }
+            pg_sys::A_Expr_Kind::AEXPR_NULLIF => {
+                // NULLIF(a, b) — evaluates to a when a <> b, else NULL.
+                // Represented in the raw parse tree as AEXPR_NULLIF; handled
+                // here so expressions like `NULLIF(col, '')::bigint` in the
+                // SELECT list don't cause an unsupported-operator error.
+                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                Ok(Expr::Raw(format!(
+                    "NULLIF({}, {})",
                     left.to_sql(),
                     right.to_sql()
                 )))
@@ -16922,6 +17094,70 @@ mod tests {
     }
 
     #[test]
+    fn test_row_id_key_columns_project_filter_scan_where_not_in_select() {
+        // Regression test: SELECT id, val AS vb FROM t WHERE side >= 2
+        // The Filter exposes all Scan columns (id, val, side) in its output,
+        // but the Project aliases only contain (id, vb) — 2 items vs 3 in
+        // child_out. Previously this caused row_id_key_columns() to return
+        // None, leading to row_to_json-based __pgt_row_id in the full refresh
+        // but PK-hash-based in the differential, causing MERGE mismatches and
+        // stale rows after UPDATEs that change the WHERE-clause column.
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".to_string(),
+            schema: "public".to_string(),
+            columns: vec![make_column("id"), make_column("val"), make_column("side")],
+            pk_columns: vec!["id".to_string()],
+            alias: "t".to_string(),
+        };
+        let filter = OpTree::Filter {
+            predicate: Expr::BinaryOp {
+                op: ">=".to_string(),
+                left: Box::new(col("side")),
+                right: Box::new(Expr::Literal("2".to_string())),
+            },
+            child: Box::new(scan),
+        };
+        let tree = OpTree::Project {
+            expressions: vec![col("id"), col("val")],
+            aliases: vec!["id".to_string(), "vb".to_string()],
+            child: Box::new(filter),
+        };
+        // Must return Some(["id"]) — the PK, not None.
+        assert_eq!(tree.row_id_key_columns(), Some(vec!["id".to_string()]));
+    }
+
+    #[test]
+    fn test_row_id_key_columns_project_filter_scan_pk_not_projected_returns_none() {
+        // When the PK column is NOT in the SELECT list, the row_id key
+        // cannot be determined — return None so the fallback row_to_json
+        // hash is used consistently for both full and differential refresh.
+        let scan = OpTree::Scan {
+            table_oid: 1,
+            table_name: "t".to_string(),
+            schema: "public".to_string(),
+            columns: vec![
+                make_column("id"),
+                make_column("name"),
+                make_column("amount"),
+            ],
+            pk_columns: vec!["id".to_string()],
+            alias: "t".to_string(),
+        };
+        let filter = OpTree::Filter {
+            predicate: col("amount"),
+            child: Box::new(scan),
+        };
+        // SELECT name FROM t WHERE amount > 0 — PK "id" is NOT projected.
+        let tree = OpTree::Project {
+            expressions: vec![col("name")],
+            aliases: vec!["name".to_string()],
+            child: Box::new(filter),
+        };
+        assert_eq!(tree.row_id_key_columns(), None);
+    }
+
+    #[test]
     fn test_row_id_key_columns_distinct_returns_all() {
         let tree = OpTree::Distinct {
             child: Box::new(scan_node("t", 1, &["a", "b"])),
@@ -18395,6 +18631,7 @@ mod tests {
             subquery_sql: "SELECT avg(amount) FROM orders".to_string(),
             expr_sql: "(SELECT avg(\"amount\") FROM \"orders\")".to_string(),
             inner_tables: vec!["orders".to_string()],
+            has_limit_or_offset: false,
         };
         assert!(extract.subquery_sql.contains("avg"));
         assert!(extract.expr_sql.starts_with('('));

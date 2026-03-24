@@ -33,11 +33,17 @@ async fn configure_fast_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
         .await;
+    // Disable auto-backoff so 1-second schedules never get stretched in slow
+    // CI containers — the default (true since v0.10.0) would double the
+    // effective interval once a refresh takes > 950 ms.
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
     db.reload_config_and_wait().await;
     db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
         .await;
     db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
         .await;
+    db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
 
     assert!(
         db.wait_for_scheduler(Duration::from_secs(90)).await,
@@ -497,8 +503,8 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
             .await;
     }
 
-    // Wait for the cascade
-    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    // Wait for the full cascade to propagate through all 3 layers
+    wait_for_refresh_cycle(&db, "prop_auto_l3", Duration::from_secs(30)).await;
 
     for cycle in 1..=(config.cycles / 2).max(1) {
         let op = rng.usize_range(0, 100);
@@ -521,8 +527,8 @@ async fn run_autorefresh_trace(seed: u64, config: &TraceConfig) {
             }
         }
 
-        // Wait to allow auto-refresh
-        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        // Wait for the cascade to propagate the DML change
+        wait_for_refresh_cycle(&db, "prop_auto_l3", Duration::from_secs(30)).await;
 
         assert_st_query_invariants(&db, &AUTO_INVARIANTS, seed, cycle, "auto").await;
     }

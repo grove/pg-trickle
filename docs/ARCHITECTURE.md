@@ -379,9 +379,9 @@ Each tick of the main loop performs the following steps inside a single transact
 3. **Per-ST evaluation** — For each active ST:
    - Skip if in retry backoff (exponential, per-ST).
    - Skip if schedule/cron says not yet due.
-   - Skip if an advisory lock indicates a concurrent refresh.
+   - Skip if a row-level lock on the catalog entry indicates a concurrent refresh.
    - Check upstream change buffers for pending rows.
-4. **Execute refresh** — Acquire an advisory lock → record `RUNNING` in history → run `FULL` / `DIFFERENTIAL` / `REINITIALIZE` → store new frontier → release lock → record completion.
+4. **Execute refresh** — Acquire a row-level lock on the catalog entry → record `RUNNING` in history → run `FULL` / `DIFFERENTIAL` / `REINITIALIZE` → store new frontier → release lock → record completion.
 5. **WAL transitions** — Advance any trigger→WAL CDC mode transitions (`src/wal_decoder.rs`).
 6. **Slot health** — Check replication slot health and emit `NOTIFY` alerts.
 7. **Prune retry state** — Remove backoff entries for STs that no longer exist.

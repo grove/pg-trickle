@@ -32,7 +32,7 @@ SELECT * FROM pgtrickle.health_check();
 
 ```sql
 SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle';
--- Returns: '0.1.3'
+-- Returns your current installed version, e.g. '0.9.0'
 ```
 
 ### 2. Install New Binary Files
@@ -234,6 +234,94 @@ upgrade script drops and recreates both lifecycle functions during
 - Existing non-circular stream tables continue to work as before. The new
   catalog objects are additive.
 
+### 0.7.0 → 0.8.0
+
+**No catalog schema changes.** The upgrade migration script contains no DDL.
+
+**New operational features:**
+
+- `pg_dump` / `pg_restore` support: stream tables are now safely exported and
+  re-connected after restore without manual intervention.
+- Connection pooler opt-in was introduced at the per-stream level (superseded
+  by the more comprehensive `pooler_compatibility_mode` added in v0.10.0).
+
+**No breaking changes.** All v0.7.0 functions, views, and event triggers
+continue to work as before.
+
+### 0.8.0 → 0.9.0
+
+**No catalog schema DDL changes** to `pgtrickle.pgt_stream_tables` or the
+dependency catalog.
+
+**New API function added:**
+
+- `pgtrickle.restore_stream_tables()` — re-installs CDC triggers and
+  re-registers stream tables after a `pg_restore` from a `pg_dump`.
+
+**Hidden auxiliary columns for AVG / STDDEV / VAR aggregates.** Stream tables
+using these aggregates will automatically receive hidden `__pgt_aux_*`
+columns on the next refresh after upgrading. No manual action is needed —
+pg_trickle detects missing auxiliary columns and performs a single full
+reinitialise to add them.
+
+**Behavioral notes:**
+
+- COUNT, SUM, and AVG now update in constant time (O(changed rows)) instead
+  of rescanning the whole group.
+- STDDEV and VAR variants likewise update in O(changed rows) via hidden
+  sum-of-squares auxiliary columns.
+- MIN/MAX still requires a group rescan only when the deleted value is the
+  current extreme.
+- Refresh groups (`create_refresh_group`, `drop_refresh_group`,
+  `refresh_groups()`) are available starting from this version.
+
+### 0.9.0 → 0.10.0
+
+**Two new catalog columns** added to `pgtrickle.pgt_stream_tables`:
+
+| Column | Type | Default | Purpose |
+|--------|------|---------|--------|
+| `pooler_compatibility_mode` | `BOOLEAN NOT NULL` | `FALSE` | Disables prepared statements and NOTIFY for this stream table — required when accessed through PgBouncer in transaction-pool mode |
+| `refresh_tier` | `TEXT NOT NULL` | `'hot'` | Tiered scheduling tier: `hot`, `warm`, `cold`, or `frozen` |
+
+**One new catalog table** is added:
+
+| Table | Purpose |
+|------|---------|
+| `pgtrickle.pgt_refresh_groups` | Stores refresh groups for snapshot-consistent multi-table refresh |
+
+**The upgrade script also updates and adds SQL functions**:
+
+- `pgtrickle.create_stream_table(...)` gains the `pooler_compatibility_mode` parameter
+- `pgtrickle.create_stream_table_if_not_exists(...)` likewise
+- `pgtrickle.create_or_replace_stream_table(...)` likewise
+- `pgtrickle.alter_stream_table(...)` likewise
+- Adds `pgtrickle.create_refresh_group(name, members, isolation)`
+- Adds `pgtrickle.drop_refresh_group(name)`
+- Adds `pgtrickle.refresh_groups()` — lists all declared groups
+
+**Behavioral notes:**
+
+- `pooler_compatibility_mode` defaults to `false`. Existing stream tables are
+  unaffected. Enable it only for stream tables accessed through PgBouncer
+  transaction-mode pooling.
+- `pg_trickle.auto_backoff` now defaults to `on` (was `off`). The backoff
+  threshold is raised from 80 % → 95 % and the maximum slowdown is capped at
+  8× (was 64×). If you relied on the old opt-in behaviour, set
+  `pg_trickle.auto_backoff = off` explicitly.
+- `diamond_consistency` now defaults to `'atomic'` for new stream tables
+  (was `'none'`). Existing stream tables keep their current setting.
+- The scheduler now uses row-level locking for concurrency control instead of
+  session-level advisory locks, making pg_trickle compatible with PgBouncer
+  transaction-pool and similar connection poolers.
+- Statistical aggregates (`CORR`, `COVAR_*`, `REGR_*`) now update
+  incrementally using Welford-style accumulation, no longer requiring a
+  group rescan.
+- Materialized view sources can now be used in DIFFERENTIAL mode when
+  `pg_trickle.matview_polling = on` is set.
+- Recursive CTE stream tables with DELETE/UPDATE now use the Delete-and-Rederive
+  algorithm (O(delta) instead of O(n)).
+
 ---
 
 ## Supported Upgrade Paths
@@ -252,9 +340,12 @@ automatically when you run `ALTER EXTENSION pg_trickle UPDATE`.
 | 0.4.0 | 0.5.0 | `pg_trickle--0.4.0--0.5.0.sql` |
 | 0.5.0 | 0.6.0 | `pg_trickle--0.5.0--0.6.0.sql` |
 | 0.6.0 | 0.7.0 | `pg_trickle--0.6.0--0.7.0.sql` |
+| 0.7.0 | 0.8.0 | `pg_trickle--0.7.0--0.8.0.sql` |
+| 0.8.0 | 0.9.0 | `pg_trickle--0.8.0--0.9.0.sql` |
+| 0.9.0 | 0.10.0 | `pg_trickle--0.9.0--0.10.0.sql` |
 
-That means any installation currently on 0.1.3 through 0.6.0 can upgrade to
-0.7.0 in one step after the new binaries are installed and PostgreSQL has been
+That means any installation currently on 0.1.3 through 0.9.0 can upgrade to
+0.10.0 in one step after the new binaries are installed and PostgreSQL has been
 restarted.
 
 ---

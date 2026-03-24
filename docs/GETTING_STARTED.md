@@ -61,7 +61,7 @@ By the end you will have:
 
 - Seen how stream tables are created, queried, and refreshed
 - Watched a single `UPDATE` in a base table cascade through three layers of stream tables automatically
-- Understood the three refresh modes and IVM strategies
+- Understood the four refresh modes and IVM strategies
 
 ---
 
@@ -76,7 +76,10 @@ By the end you will have:
 
 - PostgreSQL 18.x with pg_trickle installed (see [INSTALL.md](../INSTALL.md))
 - `shared_preload_libraries = 'pg_trickle'` in `postgresql.conf`
+- `max_worker_processes` raised to at least 32 (see [INSTALL.md](../INSTALL.md#postgresql-configuration)); the PostgreSQL default of 8 is often exhausted if you have several databases, causing stream tables to silently stop refreshing
 - `psql` or any SQL client
+
+> **Quick start with Docker:** If you don't have a local PostgreSQL 18 install, [INSTALL.md](../INSTALL.md) has a Docker-based setup that mounts the extension into a stock `postgres:18` container — no installation required.
 
 Connect to the database you want to use and enable the extension:
 
@@ -180,11 +183,13 @@ SELECT pgtrickle.create_stream_table(
     )
     SELECT id, name, parent_id, path, depth FROM tree
     $$,
-    schedule     => '1m'
+    schedule     => '1s'
 );
 ```
 
-> **New in v0.2.0:** `create_stream_table` also accepts `diamond_consistency` (`'none'` or `'atomic'`) and `diamond_schedule_policy` (`'fastest'` or `'slowest'`) parameters for managing diamond-shaped dependency graphs. Schedules can also be specified as cron expressions (e.g., `'*/5 * * * *'`, `'@hourly'`). See [SQL_REFERENCE.md](SQL_REFERENCE.md) for the full parameter list.
+> **Note on short schedules:** A 1-second schedule is safe for development and production thanks to `auto_backoff` (on by default since v0.10.0). If a refresh takes more than 95% of the schedule window, the scheduler automatically stretches the effective interval (up to 8× the configured schedule) to prevent CPU runaway, then resets to 1× as soon as a refresh completes on time. You will see a `WARNING` message when backoff activates.
+>
+> **v0.2.0+:** `create_stream_table` also accepts `diamond_consistency` (`'none'` or `'atomic'`) and `diamond_schedule_policy` (`'fastest'` or `'slowest'`) for diamond-shaped dependency graphs. Schedules can be cron expressions (e.g., `'*/5 * * * *'`, `'@hourly'`). Set `pooler_compatibility_mode => true` if you're connecting through PgBouncer or another transaction-mode connection pooler. See [SQL_REFERENCE.md](SQL_REFERENCE.md) for the full parameter list.
 
 ### What just happened?
 
@@ -195,8 +200,8 @@ That single function call did a lot of work atomically (all in one transaction):
 3. **Installed CDC triggers** on the `departments` table — lightweight `AFTER INSERT OR UPDATE OR DELETE` row-level triggers that will capture every future change
 4. **Created a change buffer table** in the `pgtrickle_changes` schema — this is where the triggers write captured changes
 5. **Ran an initial full refresh** — executed the recursive query against the current data and populated the storage table
-6. **Registered the stream table** in pg_trickle's catalog with a 1-minute refresh schedule
-
+6. **Registered the stream table** in pg_trickle's catalog with a 1-second refresh schedule
+> **TRUNCATE caveat:** Row-level triggers do not fire on `TRUNCATE`. If you `TRUNCATE` a base table, the change is not captured incrementally — the stream table will become stale. Use `DELETE FROM table` instead, or call `pgtrickle.refresh_stream_table('department_tree', full => true)` after a TRUNCATE to force a full recompute.
 Query it immediately — it's already populated:
 
 ```sql
@@ -219,7 +224,7 @@ Expected output:
 
 This is a **real PostgreSQL table** — you can create indexes on it, join it in other queries, reference it in views, or even use it as a source for other stream tables. pg_trickle keeps it in sync automatically.
 
-> **Key insight:** The recursive query that computes paths and depths would normally need to be re-run manually (or via `REFRESH MATERIALIZED VIEW`). With pg_trickle, it stays fresh — any change to the `departments` table is automatically reflected within the schedule bound (1 minute here).
+> **Key insight:** The recursive query that computes paths and depths would normally need to be re-run manually (or via `REFRESH MATERIALIZED VIEW`). With pg_trickle, it stays fresh — any change to the `departments` table is automatically reflected within the schedule bound (1 second here).
 
 ---
 
@@ -253,7 +258,7 @@ SELECT pgtrickle.create_stream_table(
 
 Like before, pg_trickle parsed the query, created a storage table, and set up CDC. But `department_stats` depends on `department_tree`, not a base table — so *no new triggers were installed*. Instead, pg_trickle registered `department_tree` as an upstream dependency in the DAG.
 
-The schedule is `NULL` (CALCULATED mode), which means: "don't give this table its own schedule — inherit the tightest schedule of any downstream table that queries it". Since no other stream table has been created yet, it will be refreshed on demand or when a downstream dependent triggers it.
+The schedule is `'calculated'` (CALCULATED mode), which means: "don't give this table its own schedule — inherit the tightest schedule of any downstream table that queries it". Internally this stores `NULL` in the catalog, but you must pass the string `'calculated'` — passing SQL `NULL` is an error. Since no other stream table has been created yet, it will be refreshed on demand or when a downstream dependent triggers it.
 
 The query has no recursive CTE, so pg_trickle uses **algebraic differentiation**:
 
@@ -306,7 +311,7 @@ SELECT pgtrickle.create_stream_table(
     WHERE depth >= 1
     GROUP BY 1
     $$,
-    schedule     => '1m'              -- this is the only explicit schedule; CALCULATED tables above inherit it
+    schedule     => '1s'              -- this is the only explicit schedule; CALCULATED tables above inherit it
 );
 ```
 
@@ -324,10 +329,10 @@ department_tree ──────────┤
                       │
                       ▼
                department_report
-                  (DIFF, 1m)   ◀── only explicit schedule
+                  (DIFF, 1s)   ◀── only explicit schedule
 ```
 
-`department_report` drives the whole pipeline. Because it has a 1-minute schedule, pg_trickle automatically propagates that cadence upstream: `department_stats` and `department_tree` will also be refreshed within 1 minute of a base table change, in topological order, with no manual configuration.
+`department_report` drives the whole pipeline. Because it has a 1-second schedule, pg_trickle automatically propagates that cadence upstream: `department_stats` and `department_tree` will also be refreshed within 1 second of a base table change, in topological order, with no manual configuration.
 
 Query the report:
 
@@ -359,7 +364,7 @@ This is the heart of pg_trickle. We'll make four changes to the base tables and 
   Change buffer receives one row
        │
        ▼
-  Background scheduler fires (or manual refresh_stream_table)
+  Background scheduler fires (within ~1 second)
        │
        ├──▶ [Layer 1] Refresh department_tree
        │         delta query reads change buffer
@@ -389,17 +394,16 @@ INSERT INTO employees (name, department_id, salary) VALUES
 
 The stream tables don't know about Heidi yet. The change is in the buffer, waiting for the next refresh.
 
-> **In production you don't need to do anything.** The background scheduler will refresh `department_stats` and then `department_report` automatically within the next minute. Manual refresh calls are only needed here to see the result immediately without waiting.
-
-To trigger it now (optional — skip and wait ~1 minute if you prefer):
-
-```sql
--- Refresh in source-to-sink order.
--- department_stats reads from employees (has buffered changes).
--- department_report reads from department_stats.
-SELECT pgtrickle.refresh_stream_table('department_stats');
-SELECT pgtrickle.refresh_stream_table('department_report');
-```
+> **The background scheduler handles this automatically.** With a 1-second schedule, `department_stats` and `department_report` refresh within about a second.
+>
+> To confirm a refresh has happened, check `data_timestamp` in the monitoring view:
+> ```sql
+> SELECT name, data_timestamp, staleness FROM pgtrickle.pgt_status();
+> ```
+> Or force an immediate synchronous refresh for the tutorial:
+> ```sql
+> SELECT pgtrickle.refresh_stream_table('department_report');
+> ```
 
 **What happened across the three layers:**
 
@@ -437,16 +441,7 @@ INSERT INTO departments (id, name, parent_id) VALUES
 
 **What happened:** The CDC trigger on `departments` fired. The change buffer for `departments` has one new row. None of the stream tables know about it yet.
 
-> **Again, the scheduler handles this automatically.** All three tables will refresh in the correct dependency order within the next minute. To see the result immediately:
-
-```sql
--- department_tree reads from departments (has buffered changes).
--- department_stats reads from department_tree.
--- department_report reads from department_stats.
-SELECT pgtrickle.refresh_stream_table('department_tree');
-SELECT pgtrickle.refresh_stream_table('department_stats');
-SELECT pgtrickle.refresh_stream_table('department_report');
-```
+> **The scheduler handles this automatically** — all three tables will refresh within a second in the correct dependency order (upstream first). To force it synchronously: `SELECT pgtrickle.refresh_stream_table('department_report');`
 
 **What happened across all three layers:**
 
@@ -466,9 +461,9 @@ SELECT id, name, depth, path FROM department_tree WHERE name = 'DevOps';
 ```
 
 ```
- id |  name  | depth |           path                |
-----+--------+-------+-------------------------------+
-  8 | DevOps |         2 | Company > Engineering > DevOps |    2
+ id |  name  | depth |              path               
+----+--------+-------+---------------------------------
+  8 | DevOps |     2 | Company > Engineering > DevOps  
 ```
 
 The recursive CTE automatically expanded to include the new department at the correct depth and path. One inserted row in `departments` produced one new row in the stream table.
@@ -483,15 +478,9 @@ UPDATE departments SET name = 'R&D' WHERE id = 2;
 
 **What happened in the change buffer:** The CDC trigger captured the **old** row (`name='Engineering'`) and the **new** row (`name='R&D'`). Both old and new values are stored so the delta can compute what to remove and what to add.
 
-Refresh:
+Wait a moment for the scheduler to propagate the rename through all layers (or force it: `SELECT pgtrickle.refresh_stream_table('department_report');`).
 
-```sql
-SELECT pgtrickle.refresh_stream_table('department_tree');
-SELECT pgtrickle.refresh_stream_table('department_stats');
-SELECT pgtrickle.refresh_stream_table('department_report');
-```
-
-**What happened:**
+**What happened across all three layers:**
 
 | Layer | Work done | Result |
 |-------|-----------|--------|
@@ -525,9 +514,9 @@ DELETE FROM employees WHERE name = 'Bob';
 
 **What happened:** The `AFTER DELETE` trigger on `employees` fired, writing a change buffer row with action type `D` and Bob's old values (`department_id=5, salary=115000`). The delta query will use these old values to compute the correct aggregate adjustment — it knows to subtract 115000 from Backend's salary sum and decrement the count.
 
+Wait about a second for the scheduler to process the DELETE, then:
+
 ```sql
-SELECT pgtrickle.refresh_stream_table('department_stats');
-SELECT pgtrickle.refresh_stream_table('department_report');
 SELECT * FROM department_stats WHERE department_name = 'Backend';
 ```
 
@@ -543,21 +532,21 @@ Headcount dropped from 2 → 1 and the salary aggregates updated. Again, only th
 
 ## Step 5: Automatic Scheduling — Let the DAG Drive Itself
 
-In the examples above, we called `refresh_stream_table()` manually. In production you never need to do this. pg_trickle runs a **background scheduler** that automatically refreshes stale tables — in topological order.
+pg_trickle runs a **background scheduler** that automatically refreshes stale tables in topological order. In the Step 4 examples above, the scheduler handled every change within about a second. You can also call `refresh_stream_table()` directly when needed (e.g. in scripts or tests), but in normal operation the scheduler takes care of everything.
 
 ### How schedules propagate
 
-We gave `department_report` a `'1m'` schedule and the two upstream tables a `NULL` schedule (CALCULATED mode). This is the recommended pattern:
+We gave `department_report` a `'1s'` schedule and the two upstream tables a `NULL` schedule (CALCULATED mode). This is the recommended pattern:
 
 ```
- department_tree    (CALCULATED → inherits 1m from downstream)
+ department_tree    (CALCULATED → inherits 1s from downstream)
        │
- department_stats   (CALCULATED → inherits 1m from downstream)
+ department_stats   (CALCULATED → inherits 1s from downstream)
        │
- department_report  (1m — the only explicit schedule)
+ department_report  (1s — the only explicit schedule)
 ```
 
-CALCULATED (schedule = `NULL`) means: compute the tightest schedule across all downstream dependents. You declare freshness requirements at the tables your application queries — the system figures out how often each upstream table needs to refresh.
+CALCULATED mode (pass `schedule => 'calculated'`) means: compute the tightest schedule across all downstream dependents. You declare freshness requirements at the tables your application queries — the system figures out how often each upstream table needs to refresh.
 
 ### What the scheduler does every second
 
@@ -579,7 +568,7 @@ FROM pgtrickle.pgt_status();
 -----------------------------+--------+---------------+----------+-----------------------------+-----------------
  public.department_tree      | ACTIVE | DIFFERENTIAL  |          | 2026-02-26 10:30:00.123+01 | 00:00:00.877
  public.department_stats     | ACTIVE | DIFFERENTIAL  |          | 2026-02-26 10:30:00.456+01 | 00:00:00.544
- public.department_report    | ACTIVE | DIFFERENTIAL  | 1m       | 2026-02-26 10:30:00.789+01 | 00:00:00.211
+ public.department_report    | ACTIVE | DIFFERENTIAL  | 1s       | 2026-02-26 10:30:00.789+01 | 00:00:00.211
 ```
 
 ```sql
@@ -652,13 +641,32 @@ SELECT * FROM pgtrickle.parallel_job_status(60);     -- recent jobs
 
 See [CONFIGURATION.md — Parallel Refresh](CONFIGURATION.md#parallel-refresh) for the complete tuning reference.
 
+### Optional: PgBouncer / Connection Pooler Compatibility (v0.10.0+)
+
+If you're connecting through PgBouncer or another connection pooler in **transaction mode** (the default on Supabase, Railway, Neon, and most managed PostgreSQL platforms), set `pooler_compatibility_mode` when creating or altering a stream table:
+
+```sql
+SELECT pgtrickle.create_stream_table(
+    name                    => 'live_headcount',
+    query                   => 'SELECT department_id, COUNT(*) FROM employees GROUP BY 1',
+    schedule                => '1s',
+    pooler_compatibility_mode => true
+);
+```
+
+This disables prepared statements and NOTIFY emissions for that table — the two features that break in transaction-pool mode. Leave it off (the default) if you connect directly to PostgreSQL.
+
+### Optional: Change Buffer Compaction (v0.10.0+)
+
+For high-churn tables, pg_trickle automatically compacts the pending change buffer before each refresh cycle when it exceeds `pg_trickle.compact_threshold` (default 100,000 rows). INSERT→DELETE pairs that cancel each other out are eliminated, and multiple changes to the same row are collapsed to a single net change, reducing delta scan overhead by 50–90%.
+
 ---
 
 ## Step 6: Understanding the Refresh Modes and IVM Strategies
 
-You've now seen the IVM strategies pg_trickle uses for incremental view maintenance. Understanding the three refresh modes and when each strategy applies helps you write efficient stream table queries.
+You've now seen the IVM strategies pg_trickle uses for incremental view maintenance. Understanding the four refresh modes and when each strategy applies helps you write efficient stream table queries.
 
-### The Three Refresh Modes
+### The Four Refresh Modes
 
 | Mode | When it refreshes | Use case |
 |------|------------------|----------|
@@ -696,7 +704,7 @@ You can switch between modes at any time:
 SELECT pgtrickle.alter_stream_table('department_stats', refresh_mode => 'IMMEDIATE');
 
 -- Switch back to DIFFERENTIAL with a schedule
-SELECT pgtrickle.alter_stream_table('department_stats', refresh_mode => 'DIFFERENTIAL', schedule => '1m');
+SELECT pgtrickle.alter_stream_table('department_stats', refresh_mode => 'DIFFERENTIAL', schedule => '1s');
 ```
 
 ### Algebraic Differentiation (used by `department_stats`)
@@ -736,12 +744,14 @@ You don't choose — pg_trickle detects the strategy automatically based on the 
 | Query Pattern | Strategy | Performance |
 |---------------|----------|-------------|
 | Scan + Filter + Join + algebraic Aggregate (COUNT/SUM/AVG) | Algebraic | Excellent — O(changes) |
+| `CORR`, `COVAR_POP/SAMP`, `REGR_*` (12 functions) | Algebraic (Welford running totals) | O(changes) — running totals updated per changed row, no group rescan (v0.10.0+) |
 | Non-recursive CTEs | Algebraic (inlined) | CTE body is differentiated inline |
 | `MIN` / `MAX` aggregates | Semi-algebraic | Uses LEAST/GREATEST merge; per-group rescan only when an extremum is deleted |
 | `STRING_AGG`, `ARRAY_AGG`, ordered-set aggregates | Group-rescan | Affected groups fully re-aggregated from source |
 | `GROUPING SETS` / `CUBE` / `ROLLUP` | Algebraic (rewritten) | Auto-expanded to `UNION ALL` of `GROUP BY` queries; CUBE capped at 64 branches |
 | Recursive CTEs (`WITH RECURSIVE`) INSERT | Semi-naive evaluation | O(new rows derived from the change) |
-| Recursive CTEs (`WITH RECURSIVE`) DELETE/UPDATE | Delete-and-Rederive | Re-derives rows with alternative paths; O(affected subgraph) |
+| Recursive CTEs (`WITH RECURSIVE`) DELETE/UPDATE | Delete-and-Rederive | Re-derives rows with alternative paths; O(affected subgraph) (v0.10.0+) |
+| LATERAL subqueries | Correlated re-evaluation | Only outer rows correlated with changed inner data re-evaluated — O(correlated rows) (v0.10.0+) |
 | Window functions | Partition recompute | Only affected partitions recomputed |
 | `ORDER BY … LIMIT N` (TopK) | Scoped recomputation | Re-evaluates top-N via MERGE; stores exactly N rows |
 | IMMEDIATE mode queries | In-transaction delta | Same algebraic strategies, applied synchronously via transition tables |
@@ -777,16 +787,66 @@ DROP TABLE departments;
 | **CDC triggers** | Lightweight change capture in the same transaction — no logical replication or polling required |
 | **DAG scheduling** | Stream tables can depend on other stream tables; refreshes run in topological order, schedules propagate upstream via `CALCULATED` mode |
 | **Algebraic IVM** | Delta queries that process only changed rows — O(changes) regardless of table size |
-| **Semi-naive / DRed** | Incremental strategies for `WITH RECURSIVE` — INSERT uses semi-naive, DELETE/UPDATE uses Delete-and-Rederive |
+| **Semi-naive / DRed** | Incremental strategies for `WITH RECURSIVE` — INSERT uses semi-naive, DELETE/UPDATE uses Delete-and-Rederive (v0.10.0+) |
 | **IMMEDIATE mode** | Synchronous in-transaction IVM — stream tables updated within the same transaction as your DML, always consistent |
 | **TopK** | `ORDER BY … LIMIT N` queries store exactly N rows, refreshed via scoped recomputation |
 | **Diamond consistency** | Atomic refresh groups for diamond-shaped dependency graphs via `diamond_consistency = 'atomic'` |
 | **Downstream propagation** | A single base table write cascades through an entire chain of stream tables, automatically, in the right order |
 | **Trigger-based CDC** | Lightweight row-level triggers by default (no WAL configuration needed); optional transition to WAL-based capture via `pg_trickle.cdc_mode = 'auto'` |
 | **Parallel refresh** | Independent stream tables refresh concurrently in dynamic background workers via `pg_trickle.parallel_refresh_mode = 'on'` (v0.4.0+, default off) |
+| **auto_backoff** | Scheduler automatically stretches effective interval when refresh cost exceeds 95% of the schedule window, capped at 8× (on by default, v0.10.0+) |
+| **PgBouncer compatibility** | Set `pooler_compatibility_mode => true` per stream table to work behind transaction-mode connection poolers (v0.10.0+) |
 | **Monitoring** | `pgt_status()`, `health_check()`, `dependency_tree()`, `pg_stat_stream_tables`, and more for freshness, timing, and error history |
 
 The key takeaway: you write to base tables — **pg_trickle does the rest**. Data flows downstream automatically, each layer doing the minimum work proportional to what changed, in dependency order.
+
+---
+
+## Troubleshooting
+
+### Stream table is stale / not refreshing
+
+Check the status view first:
+
+```sql
+SELECT name, status, last_error, last_refresh_at, staleness FROM pgtrickle.pgt_status();
+```
+
+A `status` of `ERROR` means the last refresh failed. `last_error` contains the message. Fix the underlying issue (e.g., a dropped column referenced in the query) then call:
+
+```sql
+SELECT pgtrickle.refresh_stream_table('your_table', full => true);
+```
+
+For a broader health check:
+
+```sql
+SELECT check_name, severity, detail FROM pgtrickle.health_check();
+```
+
+### Change buffer growing large
+
+If a stream table has `status = 'PAUSED'` or refreshes are falling behind:
+
+```sql
+SELECT * FROM pgtrickle.change_buffer_sizes();  -- find large buffers
+```
+
+Large buffers are normal under heavy load — `auto_backoff` slows the schedule to avoid CPU runaway and will self-correct once throughput stabilises. If a buffer stays large indefinitely, check `last_error` in `pgt_status()` for a blocked refresh.
+
+### CDC triggers missing after restore / point-in-time recovery
+
+PITR restores the heap table but not the triggers if the extension was installed after the base backup. Verify:
+
+```sql
+SELECT * FROM pgtrickle.trigger_inventory();  -- expected vs installed triggers
+```
+
+Any missing trigger can be reinstalled with:
+
+```sql
+SELECT pgtrickle.repair_stream_table('your_table');
+```
 
 ---
 
@@ -808,7 +868,7 @@ SELECT pgtrickle.create_or_replace_stream_table(
     name         => 'employee_salaries',
     query        => 'SELECT e.id, e.name, d.name AS department, e.salary
                      FROM employees e JOIN departments d ON e.department_id = d.id',
-    schedule     => '2m',
+    schedule     => '30s',
     refresh_mode => 'DIFFERENTIAL'
 );
 
@@ -816,7 +876,7 @@ SELECT pgtrickle.create_or_replace_stream_table(
     name         => 'department_stats',
     query        => 'SELECT department, COUNT(*) AS headcount, AVG(salary) AS avg_salary
                      FROM employee_salaries GROUP BY department',
-    schedule     => '2m',
+    schedule     => '30s',
     refresh_mode => 'DIFFERENTIAL'
 );
 ```
@@ -834,7 +894,7 @@ package, stream tables are just dbt models with `materialized='stream_table'`:
 -- models/department_stats.sql
 {{ config(
     materialized='stream_table',
-    schedule='2m',
+    schedule='30s',
     refresh_mode='DIFFERENTIAL'
 ) }}
 

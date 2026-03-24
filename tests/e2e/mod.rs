@@ -124,15 +124,29 @@ fn coverage_mount() -> Option<Mount> {
 /// found locally.  For local-only image names (like `pg_trickle_e2e`) that
 /// produces a confusing "pull access denied" 404.  This check panics early
 /// with a clear, actionable message instead.
+///
+/// Uses `docker image ls --format` rather than `docker image inspect` because
+/// on macOS Docker Desktop with the containerd image store enabled,
+/// `docker image inspect <name>:<tag>` returns exit code 1 even for images
+/// that are listed by `docker images`.  The `--format` filter approach works
+/// consistently across both classic and containerd image stores.
 async fn assert_docker_image_exists(name: &str, tag: &str) {
-    let status = tokio::process::Command::new("docker")
-        .args(["image", "inspect", &format!("{}:{}", name, tag)])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+            &format!("{}:{}", name, tag),
+        ])
+        .output()
         .await
-        .expect("Failed to run `docker image inspect` — is Docker running?");
-    if !status.success() {
+        .expect("Failed to run `docker image ls` — is Docker running?");
+    let found = std::str::from_utf8(&output.stdout)
+        .unwrap_or("")
+        .lines()
+        .any(|line| line.trim() == format!("{name}:{tag}"));
+    if !found {
         panic!(
             "Docker image {name}:{tag} not found locally.\n\
              Build it first:\n\
@@ -599,6 +613,16 @@ impl E2eDb {
             .execute(&self.pool)
             .await
             .expect("Failed to CREATE EXTENSION pg_trickle");
+
+        // Signal the pg_trickle launcher to immediately discover this new database.
+        // Without this, the launcher can sleep up to 10 s before its next poll cycle,
+        // causing WAL-transition tests to time out waiting for the scheduler.
+        // The SIGHUP wakes the launcher, which then sees the DAG-version bump from
+        // CREATE EXTENSION, clears its skip-cache, and spawns the per-DB scheduler.
+        sqlx::query("SELECT pg_reload_conf()")
+            .execute(&self.pool)
+            .await
+            .expect("Failed to pg_reload_conf()");
 
         if let Ok(mode) = std::env::var("PGT_PARALLEL_MODE") {
             let mode = mode.to_ascii_lowercase();

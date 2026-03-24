@@ -1762,8 +1762,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         current_version
                     );
                     // Signal a full rebuild (overflow) so the next tick uses a fresh
-                    // snapshot.  Do NOT update dag_version — the stale tick's version
-                    // is not trusted.
+                    // snapshot.  This is necessary because without the overflow flag,
+                    // an incremental rebuild for a *different* pgt_id arriving between
+                    // ticks could satisfy the version-mismatch check while still
+                    // missing the not-yet-committed ST — permanently excluding it from
+                    // the DAG.  The overflow path forces a full build_from_catalog()
+                    // on the next tick regardless of what else arrives in the ring.
+                    //
+                    // Do NOT update dag_version — the stale tick's version is not
+                    // trusted.
                     shmem::signal_dag_rebuild();
                 } else {
                     dag_version = current_version;
@@ -1916,24 +1923,27 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     if bf > 1.0 {
                         // Check if enough time has passed since last refresh
                         // (effective interval = schedule * backoff_factor).
-                        let should_skip = BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                            if let Some(st) = load_st_by_id(pgt_id)
-                                && let Some(ref schedule_str) = st.schedule
-                                && let Ok(max_secs) = crate::api::parse_duration(schedule_str)
-                            {
-                                let effective_secs: f64 = max_secs as f64 * bf;
-                                let stale = Spi::get_one_with_args::<bool>(
-                                    "SELECT CASE WHEN last_refresh_at IS NULL THEN true \
-                                     ELSE EXTRACT(EPOCH FROM (now() - last_refresh_at)) > $2 END \
-                                     FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
-                                    &[st.pgt_id.into(), effective_secs.into()],
-                                )
-                                .unwrap_or(Some(false))
-                                .unwrap_or(false);
-                                return !stale; // skip if not yet due under backoff schedule
-                            }
+                        // NOTE: We are already inside the outer BackgroundWorker::transaction,
+                        // so we must NOT call BackgroundWorker::transaction here — PostgreSQL
+                        // does not allow StartTransactionCommand when already in TBLOCK_STARTED
+                        // state (causes elog(FATAL)). Use Spi directly instead.
+                        let should_skip = if let Some(st) = load_st_by_id(pgt_id)
+                            && let Some(ref schedule_str) = st.schedule
+                            && let Ok(max_secs) = crate::api::parse_duration(schedule_str)
+                        {
+                            let effective_secs: f64 = max_secs as f64 * bf;
+                            let stale = Spi::get_one_with_args::<bool>(
+                                "SELECT CASE WHEN last_refresh_at IS NULL THEN true \
+                                 ELSE EXTRACT(EPOCH FROM (now() - last_refresh_at)) > $2 END \
+                                 FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1",
+                                &[st.pgt_id.into(), effective_secs.into()],
+                            )
+                            .unwrap_or(Some(false))
+                            .unwrap_or(false);
+                            !stale // skip if not yet due under backoff schedule
+                        } else {
                             false
-                        }));
+                        };
                         if should_skip {
                             continue;
                         }
@@ -1950,10 +1960,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         Some(&mut entry),
                     );
                     // P3-5: Update auto-backoff factor based on last refresh timing.
+                    // NOTE: We are already inside the outer BackgroundWorker::transaction,
+                    // so we must NOT call BackgroundWorker::transaction here — calling
+                    // StartTransactionCommand in TBLOCK_STARTED state causes elog(FATAL).
                     if config::pg_trickle_auto_backoff() {
-                        BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                            update_backoff_factor(pgt_id, &mut backoff_factors);
-                        }));
+                        update_backoff_factor(pgt_id, &mut backoff_factors);
                     }
                     continue;
                 }
@@ -2334,9 +2345,17 @@ fn check_cdc_transition_health() {
 ///
 /// Uses `SELECT ... FOR UPDATE SKIP LOCKED` on the catalog row to detect
 /// concurrent refreshes.  If another session holds the row lock the query
-/// returns zero rows and we skip.  The probe runs inside `Spi::connect`
-/// (subtransaction) so the lock is released immediately — this is a
-/// lightweight check, not the authoritative lock acquisition.
+/// returns zero rows and we skip.  The row lock, once acquired, is held for
+/// the remainder of the caller's transaction — this is intentional, as the
+/// lock prevents concurrent refreshes until the tick transaction commits.
+///
+/// IMPORTANT: `Spi::get_one_with_args` is used here (not `Spi::connect` +
+/// `client.select`) because pgrx's `select` passes `read_only =
+/// Spi::is_xact_still_immutable()`, which evaluates to `true` when no prior
+/// mutation has assigned a transaction XID yet.  PostgreSQL rejects `FOR
+/// UPDATE` in a read-only SPI context with "SELECT FOR UPDATE is not allowed
+/// in a non-volatile function".  `get_one_with_args` routes through
+/// `connect_mut` / `update`, which always uses `read_only = false`.
 ///
 /// PB1: replaces the previous `pg_try_advisory_lock` approach for
 /// PgBouncer transaction‐mode compatibility.
@@ -2345,20 +2364,18 @@ fn check_cdc_transition_health() {
 fn check_skip_needed(st: &StreamTableMeta) -> bool {
     let pgt_id = st.pgt_id;
 
-    // Probe inside a subtransaction so the row lock is released at the
-    // end of the closure, regardless of the result.
-    Spi::connect(|client| {
-        let row = client
-            .select(
-                "SELECT 1 FROM pgtrickle.pgt_stream_tables \
-                 WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
-                None,
-                &[pgt_id.into()],
-            )
-            .unwrap_or_else(|_| panic!("check_skip_needed: SPI select failed"));
-        // Zero rows → the row is locked by another session.
-        row.is_empty()
-    })
+    // FOR UPDATE SKIP LOCKED requires read_only=false (mutating SPI context).
+    // Returns Some(pgt_id) if lock acquired, None if row is locked by another session.
+    let row_found = Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(None)
+    .is_some();
+
+    // Zero rows → the row is locked by another session → skip.
+    !row_found
 }
 
 // ── Time Helper ────────────────────────────────────────────────────────────

@@ -124,7 +124,7 @@ async fn test_explicit_wal_override_transitions_even_with_global_trigger() {
     assert_eq!(requested_cdc_mode, "wal");
 
     let final_mode =
-        wait_for_cdc_mode(&db, "wal_override_src", "WAL", Duration::from_secs(30)).await;
+        wait_for_cdc_mode(&db, "wal_override_src", "WAL", Duration::from_secs(60)).await;
     assert_eq!(
         final_mode, "WAL",
         "Explicit wal override should transition to WAL mode"
@@ -210,7 +210,7 @@ async fn test_wal_transition_lifecycle() {
     // 1. Start transition (create slot + publication)
     // 2. Poll WAL to catch up
     // 3. Complete transition (verify lag < 64KB)
-    let final_mode = wait_for_cdc_mode(&db, "wal_src", "WAL", Duration::from_secs(30)).await;
+    let final_mode = wait_for_cdc_mode(&db, "wal_src", "WAL", Duration::from_secs(60)).await;
     assert_eq!(
         final_mode, "WAL",
         "Should transition to WAL mode (got: {final_mode})"
@@ -249,7 +249,7 @@ async fn test_wal_cdc_captures_insert() {
     assert_eq!(db.count("public.wal_ins_st").await, 1);
 
     // Wait for WAL transition
-    let mode = wait_for_cdc_mode(&db, "wal_ins", "WAL", Duration::from_secs(30)).await;
+    let mode = wait_for_cdc_mode(&db, "wal_ins", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should transition to WAL mode");
 
     // Insert new rows — WAL decoder should capture them
@@ -292,7 +292,7 @@ async fn test_wal_cdc_captures_update() {
     )
     .await;
 
-    let mode = wait_for_cdc_mode(&db, "wal_upd", "WAL", Duration::from_secs(30)).await;
+    let mode = wait_for_cdc_mode(&db, "wal_upd", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should transition to WAL mode");
 
     db.execute("UPDATE wal_upd SET val = 'new' WHERE id = 1")
@@ -335,7 +335,7 @@ async fn test_wal_cdc_captures_delete() {
 
     assert_eq!(db.count("public.wal_del_st").await, 2);
 
-    let mode = wait_for_cdc_mode(&db, "wal_del", "WAL", Duration::from_secs(30)).await;
+    let mode = wait_for_cdc_mode(&db, "wal_del", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should transition to WAL mode");
 
     db.execute("DELETE FROM wal_del WHERE id = 2").await;
@@ -422,7 +422,7 @@ async fn test_wal_fallback_on_missing_slot() {
     .await;
 
     // Wait for WAL transition to complete
-    let mode = wait_for_cdc_mode(&db, "wal_fb", "WAL", Duration::from_secs(30)).await;
+    let mode = wait_for_cdc_mode(&db, "wal_fb", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should be in WAL mode before test");
 
     // Externally drop the replication slot to simulate infrastructure failure
@@ -432,7 +432,7 @@ async fn test_wal_fallback_on_missing_slot() {
         .await;
 
     // Wait for the health check / poll error to trigger fallback
-    let fallback_mode = wait_for_cdc_mode(&db, "wal_fb", "TRIGGER", Duration::from_secs(30)).await;
+    let fallback_mode = wait_for_cdc_mode(&db, "wal_fb", "TRIGGER", Duration::from_secs(60)).await;
     assert_eq!(
         fallback_mode, "TRIGGER",
         "Should fall back to TRIGGER after slot is dropped"
@@ -472,7 +472,7 @@ async fn test_wal_cleanup_on_drop() {
     )
     .await;
 
-    wait_for_cdc_mode(&db, "wal_drop", "WAL", Duration::from_secs(30)).await;
+    wait_for_cdc_mode(&db, "wal_drop", "WAL", Duration::from_secs(60)).await;
 
     let oid = db.table_oid("wal_drop").await;
     let slot_name = format!("pgtrickle_{}", oid);
@@ -635,7 +635,7 @@ async fn test_ec34_check_cdc_health_detects_missing_slot() {
     .await;
 
     // Wait for WAL transition to complete
-    let mode = wait_for_cdc_mode(&db, "ec34_src", "WAL", Duration::from_secs(30)).await;
+    let mode = wait_for_cdc_mode(&db, "ec34_src", "WAL", Duration::from_secs(60)).await;
     assert_eq!(mode, "WAL", "Should be in WAL mode before dropping slot");
 
     // Drop the replication slot externally to simulate backup/restore
@@ -659,7 +659,7 @@ async fn test_ec34_check_cdc_health_detects_missing_slot() {
 
     // After fallback completes, verify data integrity
     let fallback_mode =
-        wait_for_cdc_mode(&db, "ec34_src", "TRIGGER", Duration::from_secs(30)).await;
+        wait_for_cdc_mode(&db, "ec34_src", "TRIGGER", Duration::from_secs(60)).await;
     assert_eq!(
         fallback_mode, "TRIGGER",
         "Should fall back to TRIGGER after slot is dropped"

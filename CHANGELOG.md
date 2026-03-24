@@ -278,6 +278,68 @@ actionable message at the moment they occur:
   unaffected. Enable it only for stream tables accessed through PgBouncer
   transaction-mode pooling.
 
+### Additional Bug Fixes (2026-03-24)
+
+**Scheduler stability:**
+
+- **Scheduler no longer crashes when concurrent refreshes compete.** The
+  internal function that decides whether to skip a refresh cycle was running a
+  locking query outside a transaction boundary — a strict PostgreSQL requirement.
+  It now runs inside a proper subtransaction, eliminating the crash.
+
+- **Auto-backoff no longer causes a transaction conflict in the background
+  worker.** When the auto-backoff feature stretches a stream table's refresh
+  interval, it previously tried to open a new transaction inside the background
+  worker's already-open transaction. PostgreSQL does not allow this nesting; the
+  code path is now restructured to avoid it.
+
+**Query engine correctness:**
+
+- **Queries that filter on hidden columns now produce correct results.** For
+  example, `SELECT name FROM users WHERE internal_id > 5` — where `internal_id`
+  is not part of the output — could return wrong rows during incremental updates.
+  Fixed.
+
+- **JOIN results are correct when both joined tables change at the same time.**
+  Simultaneous changes to two stream tables connected by a JOIN could leave the
+  output with stale or duplicated rows. Fixed.
+
+- **`NULLIF(a, b)` expressions now work in incremental queries.** `NULLIF`
+  returns NULL when its two arguments are equal. It was not recognised by the
+  incremental parser, causing a fallback error. Fixed.
+
+- **`LIKE` and `ILIKE` pattern matching now work in filter conditions.** Filter
+  expressions such as `WHERE name LIKE 'A%'` or `WHERE description ILIKE
+  '%widget%'` were not handled by the incremental engine. Fixed.
+
+- **Subqueries with `ORDER BY`, `LIMIT`, or `OFFSET` are now preserved
+  correctly.** When the incremental engine reconstructed a subquery, those
+  clauses were silently dropped. The incremental result no longer differs from a
+  full refresh for such queries.
+
+- **Scalar subqueries using `LIMIT` or `OFFSET` are now handled gracefully.**
+  Rather than producing a runtime error, the engine falls back to a full refresh
+  for those cases and continues.
+
+**SQL parser:**
+
+- **Wildcard column references (`table.*`) now work for qualified names.** A
+  two- or three-part column reference such as `schema.table.*` or `alias.*`
+  caused a parser crash. Fixed.
+
+**Change capture and WAL:**
+
+- **State transitions no longer stall when the WAL replication slot is behind.**
+  When a stream table moves through the TRANSITIONING state, pg_trickle now
+  advances the WAL replication slot up-front. This eliminates a lag-check stall
+  that could cause the transition to hang indefinitely under write-heavy
+  workloads.
+
+**Security:**
+
+- Several low-severity code quality and security scanner alerts from Semgrep and
+  CodeQL are resolved. No user-visible behaviour changes.
+
 ---
 
 ## [0.9.0] — 2026-03-20

@@ -10,7 +10,7 @@
 [![PostgreSQL 18](https://img.shields.io/badge/PostgreSQL-18-blue?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx 0.17](https://img.shields.io/badge/pgrx-0.17-orange)](https://github.com/pgcentralfoundation/pgrx)
 
-> **Early Release Notice:** This project is in an early stage of development and is **not yet production ready**. APIs, configuration options, and internal behavior may change without notice. Use at your own risk and please report any issues you encounter.
+> **Pre-1.0 Notice:** pg_trickle is under active development and has not yet reached a stable 1.0 release. The core feature set is extensive and thoroughly tested, but APIs and configuration options may still change between minor versions. See [ROADMAP.md](ROADMAP.md) for the planned path to 1.0.
 
 > For a plain-language description of the problem pg_trickle solves, the differential dataflow approach, and the hybrid CDC architecture, read **[ESSENCE.md](ESSENCE.md)**.
 
@@ -44,7 +44,10 @@ We also do not think the use of AI should lower the standard for trust. If anyth
 - **Circular dependency support** — monotone dependency cycles can be enabled explicitly and are refreshed to a fixed point with convergence guardrails and monitoring.
 - **Watermark gating** — external loaders can publish per-source watermarks so downstream refreshes wait until related sources are aligned.
 - **Multi-database auto-discovery** — a single launcher worker automatically spawns per-database scheduler workers for every database that has the extension installed. No manual per-database configuration needed.
-- **Crash-safe** — advisory locks prevent concurrent refreshes; crash recovery marks in-flight refreshes as failed and resumes normal operation.
+- **PgBouncer compatible** — works behind PgBouncer in transaction-pool mode (the default on Supabase, Railway, Neon, and similar managed platforms). Session locks have been replaced with row-level locking. Per-table `pooler_compatibility_mode` disables prepared statements and NOTIFY for connection-pooler deployments.
+- **Tiered scheduling** — assign stream tables to Hot / Warm / Cold / Frozen tiers to control effective refresh rates in large deployments (`pg_trickle.tiered_scheduling = on`).
+- **Change buffer compaction** — automatically collapses cancelling INSERT/DELETE pairs and sequential changes to the same row, reducing delta scan overhead 50–90 % for high-churn tables.
+- **Crash-safe** — row-level locks prevent concurrent refreshes; crash recovery marks in-flight refreshes as failed and resumes normal operation.
 - **Observable** — built-in monitoring views, refresh history, slot health checks, staleness reporting, SCC status, watermark status, `NOTIFY`-based alerting, and dedicated helper functions such as `health_check`, `change_buffer_sizes`, `dependency_tree`, `refresh_timeline`, `trigger_inventory`, `list_sources`, `diamond_groups`, and `pgt_scc_status`.
 
 ## SQL Support
@@ -108,7 +111,7 @@ Every operator listed here works in `DIFFERENTIAL` mode (incremental delta compu
 | **Safety** | Volatile function/operator detection | ✅ Full | VOLATILE expressions rejected in DIFFERENTIAL and IMMEDIATE; STABLE functions warned |
 | **Source tables** | Tables without primary key | ✅ Full | Content-hash row identity via all columns |
 | **Source tables** | Views as sources | ✅ Full | Auto-inlined as subqueries; CDC triggers land on base tables |
-| **Source tables** | Materialized views | ❌ DIFF / ✅ FULL | Rejected in DIFFERENTIAL (stale snapshot); allowed in FULL |
+| **Source tables** | Materialized views | ⚠️ DIFF / ✅ FULL | DIFFERENTIAL requires `pg_trickle.matview_polling = on` (snapshot comparison); FULL always works |
 | **TopK** | `ORDER BY ... LIMIT N [OFFSET M]` | ✅ Full | TopK stream tables store only N rows (optionally from position M+1); scoped recomputation via MERGE |
 | **Ordering** | `ORDER BY` (without LIMIT) | ⚠️ Ignored | Accepted but silently discarded; storage row order is undefined |
 | **Ordering** | `LIMIT` / `OFFSET` (without ORDER BY) | ❌ Rejected | Not supported — stream tables materialize the full result set |
@@ -152,7 +155,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle-ext:0.2.2
+docker pull ghcr.io/grove/pg_trickle-ext:0.10.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -166,7 +169,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/grove/pg_trickle-ext:0.2.2
+          reference: ghcr.io/grove/pg_trickle-ext:0.10.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -246,7 +249,7 @@ SELECT pgtrickle.drop_stream_table('regional_totals');
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) | Supported operators and differentiation rules |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | GUC variables and tuning guide |
-| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.8.0) |
+| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.11.0) |
 
 ### Research & Plans
 

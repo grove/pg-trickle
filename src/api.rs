@@ -2764,7 +2764,7 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     // G-N3 optimization: source OIDs are fetched once and reused.
     let source_oids = get_source_oids_for_manual_refresh(st.pgt_id)?;
 
-    // Phase 10: Advisory lock to prevent concurrent refresh.
+    // Phase 10: Advisory lock to prevent concurrent manual refresh.
     // Use the transaction-scoped variant so the lock is automatically
     // released when the transaction commits or rolls back — including on
     // error-triggered rollbacks where a subsequent session-level
@@ -2775,6 +2775,30 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
             .unwrap_or(false);
 
     if !got_lock {
+        return Err(PgTrickleError::RefreshSkipped(format!(
+            "{}.{} — another refresh is already in progress",
+            schema, table_name,
+        )));
+    }
+
+    // PB1 row-lock: acquire FOR UPDATE SKIP LOCKED on the catalog row so
+    // the background scheduler's check_skip_needed() sees this manual
+    // refresh as "in progress" and skips the ST for this tick.  Without
+    // this, the advisory lock (above) and the scheduler's FOR UPDATE are
+    // invisible to each other, allowing both to proceed simultaneously and
+    // deadlock when the scheduler's TRUNCATE and the manual refresh's
+    // catalog UPDATE race for conflicting locks.
+    //
+    // If the scheduler already holds the row lock (currently refreshing
+    // this ST), we get zero rows back — report "already in progress".
+    let row_available = Spi::get_one_with_args::<i64>(
+        "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None)
+    .is_some();
+
+    if !row_available {
         return Err(PgTrickleError::RefreshSkipped(format!(
             "{}.{} — another refresh is already in progress",
             schema, table_name,
@@ -3097,6 +3121,8 @@ fn execute_manual_full_refresh(
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
     // refresh occurred.
     if has_triggers {
+        // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be
+        // parameterized; quoted_table is a PostgreSQL-quoted identifier.
         Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
@@ -3104,6 +3130,8 @@ fn execute_manual_full_refresh(
         if !st.pooler_compatibility_mode {
             let escaped_name = table_name.replace('\'', "''");
             let escaped_schema = schema.replace('\'', "''");
+            // nosemgrep: rust.spi.run.dynamic-format — NOTIFY does not support
+            // parameterized payloads; single quotes are escaped above.
             Spi::run(&format!(
                 "NOTIFY pgtrickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
                  \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\"}}'"
