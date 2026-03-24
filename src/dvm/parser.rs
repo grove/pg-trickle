@@ -16969,11 +16969,7 @@ mod tests {
             table_oid: 1,
             table_name: "t".to_string(),
             schema: "public".to_string(),
-            columns: vec![
-                make_column("id"),
-                make_column("val"),
-                make_column("side"),
-            ],
+            columns: vec![make_column("id"), make_column("val"), make_column("side")],
             pk_columns: vec!["id".to_string()],
             alias: "t".to_string(),
         };
