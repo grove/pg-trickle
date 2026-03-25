@@ -1,7 +1,7 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-03-25
-> **Latest release:** 0.10.0 (2026-03-23)
+> **Latest release:** 0.10.0 (2026-03-25)
 > **Current milestone:** v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness
 > **v0.11.0 progress:** Phase 1 complete (PR #279)
 

@@ -1,14 +1,15 @@
 {
   "name": "pg_trickle",
   "abstract": "Streaming tables with incremental view maintenance for PostgreSQL 18",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "maintainer": "pg_trickle contributors",
   "license": "apache_2_0",
   "provides": {
     "pg_trickle": {
       "abstract": "Streaming tables with differential view maintenance",
       "file": "pg_trickle.control",
-      "version": "0.10.0"
+      "docfile": "doc/pg_trickle.md",
+      "version": "0.11.0"
     }
   },
   "prereqs": {
