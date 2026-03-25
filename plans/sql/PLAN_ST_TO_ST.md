@@ -191,15 +191,37 @@ WHERE d.__pgt_action IN ('I', 'D');
 
 **Path 2 — Prepared statement / direct MERGE:**
 
-The delta is not materialized. Two options:
+The delta is not yet materialized in memory. Two options:
 
-- **Option A (preferred):** Materialize the delta into a temp table first
-  (same pattern as the explicit-DML path), then MERGE from it AND INSERT
-  into the buffer. This adds one temp-table materialization but avoids
-  evaluating the delta SQL twice.
-  
-- **Option B:** Wrap the MERGE in a CTE or use `MERGE ... RETURNING` (not
-  available in PostgreSQL 18). Less clean; go with Option A.
+- **Option A:** Materialize the delta into a temp table first (same pattern
+  as the explicit-DML path), then MERGE from it AND INSERT into the buffer.
+  One extra `CREATE TEMP TABLE ... AS SELECT` before the MERGE.
+
+- **Option B (preferred):** Use `MERGE ... RETURNING`, which is available
+  since PostgreSQL 17 and therefore present in the pg_trickle target of
+  PostgreSQL 18. The RETURNING clause can reference source-table alias
+  columns directly, yielding exactly the delta rows needed for the buffer
+  insert — no temp table required:
+
+  ```sql
+  WITH delta_rows AS (
+      MERGE INTO "{schema}"."{name}" AS st
+      USING ({delta_sql}) AS d
+      ON st.__pgt_row_id = d.__pgt_row_id
+      WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE
+      WHEN MATCHED AND d.__pgt_action = 'I' ... THEN UPDATE SET ...
+      WHEN NOT MATCHED AND d.__pgt_action = 'I' THEN INSERT ...
+      RETURNING d.__pgt_action, d.__pgt_row_id, d.col1, d.col2, ...
+  )
+  INSERT INTO pgtrickle_changes.changes_pgt_{pgt_id}
+      (lsn, action, pk_hash, new_col1, new_col2, ...)
+  SELECT pg_current_wal_lsn(), r.__pgt_action, r.__pgt_row_id,
+         r.col1, r.col2, ...
+  FROM delta_rows r;
+  ```
+
+  This atomically applies the MERGE and captures the buffer rows in a
+  single round-trip, with no intermediate materialisation cost.
 
 **LSN assignment:** Use `pg_current_wal_lsn()` at capture time. This gives
 each captured batch a monotonically increasing LSN that downstream STs can
@@ -381,10 +403,10 @@ frontier entry.
 
 | Task | File | Description |
 |------|------|-------------|
-| 2.1 | `refresh.rs` | Add `capture_delta_to_st_buffer(pgt_id, delta_temp_table, columns)` — INSERTs delta rows into `changes_pgt_{id}` with `pg_current_wal_lsn()` |
-| 2.2 | `refresh.rs` | In `execute_differential_refresh()`, after MERGE, call `capture_delta_to_st_buffer()` if the ST has a change buffer |
-| 2.3 | `refresh.rs` | In `execute_full_refresh()`, after the full rewrite, compute and capture the full diff (new state minus old state) into the buffer |
-| 2.4 | `refresh.rs` | Ensure the delta is materialized to a temp table in all MERGE paths (currently only done in the explicit-DML path) |
+| 2.1 | `refresh.rs` | Add `capture_delta_to_st_buffer(pgt_id, delta_temp_table, columns)` — INSERTs delta rows into `changes_pgt_{id}` with `pg_current_wal_lsn()` (used by the explicit-DML path which already has a temp table) |
+| 2.2 | `refresh.rs` | In `execute_differential_refresh()`, for the prepared-statement and direct-MERGE paths: wrap the MERGE in a CTE using `MERGE ... RETURNING` to atomically capture delta rows into the buffer (PostgreSQL 17+ feature, available on the pg_trickle target of PG 18) |
+| 2.3 | `refresh.rs` | In the explicit-DML path, call `capture_delta_to_st_buffer()` after the DELETE/UPDATE/INSERT sequence, reading from the already-materialized `__pgt_delta_{pgt_id}` temp table |
+| 2.4 | `refresh.rs` | In `execute_full_refresh()`, after the full rewrite, compute and capture the full diff (new state minus old state) into the buffer — see Section 7 |
 
 ### Phase 3: DVM Scan for ST Sources
 
@@ -427,7 +449,7 @@ frontier entry.
 
 ---
 
-## 7. Task 2.3 Deep Dive: FULL Refresh Delta Capture
+## 7. Task 2.4 Deep Dive: FULL Refresh Delta Capture
 
 FULL refresh is the trickiest case. When an ST does a FULL refresh (truncate +
 rewrite), we still need to capture the **diff** between the old and new state
