@@ -2378,20 +2378,44 @@ fn check_cdc_transition_health() {
 /// PgBouncer transaction‐mode compatibility.
 ///
 /// Returns `true` if the refresh should be skipped.
+///
+/// SAF-1 audit (v0.11.0): This function and the broader worker loop in
+/// `scheduler.rs`, `refresh.rs`, and `hooks.rs` have been audited for
+/// `panic!` / `unwrap()` / `.expect()` in non-test code paths. All such
+/// calls found were confined to `#[cfg(test)]` blocks. The only non-test
+/// fallible path here is the SPI call below, which was previously silently
+/// swallowed. It now logs a WARNING so operators can distinguish a missed
+/// lock-check from a genuine SPI failure.
 fn check_skip_needed(st: &StreamTableMeta) -> bool {
     let pgt_id = st.pgt_id;
 
     // FOR UPDATE SKIP LOCKED requires read_only=false (mutating SPI context).
     // Returns Some(pgt_id) if lock acquired, None if row is locked by another session.
-    let row_found = Spi::get_one_with_args::<i64>(
+    let spi_result = Spi::get_one_with_args::<i64>(
         "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
          WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
         &[pgt_id.into()],
-    )
-    .unwrap_or(None)
-    .is_some();
+    );
 
-    // Zero rows → the row is locked by another session → skip.
+    let row_found = match spi_result {
+        Ok(opt) => opt.is_some(),
+        Err(e) => {
+            // SAF-1: Log the SPI error instead of silently treating it as
+            // "locked". We still skip (return true) to be conservative — a
+            // failed lock check should not allow concurrent refreshes.
+            pgrx::warning!(
+                "[pg_trickle] check_skip_needed: SPI error for {}.{} (pgt_id={}): {} \
+                 — treating as locked, skipping this cycle",
+                st.pgt_schema,
+                st.pgt_name,
+                pgt_id,
+                e,
+            );
+            false
+        }
+    };
+
+    // Zero rows (or SPI error) → the row is locked or unavailable → skip.
     !row_found
 }
 

@@ -674,9 +674,10 @@ fn validate_and_parse_query(
     // AUTO mode: downgrade to FULL instead of erroring.
     if let Err(e) = crate::dvm::reject_unsupported_constructs(q) {
         if is_auto {
-            pgrx::info!(
-                "Query uses constructs not supported by differential maintenance ({}); \
-                 using FULL refresh mode. See docs/DVM_OPERATORS.md for supported operators.",
+            pgrx::warning!(
+                "[pg_trickle] AUTO mode: query uses constructs not supported by differential \
+                 maintenance ({}) — falling back to FULL refresh. \
+                 See docs/DVM_OPERATORS.md for supported operators.",
                 e
             );
             *refresh_mode = RefreshMode::Full;
@@ -691,9 +692,9 @@ fn validate_and_parse_query(
         && let Err(e) = crate::dvm::reject_materialized_views(q)
     {
         if is_auto && *refresh_mode == RefreshMode::Differential {
-            pgrx::info!(
-                "Query references materialized views or foreign tables ({}); \
-                 using FULL refresh mode.",
+            pgrx::warning!(
+                "[pg_trickle] AUTO mode: query references materialized views or foreign \
+                 tables ({}) — falling back to FULL refresh.",
                 e
             );
             *refresh_mode = RefreshMode::Full;
@@ -710,9 +711,9 @@ fn validate_and_parse_query(
         && (*refresh_mode == RefreshMode::Differential || *refresh_mode == RefreshMode::Immediate)
     {
         if is_auto {
-            pgrx::info!(
-                "Query contains window functions inside expressions (e.g. CASE WHEN window_fn() ...). \
-                 Differential maintenance is not supported for this pattern; using FULL refresh mode."
+            pgrx::warning!(
+                "[pg_trickle] AUTO mode: query contains window functions inside expressions \
+                 (e.g. CASE WHEN window_fn() ...) -- falling back to FULL refresh."
             );
             *refresh_mode = RefreshMode::Full;
         } else {
@@ -760,9 +761,10 @@ fn validate_and_parse_query(
         match crate::dvm::parse_defining_query_full(q) {
             Ok(tree) => Some(tree),
             Err(e) if is_auto && *refresh_mode == RefreshMode::Differential => {
-                pgrx::info!(
-                    "Query cannot use differential maintenance ({}); \
-                     using FULL refresh mode. See docs/DVM_OPERATORS.md for supported operators.",
+                pgrx::warning!(
+                    "[pg_trickle] AUTO mode: query cannot use differential maintenance \
+                     ({}) — falling back to FULL refresh. \
+                     See docs/DVM_OPERATORS.md for supported operators.",
                     e
                 );
                 *refresh_mode = RefreshMode::Full;

@@ -2269,7 +2269,10 @@ pub fn execute_differential_refresh(
                INSERT (__pgt_row_id, {user_col_list}) \
                VALUES (d.__pgt_row_id, {d_user_col_list})",
         );
-        println!("MERGE SQL TEMPLATE:\n{}", merge_template);
+        // QF-1: Log at LOG level only when pg_trickle.log_merge_sql = on.
+        if crate::config::pg_trickle_log_merge_sql() {
+            pgrx::log!("[pg_trickle] MERGE SQL TEMPLATE:\n{}", merge_template);
+        }
 
         // ── B-3: DELETE + INSERT template removed (always use MERGE) ─
 

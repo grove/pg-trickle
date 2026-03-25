@@ -147,9 +147,10 @@ pub static PGS_SLOT_LAG_CRITICAL_THRESHOLD_MB: GucSetting<i32> = GucSetting::<i3
 /// Benign DDL (CREATE INDEX, COMMENT ON, ALTER TABLE SET STATISTICS) and
 /// constraint-only changes are always allowed regardless of this setting.
 ///
-/// Useful for production deployments where source schemas are stable and
-/// accidental column changes should be prevented.
-pub static PGS_BLOCK_SOURCE_DDL: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// Default is `true` (enabled) as of v0.11.0 — set to `false` to restore
+/// the previous permissive behavior (DDL triggers reinitialization instead
+/// of blocking).
+pub static PGS_BLOCK_SOURCE_DDL: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// F46 (G9.3): Buffer growth alert threshold (number of pending change rows).
 ///
@@ -249,12 +250,13 @@ pub static PGS_MATVIEW_POLLING: GucSetting<bool> = GucSetting::<bool>::new(false
 /// Parallel refresh mode — controls whether the scheduler dispatches
 /// refresh work to dynamic background workers.
 ///
-/// - `"off"` (default): Current sequential behavior.
+/// - `"on"` (default as of v0.11.0): Enable true parallel refresh via
+///   dynamic workers. The feature has been stable since v0.4.0.
+/// - `"off"`: Sequential refresh (pre-v0.11.0 default).
 /// - `"dry_run"`: Compute execution units and log dispatch decisions,
 ///   but execute inline (no actual workers spawned).
-/// - `"on"`: Enable true parallel refresh via dynamic workers.
 pub static PGS_PARALLEL_REFRESH_MODE: GucSetting<Option<std::ffi::CString>> =
-    GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"on"));
 
 /// Cluster-wide cap on concurrently active pg_trickle dynamic refresh workers.
 ///
@@ -338,6 +340,14 @@ pub static PGS_ALLOW_CIRCULAR: GucSetting<bool> = GucSetting::<bool>::new(false)
 /// User-set via `ALTER STREAM TABLE ... SET (tier = 'warm')`.
 /// Default tier for new STs is Hot (no change in behavior).
 pub static PGS_TIERED_SCHEDULING: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// QF-1: When `true`, the MERGE SQL template is emitted to the PostgreSQL
+/// server log at `LOG` level on every refresh cycle.
+///
+/// Intended for debugging MERGE query generation only. **Do not enable in
+/// production** — every refresh will emit potentially large SQL strings to
+/// the server log.
+pub static PGS_LOG_MERGE_SQL: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
@@ -532,10 +542,11 @@ pub fn register_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_trickle.block_source_ddl",
         c"Block column-altering DDL on source tables used by stream tables.",
-        c"When true, ALTER TABLE that adds, drops, renames, or changes the type of a column \
-           on a source table will ERROR instead of triggering reinitialization. \
+        c"When true (default), ALTER TABLE that adds, drops, renames, or changes the type \
+           of a column on a source table will ERROR instead of triggering reinitialization. \
            Benign DDL (indexes, comments, statistics) and constraint changes are always allowed. \
-           Useful for production deployments where source schemas should be stable.",
+           Set to false to allow schema changes (the stream table will be reinitialized on the \
+           next scheduler tick). Use ALTER STREAM TABLE to update the query before re-enabling.",
         &PGS_BLOCK_SOURCE_DDL,
         GucContext::Suset,
         GucFlags::default(),
@@ -638,10 +649,10 @@ pub fn register_gucs() {
 
     GucRegistry::define_string_guc(
         c"pg_trickle.parallel_refresh_mode",
-        c"Parallel refresh mode: off, dry_run, or on.",
-        c"'off' (default): sequential refresh. \
+        c"Parallel refresh mode: on (default), dry_run, or off.",
+        c"'on' (default): enable true parallel refresh via dynamic background workers. \
            'dry_run': compute execution units and log dispatch decisions but execute inline. \
-           'on': enable true parallel refresh via dynamic background workers.",
+           'off': sequential refresh (pre-v0.11.0 default).",
         &PGS_PARALLEL_REFRESH_MODE,
         GucContext::Suset,
         GucFlags::default(),
@@ -758,6 +769,17 @@ pub fn register_gucs() {
            Cold at 10x, Frozen skips entirely. Set per-ST tier via \
            ALTER STREAM TABLE ... SET (tier = 'warm'). Default is off.",
         &PGS_TIERED_SCHEDULING,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.log_merge_sql",
+        c"Log the generated MERGE SQL template on every refresh cycle.",
+        c"When true, the MERGE SQL template built during differential refresh is \
+           emitted to the PostgreSQL server log at LOG level. Intended for debugging \
+           MERGE query generation only. Do not enable in production.",
+        &PGS_LOG_MERGE_SQL,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -968,8 +990,10 @@ impl std::fmt::Display for ParallelRefreshMode {
 fn normalize_parallel_refresh_mode(value: Option<String>) -> ParallelRefreshMode {
     match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("dry_run") => ParallelRefreshMode::DryRun,
-        Some("on") => ParallelRefreshMode::On,
-        _ => ParallelRefreshMode::Off,
+        Some("off") => ParallelRefreshMode::Off,
+        // Default to On for None (unset) and any unrecognised value.
+        // On has been the stable parallel path since v0.4.0.
+        _ => ParallelRefreshMode::On,
     }
 }
 
@@ -1000,6 +1024,11 @@ pub fn pg_trickle_allow_circular() -> bool {
 /// G-7: Returns whether tiered refresh scheduling is enabled.
 pub fn pg_trickle_tiered_scheduling() -> bool {
     PGS_TIERED_SCHEDULING.get()
+}
+
+/// QF-1: Returns whether MERGE SQL template logging is enabled.
+pub fn pg_trickle_log_merge_sql() -> bool {
+    PGS_LOG_MERGE_SQL.get()
 }
 
 #[cfg(test)]
@@ -1087,14 +1116,14 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_parallel_refresh_mode_defaults_to_off() {
+    fn test_normalize_parallel_refresh_mode_defaults_to_on() {
         assert_eq!(
             normalize_parallel_refresh_mode(None),
-            ParallelRefreshMode::Off
+            ParallelRefreshMode::On
         );
         assert_eq!(
             normalize_parallel_refresh_mode(Some("unexpected".to_string())),
-            ParallelRefreshMode::Off
+            ParallelRefreshMode::On
         );
     }
 
