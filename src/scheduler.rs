@@ -2401,24 +2401,24 @@ fn check_cdc_transition_health() {
 
 // ── Skip Mechanism ─────────────────────────────────────────────────────────
 
-/// Check if a refresh should be skipped because a previous one is still running.
-///
-/// Uses `SELECT ... FOR UPDATE SKIP LOCKED` on the catalog row to detect
-/// concurrent refreshes.  If another session holds the row lock the query
-/// returns zero rows and we skip.  The row lock, once acquired, is held for
-/// the remainder of the caller's transaction — this is intentional, as the
-/// lock prevents concurrent refreshes until the tick transaction commits.
-///
-/// IMPORTANT: `Spi::get_one_with_args` is used here (not `Spi::connect` +
-/// `client.select`) because pgrx's `select` passes `read_only =
-/// Spi::is_xact_still_immutable()`, which evaluates to `true` when no prior
-/// mutation has assigned a transaction XID yet.  PostgreSQL rejects `FOR
-/// UPDATE` in a read-only SPI context with "SELECT FOR UPDATE is not allowed
-/// in a non-volatile function".  `get_one_with_args` routes through
-/// `connect_mut` / `update`, which always uses `read_only = false`.
-///
-/// PB1: replaces the previous `pg_try_advisory_lock` approach for
-/// PgBouncer transaction‐mode compatibility.
+// Check if a refresh should be skipped because a previous one is still running.
+//
+// Uses `SELECT ... FOR UPDATE SKIP LOCKED` on the catalog row to detect
+// concurrent refreshes.  If another session holds the row lock the query
+// returns zero rows and we skip.  The row lock, once acquired, is held for
+// the remainder of the caller's transaction — this is intentional, as the
+// lock prevents concurrent refreshes until the tick transaction commits.
+//
+// IMPORTANT: `Spi::get_one_with_args` is used here (not `Spi::connect` +
+// `client.select`) because pgrx's `select` passes `read_only =
+// Spi::is_xact_still_immutable()`, which evaluates to `true` when no prior
+// mutation has assigned a transaction XID yet.  PostgreSQL rejects `FOR
+// UPDATE` in a read-only SPI context with "SELECT FOR UPDATE is not allowed
+// in a non-volatile function".  `get_one_with_args` routes through
+// `connect_mut` / `update`, which always uses `read_only = false`.
+//
+// PB1: replaces the previous `pg_try_advisory_lock` approach for
+// PgBouncer transaction‐mode compatibility.
 
 // ── FUSE-5: Fuse circuit breaker pre-check ─────────────────────────────────
 
