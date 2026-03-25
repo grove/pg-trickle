@@ -16,7 +16,9 @@ The approach is grounded in the DBSP differential dataflow framework (Budiu et a
 
 Other things we care about: crash-safe advisory locking, built-in monitoring views, NOTIFY-based alerting, and a dbt integration.
 
-Written in Rust using pgrx. Targets PostgreSQL 18. Apache 2.0 licensed. Early stage — 1,100+ unit tests and 380+ e2e tests, but not yet production-hardened.
+**Performance is a primary goal.** Maximum throughput, low latency, and minimal overhead drive every design decision. Differential refresh is the default mode; full refresh is a fallback of last resort. At a 1% change rate, benchmarks show 7–42× speedup over full refresh — and the bottleneck is PostgreSQL's own MERGE, not pg_trickle's pipeline.
+
+Written in Rust using pgrx. Targets PostgreSQL 18. Apache 2.0 licensed. 1,200+ unit tests and 570+ E2E tests across eleven releases — approaching production readiness.
 
 See [ROADMAP.md](ROADMAP.md) for the release milestone plan (v0.2.0 through v1.0.0 and beyond).
 
