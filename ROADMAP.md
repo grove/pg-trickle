@@ -2267,8 +2267,27 @@ large design changes; all build on existing infrastructure.
 
 > **Performance defaults subtotal: ~1–3 weeks**
 
+### DAG Refresh Performance Improvements (from PLAN_DAG_PERFORMANCE.md §8)
 
-> **v0.12.0 total: ~18–27 weeks + ~6–8 weeks scalability + ~1–3 weeks defaults + ~3–5 weeks developer tooling & observability**
+> **In plain terms:** Now that ST-to-ST differential refresh eliminates the
+> "every hop is FULL" bottleneck, the next performance frontier is reducing
+> per-hop overhead and exploiting DAG structure more aggressively. These items
+> target the scheduling and dispatch layer — not the DVM engine — and
+> collectively can reduce end-to-end propagation latency by 30–50% for
+> heterogeneous DAGs.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DAG-1 | **Intra-tick pipelining.** Within a single scheduler tick, begin processing a downstream ST as soon as all its specific upstream dependencies have completed — not when the entire topological level finishes. Requires per-ST completion tracking in the parallel dispatch loop and immediate enqueuing of newly-ready STs. Expected 30–50% latency reduction for DAGs with mixed-cost levels. | 2–3 wk | [PLAN_DAG_PERFORMANCE.md §8.1](plans/performance/PLAN_DAG_PERFORMANCE.md) |
+| DAG-2 | **Adaptive poll interval.** Replace the fixed 200 ms parallel dispatch poll with exponential backoff (20 ms → 200 ms), resetting on worker completion. Makes parallel mode competitive with CALCULATED for cheap refreshes ($T_r \approx 10\text{ms}$). Alternative: `WaitLatch` with shared-memory completion flags. | 1–2 wk | [PLAN_DAG_PERFORMANCE.md §8.2](plans/performance/PLAN_DAG_PERFORMANCE.md) |
+| DAG-3 | **Delta amplification detection.** Track input→output delta ratio per hop via `pgt_refresh_history`. When a join ST amplifies delta beyond a configurable threshold (e.g., output > 100× input), emit a performance WARNING and optionally fall back to FULL for that hop. Expose amplification metrics in `explain_st()`. | 3–5d | [PLAN_DAG_PERFORMANCE.md §8.4](plans/performance/PLAN_DAG_PERFORMANCE.md) |
+| DAG-4 | **ST buffer bypass for single-consumer CALCULATED chains.** For ST dependencies with exactly one downstream consumer refreshing in the same tick, pass the delta in-memory instead of writing/reading from the `changes_pgt_` buffer table. Eliminates 2× SPI DML per hop (~20 ms savings per hop for 10K-row deltas). | 3–4 wk | [PLAN_DAG_PERFORMANCE.md §8.3](plans/performance/PLAN_DAG_PERFORMANCE.md) |
+| DAG-5 | **ST buffer batch coalescing.** Apply net-effect computation to ST change buffers before downstream reads — cancel INSERT/DELETE pairs for the same `__pgt_row_id` that accumulate between reads during rapid-fire upstream refreshes. Adapts existing `compute_net_effect()` logic to the ST buffer schema. | 1–2 wk | [PLAN_DAG_PERFORMANCE.md §8.5](plans/performance/PLAN_DAG_PERFORMANCE.md) |
+
+> **DAG refresh performance subtotal: ~8–12 weeks**
+
+
+> **v0.12.0 total: ~18–27 weeks + ~6–8 weeks scalability + ~1–3 weeks defaults + ~3–5 weeks developer tooling & observability + ~8–12 weeks DAG performance**
 
 
 **Exit criteria:**
@@ -2293,6 +2312,11 @@ large design changes; all build on existing infrastructure.
 - [ ] G12-SQL-IN: Multi-column IN subquery behavior documented or fixed; regression test added
 - [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
 - [ ] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup
+- [ ] DAG-1: Intra-tick pipelining dispatches downstream STs immediately on upstream completion; latency benchmark shows improvement for mixed-cost DAGs
+- [ ] DAG-2: Adaptive poll interval reduces wasted wait for cheap refreshes; parallel mode competitive at $T_r \leq 20\text{ms}$
+- [ ] DAG-3: Delta amplification detection emits WARNING when output/input ratio exceeds threshold; `explain_st()` exposes amplification metrics
+- [ ] DAG-4: ST buffer bypass eliminates buffer I/O for single-consumer CALCULATED chains; benchmark shows per-hop savings
+- [ ] DAG-5: ST buffer batch coalescing cancels redundant I/D pairs; verified under rapid-fire upstream refresh workload
 - [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
 
 ---
