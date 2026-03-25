@@ -38,6 +38,14 @@ deployments (100+ stream tables), reducing CDC write-side overhead,
 unlocking the parallel refresh feature by default, and addressing the
 ergonomics/observability gaps identified in this deep analysis (§12–§17).
 
+> **Priority note (2026-06):** The project's primary goals now explicitly
+> target *maximum performance, low latency, and high throughput* with
+> differential refresh as the default mode and full refresh as a last resort.
+> Scalability (★★★☆☆) is the most critical gap relative to this ambition.
+> Items A-2 (Columnar Change Tracking) and D-4 (Shared Change Buffers) have
+> been promoted to v0.12.0 to address this, and WAKE-1 (adaptive scheduler
+> wake) has been pulled forward to v0.11.0. See ROADMAP.md for details.
+
 ---
 
 ## Table of Contents

@@ -28,8 +28,8 @@ coverage, all in plain language.
 - [v0.9.0 — Incremental Aggregate Maintenance](#v090--incremental-aggregate-maintenance)
 - [v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Core Refresh Optimizations & Infrastructure Prep](#v0100--dvm-hardening-connection-pooler-compatibility-core-refresh-optimizations--infrastructure-prep)
 - [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness](#v0110--partitioned-stream-tables-prometheus--grafana-observability-safety-hardening--correctness)
-- [v0.12.0 — Anomalous Change Detection, CDC Research & PG Backward Compatibility](#v0120--anomalous-change-detection-cdc-research--pg-backward-compatibility)
-- [v0.13.0 — Scalability Foundations & UNLOGGED Buffers](#v0130--scalability-foundations--unlogged-buffers)
+- [v0.12.0 — Scalability Foundations, Anomalous Change Detection & CDC Research](#v0120--scalability-foundations-anomalous-change-detection--cdc-research)
+- [v0.13.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers](#v0130--tiered-scheduling-pg-backward-compatibility--unlogged-buffers)
 - [v0.14.0 — Native DDL Syntax, External Test Suites & Integration](#v0140--native-ddl-syntax-external-test-suites--integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale & Ecosystem](#post-10--scale--ecosystem)
@@ -42,9 +42,11 @@ coverage, all in plain language.
 ## Overview
 
 pg_trickle is a PostgreSQL 18 extension that implements streaming tables with
-incremental view maintenance (IVM) via differential dataflow. All 13 design
-phases are complete. This roadmap tracks the path from the v0.1.x series to
-1.0 and beyond.
+incremental view maintenance (IVM) via differential dataflow. The extension is
+designed for **maximum performance, low latency, and high throughput** —
+differential refresh is the default mode, and full refresh is a fallback of
+last resort. All 13 design phases are complete. This roadmap tracks the path
+from the v0.1.x series to 1.0 and beyond.
 
 ```
                                                                                                                               We are here
@@ -2017,20 +2019,34 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 
 > **ST-to-ST differential subtotal: ~4.5–6.5 weeks**
 
+### Adaptive/Event-Driven Scheduler Wake (Must-Ship)
+
+> **In plain terms:** The scheduler currently wakes on a fixed 1-second timer
+> even when nothing has changed. This adds event-driven wake: CDC triggers
+> notify the scheduler immediately when changes arrive. Median end-to-end
+> latency drops from ~515 ms to ~15 ms for low-volume workloads — a 34×
+> improvement. This is a must-ship item because **low latency is a primary
+> project goal**.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| WAKE-1 | **Event-driven scheduler wake.** Add a `pg_notify('pgtrickle_wake', '')` call from CDC triggers so the scheduler wakes immediately when changes arrive instead of waiting up to `scheduler_interval_ms`. Coalesce rapid-fire notifications with a 10 ms debounce. Falls back to poll-based wake when idle. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R16](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Event-driven wake subtotal: ~2–3 weeks**
+
 ### Stretch Goals (if capacity allows after Must-Ship)
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| STRETCH-1 | **Adaptive/event-driven scheduler wake.** Add a `pg_notify('pgtrickle_wake', '')` call from CDC triggers so the scheduler wakes immediately when changes arrive instead of waiting up to `scheduler_interval_ms`. Coalesce rapid-fire notifications with a 10 ms debounce. Drops median end-to-end latency from ~515 ms to ~15 ms for low-volume workloads. Falls back to poll-based wake when idle. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R16](plans/performance/REPORT_OVERALL_STATUS.md) |
-| STRETCH-2 | **Partitioned stream tables — design spike only.** Produce a written implementation plan (2–4 days) before committing to A1-1. Validates partition-key predicate injection, per-partition MERGE loop feasibility, and catalog requirements. Full A-1 implementation only starts if the spike is complete and the RFC is approved. | 2–4d | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
+| STRETCH-1 | **Partitioned stream tables — design spike only.** Produce a written implementation plan (2–4 days) before committing to A1-1. Validates partition-key predicate injection, per-partition MERGE loop feasibility, and catalog requirements. Full A-1 implementation only starts if the spike is complete and the RFC is approved. | 2–4d | [PLAN_NEW_STUFF.md §A-1](plans/performance/PLAN_NEW_STUFF.md) |
 
-> **Stretch subtotal: ~2–3 weeks (STRETCH-1) + 2–4 days (STRETCH-2 spike)**
+> **Stretch subtotal: 2–4 days (STRETCH-1 spike)**
 
-> **v0.11.0 total: ~7–10 weeks (partitioning + isolation) + ~12h observability + ~14–21h default tuning + ~7–12h safety hardening + ~2–4 weeks should-ship (bitmask + fuse + external corpus) + ~4.5–6.5 weeks ST-to-ST differential + ~1–2 days correctness quick-wins + ~2–3 days documentation**
+> **v0.11.0 total: ~7–10 weeks (partitioning + isolation) + ~12h observability + ~14–21h default tuning + ~7–12h safety hardening + ~2–4 weeks should-ship (bitmask + fuse + external corpus) + ~4.5–6.5 weeks ST-to-ST differential + ~2–3 weeks event-driven wake + ~1–2 days correctness quick-wins + ~2–3 days documentation**
 
 **Exit criteria:**
-- [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog *(or STRETCH-2 design spike complete with RFC)*
-- [ ] Partition-scoped MERGE benchmark: 10M-row ST, 0.1% change rate (expect ~100× I/O reduction) *(applies only when full A-1 is implemented)*
+- [ ] Declaratively partitioned stream tables accepted; partition key tracked in catalog
+- [ ] Partition-scoped MERGE benchmark: 10M-row ST, 0.1% change rate (expect ~100× I/O reduction)
 - [ ] Per-database worker quotas enforced; burst reclaimed within 1 scheduler cycle
 - [ ] Prometheus queries + alerting rules + Grafana dashboard shipped
 - [ ] DEF-1: `parallel_refresh_mode` default is `'on'`; concurrent-refresh E2E test passes
@@ -2051,16 +2067,18 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 - [ ] G17-EC01B-NEG: Negative regression test documents ≥3-scan fall-back behavior; linked to v0.12.0 EC01B fix
 - [ ] G16-GS/SM/MQR/GUC: GETTING_STARTED restructured with progressive complexity; DVM_OPERATORS support matrix added; monitoring quick reference added; CONFIGURATION.md GUC matrix added
 - [ ] ST-ST-1–6: All ST-to-ST dependencies refresh differentially when upstream has a change buffer; FULL refreshes on an upstream ST produce a pre/post I/D diff so downstream STs never cascade FULL through the chain; auto-migration creates buffers for existing ST-to-ST dependencies on upgrade; 3-level E2E chain test passes
+- [ ] WAKE-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads
 - [ ] Extension upgrade path tested (`0.10.0 → 0.11.0`)
 
 ---
 
-## v0.12.0 — Anomalous Change Detection, CDC Research & PG Backward Compatibility
+## v0.12.0 — Scalability Foundations, Anomalous Change Detection & CDC Research
 
-**Goal:** Protect against anomalous change spikes with a configurable fuse,
-conduct a formal research spike for the custom logical decoding output plugin
-(D-2) before committing to a full implementation, and widen the deployment
-target to PG 16–18.
+**Goal:** Deliver scalability foundations that directly serve the project's
+performance and throughput goals — columnar change tracking for 50–90%
+delta-volume reduction and shared change buffers for multi-ST deployments.
+Also land the anomalous change fuse, conduct the D-2 CDC research spike,
+and ship developer tooling and correctness improvements.
 
 ### Anomalous Change Detection (Fuse)
 
@@ -2217,6 +2235,95 @@ action.
 
 > **D-2 research spike subtotal: ~2–3 weeks**
 
+### Scalability Foundations (pulled forward from v0.13.0)
+
+> **In plain terms:** These items directly serve the project's primary goal of
+> world-class performance and scalability. Columnar change tracking eliminates
+> wasted delta processing for wide tables, and shared change buffers reduce
+> I/O multiplication in deployments with many stream tables reading from the
+> same source.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A-2 | **Columnar Change Tracking.** Per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads. | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
+| D-4 | **Shared Change Buffers.** Single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation. | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **Scalability foundations subtotal: ~6–8 weeks**
+
+### Performance Defaults (from REPORT_OVERALL_STATUS.md)
+
+Targeted improvements identified in the overall status report. None require
+large design changes; all build on existing infrastructure.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source's change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-1~~ | ~~**Adaptive scheduler wake interval.**~~ ➡️ Pulled forward to v0.11.0 as WAKE-1. | — | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-4~~ | ~~**Flip `block_source_ddl` default to `true`.**~~ ➡️ Pulled forward to v0.11.0 as DEF-5. | — | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-5~~ | ~~**Wider changed-column bitmask (>63 columns).**~~ ➡️ Pulled forward to v0.11.0 as WB-1/WB-2. | — | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **Performance defaults subtotal: ~1–3 weeks**
+
+
+> **v0.12.0 total: ~18–27 weeks + ~6–8 weeks scalability + ~1–3 weeks defaults + ~3–5 weeks developer tooling & observability**
+
+
+**Exit criteria:**
+- [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
+- [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
+- [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers *(skip if FUSE-1–6 shipped in v0.11.0)*
+- [ ] EC01B: No phantom-row drop for ≥3-scan right-subtree joins; TPC-H Q7/Q8/Q9 DELETE regression tests pass
+- [ ] BENCH-W: Write-side overhead benchmarks published in `docs/BENCHMARK.md`; `change_buffer_unlogged` GUC implemented if WAL overhead > 30% of trigger cost
+- [ ] SQLANCER: Crash-test oracle + equivalence oracle running in weekly CI job; zero correctness mismatches on known test corpus
+- [ ] PROP-5+6: Topology stress and DAG/scheduler helper property tests pass
+- [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
+- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
+- [ ] WAL decoder validated against PG 16–17 `pgoutput` format
+- [ ] CI matrix covers PG 16, 17, 18
+- [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
+- [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
+- [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
+- [x] ~~PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested~~ ➡️ Pulled to v0.11.0 as WB-1/WB-2
+- [ ] DT-1–4: `explain_query_rewrite()`, `diagnose_errors()`, `list_auxiliary_columns()`, `validate_query()` all callable from SQL; each returns structured data
+- [ ] G13-SD: Parse-tree visitors enforce `max_parse_depth`; pathological query returns `QueryTooComplex` error rather than stack overflow
+- [ ] G17-IMS: IMMEDIATE mode concurrency stress test passes with 100+ concurrent DML transactions
+- [ ] G12-SQL-IN: Multi-column IN subquery behavior documented or fixed; regression test added
+- [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
+- [ ] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup
+- [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
+
+---
+
+## v0.13.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers
+
+**Goal:** Advance tiered refresh scheduling with manual tier assignment,
+widen the deployment target to PG 16–18, and deliver opt-in UNLOGGED change
+buffers for reduced WAL amplification.
+
+### Tiered Refresh Scheduling (C-1)
+
+> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 3. Read risk
+> analyses before implementing — particularly C-1's read-tracking pitfall.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| C-1 | Tiered Refresh Scheduling — Hot/Warm/Cold/Frozen tier classification; lazy refresh for Cold/Frozen STs; configurable per-ST tier override; 80% scheduler-CPU reduction in large deployments | 3–4 wk | [PLAN_NEW_STUFF.md §C-1](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ C-1: Do **not** use raw `pg_stat_user_tables` `seq_scan`/`idx_scan` counters for tier
+> classification — pg_trickle's own internal refresh reads inflate these counters, causing
+> actively-refreshed-but-unread STs to appear Warm. Use delta-based read tracking or
+> expose explicit per-ST tier overrides only. See PLAN_NEW_STUFF.md §C-1 risk analysis.
+
+> **Retraction consideration (C-1):** The auto-classification goal (80% scheduler-CPU
+> reduction) cannot be achieved with `pg_stat_user_tables` as the signal. Scope v0.13.0
+> to **manual-only tier assignment** (`ALTER STREAM TABLE … SET (tier = 'hot')`) only;
+> drop the Hot/Warm/Cold/Frozen auto-classification and the lazy-refresh trigger path.
+> Auto-classification requiring a custom `ExecutorStart/End` hook can be revisited
+> post-1.0. The effort estimate should drop from 3–4 wk to ~1 wk for the manual-only scope.
+
+> **Tiered scheduling subtotal: ~1–4 weeks**
+
 ### PostgreSQL Backward Compatibility (PG 16–18)
 
 > **In plain terms:** pg_trickle currently only targets PostgreSQL 18. This
@@ -2235,82 +2342,6 @@ action.
 | BC5 | WAL decoder validation against PG 16–17 `pgoutput` format | 8–12h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §6A |
 
 > **Backward compatibility subtotal: ~38–56 hours**
-
-### Performance Defaults & Scalability Improvements (from REPORT_OVERALL_STATUS.md)
-
-Five targeted improvements identified in the overall status report. None require
-large design changes; all build on existing infrastructure.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| PERF-1 | **Adaptive scheduler wake interval.** The scheduler wakes every `scheduler_interval_ms` (1 s) even when all sources have zero pending changes. Implement event-driven wake: CDC triggers `pg_notify('pgtrickle_wake', '')` on each buffer INSERT; the scheduler listens and wakes immediately. Coalesces rapid-fire notifications using a 10ms debounce window to prevent thundering herd. Falls back to the configured interval when the channel is idle. Impact: median end-to-end latency drops from ~515ms to ~15ms for low-volume workloads. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source's change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-1 | **Adaptive scheduler wake interval.** The scheduler wakes every `scheduler_interval_ms` (1 s) even when all sources have zero pending changes. Implement event-driven wake: CDC triggers `pg_notify('pgtrickle_wake', '')` on each buffer INSERT; the scheduler listens and wakes immediately. Coalesces rapid-fire notifications using a 10ms debounce window to prevent thundering herd. Falls back to the configured interval when the channel is idle. Impact: median end-to-end latency drops from ~515ms to ~15ms for low-volume workloads. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source’s change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
-| ~~PERF-4~~ | ~~**Flip `block_source_ddl` default to `true`.**~~ ➡️ Pulled forward to v0.11.0 as DEF-5. | — | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
-| ~~PERF-5~~ | ~~**Wider changed-column bitmask (>63 columns).**~~ ➡️ Pulled forward to v0.11.0 as WB-1/WB-2. | — | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
-
-> **Performance defaults & scalability subtotal: ~5–9 weeks**
-
-> **v0.12.0 total: ~18–27 weeks + ~5–9 weeks defaults/scalability + ~3–5 weeks developer tooling & observability**
-
-**Exit criteria:**
-- [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers *(skip if FUSE-1–6 shipped in v0.11.0)*
-- [ ] EC01B: No phantom-row drop for ≥3-scan right-subtree joins; TPC-H Q7/Q8/Q9 DELETE regression tests pass
-- [ ] BENCH-W: Write-side overhead benchmarks published in `docs/BENCHMARK.md`; `change_buffer_unlogged` GUC implemented if WAL overhead > 30% of trigger cost
-- [ ] SQLANCER: Crash-test oracle + equivalence oracle running in weekly CI job; zero correctness mismatches on known test corpus
-- [ ] PROP-5+6: Topology stress and DAG/scheduler helper property tests pass
-- [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
-- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
-- [ ] WAL decoder validated against PG 16–17 `pgoutput` format
-- [ ] CI matrix covers PG 16, 17, 18
-- [ ] PERF-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads *(skip if STRETCH-1 shipped in v0.11.0)*
-- [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
-- [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
-- [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
-- [x] ~~PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested~~ ➡️ Pulled to v0.11.0 as WB-1/WB-2
-- [ ] DT-1–4: `explain_query_rewrite()`, `diagnose_errors()`, `list_auxiliary_columns()`, `validate_query()` all callable from SQL; each returns structured data
-- [ ] G13-SD: Parse-tree visitors enforce `max_parse_depth`; pathological query returns `QueryTooComplex` error rather than stack overflow
-- [ ] G17-IMS: IMMEDIATE mode concurrency stress test passes with 100+ concurrent DML transactions
-- [ ] G12-SQL-IN: Multi-column IN subquery behavior documented or fixed; regression test added
-- [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
-- [ ] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup
-- [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
-
----
-
-## v0.13.0 — Scalability Foundations & UNLOGGED Buffers
-
-**Goal:** Deliver the scalability foundations — columnar change tracking, advanced
-tiered scheduling, and shared change buffers — alongside opt-in UNLOGGED change
-buffers for reduced WAL amplification.
-
-### Scalability Foundations (Wave 3)
-
-> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 3. Read risk
-> analyses before implementing — particularly C-1's read-tracking pitfall.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| A-2 | Columnar Change Tracking — per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
-| C-1 | Tiered Refresh Scheduling — Hot/Warm/Cold/Frozen tier classification; lazy refresh for Cold/Frozen STs; configurable per-ST tier override; 80% scheduler-CPU reduction in large deployments | 3–4 wk | [PLAN_NEW_STUFF.md §C-1](plans/performance/PLAN_NEW_STUFF.md) |
-| D-4 | Shared Change Buffers — single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) |
-
-> ⚠️ C-1: Do **not** use raw `pg_stat_user_tables` `seq_scan`/`idx_scan` counters for tier
-> classification — pg_trickle's own internal refresh reads inflate these counters, causing
-> actively-refreshed-but-unread STs to appear Warm. Use delta-based read tracking or
-> expose explicit per-ST tier overrides only. See PLAN_NEW_STUFF.md §C-1 risk analysis.
-
-> **Retraction consideration (C-1):** The auto-classification goal (80% scheduler-CPU
-> reduction) cannot be achieved with `pg_stat_user_tables` as the signal. Scope v0.13.0
-> to **manual-only tier assignment** (`ALTER STREAM TABLE … SET (tier = 'hot')`) only;
-> drop the Hot/Warm/Cold/Frozen auto-classification and the lazy-refresh trigger path.
-> Auto-classification requiring a custom `ExecutorStart/End` hook can be revisited
-> post-1.0. The effort estimate should drop from 3–4 wk to ~1 wk for the manual-only scope.
-
-> **Scalability foundations subtotal: ~60–120h**
 
 ### UNLOGGED Change Buffers — Opt-In (D-1)
 
@@ -2348,9 +2379,10 @@ buffers for reduced WAL amplification.
 > **v0.13.0 total: ~9–18 weeks + ~1wk patterns guide + ~2–4 days stability tests**
 
 **Exit criteria:**
-- [ ] A-2: Bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
-- [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
+- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
+- [ ] WAL decoder validated against PG 16–17 `pgoutput` format
+- [ ] CI matrix covers PG 16, 17, 18
 - [ ] D-1: UNLOGGED change buffers opt-in (`unlogged_buffers = false` by default); crash-recovery FULL-refresh path tested
 - [ ] G16-PAT: Patterns guide published in `docs/PATTERNS.md` covering at least 4 patterns (bronze/silver/gold, event sourcing, SCD type-1, SCD type-2)
 - [ ] G17-SOAK: 24h soak test passes with zero worker crashes, zero zombie stream tables, stable memory usage
@@ -2577,8 +2609,8 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.9.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
 | v0.10.0 — DVM Hardening, Connection Pooler Compat, Core Refresh Opts & Infra Prep | ~7–10d + ~26–40 wk | — | |
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
-| v0.12.0 — Anomalous Change Detection, CDC Research & PG Backward Compat | ~18–27 wk + ~10–14h | — | |
-| v0.13.0 — Scalability Foundations & UNLOGGED Buffers | ~9–18 wk | — | |
+| v0.12.0 — Scalability Foundations, Anomalous Change Detection & CDC Research | ~18–27 wk + ~6–8 wk scalability + ~1–3 wk defaults | — | |
+| v0.13.0 — Tiered Scheduling, PG Backward Compat & UNLOGGED Buffers | ~5–12 wk | — | |
 | v0.14.0 — Native DDL Syntax, External Test Suites & Integration | ~140–230h | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
