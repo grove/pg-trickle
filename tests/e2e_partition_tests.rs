@@ -839,18 +839,11 @@ async fn test_partitioned_st_partition_key_in_explain_plan() {
     )
     .await;
 
-    // Insert 3 months of data so the planner has statistics to work with
-    db.execute(
-        "INSERT INTO explain_src (tx_date, val)
-         SELECT
-             DATE '2026-01-01' + (i % 90) * INTERVAL '1 day',
-             (random() * 1000)::numeric
-         FROM generate_series(1, 9000) AS s(i)",
-    )
-    .await;
-
-    db.execute("ANALYZE explain_src").await;
-
+    // Create the partitioned stream table while the source is still empty so
+    // that the initial refresh leaves the default partition empty.  Explicit
+    // range partitions must be attached before any data lands in the default
+    // partition; otherwise PostgreSQL rejects the PARTITION OF statement with
+    // "partition constraint for default partition would be violated".
     db.create_st_partitioned(
         "explain_st",
         "SELECT tx_date, SUM(val) AS daily_total FROM explain_src GROUP BY tx_date",
@@ -860,7 +853,8 @@ async fn test_partitioned_st_partition_key_in_explain_plan() {
     )
     .await;
 
-    // Add explicit named partitions (month-level) so pruning has something to prune
+    // Add explicit named partitions (month-level) so pruning has something to
+    // prune.  This must happen while the default partition is still empty.
     db.execute(
         "CREATE TABLE explain_st_jan2026 \
          PARTITION OF explain_st \
@@ -879,6 +873,18 @@ async fn test_partitioned_st_partition_key_in_explain_plan() {
          FOR VALUES FROM ('2026-03-01') TO ('2026-04-01')",
     )
     .await;
+
+    // Now insert 3 months of data so the planner has statistics to work with
+    db.execute(
+        "INSERT INTO explain_src (tx_date, val)
+         SELECT
+             DATE '2026-01-01' + (i % 90) * INTERVAL '1 day',
+             (random() * 1000)::numeric
+         FROM generate_series(1, 9000) AS s(i)",
+    )
+    .await;
+
+    db.execute("ANALYZE explain_src").await;
 
     db.refresh_st("explain_st").await;
 
