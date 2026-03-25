@@ -1496,8 +1496,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     }
 
     log!(
-        "pg_trickle scheduler started (interval={}ms)",
-        config::pg_trickle_scheduler_interval_ms()
+        "pg_trickle scheduler started (interval={}ms, event_driven_wake={})",
+        config::pg_trickle_scheduler_interval_ms(),
+        config::pg_trickle_event_driven_wake(),
     );
 
     let mut dag_version: u64 = 0;
@@ -1536,6 +1537,33 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         check_cdc_transition_health();
     }));
 
+    // WAKE-1: Event-driven wake via LISTEN/NOTIFY.
+    // When enabled, the scheduler LISTENs on the 'pgtrickle_wake' channel.
+    // CDC triggers emit pg_notify('pgtrickle_wake', '') after writing to the
+    // change buffer.  PostgreSQL sets the scheduler's latch when a notification
+    // arrives (after the notifying transaction commits), causing wait_latch()
+    // to return immediately instead of sleeping for the full poll interval.
+    let event_driven = config::pg_trickle_event_driven_wake();
+    if event_driven {
+        BackgroundWorker::transaction(AssertUnwindSafe(|| {
+            if let Err(e) = Spi::run("LISTEN pgtrickle_wake") {
+                warning!(
+                    "pg_trickle scheduler: failed to LISTEN pgtrickle_wake: {}",
+                    e
+                );
+            }
+        }));
+        log!(
+            "pg_trickle scheduler: event-driven wake enabled (debounce={}ms)",
+            config::pg_trickle_wake_debounce_ms()
+        );
+    }
+
+    // WAKE-1: Statistics for event-driven vs poll-based wakes.
+    let mut wake_stats_event: u64 = 0;
+    let mut wake_stats_poll: u64 = 0;
+    let mut wake_stats_last_log_ms: u64 = current_epoch_ms();
+
     loop {
         // Use shorter poll interval when parallel workers are in-flight.
         let poll_ms = if parallel_state.has_inflight() {
@@ -1543,8 +1571,45 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         } else {
             config::pg_trickle_scheduler_interval_ms() as u64
         };
+
+        let wake_start = std::time::Instant::now();
         let should_continue =
             BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
+
+        // WAKE-1: Determine whether this wake was event-driven (notification)
+        // or poll-based (timeout expired). If the latch returned faster than
+        // the poll interval, a notification (or signal) woke us early.
+        let wake_elapsed_ms = wake_start.elapsed().as_millis() as u64;
+        let was_event_wake = event_driven && wake_elapsed_ms < poll_ms.saturating_sub(5);
+
+        if was_event_wake {
+            wake_stats_event += 1;
+            // WAKE-1: Debounce — wait briefly to coalesce rapidly arriving
+            // notifications from bulk DML before starting the tick.
+            let debounce_ms = config::pg_trickle_wake_debounce_ms() as u64;
+            if debounce_ms > 0 {
+                let _ = BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
+                    debounce_ms,
+                )));
+            }
+        } else {
+            wake_stats_poll += 1;
+        }
+
+        // WAKE-1: Log wake statistics every 60 seconds.
+        let now_for_stats = current_epoch_ms();
+        if now_for_stats.saturating_sub(wake_stats_last_log_ms) >= 60_000 {
+            if event_driven && (wake_stats_event > 0 || wake_stats_poll > 0) {
+                log!(
+                    "pg_trickle scheduler: wake stats — event={}, poll={} (last 60s)",
+                    wake_stats_event,
+                    wake_stats_poll,
+                );
+            }
+            wake_stats_event = 0;
+            wake_stats_poll = 0;
+            wake_stats_last_log_ms = now_for_stats;
+        }
 
         unsafe {
             if pg_sys::ConfigReloadPending != 0 {

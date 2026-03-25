@@ -12,6 +12,8 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.enabled](#pg_trickleenabled)
     - [pg\_trickle.cdc\_mode](#pg_tricklecdc_mode)
     - [pg\_trickle.scheduler\_interval\_ms](#pg_tricklescheduler_interval_ms)
+    - [pg\_trickle.event\_driven\_wake](#pg_trickleevent_driven_wake)
+    - [pg\_trickle.wake\_debounce\_ms](#pg_tricklewake_debounce_ms)
     - [pg\_trickle.min\_schedule\_seconds](#pg_tricklemin_schedule_seconds)
     - [pg\_trickle.default\_schedule\_seconds](#pg_trickledefault_schedule_seconds)
     - [pg\_trickle.max\_consecutive\_errors](#pg_tricklemax_consecutive_errors)
@@ -159,6 +161,51 @@ The scheduler interval does **not** determine refresh frequency — it determine
 
 ```sql
 SET pg_trickle.scheduler_interval_ms = 500;
+```
+
+---
+
+### pg_trickle.event_driven_wake
+
+Enable event-driven scheduler wake via LISTEN/NOTIFY. When enabled, CDC triggers emit `pg_notify('pgtrickle_wake', '')` after writing to the change buffer, and the scheduler LISTENs on that channel, waking immediately instead of waiting for the full `scheduler_interval_ms` poll. This reduces median end-to-end latency from ~500 ms to ~15 ms for low-volume workloads.
+
+| Property | Value |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+**Tuning Guidance:**
+- **Low-latency workloads**: Leave enabled (default) for the best latency.
+- **Extreme write throughput** (>100K DML/s): Consider disabling if the per-statement NOTIFY overhead is measurable. The NOTIFY is coalesced by PostgreSQL (one notification per transaction), so the actual overhead is negligible for most workloads.
+
+```sql
+-- Disable event-driven wake (fall back to poll-only)
+SET pg_trickle.event_driven_wake = off;
+```
+
+---
+
+### pg_trickle.wake_debounce_ms
+
+After the scheduler receives the first `pgtrickle_wake` notification, it waits this many milliseconds to coalesce rapidly arriving notifications before starting a refresh tick. Lower values reduce latency; higher values reduce wake overhead during bulk DML.
+
+| Property | Value |
+|---|---|
+| Type | `int` |
+| Default | `10` (10 milliseconds) |
+| Range | `1` – `5000` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+**Tuning Guidance:**
+- **Single-statement latency-sensitive**: Use `1`–`5` ms.
+- **Bulk DML workloads**: Use `50`–`200` ms to coalesce more notifications per tick.
+- **Default** (`10` ms) balances sub-20 ms latency with reasonable coalescing.
+
+```sql
+SET pg_trickle.wake_debounce_ms = 50;
 ```
 
 ---
