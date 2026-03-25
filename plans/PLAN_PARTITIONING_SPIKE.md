@@ -1,10 +1,10 @@
 # PLAN_PARTITIONING_SPIKE.md — Partitioned Stream Tables Design Spike (STRETCH-1)
 
-> **Status:** ✅ A1-1 + A1-2 + A1-3 complete — partitioned storage DDL + MERGE predicate injection done
+> **Status:** ✅ A1-1 + A1-2 + A1-3 + A1-4 complete — full Partitioning Design Spike delivered
 > **Date:** 2026-03-25
 > **Branch:** `0.11-partitioning-spike`
-> **Effort:** 2–4 days (spike) + 1–2 wk (A1-1) + 1 wk (A1-2 + A1-3)
-> **Next:** A1-4 (E2E benchmarks — `EXPLAIN (ANALYZE, BUFFERS)` partition-pruning validation)
+> **Effort:** 2–4 days (spike) + 1–2 wk (A1-1) + 1 wk (A1-2 + A1-3) + 0.5 wk (A1-4)
+> **Next:** A2 (query-time partition pruning via RANGE predicate pushdown)
 
 ---
 
@@ -370,7 +370,7 @@ SELECT pgtrickle.create_stream_table(
 | A1-1 | DDL: `CREATE STREAM TABLE … PARTITION BY`; `st_partition_key` catalog column; partitioned storage table creation (`PARTITION BY RANGE`); default catch-all partition; non-unique `__pgt_row_id` index; composite PK | 1–2 wk | ✅ Done |
 | A1-2 | Delta min/max inspection: `extract_partition_range()` in `refresh.rs`; returns `None` on empty delta (fast path → skip MERGE) | 1 wk | ✅ Done |
 | A1-3 | MERGE rewrite: inject `AND st.<key> BETWEEN <min> AND <max>` literal into ON clause via `__PGT_PART_PRED__` placeholder; stored in `CachedMergeTemplate.delta_sql_template`; D-2 prepared statements disabled for partitioned STs | 2–3 wk | ✅ Done |
-| A1-4 | E2E benchmarks: 10M-row partitioned ST, 0.1%/0.2%/100% change scenarios; `EXPLAIN (ANALYZE, BUFFERS)` partition-scan verification | 1 wk | Not started |
+| A1-4 | E2E benchmarks: 10M-row partitioned ST, 0.1%/0.2%/100% change scenarios; `EXPLAIN (ANALYZE, BUFFERS)` partition-scan verification | 1 wk | ✅ Done |
 
 ---
 
