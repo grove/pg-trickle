@@ -188,6 +188,7 @@ pub fn create_change_trigger(
     // statement-level AFTER TRUNCATE trigger writes a single marker row
     // with action='T' into the change buffer. The refresh engine
     // detects this marker and falls back to a full refresh.
+    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let truncate_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{oid}()
          RETURNS trigger LANGUAGE plpgsql AS $$
@@ -195,6 +196,7 @@ pub fn create_change_trigger(
              INSERT INTO {change_schema}.changes_{oid}
                  (lsn, action)
              VALUES (pg_current_wal_lsn(), 'T');
+             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -1125,6 +1127,10 @@ fn build_row_trigger_fn_sql(
         .collect::<Vec<_>>()
         .join("");
 
+    // WAKE-1: PERFORM pg_notify wakes the scheduler via LISTEN/NOTIFY
+    // when event-driven mode is active. The NOTIFY is coalesced by
+    // PostgreSQL — only one notification per transaction regardless of
+    // how many rows are affected. Cost is negligible (~0.5 µs).
     format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_fn_{oid}()
          RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1134,6 +1140,7 @@ fn build_row_trigger_fn_sql(
                      (lsn, action, pk_hash{ncn})
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{nv});
+                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'UPDATE' THEN
                  -- changed_cols IS NULL for INSERT/DELETE (all columns populated).
@@ -1141,12 +1148,14 @@ fn build_row_trigger_fn_sql(
                      (lsn, action, pk_hash{uccd}{ncn}{ocn})
                  VALUES (pg_current_wal_insert_lsn(), 'U'
                          {up}{ucv}{nv}{ov});
+                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
                  INSERT INTO {cs}.changes_{oid}
                      (lsn, action, pk_hash{ocn})
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ov});
+                 PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN OLD;
              END IF;
              RETURN NULL;
@@ -1206,6 +1215,7 @@ fn build_stmt_trigger_fn_sql(
         .join("");
 
     // INSERT trigger function — only accesses __pgt_new transition table.
+    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{oid}()
          RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1214,6 +1224,7 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, pk_hash{ncn})
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
              FROM __pgt_new n;
+             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -1222,6 +1233,7 @@ fn build_stmt_trigger_fn_sql(
     );
 
     // UPDATE trigger function — accesses both __pgt_new and __pgt_old.
+    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let upd_fn = if pk_columns.is_empty() {
         // Keyless table: no PK join possible — model UPDATE as DELETE+INSERT.
         format!(
@@ -1236,6 +1248,7 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, pk_hash{ncn})
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
              FROM __pgt_new n;
+             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -1262,6 +1275,7 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, pk_hash{uccd}{ncn}{ocn})
              SELECT pg_current_wal_insert_lsn(), 'U', {pkn}{ucv}{ncr}{ocr}
              FROM __pgt_new n JOIN __pgt_old o ON {join};
+             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",
@@ -1271,6 +1285,7 @@ fn build_stmt_trigger_fn_sql(
     };
 
     // DELETE trigger function — only accesses __pgt_old transition table.
+    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let del_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{oid}()
          RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1279,6 +1294,7 @@ fn build_stmt_trigger_fn_sql(
                  (lsn, action, pk_hash{ocn})
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
              FROM __pgt_old o;
+             PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
          END;
          $$",

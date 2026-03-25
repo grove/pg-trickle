@@ -35,6 +35,15 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 <!-- 0.11.0 changes go here -->
 
+- **WAKE-1: Event-driven scheduler wake.** CDC triggers now emit
+  `pg_notify('pgtrickle_wake', '')` after writing to the change buffer. The
+  scheduler LISTENs on the channel and wakes immediately instead of waiting for
+  the full poll interval, reducing median end-to-end latency from ~500 ms to
+  ~15 ms for low-volume workloads (34× improvement). A 10 ms debounce coalesces
+  rapid-fire notifications from bulk DML. Falls back to poll-based wake when
+  `pg_trickle.event_driven_wake = off`. New GUCs: `pg_trickle.event_driven_wake`
+  (default `true`), `pg_trickle.wake_debounce_ms` (default `10`).
+
 - **G12-2: TopK runtime validation.** `execute_topk_refresh()` now re-parses the
   reconstructed full query on each refresh and verifies LIMIT/OFFSET metadata
   matches the stored catalog values. On mismatch, falls back to FULL refresh

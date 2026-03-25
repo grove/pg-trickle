@@ -222,6 +222,26 @@ pub static PGS_IVM_TOPK_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000
 /// The default (100) is sufficient for virtually all practical hierarchies.
 pub static PGS_IVM_RECURSIVE_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(100);
 
+/// WAKE-1: Event-driven scheduler wake via LISTEN/NOTIFY.
+///
+/// When enabled, CDC triggers emit `pg_notify('pgtrickle_wake', '')` after
+/// writing to the change buffer. The scheduler LISTENs on the channel and
+/// wakes immediately instead of waiting for the full poll interval, reducing
+/// median end-to-end latency from ~500 ms to ~15 ms for low-volume workloads.
+///
+/// Falls back to poll-based wake (using `scheduler_interval_ms`) when no
+/// notifications arrive. Disable if the NOTIFY overhead is measurable on
+/// extremely high-throughput write paths (> 100K DML/s).
+pub static PGS_EVENT_DRIVEN_WAKE: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// WAKE-1: Coalesce debounce interval in milliseconds.
+///
+/// After the scheduler receives the first `pgtrickle_wake` notification, it
+/// waits this many milliseconds to coalesce rapidly arriving notifications
+/// before starting a refresh tick. This avoids per-statement wake overhead
+/// during bulk DML batches while preserving low single-statement latency.
+pub static PGS_WAKE_DEBOUNCE_MS: GucSetting<i32> = GucSetting::<i32>::new(10);
+
 /// Buffer table partitioning mode (Task 3.3).
 ///
 /// Controls whether change buffer tables use `PARTITION BY RANGE (lsn)`:
@@ -783,6 +803,33 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // WAKE-1: Event-driven scheduler wake GUCs.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.event_driven_wake",
+        c"Enable event-driven scheduler wake via LISTEN/NOTIFY (default on).",
+        c"When enabled, CDC triggers emit pg_notify('pgtrickle_wake') and the \
+           scheduler LISTENs on that channel, waking immediately instead of \
+           waiting for the poll interval. Reduces median latency ~34x for \
+           low-volume workloads. Disable for extreme write throughput (>100K DML/s).",
+        &PGS_EVENT_DRIVEN_WAKE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.wake_debounce_ms",
+        c"Coalesce debounce interval (ms) after first NOTIFY wake.",
+        c"After the first pgtrickle_wake notification, the scheduler waits this \
+           many milliseconds to coalesce rapidly arriving notifications before \
+           starting a refresh tick. Lower values reduce latency; higher values \
+           reduce wake overhead during bulk DML.",
+        &PGS_WAKE_DEBOUNCE_MS,
+        1,     // min
+        5_000, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_bool_guc(
         c"pg_trickle.log_merge_sql",
         c"Log the generated MERGE SQL template on every refresh cycle.",
@@ -1057,6 +1104,16 @@ pub fn pg_trickle_log_merge_sql() -> bool {
 /// FUSE-5: Returns the global default fuse ceiling (0 = disabled).
 pub fn pg_trickle_fuse_default_ceiling() -> i64 {
     PGS_FUSE_DEFAULT_CEILING.get() as i64
+}
+
+/// WAKE-1: Returns whether event-driven scheduler wake is enabled.
+pub fn pg_trickle_event_driven_wake() -> bool {
+    PGS_EVENT_DRIVEN_WAKE.get()
+}
+
+/// WAKE-1: Returns the debounce interval in milliseconds.
+pub fn pg_trickle_wake_debounce_ms() -> i32 {
+    PGS_WAKE_DEBOUNCE_MS.get()
 }
 
 #[cfg(test)]

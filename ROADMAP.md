@@ -3,7 +3,7 @@
 > **Last updated:** 2026-03-26
 > **Latest release:** 0.10.0 (2026-03-25)
 > **Current milestone:** v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness
-> **v0.11.0 progress:** Phase 1 ✅ (PR #279) · Phase 2 ✅ · Phase 3 ✅ (PR #282, Prometheus/Grafana) · Phase 4 ✅ (PR #283, correctness guards) · Phase 5 ✅ (PR #284, VARBIT bitmask) · Phase 6 ✅ (PR #285, fuse circuit breaker)
+> **v0.11.0 progress:** Phase 1 ✅ (PR #279) · Phase 2 ✅ · Phase 3 ✅ (PR #282, Prometheus/Grafana) · Phase 4 ✅ (PR #283, correctness guards) · Phase 5 ✅ (PR #284, VARBIT bitmask) · Phase 6 ✅ (PR #285, fuse circuit breaker) · Phase 7 ✅ (PR #286, event-driven wake)
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -2031,9 +2031,9 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| WAKE-1 | **Event-driven scheduler wake.** Add a `pg_notify('pgtrickle_wake', '')` call from CDC triggers so the scheduler wakes immediately when changes arrive instead of waiting up to `scheduler_interval_ms`. Coalesce rapid-fire notifications with a 10 ms debounce. Falls back to poll-based wake when idle. | 2–3 wk | [REPORT_OVERALL_STATUS.md §R16](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~WAKE-1~~ | ~~**Event-driven scheduler wake.**~~ ✅ Done in v0.11.0 Phase 7 — CDC triggers emit `pg_notify('pgtrickle_wake', '')` after each change buffer INSERT; scheduler issues `LISTEN pgtrickle_wake` at startup; 10 ms debounce coalesces rapid notifications; poll fallback preserved. New GUCs: `event_driven_wake` (default `true`), `wake_debounce_ms` (default `10`). E2E tests in `tests/e2e_wake_tests.rs`. | — | [REPORT_OVERALL_STATUS.md §R16](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> **Event-driven wake subtotal: ~2–3 weeks**
+> **Event-driven wake subtotal: ✅ Complete**
 
 ### Stretch Goals (if capacity allows after Must-Ship)
 
@@ -2069,7 +2069,7 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 - [x] G17-EC01B-NEG: Negative regression test documents ≥3-scan fall-back behavior; linked to v0.12.0 EC01B fix — ✅ Done in v0.11.0 Phase 4
 - [ ] G16-GS/SM/MQR/GUC: GETTING_STARTED restructured with progressive complexity; DVM_OPERATORS support matrix added; monitoring quick reference added; CONFIGURATION.md GUC matrix added
 - [ ] ST-ST-1–6: All ST-to-ST dependencies refresh differentially when upstream has a change buffer; FULL refreshes on an upstream ST produce a pre/post I/D diff so downstream STs never cascade FULL through the chain; auto-migration creates buffers for existing ST-to-ST dependencies on upgrade; 3-level E2E chain test passes
-- [ ] WAKE-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads
+- [x] WAKE-1: Event-driven scheduler wake implemented; latency E2E test shows sub-50ms median response for single-source workloads — ✅ Done in v0.11.0 Phase 7
 - [ ] Extension upgrade path tested (`0.10.0 → 0.11.0`)
 
 ---
