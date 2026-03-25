@@ -7,13 +7,13 @@ use pgrx::prelude::*;
 use pgrx::{PGRXSharedMemory, PgAtomic, PgLwLock, pg_shmem_init};
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
-/// C2-1: Maximum number of pgt_ids the invalidation ring buffer can hold.
+/// C2-1 / DEF-4: Maximum number of pgt_ids the invalidation ring buffer can hold.
 ///
 /// When more DDL changes arrive between scheduler ticks than this capacity,
-/// the overflow flag is set and the scheduler falls back to a full DAG
-/// rebuild. 32 slots is generous — even aggressive DDL workloads rarely
-/// produce more than a handful of DDL events per scheduler tick (1s).
-const INVALIDATION_RING_CAPACITY: usize = 32;
+/// the overflow flag is set and the scheduler falls back to a full O(V+E) DAG
+/// rebuild. Raised to 128 in v0.11.0 to handle CI pipelines, dbt model rebuilds,
+/// and schema-migration workloads that can produce dozens of DDL events per tick.
+const INVALIDATION_RING_CAPACITY: usize = 128;
 
 /// Shared state visible to both the scheduler and user backends.
 ///

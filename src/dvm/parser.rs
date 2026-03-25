@@ -7210,6 +7210,7 @@ fn rewrite_from_item_rows_from(node: *mut pg_sys::Node) -> Result<String, PgTric
             if inner_list.is_empty() {
                 continue;
             }
+            // INVARIANT: inner_list is non-empty (checked above), so head() cannot fail.
             let func_node = inner_list.head().unwrap();
             if !unsafe { pgrx::is_a(func_node, pg_sys::NodeTag::T_FuncCall) } {
                 continue;
@@ -8718,6 +8719,7 @@ fn extract_where_sublinks(
         if boolexpr.boolop == pg_sys::BoolExprType::NOT_EXPR {
             let args = pg_list::<pg_sys::Node>(boolexpr.args);
             if args.len() == 1 {
+                // INVARIANT: args.len() == 1 guarantees head() returns Some.
                 let arg = args.head().unwrap();
                 if unsafe { pgrx::is_a(arg, pg_sys::NodeTag::T_SubLink) } {
                     let wrapper = parse_sublink_to_wrapper(arg, true, cte_ctx)?;
@@ -8746,6 +8748,7 @@ fn extract_where_sublinks(
                     if inner_bool.boolop == pg_sys::BoolExprType::NOT_EXPR {
                         let inner_args = pg_list::<pg_sys::Node>(inner_bool.args);
                         if inner_args.len() == 1 {
+                            // INVARIANT: inner_args.len() == 1 guarantees head() returns Some.
                             let inner_arg = inner_args.head().unwrap();
                             if unsafe { pgrx::is_a(inner_arg, pg_sys::NodeTag::T_SubLink) } {
                                 let wrapper = parse_sublink_to_wrapper(inner_arg, true, cte_ctx)?;
@@ -9153,6 +9156,7 @@ fn parse_exists_sublink(
         ));
     }
 
+    // INVARIANT: from_list is non-empty (error returned above), so head() cannot fail.
     let mut inner_tree = unsafe { parse_from_item(from_list.head().unwrap(), cte_ctx)? };
 
     // Handle multiple FROM items (implicit cross joins in subquery)

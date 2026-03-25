@@ -1,0 +1,38 @@
+# Files and directories excluded from `git archive` (PGXN distribution tarballs).
+# PGXN uses `git archive` to build release tarballs, so anything marked
+# export-ignore will not appear on the PGXN distribution page.
+
+# Directories not relevant for extension users
+.cargo/             export-ignore
+.config/            export-ignore
+.devcontainer/      export-ignore
+.github/            export-ignore
+.semgrep/           export-ignore
+.tmp_pgxn_env/      export-ignore
+.venv/              export-ignore
+.venv-dbt/          export-ignore
+.venv2/             export-ignore
+benches/            export-ignore
+book/               export-ignore
+cnpg/               export-ignore
+dbt-pgtrickle/      export-ignore
+docs/               export-ignore
+examples/           export-ignore
+plans/              export-ignore
+proptest-regressions/ export-ignore
+scripts/            export-ignore
+target/             export-ignore
+tests/              export-ignore
+
+# Root-level files not needed by extension users
+AGENTS.md           export-ignore
+book.toml           export-ignore
+Cargo.lock          export-ignore
+codecov.yml         export-ignore
+CONTRIBUTING.md     export-ignore
+deny.toml           export-ignore
+Dockerfile.hub      export-ignore
+ESSENCE.md          export-ignore
+justfile            export-ignore
+ROADMAP.md          export-ignore
+SECURITY.md         export-ignore

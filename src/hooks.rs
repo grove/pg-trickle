@@ -724,9 +724,10 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                 if config::pg_trickle_block_source_ddl() {
                     pgrx::error!(
                         "pg_trickle: ALTER TABLE on {} blocked — column-affecting DDL is not \
-                         allowed on source tables tracked by stream tables when \
-                         pg_trickle.block_source_ddl = true. Set pg_trickle.block_source_ddl = \
-                         false to allow schema changes.",
+                         allowed while pg_trickle.block_source_ddl = true (the default). \
+                         To proceed: SET pg_trickle.block_source_ddl = false, run the DDL, \
+                         then run ALTER STREAM TABLE ... to update the defining query, \
+                         and re-enable: SET pg_trickle.block_source_ddl = true.",
                         identity,
                     );
                 }
@@ -778,9 +779,10 @@ fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
                 if config::pg_trickle_block_source_ddl() {
                     pgrx::error!(
                         "pg_trickle: ALTER TABLE on {} blocked — column-affecting DDL is not \
-                         allowed on source tables tracked by stream tables when \
-                         pg_trickle.block_source_ddl = true. Set pg_trickle.block_source_ddl = \
-                         false to allow schema changes (triggers reinitialization).",
+                         allowed while pg_trickle.block_source_ddl = true (the default). \
+                         To proceed: SET pg_trickle.block_source_ddl = false, run the DDL, \
+                         then run ALTER STREAM TABLE ... to update the defining query, \
+                         and re-enable: SET pg_trickle.block_source_ddl = true.",
                         identity,
                     );
                 }
