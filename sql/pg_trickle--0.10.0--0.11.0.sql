@@ -13,6 +13,13 @@
 --         No explicit ALTER TABLE is required here because change buffer
 --         tables live in the pgtrickle_changes schema and are managed
 --         per-source-table by the Rust code.
+--
+--   WAKE-1: CDC trigger functions now include PERFORM pg_notify('pgtrickle_wake', '')
+--           to enable event-driven scheduler wake. Existing trigger functions
+--           are rebuilt at runtime by the extension (via rebuild_cdc_trigger_function)
+--           on the first refresh cycle after upgrade, which uses CREATE OR REPLACE.
+--           The scheduler issues LISTEN pgtrickle_wake at startup when
+--           pg_trickle.event_driven_wake = true (the default).
 
 -- ── Schema Changes ─────────────────────────────────────────────────────────
 
