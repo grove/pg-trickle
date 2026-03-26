@@ -60,7 +60,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   events
         WHERE  random() < 0.10          -- ~10 % stochastic sample
     $$,
-    schedule     => '1m'
+    schedule      => '1m',
+    refresh_mode  => 'FULL'
 );
 
 
@@ -103,7 +104,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   orders
         WHERE  status = 'pending'
     $$,
-    schedule     => '30s'
+    schedule      => '30s',
+    refresh_mode  => 'FULL'
 );
 
 
@@ -142,7 +144,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   products
         WHERE  active
     $$,
-    schedule     => '5m'
+    schedule      => '5m',
+    refresh_mode  => 'FULL'
 );
 
 
@@ -183,7 +186,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   invoice_lines
         ORDER  BY invoice_id, id
     $$,
-    schedule     => '10m'
+    schedule      => '10m',
+    refresh_mode  => 'FULL'
 );
 
 
@@ -222,7 +226,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   audit_log
         WHERE  changed_at >= now() - INTERVAL '7 days'
     $$,
-    schedule     => '1h'
+    schedule      => '1h',
+    refresh_mode  => 'FULL'
 );
 
 
@@ -264,7 +269,8 @@ SELECT pgtrickle.create_stream_table(
         ORDER  BY revenue DESC
         LIMIT  3
     $$,
-    schedule     => '1h'
+    schedule      => '1h',
+    refresh_mode  => 'AUTO'
 );
 
 
@@ -315,7 +321,8 @@ SELECT pgtrickle.create_stream_table(
         FROM   erp_invoices
         GROUP  BY customer_id
     $$,
-    schedule     => '15m'
+    schedule      => '15m',
+    refresh_mode  => 'FULL'
 );
 
 
