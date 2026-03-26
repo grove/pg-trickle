@@ -87,6 +87,14 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   during rapid-fire upstream refreshes. Uses the same `compact_threshold` GUC
   as base-table compaction.
 
+- **DAG-4: ST buffer bypass for single-consumer CALCULATED chains.** When a
+  chain of stream tables has single-consumer DIFFERENTIAL dependencies (A→B→C
+  where each has exactly one downstream), the scheduler fuses them into a
+  single `FusedChain` execution unit that runs in the same background worker.
+  Intermediate deltas are captured to temp bypass tables instead of persistent
+  change buffers, eliminating WAL writes, index maintenance, and subsequent
+  buffer cleanup for each hop.
+
 ---
 
 ## [0.10.0] — 2026-03-25

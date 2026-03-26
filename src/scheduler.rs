@@ -579,6 +579,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
             "repeatable_read_group" => execute_worker_atomic_group(&job, true),
             "immediate_closure" => execute_worker_immediate_closure(&job),
             "cyclic_scc" => execute_worker_cyclic_scc(&job),
+            "fused_chain" => execute_worker_fused_chain(&job),
             _ => {
                 warning!(
                     "pg_trickle refresh worker: unknown unit_kind '{}' for job {}",
@@ -1027,6 +1028,162 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
     RefreshOutcome::PermanentFailure
 }
 
+/// DAG-4: Execute a fused chain of stream tables in a single worker.
+///
+/// Members are refreshed sequentially in topological order.  For each
+/// intermediate member (all except the last), the delta is written to a
+/// temp bypass table instead of the persistent `changes_pgt_` buffer.
+/// The next member in the chain reads from the bypass table via the
+/// `ST_BYPASS_TABLES` thread-local mapping.
+///
+/// The last member writes to the persistent buffer as normal so that
+/// any external consumers (outside the chain) see the delta.
+fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
+    log!(
+        "pg_trickle refresh worker: fused chain — {} members, job {}",
+        job.member_pgt_ids.len(),
+        job.job_id,
+    );
+
+    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
+        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+    } else {
+        None
+    };
+
+    // BOOT-4: Build gated-source set once for the whole group.
+    let gated_oids = load_gated_source_oids();
+
+    // Ensure bypass tables are clean at the start.
+    crate::refresh::clear_all_st_bypass();
+
+    let member_count = job.member_pgt_ids.len();
+    let mut refreshed_count: usize = 0;
+
+    for (idx, &pgt_id) in job.member_pgt_ids.iter().enumerate() {
+        let st = match load_st_by_id(pgt_id) {
+            Some(st) => st,
+            None => continue,
+        };
+
+        if st.status != StStatus::Active && st.status != StStatus::Initializing {
+            continue;
+        }
+
+        // BOOT-4: skip if any source is gated.
+        if is_any_source_gated(pgt_id, &gated_oids) {
+            log!(
+                "pg_trickle refresh worker: skipping {}.{} — source gated (fused chain job {})",
+                st.pgt_schema,
+                st.pgt_name,
+                job.job_id,
+            );
+            log_gated_skip(&st);
+            continue;
+        }
+
+        // WM-4: Skip if watermarks misaligned.
+        let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
+        if wm_misaligned {
+            let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
+            log!(
+                "pg_trickle refresh worker: skipping {}.{} — {} (fused chain job {})",
+                st.pgt_schema,
+                st.pgt_name,
+                reason,
+                job.job_id,
+            );
+            log_watermark_skip(&st, reason);
+            continue;
+        }
+
+        // Check catalog row lock — if another refresh is in progress, skip.
+        if check_skip_needed(&st) {
+            continue;
+        }
+
+        // FUSE-5: Check fuse circuit breaker.
+        if evaluate_fuse(&st) {
+            log!(
+                "pg_trickle refresh worker: {}.{} fuse blown — skipping (fused chain job {})",
+                st.pgt_schema,
+                st.pgt_name,
+                job.job_id,
+            );
+            continue;
+        }
+
+        let is_last = idx == member_count - 1;
+        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let action = refresh::determine_refresh_action(&st, has_changes);
+
+        // DAG-4: For intermediate members, set a flag so the refresh path
+        // uses bypass capture instead of the persistent buffer.
+        // The flag is set via the thread-local ST_BYPASS_TABLES before
+        // execute_scheduled_refresh runs. For the last member, normal
+        // persistent buffer is used so external downstreams see the delta.
+        //
+        // Note: The actual bypass capture happens inside
+        // execute_differential_refresh based on has_downstream_st_consumers().
+        // The bypass tables from earlier members are already in the
+        // thread-local map, so downstream members in this chain read from
+        // them automatically.
+
+        let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
+        match result {
+            RefreshOutcome::Success => {
+                refreshed_count += 1;
+
+                // DAG-4: For non-last members with downstream ST consumers,
+                // create the bypass temp table so the next member can read
+                // from it instead of the persistent buffer.
+                if !is_last && refresh::has_downstream_st_consumers(pgt_id) {
+                    let user_cols = refresh::get_st_user_columns(&st);
+                    match crate::refresh::capture_delta_to_bypass_table(&st, &user_cols) {
+                        Ok(n) => {
+                            pgrx::debug1!(
+                                "[pg_trickle] DAG-4: bypass captured {} rows for pgt_id={}",
+                                n,
+                                pgt_id,
+                            );
+                        }
+                        Err(e) => {
+                            // Bypass failed — the downstream will fall back to the
+                            // persistent buffer which was also written.
+                            pgrx::debug1!(
+                                "[pg_trickle] DAG-4: bypass capture failed for pgt_id={}: {}",
+                                pgt_id,
+                                e,
+                            );
+                        }
+                    }
+                }
+            }
+            RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
+                log!(
+                    "pg_trickle refresh worker: fused chain abort — member {}.{} failed (job {})",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    job.job_id,
+                );
+                // Clean up bypass tables before returning.
+                crate::refresh::clear_all_st_bypass();
+                return result;
+            }
+        }
+    }
+
+    // Clean up bypass tables.
+    crate::refresh::clear_all_st_bypass();
+
+    log!(
+        "pg_trickle refresh worker: fused chain completed ({} members refreshed, job {})",
+        refreshed_count,
+        job.job_id,
+    );
+    RefreshOutcome::Success
+}
+
 // ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
 
 /// DAG-2: Minimum adaptive poll interval (ms) when workers are in-flight.
@@ -1197,6 +1354,7 @@ fn sort_ready_queue_by_priority(
         match kind {
             ExecutionUnitKind::ImmediateClosure => 0,
             ExecutionUnitKind::AtomicGroup | ExecutionUnitKind::RepeatableReadGroup => 1,
+            ExecutionUnitKind::FusedChain => 1, // same priority as atomic groups
             ExecutionUnitKind::Singleton => 2,
             ExecutionUnitKind::CyclicScc => 3,
         }
