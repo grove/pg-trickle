@@ -1137,7 +1137,12 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
                 // DAG-4: For non-last members with downstream ST consumers,
                 // create the bypass temp table so the next member can read
                 // from it instead of the persistent buffer.
-                if !is_last && refresh::has_downstream_st_consumers(pgt_id) {
+                // Only for DIFFERENTIAL refreshes — NoData/Full/Reinitialize
+                // do not materialize __pgt_delta_{pgt_id}.
+                if !is_last
+                    && action == RefreshAction::Differential
+                    && refresh::has_downstream_st_consumers(pgt_id)
+                {
                     let user_cols = refresh::get_st_user_columns(&st);
                     match crate::refresh::capture_delta_to_bypass_table(&st, &user_cols) {
                         Ok(n) => {

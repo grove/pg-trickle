@@ -1885,6 +1885,11 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
             .collect::<Vec<_>>()
             .join(", ");
 
+        // Drop any leftover pre-snapshot from a previous iteration
+        // (e.g., SCC fixpoint loops where subtransaction commits don't
+        // fire ON COMMIT DROP until the outer transaction commits).
+        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id));
+
         let snapshot_sql = format!(
             "CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
              SELECT __pgt_row_id, {col_list} FROM {quoted_table}",
