@@ -3497,7 +3497,24 @@ fn execute_manual_full_refresh(
     // timestamp update, and marking the ST as populated.
     let slot_positions = cdc::get_slot_positions(source_oids)?;
     let data_ts = get_data_timestamp_str();
-    let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
+    let mut frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
+
+    // Include ST (stream table) sources in the frontier so that the
+    // scheduler's `prev_frontier.is_empty()` check doesn't trigger a
+    // spurious FULL fallback on the first differential refresh.
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    for dep in crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default() {
+        if dep.source_type == "STREAM_TABLE"
+            && let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(dep.source_relid)
+            && crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema)
+        {
+            let lsn = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
+            frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
+        }
+    }
+
     StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0)?;
 
     pgrx::info!("Stream table {}.{} refreshed (FULL)", schema, table_name);

@@ -1407,6 +1407,41 @@ fn parallel_dispatch_tick(
     // SAFETY: MyProcPid is always valid inside a background worker.
     let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
 
+    // ── Step 0: Reap orphaned RUNNING jobs whose worker died ─────────────
+    // A background worker can die (OOM, crash, etc.) while its job is still
+    // RUNNING in the catalog. The in-memory inflight tracking may have been
+    // lost during a DAG rebuild, so we do a DB-level scan: cancel any
+    // RUNNING job whose worker_pid is no longer in pg_stat_activity.
+    let reaped = reap_dead_worker_jobs();
+    if reaped > 0 {
+        log!(
+            "pg_trickle: parallel dispatch — reaped {} orphaned job(s) with dead workers",
+            reaped,
+        );
+
+        // Reconcile shmem worker token counter.  Crashed workers never call
+        // `release_worker_token()`, so the atomic counter drifts upward.
+        // Re-derive from pg_stat_activity to fix it.
+        let live_workers: u32 = Spi::get_one::<i64>(
+            "SELECT COUNT(*)::bigint FROM pg_stat_activity \
+             WHERE backend_type = 'pg_trickle refresh worker'",
+        )
+        .unwrap_or(Some(0))
+        .unwrap_or(0)
+        .max(0) as u32;
+
+        let shmem_count = shmem::active_worker_count();
+        if shmem_count != live_workers {
+            log!(
+                "pg_trickle: parallel dispatch — correcting worker count: shmem={} → live={}",
+                shmem_count,
+                live_workers,
+            );
+            shmem::set_active_worker_count(live_workers);
+            shmem::bump_reconcile_epoch();
+        }
+    }
+
     // ── Step 1: Poll completed jobs and process outcomes ──────────────────
     let inflight_ids: Vec<(ExecutionUnitId, i64)> = state
         .unit_states
@@ -1659,6 +1694,36 @@ fn parallel_dispatch_tick(
             );
         }
     }
+}
+
+/// Reap RUNNING jobs whose background worker process has died.
+///
+/// Called at the start of each parallel dispatch tick to detect orphaned
+/// RUNNING jobs whose worker_pid is no longer in pg_stat_activity.
+/// This handles the case where a worker crashes (OOM, segfault, etc.)
+/// while its job status remains RUNNING in the catalog — which would
+/// otherwise permanently block scheduling for that execution unit.
+///
+/// Returns the number of jobs reaped.
+fn reap_dead_worker_jobs() -> i64 {
+    Spi::get_one::<i64>(
+        "WITH reaped AS ( \
+             UPDATE pgtrickle.pgt_scheduler_jobs \
+             SET status = 'RETRYABLE_FAILED', \
+                 finished_at = now(), \
+                 outcome_detail = 'Worker process died (reaped by scheduler)', \
+                 retryable = true \
+             WHERE status = 'RUNNING' \
+               AND worker_pid IS NOT NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_stat_activity \
+                   WHERE pid = pgt_scheduler_jobs.worker_pid \
+               ) \
+             RETURNING job_id \
+         ) SELECT count(*)::bigint FROM reaped",
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0)
 }
 
 /// Reconcile orphaned jobs and worker tokens at scheduler startup.

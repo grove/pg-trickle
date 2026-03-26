@@ -725,6 +725,26 @@ pub fn capture_delta_to_bypass_table(
     user_cols: &[String],
 ) -> Result<i64, PgTrickleError> {
     let pgt_id = st.pgt_id;
+
+    // The delta temp table is only created during a true DIFFERENTIAL
+    // refresh.  If `execute_scheduled_refresh` internally fell back to
+    // FULL (e.g. no previous frontier), the table won't exist and we
+    // must skip the capture to avoid a "relation does not exist" ERROR.
+    let delta_exists: bool = Spi::get_one::<bool>(&format!(
+        "SELECT to_regclass('__pgt_delta_{}') IS NOT NULL",
+        pgt_id
+    ))
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !delta_exists {
+        pgrx::debug1!(
+            "[pg_trickle] DAG-4: no delta table for pgt_id={}, skipping bypass capture",
+            pgt_id,
+        );
+        return Ok(0);
+    }
+
     let bypass_table = format!("pg_temp.__pgt_bypass_{}", pgt_id);
 
     let sql = build_bypass_capture_sql(pgt_id, user_cols, &bypass_table);
