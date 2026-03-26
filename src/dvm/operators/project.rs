@@ -151,7 +151,44 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             .collect();
         format!("{} AS __pgt_row_id", build_hash_expr(&hash_cols))
     } else {
-        "__pgt_row_id".to_string()
+        // Recompute __pgt_row_id from the projected key columns to ensure
+        // consistency with the FULL refresh hash formula.
+        //
+        // For regular table sources with PK, this produces the same value
+        // as the change buffer's pk_hash (both hash the same PK columns).
+        // For ST sources without PK, the change buffer's pk_hash is the
+        // upstream ST's row_id (a different formula), so recomputing here
+        // ensures the MERGE ON clause can match rows correctly.
+        match op.row_id_key_columns() {
+            Some(key_cols) if !key_cols.is_empty() => {
+                let hash_cols: Vec<String> = key_cols
+                    .iter()
+                    .filter_map(|col| {
+                        aliases
+                            .iter()
+                            .position(|a| a == col)
+                            .map(|pos| resolve_expr_to_child(&expressions[pos], child_cols))
+                    })
+                    .collect();
+                if hash_cols.is_empty() || hash_cols.len() != key_cols.len() {
+                    // Not all key columns could be resolved — fall back
+                    "__pgt_row_id".to_string()
+                } else if hash_cols.len() == 1 {
+                    format!(
+                        "pgtrickle.pg_trickle_hash({}::TEXT) AS __pgt_row_id",
+                        hash_cols[0]
+                    )
+                } else {
+                    let items: Vec<String> =
+                        hash_cols.iter().map(|e| format!("({e})::TEXT")).collect();
+                    format!(
+                        "pgtrickle.pg_trickle_hash_multi(ARRAY[{}]) AS __pgt_row_id",
+                        items.join(", ")
+                    )
+                }
+            }
+            _ => "__pgt_row_id".to_string(),
+        }
     };
 
     // SF-6: Forward dual-count columns (__pgt_count_l, __pgt_count_r) when

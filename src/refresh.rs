@@ -2550,7 +2550,41 @@ pub fn execute_differential_refresh(
             .unwrap_or(false)
     };
 
-    if !any_changes {
+    // Also check ST (stream table) change buffers for pending changes.
+    // Without this, pure ST-on-ST dependencies (catalog_source_oids is
+    // empty) would always short-circuit and never run DIFFERENTIAL.
+    let any_st_changes = if !any_changes && !st_source_pgt_ids.is_empty() {
+        st_source_pgt_ids.iter().any(|&pgt_id| {
+            if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+                return false;
+            }
+            let key = format!("pgt_{pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_pgt_{pgt_id} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   LIMIT 1\
+                 )",
+            ))
+            .unwrap_or(Some(false))
+            .unwrap_or(false)
+        })
+    } else {
+        false
+    };
+
+    if !any_changes && !any_st_changes {
         return Ok((0, 0));
     }
 
