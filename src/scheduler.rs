@@ -1137,7 +1137,12 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
                 // DAG-4: For non-last members with downstream ST consumers,
                 // create the bypass temp table so the next member can read
                 // from it instead of the persistent buffer.
-                if !is_last && refresh::has_downstream_st_consumers(pgt_id) {
+                // Only for DIFFERENTIAL refreshes — NoData/Full/Reinitialize
+                // do not materialize __pgt_delta_{pgt_id}.
+                if !is_last
+                    && action == RefreshAction::Differential
+                    && refresh::has_downstream_st_consumers(pgt_id)
+                {
                     let user_cols = refresh::get_st_user_columns(&st);
                     match crate::refresh::capture_delta_to_bypass_table(&st, &user_cols) {
                         Ok(n) => {
@@ -1402,6 +1407,41 @@ fn parallel_dispatch_tick(
     // SAFETY: MyProcPid is always valid inside a background worker.
     let scheduler_pid: i32 = unsafe { pg_sys::MyProcPid };
 
+    // ── Step 0: Reap orphaned RUNNING jobs whose worker died ─────────────
+    // A background worker can die (OOM, crash, etc.) while its job is still
+    // RUNNING in the catalog. The in-memory inflight tracking may have been
+    // lost during a DAG rebuild, so we do a DB-level scan: cancel any
+    // RUNNING job whose worker_pid is no longer in pg_stat_activity.
+    let reaped = reap_dead_worker_jobs();
+    if reaped > 0 {
+        log!(
+            "pg_trickle: parallel dispatch — reaped {} orphaned job(s) with dead workers",
+            reaped,
+        );
+
+        // Reconcile shmem worker token counter.  Crashed workers never call
+        // `release_worker_token()`, so the atomic counter drifts upward.
+        // Re-derive from pg_stat_activity to fix it.
+        let live_workers: u32 = Spi::get_one::<i64>(
+            "SELECT COUNT(*)::bigint FROM pg_stat_activity \
+             WHERE backend_type = 'pg_trickle refresh worker'",
+        )
+        .unwrap_or(Some(0))
+        .unwrap_or(0)
+        .max(0) as u32;
+
+        let shmem_count = shmem::active_worker_count();
+        if shmem_count != live_workers {
+            log!(
+                "pg_trickle: parallel dispatch — correcting worker count: shmem={} → live={}",
+                shmem_count,
+                live_workers,
+            );
+            shmem::set_active_worker_count(live_workers);
+            shmem::bump_reconcile_epoch();
+        }
+    }
+
     // ── Step 1: Poll completed jobs and process outcomes ──────────────────
     let inflight_ids: Vec<(ExecutionUnitId, i64)> = state
         .unit_states
@@ -1656,6 +1696,36 @@ fn parallel_dispatch_tick(
     }
 }
 
+/// Reap RUNNING jobs whose background worker process has died.
+///
+/// Called at the start of each parallel dispatch tick to detect orphaned
+/// RUNNING jobs whose worker_pid is no longer in pg_stat_activity.
+/// This handles the case where a worker crashes (OOM, segfault, etc.)
+/// while its job status remains RUNNING in the catalog — which would
+/// otherwise permanently block scheduling for that execution unit.
+///
+/// Returns the number of jobs reaped.
+fn reap_dead_worker_jobs() -> i64 {
+    Spi::get_one::<i64>(
+        "WITH reaped AS ( \
+             UPDATE pgtrickle.pgt_scheduler_jobs \
+             SET status = 'RETRYABLE_FAILED', \
+                 finished_at = now(), \
+                 outcome_detail = 'Worker process died (reaped by scheduler)', \
+                 retryable = true \
+             WHERE status = 'RUNNING' \
+               AND worker_pid IS NOT NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_stat_activity \
+                   WHERE pid = pgt_scheduler_jobs.worker_pid \
+               ) \
+             RETURNING job_id \
+         ) SELECT count(*)::bigint FROM reaped",
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0)
+}
+
 /// Reconcile orphaned jobs and worker tokens at scheduler startup.
 ///
 /// Called once during per-database scheduler initialization:
@@ -1800,6 +1870,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
     let mut dag_version: u64 = 0;
     let mut dag: Option<StDag> = None;
+    // Follow-up flag: after an incremental rebuild, schedule a full rebuild
+    // on the next tick.  ALTER operations change dependency edges but not
+    // the node set, so the stale-snapshot guard (which only checks for
+    // missing nodes) cannot detect stale edges.  A follow-up full rebuild
+    // with a fresh snapshot captures the committed edge changes.
+    let mut pending_full_rebuild = false;
 
     // Per-ST retry state (in-memory only, reset on scheduler restart)
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
@@ -2070,14 +2146,20 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
             // Step A: Check if DAG needs rebuild
             let current_version = shmem::current_dag_version();
-            if current_version != dag_version || dag.is_none() {
+            if current_version != dag_version || dag.is_none() || pending_full_rebuild {
+                let force_full = pending_full_rebuild;
+                pending_full_rebuild = false;
+
                 // C2-1: Drain the invalidation ring buffer.
                 let invalidated = shmem::drain_invalidations();
 
                 // G-8: Try incremental rebuild when we have specific pgt_ids
                 // and an existing DAG. Falls back to full rebuild on overflow,
                 // no existing DAG, or incremental failure.
-                let incremental_ok = if let Some(ids) = &invalidated {
+                // Skip incremental if a follow-up full rebuild was requested.
+                let incremental_ok = if force_full {
+                    false
+                } else if let Some(ids) = &invalidated {
                     if !ids.is_empty() {
                         if let Some(ref mut existing_dag) = dag {
                             match existing_dag.rebuild_incremental(
@@ -2160,6 +2242,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     shmem::signal_dag_rebuild();
                 } else {
                     dag_version = current_version;
+                    // After an incremental rebuild, schedule a follow-up full
+                    // rebuild to catch edge-stale scenarios.  ALTER operations
+                    // update dependency edges but preserve the node; the stale
+                    // guard above only detects missing *nodes*.  A full rebuild
+                    // on the next tick (with a fresh snapshot that sees the
+                    // committed edge updates) closes this window.
+                    if incremental_ok {
+                        pending_full_rebuild = true;
+                    }
                 }
             }
 

@@ -11753,10 +11753,15 @@ fn resolve_table_oid(schema: &str, table: &str) -> Result<u32, PgTrickleError> {
 
 /// Resolve column metadata for a table via SPI.
 fn resolve_columns(table_oid: u32) -> Result<Vec<Column>, PgTrickleError> {
+    // Filter out internal __pgt_* columns (e.g. __pgt_row_id) that exist
+    // on stream table storage tables. These are implementation details
+    // and must not participate in row_id computation or delta queries.
+    // Mirrors the filter in resolve_st_output_columns().
     let sql = format!(
         "SELECT attname::text, atttypid, attnotnull \
          FROM pg_attribute \
          WHERE attrelid = {} AND attnum > 0 AND NOT attisdropped \
+           AND attname::text NOT LIKE '__pgt_%%' \
          ORDER BY attnum",
         table_oid,
     );
