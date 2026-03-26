@@ -75,6 +75,18 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   schedule resolution for cheap refreshes ($T_r \leq 20\text{ms}$), reducing
   wasted wait time by up to 90% in fast-completing DAGs.
 
+- **DAG-1: Intra-tick pipelining (validated).** The Phase 4 parallel dispatch
+  architecture already achieves intra-tick pipelining via per-dependency
+  `remaining_upstreams` tracking — downstream STs are dispatched in the same
+  tick that their upstream completes, with no level barrier. Validation tests
+  confirm correct cascade and mixed-cost-level behavior.
+
+- **DAG-5: ST buffer batch coalescing.** Before a downstream stream table reads
+  from an upstream ST's change buffer (`changes_pgt_{id}`), net-effect compaction
+  removes redundant INSERT/DELETE pairs for the same `pk_hash` that accumulate
+  during rapid-fire upstream refreshes. Uses the same `compact_threshold` GUC
+  as base-table compaction.
+
 ---
 
 ## [0.10.0] — 2026-03-25
