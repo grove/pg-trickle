@@ -4,10 +4,7 @@
 # (or PG_EXPORTER_EXTEND_QUERY_PATH env var).
 #
 # All metrics are prefixed "pg_trickle_".
-# Requires pg_trickle 0.10.0+ with:
-#   pgtrickle.pg_stat_stream_tables view
-#   pgtrickle.quick_health view
-#   pgtrickle.change_buffer_sizes() function
+# Requires pg_trickle 0.11.0+ with pgtrickle.pg_stat_stream_tables view
 
 # ── Per-table refresh statistics ─────────────────────────────────────────────
 
@@ -18,7 +15,6 @@ pg_trickle_table_stats:
         pgt_name                                      AS name,
         status,
         refresh_mode,
-        COALESCE(effective_refresh_mode, refresh_mode) AS effective_refresh_mode,
         CASE WHEN is_populated THEN 1 ELSE 0 END      AS is_populated,
         EXTRACT(EPOCH FROM staleness)::float8          AS staleness_seconds,
         CASE WHEN stale THEN 1 ELSE 0 END              AS stale,
@@ -43,9 +39,6 @@ pg_trickle_table_stats:
     - refresh_mode:
         usage: LABEL
         description: "Configured refresh mode (FULL, DIFFERENTIAL, AUTO, IMMEDIATE)"
-    - effective_refresh_mode:
-        usage: LABEL
-        description: "Effective refresh mode used in the last refresh"
     - is_populated:
         usage: GAUGE
         description: "1 if the stream table has been populated at least once"
@@ -76,67 +69,6 @@ pg_trickle_table_stats:
     - avg_duration_ms:
         usage: GAUGE
         description: "Rolling average refresh duration in milliseconds"
-
-# ── Overall health summary ────────────────────────────────────────────────────
-
-pg_trickle_health:
-  query: |
-    SELECT
-        total_stream_tables,
-        error_tables,
-        stale_tables,
-        CASE WHEN scheduler_running THEN 1 ELSE 0 END AS scheduler_running,
-        CASE
-            WHEN status = 'OK'       THEN 0
-            WHEN status = 'WARNING'  THEN 1
-            WHEN status = 'CRITICAL' THEN 2
-            ELSE 3
-        END AS health_status_code
-    FROM pgtrickle.quick_health
-  metrics:
-    - total_stream_tables:
-        usage: GAUGE
-        description: "Total number of registered stream tables"
-    - error_tables:
-        usage: GAUGE
-        description: "Number of tables currently in ERROR state or with consecutive errors"
-    - stale_tables:
-        usage: GAUGE
-        description: "Number of tables with data older than their configured schedule"
-    - scheduler_running:
-        usage: GAUGE
-        description: "1 if the pg_trickle scheduler background worker is alive"
-    - health_status_code:
-        usage: GAUGE
-        description: "Overall cluster health: 0=OK, 1=WARNING, 2=CRITICAL"
-
-# ── CDC change buffer sizes ───────────────────────────────────────────────────
-
-pg_trickle_cdc_buffers:
-  query: |
-    SELECT
-        stream_table                 AS stream_table,
-        source_table                 AS source_table,
-        cdc_mode,
-        COALESCE(pending_rows, 0)    AS pending_rows,
-        COALESCE(buffer_bytes, 0)    AS buffer_bytes
-    FROM pgtrickle.change_buffer_sizes()
-  metrics:
-    - stream_table:
-        usage: LABEL
-        description: "Fully qualified name of the stream table"
-    - source_table:
-        usage: LABEL
-        description: "Fully qualified name of the upstream source table"
-    - cdc_mode:
-        usage: LABEL
-        description: "CDC mode in use for this source (trigger, wal, transitioning)"
-    - pending_rows:
-        usage: GAUGE
-        description: "Rows currently pending in the CDC change buffer"
-    - buffer_bytes:
-        usage: GAUGE
-        description: "Size in bytes of the CDC change buffer (on-disk)"
 
 # ── Stream table status counts ────────────────────────────────────────────────
 

@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS products (
 -- ── Stream tables ──────────────────────────────────────────────────────────
 
 -- Daily sales totals per product
+-- Schedule: every minute (* * * * *)
 SELECT pgtrickle.create_stream_table(
     'public.daily_sales',
     $$
@@ -35,11 +36,12 @@ SELECT pgtrickle.create_stream_table(
         FROM orders
         GROUP BY product, date_trunc('day', created_at)
     $$,
-    schedule => '30 seconds',
+    schedule => '* * * * *',
     refresh_mode => 'DIFFERENTIAL'
 );
 
 -- Hot products: top-10 by order count in last 24 h
+-- Schedule: every 5 minutes (*/5 * * * *)
 SELECT pgtrickle.create_stream_table(
     'public.hot_products',
     $$
@@ -50,7 +52,7 @@ SELECT pgtrickle.create_stream_table(
         ORDER BY order_count DESC
         LIMIT 10
     $$,
-    schedule => '1 minute',
+    schedule => '*/5 * * * *',
     refresh_mode => 'FULL'
 );
 
