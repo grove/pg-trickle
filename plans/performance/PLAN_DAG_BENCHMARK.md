@@ -1,6 +1,6 @@
 # DAG Topology Benchmarking Suite
 
-> **Status:** In Progress (Session 1 complete)  
+> **Status:** In Progress (Sessions 1–3 complete)  
 > **Date:** 2026-03-26  
 > **Related:** [PLAN_DAG_PERFORMANCE.md](PLAN_DAG_PERFORMANCE.md) ·
 > [STATUS_PERFORMANCE.md](STATUS_PERFORMANCE.md) ·
@@ -570,11 +570,11 @@ cargo test --test e2e_dag_bench_tests -- --ignored bench_throughput_linear_5 --t
 ### Session 2: Wide DAG & Fan-Out (est. effort: medium)
 
 **Deliverables:**
-- [ ] `build_wide_dag()` topology builder
-- [ ] `build_fan_out_tree()` topology builder
-- [ ] All wide DAG latency tests (5 tests)
-- [ ] All fan-out latency tests (2 tests)
-- [ ] Wide DAG and fan-out throughput tests (2 tests)
+- [x] `build_wide_dag()` topology builder
+- [x] `build_fan_out_tree()` topology builder
+- [x] All wide DAG latency tests (5 tests)
+- [x] All fan-out latency tests (2 tests)
+- [x] Wide DAG and fan-out throughput tests (2 tests)
 
 **Verification:**
 ```bash
@@ -586,12 +586,12 @@ cargo test --test e2e_dag_bench_tests -- --ignored bench_latency_fanout --test-t
 ### Session 3: Diamond, Mixed & Reporting (est. effort: medium)
 
 **Deliverables:**
-- [ ] `build_diamond()` topology builder
-- [ ] `build_mixed()` topology builder
-- [ ] Diamond latency and throughput tests (2 tests)
-- [ ] Mixed topology latency and throughput tests (3 tests)
-- [ ] Per-level breakdown reporting
-- [ ] Summary table across all topologies
+- [x] `build_diamond()` topology builder
+- [x] `build_mixed()` topology builder
+- [x] Diamond latency and throughput tests (2 tests)
+- [x] Mixed topology latency and throughput tests (3 tests)
+- [x] Per-level breakdown reporting (done in Session 1)
+- [x] Summary table across all topologies (done in Session 1)
 
 **Verification:**
 ```bash
@@ -603,7 +603,7 @@ cargo test --test e2e_dag_bench_tests -- --ignored bench_latency_mixed --test-th
 ### Session 4: Integration & Documentation (est. effort: small)
 
 **Deliverables:**
-- [ ] justfile targets: `test-dag-bench`, `test-dag-bench-fast`
+- [x] justfile targets: `test-dag-bench`, `test-dag-bench-fast` (done in Session 1)
 - [ ] Update `docs/BENCHMARK.md` — add DAG Topology Benchmark section
 - [ ] Full suite validation run
 

@@ -161,6 +161,517 @@ async fn build_linear_chain(db: &E2eDb, depth: u32) -> DagTopology {
     }
 }
 
+/// Build a wide DAG: src → [W parallel chains of depth D]
+///
+/// L1: `width` independent STs, each filtering a different group from the source.
+/// L2+: Each ST depends on the ST directly above (same position index).
+async fn build_wide_dag(db: &E2eDb, depth: u32, width: u32) -> DagTopology {
+    let src = "wd_src".to_string();
+    db.execute(
+        "CREATE TABLE wd_src (
+            id  SERIAL PRIMARY KEY,
+            grp TEXT NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(&format!(
+        "INSERT INTO wd_src (grp, val)
+         SELECT 'g' || (i % {width}), (random() * 1000)::int
+         FROM generate_series(1, {BASE_TABLE_SIZE}) AS s(i)"
+    ))
+    .await;
+
+    db.execute("ANALYZE wd_src").await;
+
+    let mut all_sts = Vec::new();
+    let mut levels: Vec<Vec<String>> = Vec::new();
+
+    // L1: width independent STs, each filtering a different group
+    let mut level1 = Vec::new();
+    for w in 0..width {
+        let st_name = format!("st_wd_1_{w}");
+        db.create_st(
+            &st_name,
+            &format!(
+                "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM wd_src WHERE grp = 'g{w}' GROUP BY grp"
+            ),
+            "1m",
+            "DIFFERENTIAL",
+        )
+        .await;
+        all_sts.push(st_name.clone());
+        level1.push(st_name);
+    }
+    levels.push(level1);
+
+    // L2+: each ST at level L depends on same-index ST at level L-1
+    for d in 2..=depth {
+        let mut level = Vec::new();
+        for w in 0..width {
+            let st_name = format!("st_wd_{d}_{w}");
+            let prev = format!("st_wd_{}_{w}", d - 1);
+            let query = if d % 2 == 0 {
+                format!("SELECT grp, total * 2 AS total, cnt FROM {prev}")
+            } else {
+                format!("SELECT grp, total, cnt FROM {prev} WHERE total > 0")
+            };
+            db.execute(&format!(
+                "SELECT pgtrickle.create_stream_table('{st_name}', $${query}$$, 'calculated', 'DIFFERENTIAL')"
+            ))
+            .await;
+            all_sts.push(st_name.clone());
+            level.push(st_name);
+        }
+        levels.push(level);
+    }
+
+    let leaf_sts: Vec<String> = levels.last().unwrap().clone();
+
+    DagTopology {
+        source_tables: vec![src],
+        all_sts,
+        leaf_sts,
+        depth,
+        max_width: width,
+        levels,
+    }
+}
+
+/// Build a fan-out tree: src → root → [b children] → [b² grandchildren] → ...
+///
+/// Each node fans out to `branching_factor` children with different filter/project queries.
+/// Total STs = (b^d - 1) / (b - 1) where b = branching factor, d = depth.
+async fn build_fan_out_tree(db: &E2eDb, depth: u32, branching_factor: u32) -> DagTopology {
+    let src = "fo_src".to_string();
+    db.execute(
+        "CREATE TABLE fo_src (
+            id  SERIAL PRIMARY KEY,
+            grp TEXT NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(&format!(
+        "INSERT INTO fo_src (grp, val)
+         SELECT 'g' || (i % {NUM_GROUPS}), (random() * 1000)::int
+         FROM generate_series(1, {BASE_TABLE_SIZE}) AS s(i)"
+    ))
+    .await;
+
+    db.execute("ANALYZE fo_src").await;
+
+    let mut all_sts = Vec::new();
+    let mut levels: Vec<Vec<String>> = Vec::new();
+    let mut max_width: u32 = 0;
+
+    // L1: single root aggregate
+    let root = "st_fo_1".to_string();
+    db.create_st(
+        &root,
+        "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM fo_src GROUP BY grp",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push(root.clone());
+    levels.push(vec![root]);
+    max_width = max_width.max(1);
+
+    // L2+: each parent fans out to branching_factor children
+    for d in 2..=depth {
+        let parent_level = &levels[d as usize - 2];
+        let mut level = Vec::new();
+        for (pi, parent) in parent_level.iter().enumerate() {
+            for b in 0..branching_factor {
+                let st_name = format!("st_fo_{d}_{}_{b}", pi);
+                let query = if b % 2 == 0 {
+                    format!("SELECT grp, total * {} AS total, cnt FROM {parent}", b + 2)
+                } else {
+                    format!("SELECT grp, total, cnt FROM {parent} WHERE total > {b}")
+                };
+                db.execute(&format!(
+                    "SELECT pgtrickle.create_stream_table('{st_name}', $${query}$$, 'calculated', 'DIFFERENTIAL')"
+                ))
+                .await;
+                all_sts.push(st_name.clone());
+                level.push(st_name);
+            }
+        }
+        max_width = max_width.max(level.len() as u32);
+        levels.push(level);
+    }
+
+    let leaf_sts = levels.last().unwrap().clone();
+
+    DagTopology {
+        source_tables: vec![src],
+        all_sts,
+        leaf_sts,
+        depth,
+        max_width,
+        levels,
+    }
+}
+
+/// Build a diamond topology: src → [fan_out aggregates] → join ST → [extra_depth layers]
+///
+/// L1: `fan_out` independent aggregate STs (SUM, COUNT, MAX, MIN, ...)
+/// L2: Single ST that JOINs all L1 STs on `grp`
+/// L3+: Optional additional layers after the join point
+async fn build_diamond(db: &E2eDb, fan_out: u32, extra_depth: u32) -> DagTopology {
+    let src = "dm_src".to_string();
+    db.execute(
+        "CREATE TABLE dm_src (
+            id  SERIAL PRIMARY KEY,
+            grp TEXT NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(&format!(
+        "INSERT INTO dm_src (grp, val)
+         SELECT 'g' || (i % {NUM_GROUPS}), (random() * 1000)::int
+         FROM generate_series(1, {BASE_TABLE_SIZE}) AS s(i)"
+    ))
+    .await;
+
+    db.execute("ANALYZE dm_src").await;
+
+    let mut all_sts = Vec::new();
+    let mut levels: Vec<Vec<String>> = Vec::new();
+
+    // L1: fan_out independent aggregate STs
+    let agg_fns = ["SUM", "COUNT", "MAX", "MIN", "AVG"];
+    let mut l1_names = Vec::new();
+    for i in 0..fan_out {
+        let st_name = format!("st_dm_{}", (b'a' + i as u8) as char);
+        let agg = agg_fns[i as usize % agg_fns.len()];
+        let alias = agg.to_lowercase();
+        db.create_st(
+            &st_name,
+            &format!("SELECT grp, {agg}(val) AS {alias}_val FROM dm_src GROUP BY grp"),
+            "1m",
+            "DIFFERENTIAL",
+        )
+        .await;
+        all_sts.push(st_name.clone());
+        l1_names.push(st_name);
+    }
+    levels.push(l1_names.clone());
+
+    // L2: join all L1 STs on grp
+    let join_name = "st_dm_join".to_string();
+    let first = &l1_names[0];
+    let first_alias = "t0";
+    let mut select_cols = format!("{first_alias}.grp");
+    let mut from_clause = format!("{first} {first_alias}");
+    for (i, st) in l1_names.iter().enumerate() {
+        let alias = format!("t{i}");
+        if i == 0 {
+            continue;
+        }
+        // Add the aggregate column from this ST to the select
+        let agg = agg_fns[i % agg_fns.len()].to_lowercase();
+        select_cols.push_str(&format!(", {alias}.{agg}_val"));
+        from_clause.push_str(&format!(
+            " JOIN {st} {alias} ON {first_alias}.grp = {alias}.grp"
+        ));
+    }
+    // Add first ST's column too
+    let first_agg = agg_fns[0].to_lowercase();
+    select_cols = format!("{first_alias}.grp, {first_alias}.{first_agg}_val, {}", {
+        let mut cols = Vec::new();
+        for i in 1..l1_names.len() {
+            let alias = format!("t{i}");
+            let agg = agg_fns[i % agg_fns.len()].to_lowercase();
+            cols.push(format!("{alias}.{agg}_val"));
+        }
+        cols.join(", ")
+    });
+
+    let join_query = format!("SELECT {select_cols} FROM {from_clause}");
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table('{join_name}', $${join_query}$$, 'calculated', 'DIFFERENTIAL')"
+    ))
+    .await;
+    all_sts.push(join_name.clone());
+    levels.push(vec![join_name.clone()]);
+
+    // L3+: additional layers after the join
+    let mut prev = join_name;
+    for i in 0..extra_depth {
+        let st_name = format!("st_dm_ext_{}", i + 1);
+        let query = if i % 2 == 0 {
+            format!("SELECT grp, {first_agg}_val * 2 AS {first_agg}_val FROM {prev}")
+        } else {
+            format!("SELECT grp, {first_agg}_val FROM {prev} WHERE {first_agg}_val > 0")
+        };
+        db.execute(&format!(
+            "SELECT pgtrickle.create_stream_table('{st_name}', $${query}$$, 'calculated', 'DIFFERENTIAL')"
+        ))
+        .await;
+        all_sts.push(st_name.clone());
+        levels.push(vec![st_name.clone()]);
+        prev = st_name;
+    }
+
+    let leaf = all_sts.last().unwrap().clone();
+    let total_depth = 2 + extra_depth;
+
+    DagTopology {
+        source_tables: vec![src],
+        all_sts,
+        leaf_sts: vec![leaf],
+        depth: total_depth,
+        max_width: fan_out,
+        levels,
+    }
+}
+
+/// Build a mixed topology modeled on an e-commerce scenario.
+///
+/// Two source tables (orders, products) with ~35 STs across 4 layers:
+/// - Layer 1: base aggregates from each source
+/// - Layer 2: domain views (region, product, daily)
+/// - Layer 3: dashboards (cross-source joins)
+/// - Layer 4: alerts / summary
+async fn build_mixed(db: &E2eDb) -> DagTopology {
+    // ── Source tables ───────────────────────────────────────────────
+    db.execute(
+        "CREATE TABLE mx_orders (
+            id         SERIAL PRIMARY KEY,
+            region     TEXT NOT NULL,
+            product_id INT NOT NULL,
+            amount     INT NOT NULL,
+            ts         DATE NOT NULL DEFAULT CURRENT_DATE
+        )",
+    )
+    .await;
+
+    db.execute(&format!(
+        "INSERT INTO mx_orders (region, product_id, amount, ts)
+         SELECT
+             CASE (i % 4) WHEN 0 THEN 'north' WHEN 1 THEN 'south'
+                          WHEN 2 THEN 'east' ELSE 'west' END,
+             (i % 50) + 1,
+             (random() * 1000)::int,
+             CURRENT_DATE - (i % 30)
+         FROM generate_series(1, {BASE_TABLE_SIZE}) AS s(i)"
+    ))
+    .await;
+
+    db.execute(
+        "CREATE TABLE mx_products (
+            id       SERIAL PRIMARY KEY,
+            name     TEXT NOT NULL,
+            category TEXT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO mx_products (name, category)
+         SELECT 'product_' || i, CASE (i % 5)
+             WHEN 0 THEN 'electronics' WHEN 1 THEN 'clothing'
+             WHEN 2 THEN 'food' WHEN 3 THEN 'furniture' ELSE 'other' END
+         FROM generate_series(1, 50) AS s(i)",
+    )
+    .await;
+
+    db.execute("ANALYZE mx_orders").await;
+    db.execute("ANALYZE mx_products").await;
+
+    let mut all_sts = Vec::new();
+    let mut levels: Vec<Vec<String>> = Vec::new();
+
+    // ── Layer 1: base aggregates ────────────────────────────────────
+    let mut l1 = Vec::new();
+
+    // Orders aggregates
+    db.create_st(
+        "mx_orders_daily",
+        "SELECT ts, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY ts",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push("mx_orders_daily".into());
+    l1.push("mx_orders_daily".into());
+
+    db.create_st(
+        "mx_orders_by_region",
+        "SELECT region, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY region",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push("mx_orders_by_region".into());
+    l1.push("mx_orders_by_region".into());
+
+    db.create_st(
+        "mx_orders_by_product",
+        "SELECT product_id, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY product_id",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push("mx_orders_by_product".into());
+    l1.push("mx_orders_by_product".into());
+
+    db.create_st(
+        "mx_orders_high_value",
+        "SELECT id, region, product_id, amount FROM mx_orders WHERE amount > 500",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push("mx_orders_high_value".into());
+    l1.push("mx_orders_high_value".into());
+
+    // Products aggregates
+    db.create_st(
+        "mx_product_stats",
+        "SELECT category, COUNT(*) AS cnt FROM mx_products GROUP BY category",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    all_sts.push("mx_product_stats".into());
+    l1.push("mx_product_stats".into());
+
+    levels.push(l1);
+
+    // ── Layer 2: domain views (ST-on-ST) ────────────────────────────
+    let mut l2 = Vec::new();
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_orders_summary',
+            $$SELECT SUM(total) AS grand_total, SUM(cnt) AS grand_cnt FROM mx_orders_daily$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_orders_summary".into());
+    l2.push("mx_orders_summary".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_region_ranked',
+            $$SELECT region, total, cnt,
+              total * 100 / NULLIF(cnt, 0) AS avg_amount
+              FROM mx_orders_by_region$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_region_ranked".into());
+    l2.push("mx_region_ranked".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_top_products',
+            $$SELECT product_id, total FROM mx_orders_by_product WHERE total > 100$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_top_products".into());
+    l2.push("mx_top_products".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_hv_by_region',
+            $$SELECT region, COUNT(*) AS hv_cnt, SUM(amount) AS hv_total
+              FROM mx_orders_high_value GROUP BY region$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_hv_by_region".into());
+    l2.push("mx_hv_by_region".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_product_categories',
+            $$SELECT category, cnt * 2 AS weighted_cnt FROM mx_product_stats$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_product_categories".into());
+    l2.push("mx_product_categories".into());
+
+    levels.push(l2);
+
+    // ── Layer 3: dashboards (cross-source joins, deeper chains) ─────
+    let mut l3 = Vec::new();
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_exec_dashboard',
+            $$SELECT r.region, r.total AS region_total, r.avg_amount,
+                     h.hv_cnt, h.hv_total
+              FROM mx_region_ranked r
+              JOIN mx_hv_by_region h ON r.region = h.region$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_exec_dashboard".into());
+    l3.push("mx_exec_dashboard".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_summary_extended',
+            $$SELECT grand_total, grand_cnt,
+                     grand_total * 100 / NULLIF(grand_cnt, 0) AS grand_avg
+              FROM mx_orders_summary$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_summary_extended".into());
+    l3.push("mx_summary_extended".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_top_products_doubled',
+            $$SELECT product_id, total * 2 AS doubled FROM mx_top_products$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_top_products_doubled".into());
+    l3.push("mx_top_products_doubled".into());
+
+    levels.push(l3);
+
+    // ── Layer 4: alerts / final summary ─────────────────────────────
+    let mut l4 = Vec::new();
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_alert_high_region',
+            $$SELECT region, region_total, hv_cnt
+              FROM mx_exec_dashboard WHERE hv_cnt > 0$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_alert_high_region".into());
+    l4.push("mx_alert_high_region".into());
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table('mx_final_summary',
+            $$SELECT grand_total, grand_avg FROM mx_summary_extended WHERE grand_avg > 0$$,
+            'calculated', 'DIFFERENTIAL')",
+    )
+    .await;
+    all_sts.push("mx_final_summary".into());
+    l4.push("mx_final_summary".into());
+
+    levels.push(l4);
+
+    let leaf_sts = levels.last().unwrap().clone();
+    let max_width = levels.iter().map(|l| l.len() as u32).max().unwrap_or(1);
+
+    DagTopology {
+        source_tables: vec!["mx_orders".into(), "mx_products".into()],
+        all_sts,
+        leaf_sts,
+        depth: levels.len() as u32,
+        max_width,
+        levels,
+    }
+}
+
 // ── Measurement Helpers ────────────────────────────────────────────────
 
 /// Configure scheduler for latency benchmarks with the given refresh mode.
@@ -831,5 +1342,198 @@ async fn bench_throughput_linear_20() {
         db.refresh_st_with_retry(st).await;
     }
     let results = measure_throughput(&db, &topo, "linear_chain", THROUGHPUT_DELTA_SIZES).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Latency Benchmarks — Wide DAG
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_wide_3x20_calc() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "CALCULATED", 1).await;
+    let topo = build_wide_dag(&db, 3, 20).await;
+    let results = measure_latency(&db, &topo, "wide_dag", "CALCULATED", 1).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_wide_3x20_par4() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "PARALLEL_C4", 4).await;
+    let topo = build_wide_dag(&db, 3, 20).await;
+    let results = measure_latency(&db, &topo, "wide_dag", "PARALLEL_C4", 4).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_wide_3x20_par8() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "PARALLEL_C8", 8).await;
+    let topo = build_wide_dag(&db, 3, 20).await;
+    let results = measure_latency(&db, &topo, "wide_dag", "PARALLEL_C8", 8).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_wide_5x20_calc() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "CALCULATED", 1).await;
+    let topo = build_wide_dag(&db, 5, 20).await;
+    let results = measure_latency(&db, &topo, "wide_dag", "CALCULATED", 1).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_wide_5x20_par8() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "PARALLEL_C8", 8).await;
+    let topo = build_wide_dag(&db, 5, 20).await;
+    let results = measure_latency(&db, &topo, "wide_dag", "PARALLEL_C8", 8).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Latency Benchmarks — Fan-Out Tree
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_fanout_b2d5_calc() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "CALCULATED", 1).await;
+    let topo = build_fan_out_tree(&db, 5, 2).await;
+    let results = measure_latency(&db, &topo, "fan_out", "CALCULATED", 1).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_fanout_b2d5_par8() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "PARALLEL_C8", 8).await;
+    let topo = build_fan_out_tree(&db, 5, 2).await;
+    let results = measure_latency(&db, &topo, "fan_out", "PARALLEL_C8", 8).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Latency Benchmarks — Diamond
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_diamond_4_calc() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "CALCULATED", 1).await;
+    let topo = build_diamond(&db, 4, 0).await;
+    let results = measure_latency(&db, &topo, "diamond", "CALCULATED", 1).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Latency Benchmarks — Mixed Topology
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_mixed_calc() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "CALCULATED", 1).await;
+    let topo = build_mixed(&db).await;
+    let results = measure_latency(&db, &topo, "mixed", "CALCULATED", 1).await;
+    report_results(&results);
+}
+
+#[tokio::test]
+#[ignore]
+async fn bench_latency_mixed_par8() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_latency_scheduler(&db, "PARALLEL_C8", 8).await;
+    let topo = build_mixed(&db).await;
+    let results = measure_latency(&db, &topo, "mixed", "PARALLEL_C8", 8).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Throughput Benchmarks — Wide DAG
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_throughput_wide_3x20() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = off")
+        .await;
+    db.reload_config_and_wait().await;
+    let topo = build_wide_dag(&db, 3, 20).await;
+    for st in &topo.all_sts {
+        db.refresh_st_with_retry(st).await;
+    }
+    let results = measure_throughput(&db, &topo, "wide_dag", THROUGHPUT_DELTA_SIZES).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Throughput Benchmarks — Fan-Out Tree
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_throughput_fanout_b2d5() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = off")
+        .await;
+    db.reload_config_and_wait().await;
+    let topo = build_fan_out_tree(&db, 5, 2).await;
+    for st in &topo.all_sts {
+        db.refresh_st_with_retry(st).await;
+    }
+    let results = measure_throughput(&db, &topo, "fan_out", THROUGHPUT_DELTA_SIZES).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Throughput Benchmarks — Diamond
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_throughput_diamond_4() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = off")
+        .await;
+    db.reload_config_and_wait().await;
+    let topo = build_diamond(&db, 4, 0).await;
+    for st in &topo.all_sts {
+        db.refresh_st_with_retry(st).await;
+    }
+    let results = measure_throughput(&db, &topo, "diamond", THROUGHPUT_DELTA_SIZES).await;
+    report_results(&results);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Throughput Benchmarks — Mixed Topology
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore]
+async fn bench_throughput_mixed() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    db.execute("ALTER SYSTEM SET pg_trickle.enabled = off")
+        .await;
+    db.reload_config_and_wait().await;
+    let topo = build_mixed(&db).await;
+    for st in &topo.all_sts {
+        db.refresh_st_with_retry(st).await;
+    }
+    // Mixed topology uses mx_orders as the primary source for DML
+    let results = measure_throughput(&db, &topo, "mixed", THROUGHPUT_DELTA_SIZES).await;
     report_results(&results);
 }
