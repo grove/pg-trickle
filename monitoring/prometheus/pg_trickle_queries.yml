@@ -4,7 +4,40 @@
 # (or PG_EXPORTER_EXTEND_QUERY_PATH env var).
 #
 # All metrics are prefixed "pg_trickle_".
-# Requires pg_trickle 0.11.0+ with pgtrickle.pg_stat_stream_tables view
+# Requires pg_trickle 0.11.0+ with pgtrickle.pg_stat_stream_tables and quick_health views
+
+# ── Overall cluster health summary ─────────────────────────────────────────────
+
+pg_trickle_health:
+  query: |
+    SELECT
+        total_stream_tables,
+        error_tables,
+        stale_tables,
+        CASE WHEN scheduler_running THEN 1 ELSE 0 END AS scheduler_running,
+        CASE
+            WHEN status = 'OK'       THEN 0
+            WHEN status = 'WARNING'  THEN 1
+            WHEN status = 'CRITICAL' THEN 2
+            ELSE 3
+        END AS health_status_code
+    FROM pgtrickle.quick_health
+  metrics:
+    - total_stream_tables:
+        usage: GAUGE
+        description: "Total number of registered stream tables"
+    - error_tables:
+        usage: GAUGE
+        description: "Number of tables currently in ERROR state or with consecutive errors"
+    - stale_tables:
+        usage: GAUGE
+        description: "Number of tables with data older than their configured schedule"
+    - scheduler_running:
+        usage: GAUGE
+        description: "1 if the pg_trickle scheduler background worker is alive"
+    - health_status_code:
+        usage: GAUGE
+        description: "Overall cluster health: 0=OK, 1=WARNING, 2=CRITICAL"
 
 # ── Per-table refresh statistics ─────────────────────────────────────────────
 
