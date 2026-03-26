@@ -1029,6 +1029,36 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
 
 // ── Parallel Dispatch State (Phase 4) ─────────────────────────────────────
 
+/// DAG-2: Minimum adaptive poll interval (ms) when workers are in-flight.
+const ADAPTIVE_POLL_MIN_MS: u64 = 20;
+/// DAG-2: Maximum adaptive poll interval (ms) — the old fixed cap.
+const ADAPTIVE_POLL_MAX_MS: u64 = 200;
+
+/// DAG-2: Compute the next adaptive poll interval.
+///
+/// Uses exponential backoff: starts at `ADAPTIVE_POLL_MIN_MS` after a worker
+/// completion, doubles each tick with no completion, and caps at
+/// `ADAPTIVE_POLL_MAX_MS`. When no workers are in-flight, returns the full
+/// `base_interval_ms` (the scheduler GUC value).
+///
+/// This is a pure function for unit-testability.
+fn compute_adaptive_poll_ms(
+    current_poll_ms: u64,
+    had_completion: bool,
+    has_inflight: bool,
+    base_interval_ms: u64,
+) -> u64 {
+    if !has_inflight {
+        return base_interval_ms;
+    }
+    if had_completion {
+        return ADAPTIVE_POLL_MIN_MS;
+    }
+    // Exponential backoff: double the current interval, capped.
+    let next = current_poll_ms.saturating_mul(2);
+    std::cmp::min(next, ADAPTIVE_POLL_MAX_MS)
+}
+
 /// Per-unit coordinator state for the parallel dispatch loop.
 #[derive(Debug, Default)]
 struct UnitDispatchState {
@@ -1053,6 +1083,11 @@ struct ParallelDispatchState {
     dag_version: u64,
     /// The execution unit DAG (rebuilt on DAG version change).
     eu_dag: Option<ExecutionUnitDag>,
+    /// DAG-2: Current adaptive poll interval (ms). Doubles each tick without
+    /// worker completions; resets to `ADAPTIVE_POLL_MIN_MS` on completion.
+    adaptive_poll_ms: u64,
+    /// DAG-2: Number of worker completions observed in the last dispatch tick.
+    completions_this_tick: u32,
 }
 
 impl ParallelDispatchState {
@@ -1062,6 +1097,8 @@ impl ParallelDispatchState {
             per_db_inflight: 0,
             dag_version: 0,
             eu_dag: None,
+            adaptive_poll_ms: ADAPTIVE_POLL_MIN_MS,
+            completions_this_tick: 0,
         }
     }
 
@@ -1247,6 +1284,8 @@ fn parallel_dispatch_tick(
             us.inflight_job_id = None;
         }
         state.per_db_inflight = state.per_db_inflight.saturating_sub(1);
+        // DAG-2: Track completion for adaptive poll reset.
+        state.completions_this_tick += 1;
 
         let root_pgt_id = eu_dag
             .units()
@@ -1666,12 +1705,18 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut wake_stats_last_log_ms: u64 = current_epoch_ms();
 
     loop {
-        // Use shorter poll interval when parallel workers are in-flight.
-        let poll_ms = if parallel_state.has_inflight() {
-            std::cmp::min(config::pg_trickle_scheduler_interval_ms() as u64, 200)
-        } else {
-            config::pg_trickle_scheduler_interval_ms() as u64
-        };
+        // DAG-2: Adaptive poll interval — exponential backoff (20ms → 200ms)
+        // that resets to 20ms on worker completion, making parallel mode
+        // competitive for cheap refreshes.
+        let base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        let poll_ms = compute_adaptive_poll_ms(
+            parallel_state.adaptive_poll_ms,
+            parallel_state.completions_this_tick > 0,
+            parallel_state.has_inflight(),
+            base_interval_ms,
+        );
+        parallel_state.adaptive_poll_ms = poll_ms;
+        parallel_state.completions_this_tick = 0;
 
         let wake_start = std::time::Instant::now();
         let should_continue =
@@ -4635,5 +4680,89 @@ mod tests {
         assert_eq!(compute_per_db_quota(4, 4, 10, 7), 6);
         // active=8 == threshold → no burst
         assert_eq!(compute_per_db_quota(4, 4, 10, 8), 4);
+    }
+
+    // ── DAG-2: compute_adaptive_poll_ms tests ─────────────────────────────
+
+    #[test]
+    fn test_adaptive_poll_no_inflight_returns_base_interval() {
+        // When no workers are in-flight, use the full scheduler interval
+        // regardless of current_poll_ms or completion state.
+        assert_eq!(compute_adaptive_poll_ms(20, false, false, 1000), 1000);
+        assert_eq!(compute_adaptive_poll_ms(200, true, false, 1000), 1000);
+        assert_eq!(compute_adaptive_poll_ms(50, false, false, 500), 500);
+    }
+
+    #[test]
+    fn test_adaptive_poll_completion_resets_to_min() {
+        // After a worker completes, poll resets to ADAPTIVE_POLL_MIN_MS (20ms).
+        assert_eq!(compute_adaptive_poll_ms(200, true, true, 1000), 20);
+        assert_eq!(compute_adaptive_poll_ms(100, true, true, 1000), 20);
+        assert_eq!(compute_adaptive_poll_ms(20, true, true, 1000), 20);
+    }
+
+    #[test]
+    fn test_adaptive_poll_backoff_doubles_each_tick() {
+        // No completion, workers in-flight → double current_poll_ms.
+        assert_eq!(compute_adaptive_poll_ms(20, false, true, 1000), 40);
+        assert_eq!(compute_adaptive_poll_ms(40, false, true, 1000), 80);
+        assert_eq!(compute_adaptive_poll_ms(80, false, true, 1000), 160);
+    }
+
+    #[test]
+    fn test_adaptive_poll_caps_at_max() {
+        // Doubling 160 → 320, but capped at ADAPTIVE_POLL_MAX_MS (200).
+        assert_eq!(compute_adaptive_poll_ms(160, false, true, 1000), 200);
+        assert_eq!(compute_adaptive_poll_ms(200, false, true, 1000), 200);
+    }
+
+    #[test]
+    fn test_adaptive_poll_full_backoff_sequence() {
+        // Simulate a full sequence: completion → backoff → backoff → … → cap.
+        let base = 1000u64;
+        // Worker completes → reset.
+        let p = compute_adaptive_poll_ms(200, true, true, base);
+        assert_eq!(p, 20);
+        // Tick 1: no completion.
+        let p = compute_adaptive_poll_ms(p, false, true, base);
+        assert_eq!(p, 40);
+        // Tick 2.
+        let p = compute_adaptive_poll_ms(p, false, true, base);
+        assert_eq!(p, 80);
+        // Tick 3.
+        let p = compute_adaptive_poll_ms(p, false, true, base);
+        assert_eq!(p, 160);
+        // Tick 4: would be 320, capped at 200.
+        let p = compute_adaptive_poll_ms(p, false, true, base);
+        assert_eq!(p, 200);
+        // Tick 5: stays at cap.
+        let p = compute_adaptive_poll_ms(p, false, true, base);
+        assert_eq!(p, 200);
+    }
+
+    #[test]
+    fn test_adaptive_poll_completion_after_backoff_resets() {
+        // After backing off to cap, a completion resets to min.
+        let p = compute_adaptive_poll_ms(200, true, true, 1000);
+        assert_eq!(p, 20);
+    }
+
+    #[test]
+    fn test_adaptive_poll_transition_inflight_to_idle() {
+        // Workers finish between ticks: in-flight → not in-flight.
+        // Should switch from adaptive to base interval.
+        let p = compute_adaptive_poll_ms(40, false, true, 1000);
+        assert_eq!(p, 80); // still in-flight, doubles
+        let p = compute_adaptive_poll_ms(p, false, false, 1000);
+        assert_eq!(p, 1000); // no longer in-flight, base interval
+    }
+
+    // ── DAG-2: ParallelDispatchState adaptive poll integration ────────────
+
+    #[test]
+    fn test_parallel_state_new_has_min_adaptive_poll() {
+        let state = ParallelDispatchState::new();
+        assert_eq!(state.adaptive_poll_ms, ADAPTIVE_POLL_MIN_MS);
+        assert_eq!(state.completions_this_tick, 0);
     }
 }
