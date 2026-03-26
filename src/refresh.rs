@@ -2332,6 +2332,39 @@ pub fn execute_differential_refresh(
         }
     }
 
+    // DAG-5: Compact ST change buffers that exceed the threshold.
+    // During rapid-fire upstream refreshes, multiple rounds of I/D pairs
+    // accumulate in changes_pgt_{id} between downstream reads. Compaction
+    // cancels net-zero INSERT/DELETE pairs and removes intermediate rows.
+    for &upstream_pgt_id in &st_source_pgt_ids {
+        if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema) {
+            continue;
+        }
+        let key = format!("pgt_{upstream_pgt_id}");
+        let prev_lsn = prev_frontier
+            .sources
+            .get(&key)
+            .map(|sv| sv.lsn.clone())
+            .unwrap_or_else(|| "0/0".to_string());
+        let new_lsn = new_frontier
+            .sources
+            .get(&key)
+            .map(|sv| sv.lsn.clone())
+            .unwrap_or_else(|| "0/0".to_string());
+        if let Err(e) = crate::cdc::compact_st_change_buffer(
+            &change_schema,
+            upstream_pgt_id,
+            &prev_lsn,
+            &new_lsn,
+        ) {
+            pgrx::debug1!(
+                "[pg_trickle] DAG-5: compaction failed for changes_pgt_{}: {}",
+                upstream_pgt_id,
+                e,
+            );
+        }
+    }
+
     let t_decision_start = Instant::now();
 
     // ── E-1: Ultra-fast EXISTS for no-data short-circuit ─────────────
