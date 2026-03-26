@@ -657,6 +657,14 @@ async fn test_ec34_check_cdc_health_detects_missing_slot() {
         "check_cdc_health() should report replication_slot_missing after slot drop"
     );
 
+    // Prevent the scheduler from re-promoting back to WAL after fallback.
+    // Without this, the auto CDC mode immediately re-creates the slot and
+    // transitions back to WAL, making the TRIGGER state unobservable.
+    db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
+        .await;
+    db.execute("SELECT pg_reload_conf()").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
     // After fallback completes, verify data integrity
     let fallback_mode =
         wait_for_cdc_mode(&db, "ec34_src", "TRIGGER", Duration::from_secs(60)).await;

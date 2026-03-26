@@ -1870,6 +1870,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
     let mut dag_version: u64 = 0;
     let mut dag: Option<StDag> = None;
+    // Follow-up flag: after an incremental rebuild, schedule a full rebuild
+    // on the next tick.  ALTER operations change dependency edges but not
+    // the node set, so the stale-snapshot guard (which only checks for
+    // missing nodes) cannot detect stale edges.  A follow-up full rebuild
+    // with a fresh snapshot captures the committed edge changes.
+    let mut pending_full_rebuild = false;
 
     // Per-ST retry state (in-memory only, reset on scheduler restart)
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
@@ -2140,14 +2146,20 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
             // Step A: Check if DAG needs rebuild
             let current_version = shmem::current_dag_version();
-            if current_version != dag_version || dag.is_none() {
+            if current_version != dag_version || dag.is_none() || pending_full_rebuild {
+                let force_full = pending_full_rebuild;
+                pending_full_rebuild = false;
+
                 // C2-1: Drain the invalidation ring buffer.
                 let invalidated = shmem::drain_invalidations();
 
                 // G-8: Try incremental rebuild when we have specific pgt_ids
                 // and an existing DAG. Falls back to full rebuild on overflow,
                 // no existing DAG, or incremental failure.
-                let incremental_ok = if let Some(ids) = &invalidated {
+                // Skip incremental if a follow-up full rebuild was requested.
+                let incremental_ok = if force_full {
+                    false
+                } else if let Some(ids) = &invalidated {
                     if !ids.is_empty() {
                         if let Some(ref mut existing_dag) = dag {
                             match existing_dag.rebuild_incremental(
@@ -2230,6 +2242,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     shmem::signal_dag_rebuild();
                 } else {
                     dag_version = current_version;
+                    // After an incremental rebuild, schedule a follow-up full
+                    // rebuild to catch edge-stale scenarios.  ALTER operations
+                    // update dependency edges but preserve the node; the stale
+                    // guard above only detects missing *nodes*.  A full rebuild
+                    // on the next tick (with a fresh snapshot that sees the
+                    // committed edge updates) closes this window.
+                    if incremental_ok {
+                        pending_full_rebuild = true;
+                    }
                 }
             }
 

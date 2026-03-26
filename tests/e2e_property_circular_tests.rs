@@ -37,6 +37,14 @@ async fn configure_circular_scheduler(db: &E2eDb) {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.allow_circular = true")
         .await;
+    // Use sequential mode for fixpoint tests.  The parallel dispatch path
+    // has a known timing window: signal_dag_invalidation fires mid-ALTER
+    // transaction, so the scheduler can consume the signal and rebuild the
+    // DAG before the ALTER commits — leaving the cycle edges invisible.
+    // Sequential mode exercises the same iterate_to_fixpoint logic without
+    // the dispatch-level race.
+    db.execute("ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'off'")
+        .await;
     db.reload_config_and_wait().await;
     assert!(
         db.wait_for_scheduler(Duration::from_secs(90)).await,
