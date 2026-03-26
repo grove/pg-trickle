@@ -61,7 +61,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE  random() < 0.10          -- ~10 % stochastic sample
     $$,
     schedule     => '1m',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -105,7 +105,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE  status = 'pending'
     $$,
     schedule     => '30s',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -145,7 +145,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE  active
     $$,
     schedule     => '5m',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -187,7 +187,7 @@ SELECT pgtrickle.create_stream_table(
         ORDER  BY invoice_id, id
     $$,
     schedule     => '10m',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -227,7 +227,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE  changed_at >= now() - INTERVAL '7 days'
     $$,
     schedule     => '1h',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -270,7 +270,7 @@ SELECT pgtrickle.create_stream_table(
         LIMIT  3
     $$,
     schedule     => '1h',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
@@ -322,7 +322,7 @@ SELECT pgtrickle.create_stream_table(
         GROUP  BY customer_id
     $$,
     schedule     => '15m',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 
