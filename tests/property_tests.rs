@@ -8,6 +8,10 @@
 //! - StStatus/RefreshMode enum roundtrips
 //! - Canonical period selection bounds
 //! - Hash determinism and collision resistance
+//!
+//! Phase 4 additions:
+//! - PROP-5: Topology/scheduler stress — 10,000+ randomised DAG shapes
+//! - PROP-6: Pure Rust DAG/scheduler helper invariants
 
 // These tests exercise pure functions from the library.
 // We use `pg_trickle` as a lib crate (cdylib + lib).
@@ -926,6 +930,560 @@ proptest! {
         prop_assert!(
             !result.contains("SQRT"),
             "DISTINCT STDDEV_POP merge should NOT use algebraic SQRT formula: {result}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROP-5 — Topology / Scheduler Stress (Phase 4)
+//
+// Goal: 10,000+ randomised DAG shapes; assert no incorrect refresh ordering
+// or spurious suspension across multi-source branch interactions.
+// ═══════════════════════════════════════════════════════════════════════════
+
+use pg_trickle::dag::DiamondSchedulePolicy;
+use pg_trickle::scheduler::compute_per_db_quota;
+
+proptest! {
+    // Run 10,000+ cases — high count to stress the topology combinatorics.
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    /// PROP-5-A: `topological_levels()` is consistent with `topological_order()`.
+    ///
+    /// For any acyclic DAG, the levels returned by `topological_levels` must:
+    /// 1. Partition all ST nodes (each node in exactly one level).
+    /// 2. Obey edge ordering: for every edge u → v, level[u] < level[v].
+    #[test]
+    fn prop_topological_levels_consistent_with_order(
+        (num_nodes, edges) in arb_dag_edges(20, 50)
+    ) {
+        let mut dag = StDag::new();
+        for i in 1..=num_nodes {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(i as i64),
+                schedule: Some(Duration::from_secs(60)),
+                effective_schedule: Duration::from_secs(60),
+                name: format!("st_{i}"),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+        for &(u, v) in &edges {
+            dag.add_edge(
+                NodeId::StreamTable(u as i64),
+                NodeId::StreamTable(v as i64),
+            );
+        }
+
+        // Only validate on acyclic graphs.
+        if dag.detect_cycles().is_err() {
+            return Ok(());
+        }
+
+        let levels = dag.topological_levels().expect("acyclic DAG must produce levels");
+
+        // Build level-assignment map and verify uniqueness.
+        let mut level_of: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for (lvl, nodes) in levels.iter().enumerate() {
+            for &node in nodes {
+                prop_assert!(
+                    level_of.insert(node, lvl).is_none(),
+                    "node {:?} appears in multiple levels",
+                    node
+                );
+            }
+        }
+
+        // Edge invariant: every u → v must have level[u] < level[v].
+        for (lvl, nodes) in levels.iter().enumerate() {
+            for &node in nodes {
+                let downstream = dag.get_downstream(node);
+                for &ds in &downstream {
+                    if matches!(ds, NodeId::StreamTable(_)) && let Some(&lvl_ds) = level_of.get(&ds) {
+                        prop_assert!(
+                            lvl < lvl_ds,
+                            "level invariant violated: {:?} (level {}) → {:?} (level {})",
+                            node, lvl, ds, lvl_ds
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// PROP-5-B: Multi-source branch interaction — topological ordering is still
+    /// correct when multiple base tables feed separate branches that converge.
+    ///
+    /// Topology: BT1 → st1 → st3 ← st2 ← BT2 (diamond via base tables).
+    /// The convergence node st3 must appear after both st1 and st2.
+    #[test]
+    fn prop_multi_source_branch_order(
+        sched_a in 10u64..600,
+        sched_b in 10u64..600,
+        sched_c in 10u64..600,
+    ) {
+        // st1 ← BT(100), st2 ← BT(200), st3 ← {st1, st2}
+        let mut dag = StDag::new();
+        for (id, sched) in [(1i64, sched_a), (2, sched_b), (3, sched_c)] {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(id),
+                schedule: Some(Duration::from_secs(sched)),
+                effective_schedule: Duration::from_secs(sched),
+                name: format!("st_{id}"),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+        dag.add_edge(NodeId::BaseTable(100), NodeId::StreamTable(1));
+        dag.add_edge(NodeId::BaseTable(200), NodeId::StreamTable(2));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(3));
+        dag.add_edge(NodeId::StreamTable(2), NodeId::StreamTable(3));
+
+        prop_assert!(dag.detect_cycles().is_ok());
+
+        let order = dag.topological_order().expect("must have topo order");
+        let pos: std::collections::HashMap<_, _> =
+            order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+
+        let p1 = pos[&NodeId::StreamTable(1)];
+        let p2 = pos[&NodeId::StreamTable(2)];
+        let p3 = pos[&NodeId::StreamTable(3)];
+        prop_assert!(p1 < p3, "st1 must precede st3");
+        prop_assert!(p2 < p3, "st2 must precede st3");
+    }
+
+    /// PROP-5-C: CALCULATED schedule resolution is monotonic.
+    ///
+    /// A CALCULATED upstream always adopts MIN(downstream schedules).
+    /// If all downstream schedules are within [min_s, max_s], the resolved
+    /// upstream schedule must also be within that range.
+    #[test]
+    fn prop_calculated_schedule_within_downstream_bounds(
+        sched_b in 10u64..3_600,
+        sched_c in 10u64..3_600,
+    ) {
+        // st_a (CALCULATED) → st_b (explicit) and st_a → st_c (explicit).
+        // expected: effective(st_a) == min(sched_b, sched_c)
+        let mut dag = StDag::new();
+        // st_a: CALCULATED
+        dag.add_st_node(DagNode {
+            id: NodeId::StreamTable(1),
+            schedule: None,
+            effective_schedule: Duration::ZERO,
+            name: "st_a".into(),
+            status: StStatus::Active,
+            schedule_raw: None,
+        });
+        // st_b: explicit
+        dag.add_st_node(DagNode {
+            id: NodeId::StreamTable(2),
+            schedule: Some(Duration::from_secs(sched_b)),
+            effective_schedule: Duration::from_secs(sched_b),
+            name: "st_b".into(),
+            status: StStatus::Active,
+            schedule_raw: None,
+        });
+        // st_c: explicit
+        dag.add_st_node(DagNode {
+            id: NodeId::StreamTable(3),
+            schedule: Some(Duration::from_secs(sched_c)),
+            effective_schedule: Duration::from_secs(sched_c),
+            name: "st_c".into(),
+            status: StStatus::Active,
+            schedule_raw: None,
+        });
+        // st_a feeds both st_b and st_c (CALCULATED resolves from downstream)
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+        dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(3));
+
+        dag.resolve_calculated_schedule(30);
+
+        let nodes = dag.get_all_st_nodes();
+        let st_a = nodes.iter().find(|n| n.name == "st_a").expect("st_a must exist");
+        let expected = Duration::from_secs(sched_b.min(sched_c));
+        prop_assert_eq!(
+            st_a.effective_schedule,
+            expected,
+            "CALCULATED schedule should be MIN({}, {})",
+            sched_b, sched_c
+        );
+    }
+
+    /// PROP-5-D: DAG remove_st_node does not corrupt adjacent nodes.
+    ///
+    /// After removing a node, its upstream and downstream neighbours must no
+    /// longer reference it in their edge sets.
+    #[test]
+    fn prop_remove_node_cleans_up_edges(
+        num_nodes in 2..=10usize,
+        remove_idx in 0..10usize,
+    ) {
+        let mut dag = StDag::new();
+        for i in 1..=(num_nodes as i64) {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(i),
+                schedule: Some(Duration::from_secs(60)),
+                effective_schedule: Duration::from_secs(60),
+                name: format!("st_{i}"),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+        // Chain: 1 → 2 → … → n
+        for i in 1i64..(num_nodes as i64) {
+            dag.add_edge(NodeId::StreamTable(i), NodeId::StreamTable(i + 1));
+        }
+
+        let remove_id = (remove_idx % num_nodes + 1) as i64;
+        dag.remove_st_node(remove_id);
+
+        // Verify: no remaining node references the removed node as downstream
+        let nodes = dag.get_all_st_nodes();
+        for node in &nodes {
+            let id = match node.id {
+                NodeId::StreamTable(id) => id,
+                _ => continue,
+            };
+            let downstream = dag.get_downstream(node.id);
+            prop_assert!(
+                !downstream.contains(&NodeId::StreamTable(remove_id)),
+                "node {id} still has removed node {remove_id} as downstream"
+            );
+            let upstream = dag.get_upstream(node.id);
+            prop_assert!(
+                !upstream.contains(&NodeId::StreamTable(remove_id)),
+                "node {id} still has removed node {remove_id} as upstream"
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROP-6 — Pure Rust DAG / Scheduler Helper Invariants (Phase 4)
+//
+// Goal: unit-level property tests for ordering, SCC, quota, and policy
+// helpers that are independent of any database backend.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── SCC partition properties ───────────────────────────────────────────────
+
+/// PROP-6-A: SCC partition completeness — every ST node appears in exactly
+/// one SCC.
+#[test]
+fn prop_scc_partition_covers_all_st_nodes() {
+    // Build a small cyclic graph: 1→2→3→1 (SCC), 4→5 (two singletons)
+    let mut dag = StDag::new();
+    for i in 1i64..=5 {
+        dag.add_st_node(DagNode {
+            id: NodeId::StreamTable(i),
+            schedule: Some(Duration::from_secs(60)),
+            effective_schedule: Duration::from_secs(60),
+            name: format!("st_{i}"),
+            status: StStatus::Active,
+            schedule_raw: None,
+        });
+    }
+    dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(2));
+    dag.add_edge(NodeId::StreamTable(2), NodeId::StreamTable(3));
+    dag.add_edge(NodeId::StreamTable(3), NodeId::StreamTable(1)); // cycle
+    dag.add_edge(NodeId::StreamTable(4), NodeId::StreamTable(5));
+
+    let sccs = dag.compute_sccs();
+
+    // Collect all nodes across SCCs.
+    let mut seen: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+    for (i, scc) in sccs.iter().enumerate() {
+        for &node in &scc.nodes {
+            if matches!(node, NodeId::StreamTable(_)) {
+                assert!(
+                    seen.insert(node, i).is_none(),
+                    "node {:?} appears in multiple SCCs",
+                    node,
+                );
+            }
+        }
+    }
+
+    // All ST nodes must appear.
+    for i in 1i64..=5 {
+        assert!(
+            seen.contains_key(&NodeId::StreamTable(i)),
+            "st_{i} missing from SCC partition"
+        );
+    }
+
+    // Nodes 1,2,3 form the cyclic SCC.
+    let cyclic: Vec<_> = sccs.iter().filter(|s| s.is_cyclic).collect();
+    assert_eq!(cyclic.len(), 1, "should be exactly one cyclic SCC");
+    let cyclic_nodes: std::collections::HashSet<i64> = cyclic[0]
+        .nodes
+        .iter()
+        .filter_map(|n| match n {
+            NodeId::StreamTable(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for &id in &[1i64, 2, 3] {
+        assert!(
+            cyclic_nodes.contains(&id),
+            "st_{id} should be in cyclic SCC"
+        );
+    }
+}
+
+/// PROP-6-B: `condensation_order` — no back-edges in the returned order.
+///
+/// The condensation DAG must preserve topological upstream-first order:
+/// for any SCC pair (A, B) where A is upstream of B in the condensation,
+/// A must appear before B in the returned slice.
+#[test]
+fn prop_condensation_order_no_back_edges() {
+    // Pipeline: st1 → st2 → st3 → st4
+    let mut dag = StDag::new();
+    for i in 1i64..=4 {
+        dag.add_st_node(DagNode {
+            id: NodeId::StreamTable(i),
+            schedule: Some(Duration::from_secs(60)),
+            effective_schedule: Duration::from_secs(60),
+            name: format!("st_{i}"),
+            status: StStatus::Active,
+            schedule_raw: None,
+        });
+    }
+    for i in 1i64..4 {
+        dag.add_edge(NodeId::StreamTable(i), NodeId::StreamTable(i + 1));
+    }
+
+    let order = dag.condensation_order();
+    // Build position map (first node of each SCC as key).
+    let pos: std::collections::HashMap<NodeId, usize> = order
+        .iter()
+        .enumerate()
+        .flat_map(|(i, scc)| scc.nodes.iter().map(move |&n| (n, i)))
+        .collect();
+
+    // For every edge u → v among ST nodes, pos[u] <= pos[v].
+    for i in 1i64..4 {
+        let u = NodeId::StreamTable(i);
+        let v = NodeId::StreamTable(i + 1);
+        if let (Some(&pu), Some(&pv)) = (pos.get(&u), pos.get(&v)) {
+            assert!(
+                pu <= pv,
+                "condensation order violated: st{i} (pos={pu}) should precede st{} (pos={pv})",
+                i + 1,
+            );
+        }
+    }
+}
+
+/// PROP-6-C: Self-loop is classified as cyclic SCC.
+#[test]
+fn prop_self_loop_is_cyclic_scc() {
+    let mut dag = StDag::new();
+    dag.add_st_node(DagNode {
+        id: NodeId::StreamTable(1),
+        schedule: Some(Duration::from_secs(60)),
+        effective_schedule: Duration::from_secs(60),
+        name: "st_1".into(),
+        status: StStatus::Active,
+        schedule_raw: None,
+    });
+    dag.add_edge(NodeId::StreamTable(1), NodeId::StreamTable(1));
+
+    let sccs = dag.compute_sccs();
+    assert_eq!(sccs.len(), 1);
+    assert!(sccs[0].is_cyclic, "self-loop must be flagged as cyclic");
+}
+
+// ── compute_per_db_quota properties ───────────────────────────────────────
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+    /// PROP-6-D: `compute_per_db_quota` always returns ≥ 1.
+    #[test]
+    fn prop_quota_always_at_least_one(
+        per_db in -10i32..=20,
+        max_concurrent in 1i32..=32,
+        max_cluster in 1u32..=64,
+        active in 0u32..=64,
+    ) {
+        let quota = compute_per_db_quota(per_db, max_concurrent, max_cluster, active);
+        prop_assert!(quota >= 1, "quota must be at least 1, got {quota}");
+    }
+
+    /// PROP-6-E: When disabled (per_db_quota <= 0), falls back to
+    /// max_concurrent_refreshes (clamped to ≥ 1).
+    #[test]
+    fn prop_quota_disabled_returns_fallback(
+        max_concurrent in 1i32..=32,
+        max_cluster in 1u32..=64,
+        active in 0u32..=64,
+    ) {
+        let quota = compute_per_db_quota(0, max_concurrent, max_cluster, active);
+        let expected = max_concurrent.max(1) as u32;
+        prop_assert_eq!(
+            quota,
+            expected,
+            "disabled quota should equal max_concurrent ({})",
+            max_concurrent
+        );
+    }
+
+    /// PROP-6-F: When spare cluster capacity exists (active < 80% of max),
+    /// burst quota ≥ base quota.
+    #[test]
+    fn prop_quota_burst_gte_base_when_spare(
+        per_db in 1i32..=8,
+        max_concurrent in 1i32..=32,
+        max_cluster in 4u32..=64,
+    ) {
+        // Force spare capacity: active = 0
+        let quota = compute_per_db_quota(per_db, max_concurrent, max_cluster, 0);
+        let base = per_db.max(1) as u32;
+        prop_assert!(
+            quota >= base,
+            "burst quota {} should be >= base {}",
+            quota, base
+        );
+    }
+
+    /// PROP-6-G: Under high load (active >= 80% of cluster), quota equals base.
+    #[test]
+    fn prop_quota_base_under_high_load(
+        per_db in 1i32..=8,
+        max_concurrent in 1i32..=32,
+        max_cluster in 1u32..=10,
+    ) {
+        // Force high load: active = max_cluster (100%)
+        let quota = compute_per_db_quota(per_db, max_concurrent, max_cluster, max_cluster);
+        let base = per_db.max(1) as u32;
+        prop_assert_eq!(
+            quota, base,
+            "under full load, quota should equal base {}, got {}",
+            base, quota
+        );
+    }
+}
+
+// ── DiamondSchedulePolicy properties ──────────────────────────────────────
+
+fn arb_policy() -> impl Strategy<Value = DiamondSchedulePolicy> {
+    prop_oneof![
+        Just(DiamondSchedulePolicy::Fastest),
+        Just(DiamondSchedulePolicy::Slowest),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// PROP-6-H: `stricter` is commutative.
+    #[test]
+    fn prop_diamond_policy_stricter_commutative(a in arb_policy(), b in arb_policy()) {
+        prop_assert_eq!(a.stricter(b), b.stricter(a));
+    }
+
+    /// PROP-6-I: `stricter` is idempotent.
+    #[test]
+    fn prop_diamond_policy_stricter_idempotent(a in arb_policy()) {
+        prop_assert_eq!(a.stricter(a), a);
+    }
+
+    /// PROP-6-J: `stricter` is associative.
+    #[test]
+    fn prop_diamond_policy_stricter_associative(
+        a in arb_policy(),
+        b in arb_policy(),
+        c in arb_policy(),
+    ) {
+        prop_assert_eq!(a.stricter(b.stricter(c)), (a.stricter(b)).stricter(c));
+    }
+
+    /// PROP-6-K: Slowest dominates — any policy `.stricter(Slowest)` is Slowest.
+    #[test]
+    fn prop_diamond_policy_slowest_dominates(a in arb_policy()) {
+        prop_assert_eq!(
+            a.stricter(DiamondSchedulePolicy::Slowest),
+            DiamondSchedulePolicy::Slowest
+        );
+    }
+
+    /// PROP-6-L: Fastest is the identity element for `stricter`.
+    #[test]
+    fn prop_diamond_policy_fastest_is_identity(a in arb_policy()) {
+        prop_assert_eq!(a.stricter(DiamondSchedulePolicy::Fastest), a);
+    }
+}
+
+// ── topological_levels level-count property ───────────────────────────────
+
+/// PROP-6-M: An n-node linear chain produces exactly n levels
+/// (each with one node).
+#[test]
+fn prop_linear_chain_produces_n_levels() {
+    for n in 1usize..=10 {
+        let mut dag = StDag::new();
+        for i in 1i64..=(n as i64) {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(i),
+                schedule: Some(Duration::from_secs(60)),
+                effective_schedule: Duration::from_secs(60),
+                name: format!("st_{i}"),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+        for i in 1i64..(n as i64) {
+            dag.add_edge(NodeId::StreamTable(i), NodeId::StreamTable(i + 1));
+        }
+
+        let levels = dag.topological_levels().unwrap();
+        assert_eq!(
+            levels.len(),
+            n,
+            "n={n}: linear chain should produce {n} levels, got {}",
+            levels.len()
+        );
+        for level in &levels {
+            assert_eq!(
+                level.len(),
+                1,
+                "n={n}: each level should contain exactly 1 node"
+            );
+        }
+    }
+}
+
+/// PROP-6-N: A fully independent set of n nodes produces exactly 1 level
+/// containing all n nodes.
+#[test]
+fn prop_independent_nodes_produce_single_level() {
+    for n in 1usize..=8 {
+        let mut dag = StDag::new();
+        for i in 1i64..=(n as i64) {
+            dag.add_st_node(DagNode {
+                id: NodeId::StreamTable(i),
+                schedule: Some(Duration::from_secs(60)),
+                effective_schedule: Duration::from_secs(60),
+                name: format!("st_{i}"),
+                status: StStatus::Active,
+                schedule_raw: None,
+            });
+        }
+        // No edges — all nodes are independent.
+        let levels = dag.topological_levels().unwrap();
+        assert_eq!(
+            levels.len(),
+            1,
+            "n={n}: independent set should produce 1 level, got {}",
+            levels.len()
+        );
+        assert_eq!(
+            levels[0].len(),
+            n,
+            "n={n}: the single level should contain all {n} nodes"
         );
     }
 }

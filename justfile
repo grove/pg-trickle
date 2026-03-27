@@ -198,6 +198,30 @@ test-correctness-gate: build-e2e-image
 test-correctness-gate-fast:
     ./scripts/run_e2e_tests.sh --test e2e_correctness_gate_tests --no-capture
 
+# ── SQLancer Fuzzing (Phase 4) ─────────────────────────────────────────────
+
+# Run SQLancer crash + equivalence oracle (rebuilds Docker image first).
+# Controls: SQLANCER_CASES (default 200), SQLANCER_SEED (hex), SQLANCER_JAR.
+[group: "sqlancer"]
+sqlancer: build-e2e-image
+    bash scripts/run_sqlancer.sh
+
+# Run SQLancer oracle, skip Docker image rebuild
+[group: "sqlancer"]
+sqlancer-fast:
+    bash scripts/run_sqlancer.sh
+
+# Run only the Rust crash + equivalence oracle (no Java SQLancer tool).
+# Faster than `just sqlancer`; suitable for PR spot-checks.
+[group: "sqlancer"]
+sqlancer-rust-only: build-e2e-image
+    SKIP_JAVA_ORACLE=1 bash scripts/run_sqlancer.sh
+
+# Run Rust oracle, skip Docker image rebuild
+[group: "sqlancer"]
+sqlancer-rust-only-fast:
+    SKIP_JAVA_ORACLE=1 bash scripts/run_sqlancer.sh
+
 # ── dbt Tests ─────────────────────────────────────────────────────────────
 
 # Run dbt-pgtrickle integration tests (builds Docker image)
