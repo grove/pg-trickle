@@ -958,18 +958,20 @@ async fn test_st_on_st_uses_differential_not_full() {
 
     // Verify data correctness: doubled values should reflect the new totals
     let doubled_a: i64 = db
-        .query_scalar(
-            "SELECT doubled FROM ssd_downstream WHERE grp = 'a'",
-        )
+        .query_scalar("SELECT doubled FROM ssd_downstream WHERE grp = 'a'")
         .await;
     // grp 'a' has vals 10+20+40 = 70, doubled = 140
-    assert_eq!(doubled_a, 140, "Expected grp 'a' doubled = 140, got {doubled_a}");
+    assert_eq!(
+        doubled_a, 140,
+        "Expected grp 'a' doubled = 140, got {doubled_a}"
+    );
 
     let doubled_b: i64 = db
-        .query_scalar(
-            "SELECT doubled FROM ssd_downstream WHERE grp = 'b'",
-        )
+        .query_scalar("SELECT doubled FROM ssd_downstream WHERE grp = 'b'")
         .await;
     // grp 'b' has vals 30+50 = 80, doubled = 160
-    assert_eq!(doubled_b, 160, "Expected grp 'b' doubled = 160, got {doubled_b}");
+    assert_eq!(
+        doubled_b, 160,
+        "Expected grp 'b' doubled = 160, got {doubled_b}"
+    );
 }
