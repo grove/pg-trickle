@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-03-26
 > **Latest release:** 0.11.0 (2026-03-26)
-> **Current milestone:** v0.12.0 — Scalability Foundations, Partitioning Enhancements, Anomalous Change Detection & CDC Research
+> **Current milestone:** v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -28,7 +28,7 @@ coverage, all in plain language.
 - [v0.9.0 — Incremental Aggregate Maintenance](#v090--incremental-aggregate-maintenance)
 - [v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Core Refresh Optimizations & Infrastructure Prep](#v0100--dvm-hardening-connection-pooler-compatibility-core-refresh-optimizations--infrastructure-prep)
 - [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness](#v0110--partitioned-stream-tables-prometheus--grafana-observability-safety-hardening--correctness)
-- [v0.12.0 — Scalability Foundations, Partitioning Enhancements, Anomalous Change Detection & CDC Research](#v0120--scalability-foundations-partitioning-enhancements-anomalous-change-detection--cdc-research)
+- [v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness](#v0120--scalability-foundations-partitioning-enhancements--correctness)
 - [v0.13.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers](#v0130--tiered-scheduling-pg-backward-compatibility--unlogged-buffers)
 - [v0.14.0 — Native DDL Syntax, External Test Suites & Integration](#v0140--native-ddl-syntax-external-test-suites--integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
@@ -2104,13 +2104,14 @@ Deliver **one** of TS1 or TS2; whichever is completed first meets the exit crite
 
 ---
 
-## v0.12.0 — Scalability Foundations, Partitioning Enhancements, Anomalous Change Detection & CDC Research
+## v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness
 
 **Goal:** Deliver scalability foundations that directly serve the project's
 performance and throughput goals — columnar change tracking for 50–90%
 delta-volume reduction and shared change buffers for multi-ST deployments.
-Also land the anomalous change fuse, conduct the D-2 CDC research spike,
-and ship developer tooling and correctness improvements.
+Also land the anomalous change fuse and ship developer tooling and correctness
+improvements. PG 16/17 backward compatibility and the D-2 async CDC research
+spike are **deferred to v0.13.0** and the post-1.0 research backlog respectively.
 
 ### Anomalous Change Detection (Fuse)
 
@@ -2327,19 +2328,34 @@ large design changes; all build on existing infrastructure.
 
 > **v0.12.0 total: ~18–27 weeks + ~6–8 weeks scalability + ~5–8 weeks partitioning enhancements + ~1–3 weeks defaults + ~3–5 weeks developer tooling & observability**
 
+> **Priority tiers:** P0 = Phases 1–3 (must ship); P1 = Phases 4 + 7 (target); P2 = Phases 5, 6, 8 (can defer to v0.13.0 as a unit — never partially ship Phase 5/6).
+
+### dbt Macro Updates (Phase 8)
+
+> **Priority P2** — Expose the v0.11.0 SQL API additions (`partition_by`, `fuse`,
+> `fuse_ceiling`, `fuse_sensitivity`) in the dbt materialization macros so
+> dbt users can configure them via `config(...)`. No catalog changes; pure
+> Jinja/SQL. Can defer to v0.13.0 as a unit.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| DBT-1 | `partition_by` config option wired through `stream_table.sql`, `create_stream_table.sql`, and `alter_stream_table.sql` | ~1d |
+| DBT-2 | `fuse`, `fuse_ceiling`, `fuse_sensitivity` config options wired through the materialization and alter macro with change-detection logic | ~1–2d |
+| DBT-3 | dbt docs update: README and SQL_REFERENCE.md dbt section | ~0.5d |
+
+> **dbt macro updates subtotal: ~2–3.5 days**
+
 
 **Exit criteria:**
 - [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
 - [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
-- [ ] Fuse triggers on configurable change-count threshold; `reset_fuse()` recovers *(skip if FUSE-1–6 shipped in v0.11.0)*
+- [x] ~~Fuse exit criterion~~ ➡️ FUSE-1–6 shipped in v0.11.0; no action in v0.12.0
 - [ ] EC01B: No phantom-row drop for ≥3-scan right-subtree joins; TPC-H Q7/Q8/Q9 DELETE regression tests pass
 - [ ] BENCH-W: Write-side overhead benchmarks published in `docs/BENCHMARK.md`; `change_buffer_unlogged` GUC implemented if WAL overhead > 30% of trigger cost
 - [ ] SQLANCER: Crash-test oracle + equivalence oracle running in weekly CI job; zero correctness mismatches on known test corpus
 - [ ] PROP-5+6: Topology stress and DAG/scheduler helper property tests pass
-- [ ] D-2 spike: prototype exists; SPI-in-commit-callback constraint validated; RFC written
-- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
-- [ ] WAL decoder validated against PG 16–17 `pgoutput` format
-- [ ] CI matrix covers PG 16, 17, 18
+- [x] ~~D-2 spike~~ ➡️ Deferred to post-1.0 research backlog (SPI-in-change-callback infeasibility; Very High risk; no production code until a separate feasibility study produces an RFC)
+- [x] ~~PG 16/17 backward compatibility~~ ➡️ Deferred to v0.13.0 (BC1–BC5)
 - [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
 - [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
 - [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
@@ -2355,6 +2371,9 @@ large design changes; all build on existing infrastructure.
 - [ ] A1-1d: LIST partitioning creates `PARTITION BY LIST` storage; IN-list predicate confirmed via `EXPLAIN`
 - [ ] A1-3b: HASH partitioning uses per-partition MERGE loop; only affected child partitions are targeted
 - [ ] PART-WARN: `WARNING` emitted when default partition has rows after refresh
+- [ ] DBT-1/2/3 (P2): `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
+- [ ] `docs/UPGRADING.md` updated with v0.11.0→v0.12.0 migration notes and supported upgrade chain
+- [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.11.0--0.12.0.sql`)
 - [ ] Extension upgrade path tested (`0.11.0 → 0.12.0`)
 
 ---
@@ -2673,7 +2692,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.9.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
 | v0.10.0 — DVM Hardening, Connection Pooler Compat, Core Refresh Opts & Infra Prep | ~7–10d + ~26–40 wk | — | |
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
-| v0.12.0 — Scalability Foundations, Anomalous Change Detection & CDC Research | ~18–27 wk + ~6–8 wk scalability + ~1–3 wk defaults | — | |
+| v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
 | v0.13.0 — Tiered Scheduling, PG Backward Compat & UNLOGGED Buffers | ~5–12 wk | — | |
 | v0.14.0 — Native DDL Syntax, External Test Suites & Integration | ~140–230h | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
