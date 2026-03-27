@@ -897,13 +897,9 @@ async fn measure_latency(
     }
     eprintln!("[DAG_BENCH] Initial population complete for {topology_name}");
 
-    // Warm-up: wait for scheduler-driven refresh, then run warm-up cycles
-    eprintln!("[DAG_BENCH] Waiting for scheduler auto-refresh of '{leaf}'...");
-    let initial_ok = db.wait_for_auto_refresh(leaf, Duration::from_secs(120)).await;
-    if !initial_ok {
-        eprintln!("[DAG_BENCH] WARN: scheduler did not auto-refresh '{leaf}' within 120s");
-    }
-
+    // Warmup: insert deltas and wait for scheduler to propagate to the leaf.
+    // Use main timeout — if the scheduler cannot propagate, warmup cycles will
+    // time out and measurement cycles will report timeout warnings.
     for warmup in 0..WARMUP_CYCLES {
         eprintln!("[DAG_BENCH] Warmup cycle {}/{WARMUP_CYCLES} for {topology_name}...", warmup + 1);
         let before = completed_count(db, leaf).await;
