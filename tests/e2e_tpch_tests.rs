@@ -3093,7 +3093,10 @@ async fn ec01b_combined_delete_test(qname: &str, query_sql: &str) {
     .await;
 
     match try_refresh_st(&db, &st_name).await {
-        Ok(()) => {}
+        Ok(()) => {
+            let elapsed = t.elapsed().as_secs_f64();
+            println!("  combined delete cycle REFRESHED in {:.3}s ✓", elapsed);
+        }
         Err(e) if e.contains("temp_file_limit") => {
             println!("  WARN: temp_file_limit hit — known Docker constraint, skipping");
             let _ = db
@@ -3123,7 +3126,10 @@ async fn ec01b_combined_delete_test(qname: &str, query_sql: &str) {
         apply_rf3(&db).await;
 
         match try_refresh_st(&db, &st_name).await {
-            Ok(()) => {}
+            Ok(()) => {
+                let elapsed = ct.elapsed().as_secs_f64();
+                println!("  cycle {cycle} REFRESHED in {:.3}s ✓", elapsed);
+            }
             Err(e) if e.contains("temp_file_limit") => {
                 println!("  WARN cycle {cycle}: temp_file_limit hit, skipping remaining");
                 break;
