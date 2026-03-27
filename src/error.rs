@@ -52,6 +52,10 @@ pub enum PgTrickleError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// The defining query exceeds the maximum parse depth (G13-SD).
+    #[error("query too complex: {0}")]
+    QueryTooComplex(String),
+
     // ── Schema errors — may require reinitialize ─────────────────────────
     /// An upstream (source) table was dropped.
     #[error("upstream table dropped: OID {0}")]
@@ -250,6 +254,7 @@ impl PgTrickleError {
             | PgTrickleError::NotFound(_)
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
+            | PgTrickleError::QueryTooComplex(_)
             | PgTrickleError::WatermarkBackwardMovement(_)
             | PgTrickleError::WatermarkGroupNotFound(_)
             | PgTrickleError::WatermarkGroupAlreadyExists(_) => PgTrickleErrorKind::User,
@@ -573,5 +578,19 @@ mod tests {
             "default max delay should be 60s"
         );
         assert_eq!(policy.max_attempts, 5, "default max attempts should be 5");
+    }
+
+    #[test]
+    fn test_query_too_complex_is_user_error() {
+        let err = PgTrickleError::QueryTooComplex("depth exceeded".into());
+        assert_eq!(err.kind(), PgTrickleErrorKind::User);
+        assert!(!err.is_retryable());
+        assert!(err.counts_toward_suspension());
+        assert!(!err.requires_reinitialize());
+        assert!(
+            err.to_string().contains("query too complex"),
+            "error message: {}",
+            err
+        );
     }
 }
