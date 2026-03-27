@@ -354,7 +354,7 @@ async fn build_diamond(db: &E2eDb, fan_out: u32, extra_depth: u32) -> DagTopolog
         db.create_st(
             &st_name,
             &format!("SELECT grp, {agg}(val) AS {alias}_val FROM dm_src GROUP BY grp"),
-            "1m",
+            "calculated",
             "DIFFERENTIAL",
         )
         .await;
