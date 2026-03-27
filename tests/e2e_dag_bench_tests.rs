@@ -717,13 +717,34 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
 
 /// INSERT delta rows into a source table.
 async fn insert_delta(db: &E2eDb, source_table: &str, delta_rows: u32) {
-    db.execute(&format!(
-        "INSERT INTO {source_table} (grp, val)
-         SELECT 'g' || (random() * {})::int, (random() * 1000)::int
-         FROM generate_series(1, {delta_rows})",
-        NUM_GROUPS - 1,
-    ))
-    .await;
+    let sql = if source_table == "mx_orders" {
+        format!(
+            "INSERT INTO mx_orders (region, product_id, amount, ts)
+             SELECT
+                 CASE ((random() * 3)::int) WHEN 0 THEN 'north' WHEN 1 THEN 'south'
+                                             WHEN 2 THEN 'east' ELSE 'west' END,
+                 ((random() * 49)::int) + 1,
+                 (random() * 1000)::int,
+                 CURRENT_DATE - ((random() * 29)::int)
+             FROM generate_series(1, {delta_rows})"
+        )
+    } else if source_table == "mx_products" {
+        format!(
+            "INSERT INTO mx_products (name, category)
+             SELECT 'product_' || (1000 + g), CASE ((random() * 4)::int)
+                 WHEN 0 THEN 'electronics' WHEN 1 THEN 'clothing'
+                 WHEN 2 THEN 'food' WHEN 3 THEN 'furniture' ELSE 'other' END
+             FROM generate_series(1, {delta_rows}) AS s(g)"
+        )
+    } else {
+        format!(
+            "INSERT INTO {source_table} (grp, val)
+             SELECT 'g' || (random() * {})::int, (random() * 1000)::int
+             FROM generate_series(1, {delta_rows})",
+            NUM_GROUPS - 1,
+        )
+    };
+    db.execute(&sql).await;
 }
 
 /// Apply a mixed DML workload (70% UPDATE, 15% DELETE, 15% INSERT).
@@ -733,8 +754,13 @@ async fn apply_dml_mix(db: &E2eDb, source_table: &str, delta_size: u32) {
     let n_insert = delta_size - n_update - n_delete;
 
     if n_update > 0 {
+        let update_col = if source_table == "mx_orders" {
+            "amount = amount + 1"
+        } else {
+            "val = val + 1"
+        };
         db.execute(&format!(
-            "UPDATE {source_table} SET val = val + 1
+            "UPDATE {source_table} SET {update_col}
              WHERE id IN (SELECT id FROM {source_table} ORDER BY random() LIMIT {n_update})"
         ))
         .await;
@@ -749,13 +775,7 @@ async fn apply_dml_mix(db: &E2eDb, source_table: &str, delta_size: u32) {
     }
 
     if n_insert > 0 {
-        db.execute(&format!(
-            "INSERT INTO {source_table} (grp, val)
-             SELECT 'g' || (random() * {})::int, (random() * 1000)::int
-             FROM generate_series(1, {n_insert})",
-            NUM_GROUPS - 1,
-        ))
-        .await;
+        insert_delta(db, source_table, n_insert).await;
     }
 }
 
