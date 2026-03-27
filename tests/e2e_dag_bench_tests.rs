@@ -125,7 +125,7 @@ async fn build_linear_chain(db: &E2eDb, depth: u32) -> DagTopology {
     db.create_st(
         &st1,
         "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM lc_src GROUP BY grp",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -197,7 +197,7 @@ async fn build_wide_dag(db: &E2eDb, depth: u32, width: u32) -> DagTopology {
             &format!(
                 "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM wd_src WHERE grp = 'g{w}' GROUP BY grp"
             ),
-            "1m",
+            "calculated",
             "DIFFERENTIAL",
         )
         .await;
@@ -272,7 +272,7 @@ async fn build_fan_out_tree(db: &E2eDb, depth: u32, branching_factor: u32) -> Da
     db.create_st(
         &root,
         "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM fo_src GROUP BY grp",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -495,7 +495,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_daily",
         "SELECT ts, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY ts",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -505,7 +505,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_by_region",
         "SELECT region, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY region",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -515,7 +515,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_by_product",
         "SELECT product_id, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY product_id",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -525,7 +525,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_high_value",
         "SELECT id, region, product_id, amount FROM mx_orders WHERE amount > 500",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -536,7 +536,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_product_stats",
         "SELECT category, COUNT(*) AS cnt FROM mx_products GROUP BY category",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
