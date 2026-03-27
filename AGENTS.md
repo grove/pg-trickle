@@ -180,6 +180,8 @@ light-eligible; 10 files (~90 tests) require the full E2E image.
 | Upgrade completeness | ✅ | ✅ | ✅ | ✅ |
 | Upgrade E2E | ❌ | ✅ | ✅ | ✅ |
 | Benchmarks | ❌ | ❌ | ✅ | ✅ |
+| DAG bench (calc/throughput) | ❌ | ❌ | ✅ | ✅ |
+| DAG bench (parallel workers) | ❌ | ❌ | ✅ | ✅ |
 | dbt integration | ❌ | ❌ | ✅ | ✅ |
 | CNPG smoke test | ❌ | ❌ | ✅ | ✅ |
 

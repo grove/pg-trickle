@@ -125,7 +125,7 @@ async fn build_linear_chain(db: &E2eDb, depth: u32) -> DagTopology {
     db.create_st(
         &st1,
         "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM lc_src GROUP BY grp",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -197,7 +197,7 @@ async fn build_wide_dag(db: &E2eDb, depth: u32, width: u32) -> DagTopology {
             &format!(
                 "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM wd_src WHERE grp = 'g{w}' GROUP BY grp"
             ),
-            "1m",
+            "calculated",
             "DIFFERENTIAL",
         )
         .await;
@@ -272,7 +272,7 @@ async fn build_fan_out_tree(db: &E2eDb, depth: u32, branching_factor: u32) -> Da
     db.create_st(
         &root,
         "SELECT grp, SUM(val) AS total, COUNT(*) AS cnt FROM fo_src GROUP BY grp",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -354,7 +354,7 @@ async fn build_diamond(db: &E2eDb, fan_out: u32, extra_depth: u32) -> DagTopolog
         db.create_st(
             &st_name,
             &format!("SELECT grp, {agg}(val) AS {alias}_val FROM dm_src GROUP BY grp"),
-            "1m",
+            "calculated",
             "DIFFERENTIAL",
         )
         .await;
@@ -495,7 +495,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_daily",
         "SELECT ts, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY ts",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -505,7 +505,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_by_region",
         "SELECT region, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY region",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -515,7 +515,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_by_product",
         "SELECT product_id, SUM(amount) AS total, COUNT(*) AS cnt FROM mx_orders GROUP BY product_id",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -525,7 +525,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_orders_high_value",
         "SELECT id, region, product_id, amount FROM mx_orders WHERE amount > 500",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -536,7 +536,7 @@ async fn build_mixed(db: &E2eDb) -> DagTopology {
     db.create_st(
         "mx_product_stats",
         "SELECT category, COUNT(*) AS cnt FROM mx_products GROUP BY category",
-        "1m",
+        "calculated",
         "DIFFERENTIAL",
     )
     .await;
@@ -690,6 +690,14 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
             "ALTER SYSTEM SET pg_trickle.max_concurrent_refreshes = {concurrency}"
         ))
         .await;
+    } else {
+        // CALCULATED mode tests expect sequential (topological) processing
+        // within a single scheduler tick.  The default parallel_refresh_mode
+        // is 'on', which dispatches work to background workers and changes
+        // the execution model.  Explicitly switch to 'off' so the scheduler
+        // uses the inline sequential path.
+        db.execute("ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'off'")
+            .await;
     }
 
     db.reload_config_and_wait().await;
@@ -707,6 +715,9 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
             &concurrency.to_string(),
         )
         .await;
+    } else {
+        db.wait_for_setting("pg_trickle.parallel_refresh_mode", "off")
+            .await;
     }
 
     assert!(
@@ -717,13 +728,34 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
 
 /// INSERT delta rows into a source table.
 async fn insert_delta(db: &E2eDb, source_table: &str, delta_rows: u32) {
-    db.execute(&format!(
-        "INSERT INTO {source_table} (grp, val)
-         SELECT 'g' || (random() * {})::int, (random() * 1000)::int
-         FROM generate_series(1, {delta_rows})",
-        NUM_GROUPS - 1,
-    ))
-    .await;
+    let sql = if source_table == "mx_orders" {
+        format!(
+            "INSERT INTO mx_orders (region, product_id, amount, ts)
+             SELECT
+                 CASE ((random() * 3)::int) WHEN 0 THEN 'north' WHEN 1 THEN 'south'
+                                             WHEN 2 THEN 'east' ELSE 'west' END,
+                 ((random() * 49)::int) + 1,
+                 (random() * 1000)::int,
+                 CURRENT_DATE - ((random() * 29)::int)
+             FROM generate_series(1, {delta_rows})"
+        )
+    } else if source_table == "mx_products" {
+        format!(
+            "INSERT INTO mx_products (name, category)
+             SELECT 'product_' || (1000 + g), CASE ((random() * 4)::int)
+                 WHEN 0 THEN 'electronics' WHEN 1 THEN 'clothing'
+                 WHEN 2 THEN 'food' WHEN 3 THEN 'furniture' ELSE 'other' END
+             FROM generate_series(1, {delta_rows}) AS s(g)"
+        )
+    } else {
+        format!(
+            "INSERT INTO {source_table} (grp, val)
+             SELECT 'g' || (random() * {})::int, (random() * 1000)::int
+             FROM generate_series(1, {delta_rows})",
+            NUM_GROUPS - 1,
+        )
+    };
+    db.execute(&sql).await;
 }
 
 /// Apply a mixed DML workload (70% UPDATE, 15% DELETE, 15% INSERT).
@@ -733,8 +765,13 @@ async fn apply_dml_mix(db: &E2eDb, source_table: &str, delta_size: u32) {
     let n_insert = delta_size - n_update - n_delete;
 
     if n_update > 0 {
+        let update_col = if source_table == "mx_orders" {
+            "amount = amount + 1"
+        } else {
+            "val = val + 1"
+        };
         db.execute(&format!(
-            "UPDATE {source_table} SET val = val + 1
+            "UPDATE {source_table} SET {update_col}
              WHERE id IN (SELECT id FROM {source_table} ORDER BY random() LIMIT {n_update})"
         ))
         .await;
@@ -749,13 +786,7 @@ async fn apply_dml_mix(db: &E2eDb, source_table: &str, delta_size: u32) {
     }
 
     if n_insert > 0 {
-        db.execute(&format!(
-            "INSERT INTO {source_table} (grp, val)
-             SELECT 'g' || (random() * {})::int, (random() * 1000)::int
-             FROM generate_series(1, {n_insert})",
-            NUM_GROUPS - 1,
-        ))
-        .await;
+        insert_delta(db, source_table, n_insert).await;
     }
 }
 
@@ -789,6 +820,119 @@ async fn wait_for_leaf_refresh(
             return Some(start.elapsed().as_secs_f64() * 1000.0);
         }
     }
+}
+
+/// Dump diagnostic info when a latency measurement times out.
+/// Shows refresh history, frontiers, and change buffer state per ST.
+async fn dump_timeout_diagnostics(db: &E2eDb, since_ts: &str, all_sts: &[String], source: &str) {
+    eprintln!("[DAG_BENCH_DIAG] === Timeout Diagnostics ===");
+
+    // 1. Show recent refresh history for ALL STs (last 30 entries)
+    eprintln!("[DAG_BENCH_DIAG] Recent refresh history since {since_ts}:");
+    let history = db
+        .query_scalar_opt::<String>(&format!(
+            "SELECT string_agg(line, E'\\n' ORDER BY rn) FROM (
+                SELECT ROW_NUMBER() OVER (ORDER BY h.start_time DESC) AS rn,
+                    st.pgt_name || ' | ' || h.action || ' | ' || h.status ||
+                    ' | +' || COALESCE(h.rows_inserted::text, '?') ||
+                    ' -' || COALESCE(h.rows_deleted::text, '?') ||
+                    ' | ' || to_char(h.start_time, 'HH24:MI:SS.MS') AS line
+                FROM pgtrickle.pgt_refresh_history h
+                JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = h.pgt_id
+                WHERE h.start_time >= '{since_ts}'::timestamptz
+                ORDER BY h.start_time DESC
+                LIMIT 30
+             ) sub"
+        ))
+        .await;
+    match history {
+        Some(h) => {
+            for line in h.lines() {
+                eprintln!("[DAG_BENCH_DIAG]   {line}");
+            }
+        }
+        None => eprintln!("[DAG_BENCH_DIAG]   (no refresh history found)"),
+    }
+
+    // 2. Per-ST status: populated, schedule, refresh_mode, completed count, frontier keys
+    eprintln!("[DAG_BENCH_DIAG] Per-ST status:");
+    for st_name in all_sts {
+        let info = db
+            .query_scalar_opt::<String>(&format!(
+                "SELECT st.pgt_name ||
+                    ' pop=' || st.is_populated::text ||
+                    ' sched=' || COALESCE(st.schedule, 'CALC') ||
+                    ' mode=' || st.refresh_mode ||
+                    ' status=' || st.status ||
+                    ' completed=' || (
+                        SELECT COUNT(*) FROM pgtrickle.pgt_refresh_history h
+                        WHERE h.pgt_id = st.pgt_id AND h.status = 'COMPLETED'
+                    )::text ||
+                    ' frontier_srcs=' || COALESCE(
+                        (SELECT string_agg(key, ',' ORDER BY key)
+                         FROM jsonb_object_keys(st.frontier -> 'sources') AS key), 'none')
+                 FROM pgtrickle.pgt_stream_tables st
+                 WHERE st.pgt_name = '{st_name}'"
+            ))
+            .await;
+        if let Some(i) = info {
+            eprintln!("[DAG_BENCH_DIAG]   {i}");
+        }
+    }
+
+    // 3. Source table change buffer row count
+    let source_oid = db
+        .query_scalar::<i64>(&format!(
+            "SELECT oid::bigint FROM pg_class WHERE relname = '{source}'"
+        ))
+        .await;
+    let cb_count = db
+        .query_scalar_opt::<i64>(&format!(
+            "SELECT COUNT(*)::bigint FROM pgtrickle_changes.changes_{source_oid}"
+        ))
+        .await;
+    eprintln!(
+        "[DAG_BENCH_DIAG] Change buffer for {source} (oid={source_oid}): {} rows",
+        cb_count.unwrap_or(-1)
+    );
+
+    // 4. ST change buffer row counts for STs that have downstream consumers
+    eprintln!("[DAG_BENCH_DIAG] ST change buffers:");
+    let st_ids: Vec<(String, i64)> = {
+        let rows = db
+            .query_scalar_opt::<String>(
+                "SELECT string_agg(pgt_name || ':' || pgt_id::text, ',' ORDER BY pgt_name)
+                 FROM pgtrickle.pgt_stream_tables",
+            )
+            .await;
+        rows.unwrap_or_default()
+            .split(',')
+            .filter_map(|pair| {
+                let mut parts = pair.splitn(2, ':');
+                let name = parts.next()?.to_string();
+                let id = parts.next()?.parse::<i64>().ok()?;
+                Some((name, id))
+            })
+            .collect()
+    };
+    for (name, pgt_id) in &st_ids {
+        let buf_exists = db
+            .query_scalar_opt::<bool>(&format!(
+                "SELECT to_regclass('pgtrickle_changes.changes_pgt_{pgt_id}') IS NOT NULL"
+            ))
+            .await
+            .unwrap_or(false);
+        if buf_exists {
+            let count = db
+                .query_scalar::<i64>(&format!(
+                    "SELECT COUNT(*)::bigint FROM pgtrickle_changes.changes_pgt_{pgt_id}"
+                ))
+                .await;
+            eprintln!("[DAG_BENCH_DIAG]   {name} (pgt_id={pgt_id}): {count} rows in ST buffer");
+        }
+    }
+
+    eprintln!("[DAG_BENCH_DIAG] === End Diagnostics ===");
 }
 
 /// Collect per-ST timing from pgt_refresh_history since a given timestamp.
@@ -868,11 +1012,26 @@ async fn measure_latency(
     let source = &topo.source_tables[0];
     let timeout = Duration::from_secs(LEAF_TIMEOUT_SECS);
 
-    // Warm-up: wait for initial population, then run warm-up cycles
-    db.wait_for_auto_refresh(leaf, Duration::from_secs(120))
-        .await;
+    // Ensure initial population by explicitly refreshing all STs in
+    // topological order.  The scheduler may not have populated them yet
+    // (especially for ST-on-ST diamond/mixed topologies).
+    eprintln!(
+        "[DAG_BENCH] Populating {} STs for {topology_name}...",
+        topo.all_sts.len()
+    );
+    for st in &topo.all_sts {
+        db.refresh_st_with_retry(st).await;
+    }
+    eprintln!("[DAG_BENCH] Initial population complete for {topology_name}");
 
-    for _ in 0..WARMUP_CYCLES {
+    // Warmup: insert deltas and wait for scheduler to propagate to the leaf.
+    // Use main timeout — if the scheduler cannot propagate, warmup cycles will
+    // time out and measurement cycles will report timeout warnings.
+    for warmup in 0..WARMUP_CYCLES {
+        eprintln!(
+            "[DAG_BENCH] Warmup cycle {}/{WARMUP_CYCLES} for {topology_name}...",
+            warmup + 1
+        );
         let before = completed_count(db, leaf).await;
         insert_delta(db, source, LATENCY_DELTA_ROWS).await;
         wait_for_leaf_refresh(db, leaf, before, timeout).await;
@@ -888,12 +1047,17 @@ async fn measure_latency(
         let start = Instant::now();
         insert_delta(db, source, LATENCY_DELTA_ROWS).await;
 
-        let propagation_ms = wait_for_leaf_refresh(db, leaf, before, timeout)
-            .await
-            .unwrap_or_else(|| {
+        let propagation_ms = match wait_for_leaf_refresh(db, leaf, before, timeout).await {
+            Some(ms) => ms,
+            None => {
                 eprintln!("[DAG_BENCH] WARN: timeout waiting for leaf '{leaf}' in cycle {cycle}");
+                // Dump diagnostic info on first timeout only (avoid spam)
+                if cycle == 1 {
+                    dump_timeout_diagnostics(db, &since_ts, &topo.all_sts, source).await;
+                }
                 start.elapsed().as_secs_f64() * 1000.0
-            });
+            }
+        };
 
         // Collect per-ST timing breakdown
         let breakdown = collect_per_st_timing(db, &since_ts, &topo.levels).await;

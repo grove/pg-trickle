@@ -136,6 +136,44 @@ fn resolve_delta_template(
         sql = sql.replace(&prev_placeholder, &prev_lsn);
         sql = sql.replace(&new_placeholder, &new_lsn);
     }
+
+    // ST-ST-4: Resolve pgt_-prefixed placeholders for ST source frontiers.
+    let pgt_prefix = "__PGS_PREV_LSN_pgt_";
+    if sql.contains(pgt_prefix) {
+        let mut search_from = 0usize;
+        let mut pgt_ids: Vec<i64> = Vec::new();
+        while let Some(pos) = sql[search_from..].find(pgt_prefix) {
+            let start = search_from + pos + pgt_prefix.len();
+            let end = sql[start..]
+                .find("__")
+                .map(|p| start + p)
+                .unwrap_or(sql.len());
+            if let Ok(id) = sql[start..end].parse::<i64>()
+                && !pgt_ids.contains(&id)
+            {
+                pgt_ids.push(id);
+            }
+            search_from = end;
+        }
+
+        for pgt_id in &pgt_ids {
+            let key = format!("pgt_{pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+
+            sql = sql.replace(&format!("__PGS_PREV_LSN_pgt_{pgt_id}__"), &prev_lsn);
+            sql = sql.replace(&format!("__PGS_NEW_LSN_pgt_{pgt_id}__"), &new_lsn);
+        }
+    }
+
     sql
 }
 
@@ -1227,6 +1265,36 @@ mod tests {
         let new_f = Frontier::new();
         let resolved = resolve_delta_template("__PGS_PREV_LSN_999__", &[999], &prev, &new_f);
         assert_eq!(resolved, "0/0");
+    }
+
+    #[test]
+    fn test_resolve_delta_template_pgt_placeholders() {
+        let mut prev = Frontier::new();
+        prev.set_st_source(7, "0/A000".to_string(), "ts".to_string());
+        let mut new_f = Frontier::new();
+        new_f.set_st_source(7, "0/B000".to_string(), "ts".to_string());
+
+        let template = "SELECT * FROM changes_pgt_7 WHERE lsn > '__PGS_PREV_LSN_pgt_7__' AND lsn <= '__PGS_NEW_LSN_pgt_7__'";
+        let resolved = resolve_delta_template(template, &[], &prev, &new_f);
+        assert!(resolved.contains("0/A000"));
+        assert!(resolved.contains("0/B000"));
+        assert!(!resolved.contains("__PGS_PREV_LSN_pgt_7__"));
+        assert!(!resolved.contains("__PGS_NEW_LSN_pgt_7__"));
+    }
+
+    #[test]
+    fn test_resolve_delta_template_mixed_oid_and_pgt() {
+        let mut prev = Frontier::new();
+        prev.set_source(42, "0/1000".to_string(), "ts".to_string());
+        prev.set_st_source(5, "0/2000".to_string(), "ts".to_string());
+        let mut new_f = Frontier::new();
+        new_f.set_source(42, "0/3000".to_string(), "ts".to_string());
+        new_f.set_st_source(5, "0/4000".to_string(), "ts".to_string());
+
+        let template =
+            "__PGS_PREV_LSN_42__ __PGS_NEW_LSN_42__ __PGS_PREV_LSN_pgt_5__ __PGS_NEW_LSN_pgt_5__";
+        let resolved = resolve_delta_template(template, &[42], &prev, &new_f);
+        assert_eq!(resolved, "0/1000 0/3000 0/2000 0/4000");
     }
 
     // ── is_scan_chain_tree() ────────────────────────────────────────

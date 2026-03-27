@@ -257,9 +257,9 @@ jobs:
         run: |
           cargo nextest run --profile ci --test e2e_tpch_tests --run-ignored all
 
-      - name: Run E2E tests with parallel refresh mode
+      - name: Run E2E tests with sequential refresh mode
         env:
-          PGT_PARALLEL_MODE: "on"
+          PGT_PARALLEL_MODE: "off"
         run: |
           cargo nextest run --profile ci --test 'e2e_*'
       - name: Publish Test Report
@@ -397,6 +397,102 @@ jobs:
           path: target/criterion/
           retention-days: 7
           if-no-files-found: ignore
+
+  # ── DAG benchmark tests — calc/throughput (daily + manual) ───────────────
+  # All DAG topology benchmarks excluding parallel-worker variants.
+  # 15 tests × ~15 s each ≈ well under 30 min. Non-blocking (continue-on-error).
+  dag-bench-calc:
+    name: DAG bench (calc/throughput)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+               "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+
+      - uses: actions/checkout@v5
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Restore Docker image cache (postgres:18.3)
+        uses: actions/cache@v5
+        id: cache-docker-postgres-dag-calc
+        with:
+          path: /tmp/docker-images/postgres-18.3.tar
+          key: docker-postgres-18.3
+
+      - name: Load or pull postgres:18.3
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.3.tar
+          else
+            docker pull postgres:18.3
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+          fi
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run DAG benchmark tests (calc/throughput)
+        run: |
+          cargo nextest run --profile ci \
+            --test e2e_dag_bench_tests \
+            --run-ignored ignored-only \
+            -E 'not test(/par[0-9]+/)'
+
+  # ── DAG benchmark tests — parallel workers (daily + manual) ──────────────
+  # DAG topology benchmarks with 4–8 parallel background workers.
+  # 6 tests × ~12 min each ≈ 72 min serially. Non-blocking (continue-on-error).
+  dag-bench-parallel:
+    name: DAG bench (parallel workers)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+               "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          docker system prune -af
+
+      - uses: actions/checkout@v5
+
+      - name: Setup pgrx environment
+        uses: ./.github/actions/setup-pgrx
+
+      - name: Restore Docker image cache (postgres:18.3)
+        uses: actions/cache@v5
+        id: cache-docker-postgres-dag-par
+        with:
+          path: /tmp/docker-images/postgres-18.3.tar
+          key: docker-postgres-18.3
+
+      - name: Load or pull postgres:18.3
+        run: |
+          if [ -f /tmp/docker-images/postgres-18.3.tar ]; then
+            docker load --input /tmp/docker-images/postgres-18.3.tar
+          else
+            docker pull postgres:18.3
+            mkdir -p /tmp/docker-images
+            docker save postgres:18.3 --output /tmp/docker-images/postgres-18.3.tar
+          fi
+
+      - name: Build E2E Docker image
+        run: ./tests/build_e2e_image.sh
+
+      - name: Run DAG benchmark tests (parallel workers)
+        run: |
+          cargo nextest run --profile ci \
+            --test e2e_dag_bench_tests \
+            --run-ignored ignored-only \
+            -E 'test(/par[0-9]+/)'
 
   # ── dbt-pgtrickle integration tests (Linux only) ──────────────────────────
   # Cost-optimized: single job builds the Docker image once, then tests
