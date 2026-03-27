@@ -698,17 +698,8 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
     } else {
         None
     };
-    let has_table_changes = has_table_source_changes(&st);
-    let has_st_changes = has_stream_table_source_changes(&st);
-    let has_changes = has_table_changes || has_st_changes;
-
-    // Force FULL when upstream ST sources have changes — same rationale as
-    // refresh_single_st() and execute_worker_atomic_group().
-    let action = if has_changes && has_st_changes {
-        refresh::RefreshAction::Full
-    } else {
-        refresh::determine_refresh_action(&st, has_changes)
-    };
+    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let action = refresh::determine_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
 }
@@ -807,21 +798,8 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
             continue;
         }
 
-        let has_table_changes = has_table_source_changes(&st);
-        let has_st_changes = has_stream_table_source_changes(&st);
-        let has_changes = has_table_changes || has_st_changes;
-
-        // When upstream STREAM_TABLE sources have changed, force a FULL
-        // refresh.  The DVM MERGE template is generated from TABLE-source
-        // change buffers (changes_{oid}) and does not read from ST change
-        // buffers (changes_pgt_{id}).  A DIFFERENTIAL refresh would therefore
-        // miss the upstream ST deltas and produce stale results.  This
-        // matches the sequential path in refresh_single_st().
-        let action = if has_changes && has_st_changes {
-            refresh::RefreshAction::Full
-        } else {
-            refresh::determine_refresh_action(&st, has_changes)
-        };
+        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let action = refresh::determine_refresh_action(&st, has_changes);
 
         let result = execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
         match result {
@@ -905,17 +883,8 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
     } else {
         None
     };
-    let has_table_changes = has_table_source_changes(&st);
-    let has_st_changes = has_stream_table_source_changes(&st);
-    let has_changes = has_table_changes || has_st_changes;
-
-    // Force FULL when upstream ST sources have changes — same rationale as
-    // refresh_single_st().
-    let action = if has_changes && has_st_changes {
-        refresh::RefreshAction::Full
-    } else {
-        refresh::determine_refresh_action(&st, has_changes)
-    };
+    let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+    let action = refresh::determine_refresh_action(&st, has_changes);
 
     execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None)
 }
@@ -1145,17 +1114,8 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
         }
 
         let is_last = idx == member_count - 1;
-        let has_table_changes = has_table_source_changes(&st);
-        let has_st_changes = has_stream_table_source_changes(&st);
-        let has_changes = has_table_changes || has_st_changes;
-
-        // Force FULL when upstream ST sources have changes — same rationale
-        // as refresh_single_st().
-        let action = if has_changes && has_st_changes {
-            refresh::RefreshAction::Full
-        } else {
-            refresh::determine_refresh_action(&st, has_changes)
-        };
+        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let action = refresh::determine_refresh_action(&st, has_changes);
 
         // DAG-4: For intermediate members, set a flag so the refresh path
         // uses bypass capture instead of the persistent buffer.
@@ -2627,13 +2587,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         continue;
                     }
 
-                    let (has_changes, has_stream_table_changes) =
+                    let (has_changes, _has_stream_table_changes) =
                         upstream_change_state(&st, initial_table_changes.get(&pgt_id).copied());
-                    let action = if has_changes && has_stream_table_changes {
-                        RefreshAction::Full
-                    } else {
-                        refresh::determine_refresh_action(&st, has_changes)
-                    };
+                    let action = refresh::determine_refresh_action(&st, has_changes);
                     let result =
                         execute_scheduled_refresh(&st, action, tick_watermark.as_deref(), None);
 
@@ -3795,17 +3751,10 @@ fn refresh_single_st(
         return;
     }
 
-    let (has_changes, has_stream_table_changes) = upstream_change_state(&st, table_change_snapshot);
+    let (has_changes, _has_stream_table_changes) =
+        upstream_change_state(&st, table_change_snapshot);
 
-    // When upstream STREAM_TABLE sources have changed, force a FULL refresh.
-    // Although ST change buffers (changes_pgt_{id}) now exist and record
-    // deltas, the DVM MERGE template is generated from TABLE-source change
-    // buffers only. A DIFFERENTIAL refresh would miss the upstream ST
-    // deltas. Force FULL to ensure the output incorporates the latest
-    // upstream rows.
-    let action = if has_changes && has_stream_table_changes {
-        RefreshAction::Full
-    } else {
+    let action = {
         let mut base_action = refresh::determine_refresh_action(&st, has_changes);
 
         // Check periodic drift reset
