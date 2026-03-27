@@ -2458,7 +2458,10 @@ mod tests {
     #[test]
     fn test_build_cdc_health_alert_ok_when_below_threshold_and_slot_present() {
         let alert = build_cdc_health_alert(512, 1024, true, CdcMode::Wal);
-        assert!(alert.is_none(), "No alert when lag is below threshold and slot exists");
+        assert!(
+            alert.is_none(),
+            "No alert when lag is below threshold and slot exists"
+        );
     }
 
     #[test]

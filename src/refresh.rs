@@ -4804,7 +4804,8 @@ mod pg_tests {
     #[test]
     fn test_inject_partition_predicate_basic() {
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-        let result = inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let result =
+            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
         assert!(result.contains("BETWEEN '2024-01-01' AND '2024-01-31'"));
         assert!(result.contains(r#""event_date""#));
         assert!(result.contains("st."));
@@ -4815,7 +4816,8 @@ mod pg_tests {
     fn test_inject_partition_predicate_no_placeholder() {
         // If there is no placeholder the SQL is returned unchanged
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id";
-        let result = inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let result =
+            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
         assert_eq!(result, merge_sql);
     }
 
