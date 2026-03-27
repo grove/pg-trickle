@@ -690,6 +690,14 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
             "ALTER SYSTEM SET pg_trickle.max_concurrent_refreshes = {concurrency}"
         ))
         .await;
+    } else {
+        // CALCULATED mode tests expect sequential (topological) processing
+        // within a single scheduler tick.  The default parallel_refresh_mode
+        // is 'on', which dispatches work to background workers and changes
+        // the execution model.  Explicitly switch to 'off' so the scheduler
+        // uses the inline sequential path.
+        db.execute("ALTER SYSTEM SET pg_trickle.parallel_refresh_mode = 'off'")
+            .await;
     }
 
     db.reload_config_and_wait().await;
@@ -707,6 +715,9 @@ async fn configure_latency_scheduler(db: &E2eDb, mode: &str, concurrency: u32) {
             &concurrency.to_string(),
         )
         .await;
+    } else {
+        db.wait_for_setting("pg_trickle.parallel_refresh_mode", "off")
+            .await;
     }
 
     assert!(
@@ -891,7 +902,10 @@ async fn measure_latency(
     // Ensure initial population by explicitly refreshing all STs in
     // topological order.  The scheduler may not have populated them yet
     // (especially for ST-on-ST diamond/mixed topologies).
-    eprintln!("[DAG_BENCH] Populating {} STs for {topology_name}...", topo.all_sts.len());
+    eprintln!(
+        "[DAG_BENCH] Populating {} STs for {topology_name}...",
+        topo.all_sts.len()
+    );
     for st in &topo.all_sts {
         db.refresh_st_with_retry(st).await;
     }
@@ -901,7 +915,10 @@ async fn measure_latency(
     // Use main timeout — if the scheduler cannot propagate, warmup cycles will
     // time out and measurement cycles will report timeout warnings.
     for warmup in 0..WARMUP_CYCLES {
-        eprintln!("[DAG_BENCH] Warmup cycle {}/{WARMUP_CYCLES} for {topology_name}...", warmup + 1);
+        eprintln!(
+            "[DAG_BENCH] Warmup cycle {}/{WARMUP_CYCLES} for {topology_name}...",
+            warmup + 1
+        );
         let before = completed_count(db, leaf).await;
         insert_delta(db, source, LATENCY_DELTA_ROWS).await;
         wait_for_leaf_refresh(db, leaf, before, timeout).await;
