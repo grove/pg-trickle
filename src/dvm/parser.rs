@@ -3835,6 +3835,11 @@ struct CteParseContext {
     /// Output columns for the recursive self-reference. Set alongside
     /// `recursive_self_ref_name`.
     recursive_self_ref_columns: Vec<String>,
+    /// G13-SD: Current recursion depth (incremented on each nested
+    /// parse_select_stmt / parse_set_operation / parse_from_item call).
+    depth: usize,
+    /// G13-SD: Maximum allowed recursion depth (from GUC).
+    max_depth: usize,
 }
 
 impl CteParseContext {
@@ -3842,6 +3847,13 @@ impl CteParseContext {
         raw_map: HashMap<String, *const pg_sys::SelectStmt>,
         def_aliases: HashMap<String, Vec<String>>,
     ) -> Self {
+        // In unit tests without a PG backend the GUC is unavailable;
+        // use a sensible default.
+        #[cfg(any(not(test), feature = "pg_test"))]
+        let max_depth = crate::config::pg_trickle_max_parse_depth();
+        #[cfg(all(test, not(feature = "pg_test")))]
+        let max_depth = 64;
+
         CteParseContext {
             raw_map,
             def_aliases,
@@ -3849,7 +3861,30 @@ impl CteParseContext {
             registry: CteRegistry::default(),
             recursive_self_ref_name: None,
             recursive_self_ref_columns: Vec::new(),
+            depth: 0,
+            max_depth,
         }
+    }
+
+    /// G13-SD: Increment the recursion depth and error if the limit is
+    /// exceeded.  Returns the previous depth so the caller can restore
+    /// it after the recursive call (via `set_depth`).
+    fn descend(&mut self) -> Result<usize, PgTrickleError> {
+        let prev = self.depth;
+        self.depth += 1;
+        if self.depth > self.max_depth {
+            return Err(PgTrickleError::QueryTooComplex(format!(
+                "parse tree recursion depth {} exceeds pg_trickle.max_parse_depth ({}). \
+                 Simplify the query or raise the limit.",
+                self.depth, self.max_depth,
+            )));
+        }
+        Ok(prev)
+    }
+
+    /// G13-SD: Restore the recursion depth to a previously saved value.
+    fn ascend(&mut self, prev: usize) {
+        self.depth = prev;
     }
 
     /// Returns true if `name` is a CTE defined in this query (either
@@ -10369,6 +10404,18 @@ unsafe fn parse_set_operation(
     select: &pg_sys::SelectStmt,
     cte_ctx: &mut CteParseContext,
 ) -> Result<OpTree, PgTrickleError> {
+    // G13-SD: Track recursion depth.
+    let prev_depth = cte_ctx.descend()?;
+    let result = unsafe { parse_set_operation_inner(select, cte_ctx) };
+    cte_ctx.ascend(prev_depth);
+    result
+}
+
+/// Inner implementation of `parse_set_operation` (after depth check).
+unsafe fn parse_set_operation_inner(
+    select: &pg_sys::SelectStmt,
+    cte_ctx: &mut CteParseContext,
+) -> Result<OpTree, PgTrickleError> {
     match select.op {
         pg_sys::SetOperation::SETOP_UNION => {
             let mut children = Vec::new();
@@ -10499,6 +10546,19 @@ unsafe fn collect_union_children(
 ///
 /// Builds bottom-up: Scan → Filter → Join → Project → Aggregate → Distinct
 unsafe fn parse_select_stmt(
+    select: &pg_sys::SelectStmt,
+    _full_query: &str,
+    cte_ctx: &mut CteParseContext,
+) -> Result<OpTree, PgTrickleError> {
+    // G13-SD: Track recursion depth.
+    let prev_depth = cte_ctx.descend()?;
+    let result = unsafe { parse_select_stmt_inner(select, _full_query, cte_ctx) };
+    cte_ctx.ascend(prev_depth);
+    result
+}
+
+/// Inner implementation of `parse_select_stmt` (after depth check).
+unsafe fn parse_select_stmt_inner(
     select: &pg_sys::SelectStmt,
     _full_query: &str,
     cte_ctx: &mut CteParseContext,
@@ -11037,6 +11097,18 @@ fn extract_bare_scalar_subquery_sql(raw_sql: &str) -> Option<String> {
 
 /// Parse a FROM clause item (RangeVar, JoinExpr, or RangeSubselect) into an OpTree.
 unsafe fn parse_from_item(
+    node: *mut pg_sys::Node,
+    cte_ctx: &mut CteParseContext,
+) -> Result<OpTree, PgTrickleError> {
+    // G13-SD: Track recursion depth.
+    let prev_depth = cte_ctx.descend()?;
+    let result = unsafe { parse_from_item_inner(node, cte_ctx) };
+    cte_ctx.ascend(prev_depth);
+    result
+}
+
+/// Inner implementation of `parse_from_item` (after depth check).
+unsafe fn parse_from_item_inner(
     node: *mut pg_sys::Node,
     cte_ctx: &mut CteParseContext,
 ) -> Result<OpTree, PgTrickleError> {
@@ -20382,5 +20454,49 @@ mod tests {
         let mut preds = Vec::new();
         collect_correlation_equalities(&expr, &inner_aliases, &inner_alias_oids, &mut preds);
         assert_eq!(preds.len(), 2);
+    }
+
+    // ── G13-SD: Parse depth guard tests ─────────────────────────────
+
+    #[test]
+    fn test_cte_parse_context_descend_within_limit() {
+        let mut ctx = CteParseContext::new(HashMap::new(), HashMap::new());
+        // max_depth defaults to 64 in unit tests
+        assert_eq!(ctx.depth, 0);
+        let prev = ctx.descend().expect("should not exceed limit");
+        assert_eq!(prev, 0);
+        assert_eq!(ctx.depth, 1);
+        ctx.ascend(prev);
+        assert_eq!(ctx.depth, 0);
+    }
+
+    #[test]
+    fn test_cte_parse_context_descend_exceeds_limit() {
+        let mut ctx = CteParseContext::new(HashMap::new(), HashMap::new());
+        // Manually set depth to max_depth to trigger the guard.
+        ctx.depth = ctx.max_depth;
+        let result = ctx.descend();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PgTrickleError::QueryTooComplex(_)),
+            "expected QueryTooComplex, got: {err:?}"
+        );
+        assert!(err.to_string().contains("max_parse_depth"));
+    }
+
+    #[test]
+    fn test_cte_parse_context_descend_ascend_round_trip() {
+        let mut ctx = CteParseContext::new(HashMap::new(), HashMap::new());
+        let d0 = ctx.descend().unwrap();
+        let d1 = ctx.descend().unwrap();
+        let d2 = ctx.descend().unwrap();
+        assert_eq!(ctx.depth, 3);
+        ctx.ascend(d2);
+        assert_eq!(ctx.depth, 2);
+        ctx.ascend(d1);
+        assert_eq!(ctx.depth, 1);
+        ctx.ascend(d0);
+        assert_eq!(ctx.depth, 0);
     }
 }

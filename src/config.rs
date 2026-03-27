@@ -172,6 +172,13 @@ pub static PGS_COMPACT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(100_0
 /// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
 pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
+/// G13-SD: Maximum recursion depth for the query parser's tree visitors.
+///
+/// Prevents stack-overflow crashes on pathological queries with deeply
+/// nested subqueries, CTEs, or set operations.  Returns
+/// `PgTrickleError::QueryTooComplex` when the limit is exceeded.
+pub static PGS_MAX_PARSE_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(64);
+
 /// Number of differential refresh cycles after which algebraic aggregate
 /// stream tables are automatically reinitialized (full recompute) to reset
 /// accumulated floating-point drift in auxiliary sum/sum2 columns.
@@ -364,7 +371,10 @@ pub static PGS_ALLOW_CIRCULAR: GucSetting<bool> = GucSetting::<bool>::new(false)
 /// multiplier. Hot (1×), Warm (2×), Cold (10×), Frozen (skip entirely).
 /// User-set via `ALTER STREAM TABLE ... SET (tier = 'warm')`.
 /// Default tier for new STs is Hot (no change in behavior).
-pub static PGS_TIERED_SCHEDULING: GucSetting<bool> = GucSetting::<bool>::new(false);
+///
+/// Default changed to `true` in v0.12.0 (PERF-3) — prevents large
+/// deployments from wasting CPU refreshing cold STs at full speed.
+pub static PGS_TIERED_SCHEDULING: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// QF-1: When `true`, the MERGE SQL template is emitted to the PostgreSQL
 /// server log at `LOG` level on every refresh cycle.
@@ -657,6 +667,20 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_trickle.max_parse_depth",
+        c"Maximum recursion depth for the query parser tree visitors.",
+        c"Prevents stack-overflow crashes on pathological queries with deeply \
+           nested subqueries, CTEs, or set operations. Returns a QueryTooComplex \
+           error when the limit is exceeded. Raise only if legitimate queries \
+           exceed the default.",
+        &PGS_MAX_PARSE_DEPTH,
+        1,
+        10000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_trickle.ivm_topk_max_limit",
         c"Maximum LIMIT for TopK stream tables in IMMEDIATE mode.",
         c"TopK queries exceeding this LIMIT are rejected in IMMEDIATE mode. \
@@ -835,7 +859,8 @@ pub fn register_gucs() {
         c"When enabled, per-ST refresh_tier controls the effective schedule \
            multiplier. Hot refreshes at configured interval, Warm at 2x, \
            Cold at 10x, Frozen skips entirely. Set per-ST tier via \
-           ALTER STREAM TABLE ... SET (tier = 'warm'). Default is off.",
+           ALTER STREAM TABLE ... SET (tier = 'warm'). Default is on \
+           (changed in v0.12.0; set to off to restore pre-v0.12.0 behavior).",
         &PGS_TIERED_SCHEDULING,
         GucContext::Suset,
         GucFlags::default(),
@@ -1181,6 +1206,11 @@ pub fn pg_trickle_per_database_worker_quota() -> i32 {
 /// DAG-3: Returns the delta amplification threshold (0.0 = disabled).
 pub fn pg_trickle_delta_amplification_threshold() -> f64 {
     PGS_DELTA_AMPLIFICATION_THRESHOLD.get()
+}
+
+/// G13-SD: Returns the maximum recursion depth for query parser visitors.
+pub fn pg_trickle_max_parse_depth() -> usize {
+    PGS_MAX_PARSE_DEPTH.get() as usize
 }
 
 /// WAKE-1: Returns whether event-driven scheduler wake is enabled.

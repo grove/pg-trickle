@@ -34,7 +34,27 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
-<!-- 0.12.0 changes go here -->
+- **G13-SD: Parser recursion depth limit.** New `pg_trickle.max_parse_depth` GUC
+  (default 64) prevents stack-overflow crashes on pathological queries with deeply
+  nested subqueries, CTEs, or set operations. Exceeding the limit returns a
+  `QueryTooComplex` error instead of crashing the backend.
+- **G17-MERGEEX: MERGE template EXPLAIN validation.** New E2E test suite
+  (`tests/e2e_merge_template_tests.rs`) validates MERGE SQL templates across 9
+  representative query patterns (scan, filter, aggregate, inner join, left join,
+  join+aggregate, distinct, union all, TopK) via differential refresh + EXPLAIN
+  dry-run.
+- **BENCH-W1/W2: CDC write-side overhead benchmark.** New benchmark suite
+  (`tests/e2e_cdc_write_overhead_tests.rs`) measures DML throughput overhead from
+  CDC triggers across 5 scenarios: single-row INSERT, bulk INSERT, bulk UPDATE,
+  bulk DELETE, and concurrent writers. Results published in `docs/BENCHMARK.md`.
+
+### Changed
+
+- **PERF-3: `tiered_scheduling` default flipped to `true`.** Large deployments no
+  longer waste CPU refreshing cold stream tables at full speed. New stream tables
+  default to the `hot` tier (1× multiplier, no behavior change). Set
+  `pg_trickle.tiered_scheduling = off` to restore pre-v0.12.0 behavior. Added
+  tier thresholds reference section to `docs/CONFIGURATION.md`.
 
 ---
 

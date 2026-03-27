@@ -36,6 +36,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.buffer\_alert\_threshold](#pg_tricklebuffer_alert_threshold)
     - [pg\_trickle.compact\_threshold](#pg_tricklecompact_threshold)
     - [pg\_trickle.max\_grouping\_set\_branches](#pg_tricklemax_grouping_set_branches)
+    - [pg\_trickle.max\_parse\_depth](#pg_tricklemax_parse_depth)
     - [pg\_trickle.ivm\_topk\_max\_limit](#pg_trickleivm_topk_max_limit)
     - [pg\_trickle.ivm\_recursive\_max\_depth](#pg_trickleivm_recursive_max_depth)
   - [Parallel Refresh](#parallel-refresh)
@@ -554,7 +555,7 @@ Enable tiered refresh scheduling (Hot/Warm/Cold/Frozen) for stream tables.
 | Property | Value |
 |---|---|
 | Type | `bool` |
-| Default | `off` |
+| Default | `on` |
 | Context | `SUSET` |
 | Restart Required | No |
 
@@ -581,6 +582,44 @@ SELECT pgtrickle.alter_stream_table('my_table', tier => 'frozen');
 **Design note:** Tiers are user-assigned only. Automatic classification from
 `pg_stat_user_tables` was rejected because pg_trickle's own MERGE scans
 pollute the read counters, making auto-classification unreliable.
+
+#### Tier Thresholds Reference
+
+The following table summarizes the effective refresh behavior for each tier.
+All multipliers apply to **duration-based schedules** only — cron-based
+schedules are always honored as-is. New stream tables default to `hot`.
+
+| Tier | Multiplier | Effective Schedule (1 s base) | Use Case |
+|------|-----------|-------------------------------|----------|
+| `hot` | 1× | 1 s | Real-time dashboards, alerting tables, SLA-bound queries |
+| `warm` | 2× | 2 s | Important but not latency-critical tables; reduces CPU by 50% |
+| `cold` | 10× | 10 s | Reporting tables queried infrequently; saves significant CPU |
+| `frozen` | skip | never (until promoted) | Archival tables, tables under maintenance, or seasonal reports |
+
+**When to use each tier:**
+
+- **Hot** — default for all new stream tables. Appropriate when downstream
+  consumers expect near-real-time freshness.
+- **Warm** — set for tables where a few seconds of staleness is acceptable.
+  Halves the refresh CPU cost compared to Hot.
+- **Cold** — set for tables queried only by batch jobs or low-frequency
+  dashboards. 10× reduction in refresh overhead.
+- **Frozen** — set when a table should not be refreshed at all (e.g., during
+  a maintenance window or when the upstream source is being migrated).
+  Promote back to Hot/Warm/Cold when ready.
+
+```sql
+-- Promote a frozen table back to warm
+SELECT pgtrickle.alter_stream_table('seasonal_report', tier => 'warm');
+
+-- Freeze a table during maintenance
+SELECT pgtrickle.alter_stream_table('my_table', tier => 'frozen');
+```
+
+> **Changed in v0.12.0:** The default for `pg_trickle.tiered_scheduling`
+> changed from `off` to `on`. Set `pg_trickle.tiered_scheduling = off` in
+> `postgresql.conf` to restore pre-v0.12.0 behavior (all STs refresh at
+> full speed regardless of tier assignment).
 
 ---
 
@@ -774,6 +813,23 @@ memory exhaustion during parsing. Users who genuinely need more than
 ```sql
 -- Allow up to 128 grouping set branches
 SET pg_trickle.max_grouping_set_branches = 128;
+```
+
+---
+
+### pg_trickle.max_parse_depth
+
+Maximum recursion depth for the query parser's tree visitors (G13-SD).
+Prevents stack-overflow crashes on pathological queries with deeply nested
+subqueries, CTEs, or set operations. When the limit is exceeded, the
+parser returns a `QueryTooComplex` error instead of crashing.
+
+**Default:** `64`
+**Range:** `1` – `10000`
+
+```sql
+-- Raise the limit for deeply nested queries
+SET pg_trickle.max_parse_depth = 128;
 ```
 
 ---
@@ -1216,6 +1272,7 @@ pg_trickle.block_source_ddl = false
 pg_trickle.buffer_alert_threshold = 1000000
 pg_trickle.compact_threshold = 100000
 pg_trickle.max_grouping_set_branches = 64
+pg_trickle.max_parse_depth = 64
 pg_trickle.ivm_topk_max_limit = 1000
 pg_trickle.ivm_recursive_max_depth = 100
 

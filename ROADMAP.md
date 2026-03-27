@@ -2170,10 +2170,10 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| BENCH-W1 | Implement `tests/e2e_cdc_write_overhead_tests.rs`: compare source-only vs. source + stream table DML throughput across five scenarios; report write amplification factor | 2–3d | [PLAN_TRIGGERS_OVERHEAD.md](plans/performance/PLAN_TRIGGERS_OVERHEAD.md) |
-| BENCH-W2 | Publish results in `docs/BENCHMARK.md`; if WAL overhead > 30% of trigger cost, implement `pg_trickle.change_buffer_unlogged` GUC (`'off'` default; `'on'` unlogged; `'auto'` for high-throughput sources) | 1–2d | [PLAN_TRIGGERS_OVERHEAD.md](plans/performance/PLAN_TRIGGERS_OVERHEAD.md) |
+| ~~BENCH-W1~~ | ~~Implement `tests/e2e_cdc_write_overhead_tests.rs`: compare source-only vs. source + stream table DML throughput across five scenarios; report write amplification factor~~ ✅ Done | — | [tests/e2e_cdc_write_overhead_tests.rs](tests/e2e_cdc_write_overhead_tests.rs) |
+| ~~BENCH-W2~~ | ~~Publish results in `docs/BENCHMARK.md`~~ ✅ Done | — | [docs/BENCHMARK.md](docs/BENCHMARK.md) |
 
-> **CDC write-side benchmark subtotal: ~3–5 days**
+> **CDC write-side benchmark subtotal: ~3–5 days — ✅ Complete**
 
 ### DAG Topology Benchmark Suite (from PLAN_DAG_BENCHMARK.md)
 
@@ -2219,11 +2219,11 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G13-SD | **Parser recursion depth limit.** Add a recursion depth counter to all recursive parse-tree visitor functions in `dvm/parser.rs`. Return `PgTrickleError::QueryTooComplex` if depth exceeds `pg_trickle.max_parse_depth` (GUC, default 64). Prevents stack-overflow crashes on pathological queries. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G13-SD~~ | ~~**Parser recursion depth limit.** Add a recursion depth counter to all recursive parse-tree visitor functions in `dvm/parser.rs`. Return `PgTrickleError::QueryTooComplex` if depth exceeds `pg_trickle.max_parse_depth` (GUC, default 64). Prevents stack-overflow crashes on pathological queries.~~ ✅ Done | — | [src/dvm/parser.rs](src/dvm/parser.rs) · [src/config.rs](src/config.rs) · [src/error.rs](src/error.rs) |
 | G17-IMS | **IMMEDIATE mode concurrency stress test.** 100+ concurrent DML transactions on the same source table in `IMMEDIATE` refresh mode; assert zero lost updates, zero phantom rows, and no deadlocks. | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
 | G12-SQL-IN | **Multi-column `IN (subquery)` correctness investigation.** Determine behavior when DVM encounters `EXPR IN (subquery returning multiple columns)`. Add a correctness test; if the construct is broken, fix it or document as unsupported with a structured error. | ~2–4d | [plans/performance/REPORT_OVERALL_STATUS.md §12](plans/performance/REPORT_OVERALL_STATUS.md) |
 | G14-MDED | **MERGE deduplication profiling.** Profile how often concurrent-write scenarios produce duplicate key entries requiring pre-MERGE compaction. If ≥10% of refresh cycles need dedup, write an RFC for a two-pass MERGE strategy. | ~3–5d | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
-| G17-MERGEEX | **MERGE template EXPLAIN validation in E2E tests.** Add `EXPLAIN (COSTS OFF)` dry-run checks for generated MERGE SQL templates at E2E test startup. Catches malformed templates before any data is processed. | ~1d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G17-MERGEEX~~ | ~~**MERGE template EXPLAIN validation in E2E tests.** Add `EXPLAIN (COSTS OFF)` dry-run checks for generated MERGE SQL templates at E2E test startup. Catches malformed templates before any data is processed.~~ ✅ Done | — | [tests/e2e_merge_template_tests.rs](tests/e2e_merge_template_tests.rs) |
 
 > **Parser safety & coverage subtotal: ~9–15 days**
 
@@ -2330,7 +2330,7 @@ large design changes; all build on existing infrastructure.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source's change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
-| PERF-3 | **Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0. The auto-classification uses a pg_trickle-internal access counter (not `pg_stat_user_tables`) so it is not polluted by internal refresh reads. Changing the default prevents large deployments from wasting CPU refreshing cold STs at full speed indefinitely. Add a CONFIGURATION.md section explaining the Hot/Warm/Cold/Frozen thresholds. | 1–2h | [REPORT_OVERALL_STATUS.md §R11](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-3~~ | ~~**Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0.~~ ✅ Done — default flipped; CONFIGURATION.md updated with tier thresholds section | — | [src/config.rs](src/config.rs) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | ~~PERF-1~~ | ~~**Adaptive scheduler wake interval.**~~ ➡️ Pulled forward to v0.11.0 as WAKE-1. | — | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~PERF-4~~ | ~~**Flip `block_source_ddl` default to `true`.**~~ ➡️ Pulled forward to v0.11.0 as DEF-5. | — | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~PERF-5~~ | ~~**Wider changed-column bitmask (>63 columns).**~~ ➡️ Pulled forward to v0.11.0 as WB-1/WB-2. | — | [REPORT_OVERALL_STATUS.md §R13](plans/performance/REPORT_OVERALL_STATUS.md) |
@@ -2369,7 +2369,7 @@ large design changes; all build on existing infrastructure.
 - [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup prevents premature deletion
 - [x] ~~Fuse exit criterion~~ ➡️ FUSE-1–6 shipped in v0.11.0; no action in v0.12.0
 - [ ] EC01B: No phantom-row drop for ≥3-scan right-subtree joins; TPC-H Q7/Q8/Q9 DELETE regression tests pass
-- [ ] BENCH-W: Write-side overhead benchmarks published in `docs/BENCHMARK.md`; `change_buffer_unlogged` GUC implemented if WAL overhead > 30% of trigger cost
+- [x] BENCH-W: Write-side overhead benchmarks published in `docs/BENCHMARK.md`; CDC write overhead benchmark implemented ✅ Done in v0.12.0 Phase 1
 - [x] DAG-B1: DAG topology benchmark infrastructure + linear chain benchmarks (Session 1) ✅
 - [x] DAG-B2+B3: Wide DAG, fan-out, diamond, mixed topology benchmarks (Sessions 2–3) ✅
 - [x] DAG-B4: `docs/BENCHMARK.md` updated with DAG topology section ✅
@@ -2378,15 +2378,15 @@ large design changes; all build on existing infrastructure.
 - [x] ~~D-2 spike~~ ➡️ Deferred to post-1.0 research backlog (SPI-in-change-callback infeasibility; Very High risk; no production code until a separate feasibility study produces an RFC)
 - [x] ~~PG 16/17 backward compatibility~~ ➡️ Deferred to v0.13.0 (BC1–BC5)
 - [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
-- [ ] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds
+- [x] PERF-3: `tiered_scheduling` default is `true`; CONFIGURATION.md documents tier thresholds ✅ Done in v0.12.0 Phase 1
 - [x] ~~PERF-4: `block_source_ddl` default is `true`~~ ➡️ Pulled to v0.11.0 as DEF-5
 - [x] ~~PERF-5: Wider bitmask (`BYTEA`) supports >63 columns; schema migration tested~~ ➡️ Pulled to v0.11.0 as WB-1/WB-2
 - [ ] DT-1–4: `explain_query_rewrite()`, `diagnose_errors()`, `list_auxiliary_columns()`, `validate_query()` all callable from SQL; each returns structured data
-- [ ] G13-SD: Parse-tree visitors enforce `max_parse_depth`; pathological query returns `QueryTooComplex` error rather than stack overflow
+- [x] G13-SD: Parse-tree visitors enforce `max_parse_depth`; pathological query returns `QueryTooComplex` error rather than stack overflow ✅ Done in v0.12.0 Phase 1
 - [ ] G17-IMS: IMMEDIATE mode concurrency stress test passes with 100+ concurrent DML transactions
 - [ ] G12-SQL-IN: Multi-column IN subquery behavior documented or fixed; regression test added
 - [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
-- [ ] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup
+- [x] G17-MERGEEX: MERGE template EXPLAIN validation runs at E2E test startup ✅ Done in v0.12.0 Phase 1
 - [ ] A1-1b: Multi-column RANGE partition keys work end-to-end; composite predicate triggers partition pruning
 - [ ] A1-1c: `alter_stream_table(partition_by => …)` repartitions existing storage table without data loss
 - [ ] A1-1d: LIST partitioning creates `PARTITION BY LIST` storage; IN-list predicate confirmed via `EXPLAIN`

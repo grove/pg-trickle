@@ -552,3 +552,86 @@ Once configured, the Bencher dashboard shows:
 | `image not found` | Run `./tests/build_e2e_image.sh` to build the test image |
 | Highly variable timings | Close other workloads; use `--test-threads=1` to avoid container contention |
 | SLOW status on latency test | Expected in Docker; bare-metal should pass < 10 ms |
+
+---
+
+## CDC Write-Side Overhead Benchmarks
+
+The CDC write-overhead benchmark suite in `tests/e2e_cdc_write_overhead_tests.rs` measures the DML throughput cost of pg_trickle's CDC triggers on source tables. This quantifies the "write amplification factor" — how much slower DML becomes when a stream table is attached.
+
+The core question this benchmark answers:
+
+> **How much write throughput do you sacrifice by attaching a stream table to a source table?**
+
+### Running CDC Write Overhead Benchmarks
+
+```bash
+# Full suite (all 5 scenarios)
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_write_overhead_full
+
+# Individual scenarios
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_single_row_insert
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_bulk_insert
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_bulk_update
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_bulk_delete
+cargo test --test e2e_cdc_write_overhead_tests --features pg18 -- --ignored --nocapture bench_cdc_concurrent_writers
+```
+
+### Scenarios
+
+| Scenario | Description | Rows per Cycle |
+|----------|-------------|----------------|
+| **Single-row INSERT** | One `INSERT` statement per row, 1,000 rows total | 1,000 |
+| **Bulk INSERT** | Single `INSERT ... SELECT generate_series(...)` | 10,000 |
+| **Bulk UPDATE** | Single `UPDATE ... WHERE id <= N` | 10,000 |
+| **Bulk DELETE** | Single `DELETE ... WHERE id <= N` | 10,000 |
+| **Concurrent writers** | 4 parallel sessions each inserting 5,000 rows | 20,000 total |
+
+### Reading the Output
+
+```
+╔═══════════════════════════════════════════════════════════════════════════════════╗
+║               pg_trickle CDC Write-Side Overhead Benchmark                       ║
+╠═══════════════════════╤═══════════════╤═══════════════╤═════════════════════════╣
+║ Scenario              │ Baseline (ms) │ With CDC (ms) │ Write Amplification     ║
+╠═══════════════════════╪═══════════════╪═══════════════╪═════════════════════════╣
+║ single-row INSERT     │         450.2 │         890.5 │       1.98×             ║
+║ bulk INSERT (10K)     │          35.1 │          72.3 │       2.06×             ║
+║ bulk UPDATE (10K)     │          48.7 │         105.2 │       2.16×             ║
+║ bulk DELETE (10K)     │          22.4 │          51.8 │       2.31×             ║
+║ concurrent (4×5K)     │          65.3 │         142.1 │       2.18×             ║
+╚═══════════════════════╧═══════════════╧═══════════════╧═════════════════════════╝
+```
+
+| Column | Meaning |
+|--------|---------|
+| **Scenario** | DML pattern being measured |
+| **Baseline** | Average wall-clock time with no stream table (no CDC trigger) |
+| **With CDC** | Average wall-clock time with an active stream table (CDC trigger fires) |
+| **Write Amplification** | `With CDC / Baseline` — how many times slower the write path becomes |
+
+### Machine-Readable Output
+
+```
+[CDC_BENCH] scenario=single-row_INSERT baseline_avg_ms=450.2 cdc_avg_ms=890.5 write_amplification=1.98
+```
+
+### Interpreting Write Amplification
+
+| Write Amplification | Interpretation |
+|----|----------------|
+| **1.0–1.5×** | Minimal overhead — triggers add negligible cost. Typical for bulk DML with statement-level triggers. |
+| **1.5–2.5×** | Expected range for statement-level CDC triggers. Each DML statement incurs one additional INSERT into the change buffer. |
+| **2.5–4.0×** | Moderate overhead — acceptable for most workloads. Common with row-level triggers or single-row DML. |
+| **4.0–10×** | High overhead — consider `pg_trickle.cdc_trigger_mode = 'statement'` if using row-level triggers, or reduce DML frequency. |
+| **> 10×** | Investigate — may indicate lock contention on the change buffer or pathological trigger interaction. |
+
+### Key Patterns to Look For
+
+1. **Statement-level triggers vs row-level**: Statement-level triggers (default since v0.11.0) should show significantly lower overhead for bulk DML compared to row-level triggers.
+
+2. **Bulk DML advantage**: Bulk INSERT/UPDATE/DELETE should show lower write amplification than single-row INSERT because the trigger fires once per statement, not once per row.
+
+3. **Concurrent writer safety**: The concurrent scenario should complete without deadlocks or errors, and the write amplification should be similar to the serial bulk INSERT case.
+
+4. **DELETE overhead**: DELETE triggers tend to be slightly more expensive than INSERT triggers because the trigger must capture the `OLD` row values.
