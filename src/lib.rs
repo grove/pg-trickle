@@ -33,7 +33,7 @@ mod hooks;
 mod ivm;
 mod monitor;
 mod refresh;
-mod scheduler;
+pub mod scheduler;
 mod shmem;
 pub mod version;
 mod wal_decoder;

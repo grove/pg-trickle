@@ -2238,9 +2238,9 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| SQLANCER-1 | Docker-based harness: `just sqlancer` spins up E2E container; crash-test oracle verifies that no SQLancer-generated `create_stream_table` call crashes the backend | 3–4d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §Steps 1–2 |
-| SQLANCER-2 | Equivalence oracle: for each generated query Q, assert `create_stream_table` + `refresh` output equals native `SELECT` (multiset comparison); failures auto-committed as proptest regression seeds | 3–4d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §Step 3 |
-| SQLANCER-3 | CI `weekly-sqlancer` job (daily schedule + manual dispatch); new proptest seed files committed on any detected correctness failure | 1–2d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) |
+| SQLANCER-1 | Docker-based harness: `just sqlancer` spins up E2E container; crash-test oracle verifies that no SQLancer-generated `create_stream_table` call crashes the backend | 3–4d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §Steps 1–2 | ✅ Done in v0.12.0 Phase 4 |
+| SQLANCER-2 | Equivalence oracle: for each generated query Q, assert `create_stream_table` + `refresh` output equals native `SELECT` (multiset comparison); failures auto-committed as proptest regression seeds | 3–4d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §Step 3 | ✅ Done in v0.12.0 Phase 4 |
+| SQLANCER-3 | CI `weekly-sqlancer` job (daily schedule + manual dispatch); new proptest seed files committed on any detected correctness failure | 1–2d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) | ✅ Done in v0.12.0 Phase 4 |
 
 > **SQLancer fuzzing subtotal: ~1–2 weeks**
 
@@ -2254,8 +2254,8 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| PROP-5 | Topology / scheduler stress: randomized DAG topologies with multi-source branch interactions; assert no incorrect refresh ordering or spurious suspension | 4–6d | [PLAN_TEST_PROPERTY_BASED_INVARIANTS.md](plans/testing/PLAN_TEST_PROPERTY_BASED_INVARIANTS.md) §Item 5 |
-| PROP-6 | Pure Rust DAG / scheduler helper properties: ordering invariants, monotonic metadata helpers, SCC bookkeeping edge-cases | 2–4d | [PLAN_TEST_PROPERTY_BASED_INVARIANTS.md](plans/testing/PLAN_TEST_PROPERTY_BASED_INVARIANTS.md) §Item 6 |
+| PROP-5 | Topology / scheduler stress: randomized DAG topologies with multi-source branch interactions; assert no incorrect refresh ordering or spurious suspension | 4–6d | [PLAN_TEST_PROPERTY_BASED_INVARIANTS.md](plans/testing/PLAN_TEST_PROPERTY_BASED_INVARIANTS.md) §Item 5 | ✅ Done in v0.12.0 Phase 4 |
+| PROP-6 | Pure Rust DAG / scheduler helper properties: ordering invariants, monotonic metadata helpers, SCC bookkeeping edge-cases | 2–4d | [PLAN_TEST_PROPERTY_BASED_INVARIANTS.md](plans/testing/PLAN_TEST_PROPERTY_BASED_INVARIANTS.md) §Item 6 | ✅ Done in v0.12.0 Phase 4 |
 
 > **Property testing subtotal: ~6–10 days**
 
@@ -2373,8 +2373,8 @@ large design changes; all build on existing infrastructure.
 - [x] DAG-B1: DAG topology benchmark infrastructure + linear chain benchmarks (Session 1) ✅
 - [x] DAG-B2+B3: Wide DAG, fan-out, diamond, mixed topology benchmarks (Sessions 2–3) ✅
 - [x] DAG-B4: `docs/BENCHMARK.md` updated with DAG topology section ✅
-- [ ] SQLANCER: Crash-test oracle + equivalence oracle running in weekly CI job; zero correctness mismatches on known test corpus
-- [ ] PROP-5+6: Topology stress and DAG/scheduler helper property tests pass
+- [x] SQLANCER: Crash-test oracle + equivalence oracle running in weekly CI job; zero correctness mismatches on known test corpus ✅ Done in v0.12.0 Phase 4
+- [x] PROP-5+6: Topology stress and DAG/scheduler helper property tests pass ✅ Done in v0.12.0 Phase 4
 - [x] ~~D-2 spike~~ ➡️ Deferred to post-1.0 research backlog (SPI-in-change-callback infeasibility; Very High risk; no production code until a separate feasibility study produces an RFC)
 - [x] ~~PG 16/17 backward compatibility~~ ➡️ Deferred to v0.13.0 (BC1–BC5)
 - [ ] PERF-2: `buffer_partitioning = 'auto'` implemented; auto-promote benchmark passes
