@@ -967,3 +967,110 @@ async fn test_multi_cycle_join_null_key_transitions() {
     db.refresh_st("nk_st").await;
     db.assert_st_matches_query("nk_st", q).await;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 4.4 (TESTING_GAPS_2): Multi-cycle lateral join + recursive CTE
+// ═══════════════════════════════════════════════════════════════════════
+
+/// LATERAL JOIN multi-cycle: parent + correlated subquery, 5 DML cycles.
+#[tokio::test]
+async fn test_multi_cycle_lateral_join_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE lat_parent (pid INT PRIMARY KEY, pname TEXT)")
+        .await;
+    db.execute("CREATE TABLE lat_score (sid INT PRIMARY KEY, pid INT, score INT)")
+        .await;
+    db.execute("INSERT INTO lat_parent VALUES (1,'alice'),(2,'bob'),(3,'carol')")
+        .await;
+    db.execute("INSERT INTO lat_score VALUES (10,1,80),(11,1,90),(12,2,70),(13,3,95),(14,3,85)")
+        .await;
+
+    // LATERAL correlated subquery: best score per parent
+    let q = "SELECT p.pid, p.pname, top.best \
+             FROM lat_parent p \
+             JOIN LATERAL (\
+               SELECT MAX(s.score) AS best FROM lat_score s WHERE s.pid = p.pid\
+             ) top ON true";
+    db.create_st("lat_st", q, "1m", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("lat_st", q).await;
+
+    // Cycle 1: add new score that becomes the new best
+    db.execute("INSERT INTO lat_score VALUES (15, 1, 99)").await;
+    db.refresh_st("lat_st").await;
+    db.assert_st_matches_query("lat_st", q).await;
+
+    // Cycle 2: delete the current best — score reverts
+    db.execute("DELETE FROM lat_score WHERE sid = 15").await;
+    db.refresh_st("lat_st").await;
+    db.assert_st_matches_query("lat_st", q).await;
+
+    // Cycle 3: add new parent (no scores yet → best = NULL)
+    db.execute("INSERT INTO lat_parent VALUES (4,'dave')").await;
+    db.refresh_st("lat_st").await;
+    db.assert_st_matches_query("lat_st", q).await;
+
+    // Cycle 4: add scores for the new parent
+    db.execute("INSERT INTO lat_score VALUES (16,4,60),(17,4,75)")
+        .await;
+    db.refresh_st("lat_st").await;
+    db.assert_st_matches_query("lat_st", q).await;
+
+    // Cycle 5: delete all scores for bob → best becomes NULL
+    db.execute("DELETE FROM lat_score WHERE pid = 2").await;
+    db.refresh_st("lat_st").await;
+    db.assert_st_matches_query("lat_st", q).await;
+}
+
+/// Recursive CTE multi-cycle: org hierarchy — insert/delete nodes, depth changes.
+#[tokio::test]
+async fn test_multi_cycle_recursive_cte_differential() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE rc_org (eid INT PRIMARY KEY, ename TEXT, manager_id INT)")
+        .await;
+    // Seed the hierarchy: CEO → VP → Mgr → Employee
+    db.execute(
+        "INSERT INTO rc_org VALUES \
+         (1,'CEO',NULL),(2,'VP_Eng',1),(3,'VP_Sales',1),\
+         (4,'Mgr_BE',2),(5,'Mgr_FE',2),(6,'Dev1',4),(7,'Dev2',4)",
+    )
+    .await;
+
+    let q = "WITH RECURSIVE hierarchy AS (\
+               SELECT eid, ename, manager_id, 0 AS depth \
+               FROM rc_org WHERE manager_id IS NULL \
+               UNION ALL \
+               SELECT e.eid, e.ename, e.manager_id, h.depth + 1 \
+               FROM rc_org e JOIN hierarchy h ON e.manager_id = h.eid\
+             ) \
+             SELECT eid, ename, depth FROM hierarchy";
+    db.create_st("rc_st", q, "1m", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("rc_st", q).await;
+
+    // Cycle 1: add a new leaf
+    db.execute("INSERT INTO rc_org VALUES (8,'Dev3',5)").await;
+    db.refresh_st("rc_st").await;
+    db.assert_st_matches_query("rc_st", q).await;
+
+    // Cycle 2: add a new manager (mid-tree node with children attached later)
+    db.execute("INSERT INTO rc_org VALUES (9,'Mgr_Sales',3)")
+        .await;
+    db.refresh_st("rc_st").await;
+    db.assert_st_matches_query("rc_st", q).await;
+
+    // Cycle 3: attach leaf to new manager
+    db.execute("INSERT INTO rc_org VALUES (10,'Sales1',9)")
+        .await;
+    db.refresh_st("rc_st").await;
+    db.assert_st_matches_query("rc_st", q).await;
+
+    // Cycle 4: update a name (no structural change)
+    db.execute("UPDATE rc_org SET ename = 'CTO' WHERE eid = 2")
+        .await;
+    db.refresh_st("rc_st").await;
+    db.assert_st_matches_query("rc_st", q).await;
+
+    // Cycle 5: delete a leaf node
+    db.execute("DELETE FROM rc_org WHERE eid = 7").await;
+    db.refresh_st("rc_st").await;
+    db.assert_st_matches_query("rc_st", q).await;
+}
