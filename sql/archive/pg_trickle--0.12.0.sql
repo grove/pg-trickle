@@ -249,7 +249,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table_if_not_exists"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -297,7 +298,8 @@ CREATE  FUNCTION pgtrickle."create_or_replace_stream_table"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -878,7 +880,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -1070,6 +1073,48 @@ CREATE  FUNCTION pgtrickle."get_staleness"(
 STRICT  
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_staleness_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- Circuit-breaker fuse functions (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."reset_fuse"(
+        "name" TEXT,
+        "action" TEXT DEFAULT 'apply'
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'reset_fuse_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- Circuit-breaker fuse functions (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."fuse_status"() RETURNS TABLE (
+        "stream_table" TEXT,
+        "fuse_mode" TEXT,
+        "fuse_state" TEXT,
+        "fuse_ceiling" bigint,
+        "effective_ceiling" bigint,
+        "fuse_sensitivity" INT,
+        "blown_at" timestamp with time zone,
+        "blow_reason" TEXT
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'fuse_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- Refresh mode explainer (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."explain_refresh_mode"(
+        "name" TEXT
+) RETURNS TABLE (
+        "configured_mode" TEXT,
+        "effective_mode" TEXT,
+        "downgrade_reason" TEXT
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'explain_refresh_mode_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
