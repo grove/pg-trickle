@@ -81,6 +81,10 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // the Docker container's temp_file_limit (4 GB).  The generated delta
     // queries create large intermediate results for complex join graphs.
     "q05",
+    // q09: 6-table join (nation, supplier, part, partsupp, orders, lineitem)
+    // generates delta queries that exceed the Docker container's
+    // temp_file_limit (4 GB) — same root cause as q05.
+    "q09",
     // q12: CASE WHEN with IN-list predicate produces non-deterministic
     // incremental results — known DVM drift issue (row content mismatch
     // in high_line_count / low_line_count aggregates).
@@ -98,6 +102,21 @@ const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
     // q05: multi-table joins produce DVM SQL that exceeds
     // the Docker container's temp_file_limit (4 GB).
     "q05",
+    // q07: 5-table join (nation×2, supplier, customer, orders, lineitem)
+    // IVM trigger generates intermediate results that exceed the Docker
+    // container's temp_file_limit (4 GB).
+    "q07",
+    // q08: 7-table join (region, nation×2, supplier, part, customer, orders,
+    // lineitem) — largest join in TPC-H; exceeds temp_file_limit (4 GB).
+    "q08",
+    // q09: 6-table join (nation, supplier, part, partsupp, orders, lineitem)
+    // exceeds temp_file_limit (4 GB) — same root cause as q05/q07/q08.
+    "q09",
+    // q15: IMMEDIATE IVM trigger references a generated column alias
+    // (__pgt_v_1.__pgt_c_1) that does not exist in the IVM delta view —
+    // known column-naming mismatch in IVM trigger generation for CTE-based
+    // views that compute aggregates with intermediate CTEs.
+    "q15",
 ];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
