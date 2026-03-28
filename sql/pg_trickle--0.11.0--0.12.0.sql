@@ -59,8 +59,15 @@ AS 'MODULE_PATHNAME', 'explain_refresh_mode_wrapper';
 
 -- ── Phase 1.5: Update Stream Table Creation Functions ───────────────────────────
 -- (Add partition_by parameter to existing stream table creation functions)
+-- First, drop the old function signatures (without partition_by).
+-- We can't use CASCADE here because it would drop dependent views/constraints.
 
-CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool); 
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool);
+DROP FUNCTION IF EXISTS pgtrickle."create_or_replace_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool);
+
+-- Now create the new versions with partition_by parameter
+CREATE FUNCTION pgtrickle."create_stream_table"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
@@ -76,7 +83,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
 
-CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
+CREATE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
@@ -92,7 +99,7 @@ CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
 
-CREATE OR REPLACE FUNCTION pgtrickle."create_or_replace_stream_table"(
+CREATE FUNCTION pgtrickle."create_or_replace_stream_table"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
