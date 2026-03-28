@@ -19,7 +19,7 @@ A separate [PGXN workflow](../.github/workflows/pgxn.yml) also fires on the same
 ## Prerequisites
 
 - Push access to the repository (or a PR merged by a maintainer)
-- All CI checks passing on `main`
+- All CI checks passing on `main` (verify the last run on the version-bump commit succeeded)
 - The version in `Cargo.toml` matches the tag you intend to push
 - Required GitHub secrets configured (see [Required GitHub Secrets](#required-github-secrets) below)
 
@@ -322,6 +322,7 @@ Every release requires manual updates to the files below. Missing any of them le
 [ ] just check-upgrade-all — all upgrade steps pass completeness checks (not just the one-step hop)
 [ ] Upgrade automation defaults — CI/local upgrade checks and E2E target the new version
 [ ] just check-version-sync — all version references in sync
+[ ] All CI checks on main have passed (verify the last run on the version-bump commit succeeded)
 [ ] git tag matches Cargo.toml version
 ```
 
