@@ -809,14 +809,69 @@ pub fn capture_delta_to_bypass_table(
 
     let bypass_table = format!("pg_temp.__pgt_bypass_{}", pgt_id);
 
-    let sql = build_bypass_capture_sql(pgt_id, user_cols_typed, &bypass_table);
+    // DAG-4/ST-ST-10: If a pre-snapshot table exists (created by the
+    // capture_incremental_diff_to_st_buffer path in explicit_dml), use a
+    // pre/post comparison to produce correct D+I pairs for value-changes.
+    // The weight-aggregated __pgt_delta_ collapses D+I with the same
+    // __pgt_row_id into a single I, which omits the D for old column values.
+    // Downstream STs with WHERE filters on changed columns would miss the
+    // deletion and retain stale rows.
+    let pre_snapshot_exists: bool = Spi::get_one::<bool>(&format!(
+        "SELECT to_regclass('__pgt_pre_{}') IS NOT NULL",
+        pgt_id
+    ))
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
 
-    let count = Spi::connect_mut(|client| {
-        let result = client
-            .update(&sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
+    // DAG-4/ST-ST-10: Read the MAX(lsn) from the persistent change buffer
+    // so that bypass table rows use an LSN that falls within the downstream
+    // ST's frontier range.  Between capture_incremental_diff_to_st_buffer
+    // (which writes to the persistent buffer inside execute_differential_refresh)
+    // and this bypass capture (called after execute_scheduled_refresh stores
+    // frontier and other catalog metadata), WAL-generating catalog DMLs advance
+    // pg_current_wal_lsn().  Using the stale higher LSN would cause the
+    // downstream scan's `lsn <= new_lsn` filter to exclude bypass rows,
+    // silently dropping the entire delta.
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let buffer_lsn: Option<String> = if crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+        Spi::get_one::<String>(&format!(
+            "SELECT MAX(lsn)::text FROM \"{change_schema}\".changes_pgt_{pgt_id}",
+        ))
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
+    let count = if pre_snapshot_exists {
+        let user_cols: Vec<String> = user_cols_typed.iter().map(|(n, _)| n.clone()).collect();
+        let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
+            .chain(std::iter::once("action \"char\"".to_string()))
+            .chain(std::iter::once("pk_hash bigint".to_string()))
+            .chain(
+                user_cols_typed
+                    .iter()
+                    .map(|(name, typ)| format!("\"new_{}\" {}", name.replace('"', "\"\""), typ)),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        let create_sql =
+            format!("CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP",);
+        Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        capture_diff_to_table(st, &user_cols, &bypass_table, pgt_id, buffer_lsn.as_deref())?
+    } else {
+        let sql = build_bypass_capture_sql(
+            pgt_id,
+            user_cols_typed,
+            &bypass_table,
+            buffer_lsn.as_deref(),
+        );
+        Spi::connect_mut(|client| {
+            let result = client
+                .update(&sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<i64, PgTrickleError>(result.len() as i64)
+        })?
+    };
 
     set_st_bypass(pgt_id, bypass_table.clone());
 
@@ -833,6 +888,145 @@ pub fn capture_delta_to_bypass_table(
     Ok(count)
 }
 
+/// Shared pre/post diff logic for capturing D+I pairs into a target table.
+///
+/// Used by both `capture_delta_to_bypass_table` (FusedChain path) and
+/// `capture_incremental_diff_to_st_buffer` (persistent buffer path).
+///
+/// `target_table` must already exist with the appropriate schema
+/// (`lsn, action, pk_hash, new_col1, ...`).
+/// Reads the pre-snapshot from `__pgt_pre_{pgt_id}` and compares with the
+/// current state of the ST backing table.
+///
+/// `lsn_override`: when `Some("0/1A2B3C")`, the given literal LSN is used
+/// instead of `pg_current_wal_lsn()`.  This is required for bypass tables
+/// (DAG-4) where WAL-generating catalog DMLs between the persistent buffer
+/// capture and the bypass capture advance `pg_current_wal_lsn()` past the
+/// downstream ST's frontier upper bound.
+fn capture_diff_to_table(
+    st: &StreamTableMeta,
+    user_cols: &[String],
+    target_table: &str,
+    pgt_id: i64,
+    lsn_override: Option<&str>,
+) -> Result<i64, PgTrickleError> {
+    let schema = &st.pgt_schema;
+    let name = &st.pgt_name;
+    let quoted_table = format!(
+        "\"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        name.replace('"', "\"\""),
+    );
+
+    let new_col_list: String = user_cols
+        .iter()
+        .map(|c| format!("\"new_{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let pre_col_refs: String = user_cols
+        .iter()
+        .map(|c| format!("pre.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let post_col_refs: String = user_cols
+        .iter()
+        .map(|c| format!("post.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let is_distinct_pairs: String = user_cols
+        .iter()
+        .map(|c| {
+            let qc = format!("\"{}\"", c.replace('"', "\"\""));
+            format!("pre.{qc} IS DISTINCT FROM post.{qc}")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let pre_pk_hash = build_content_hash_expr("pre.", user_cols);
+    let post_pk_hash = build_content_hash_expr("post.", user_cols);
+
+    // DAG-4: When an LSN override is provided (bypass tables), use the
+    // literal value so the rows fall within the downstream frontier range.
+    let lsn_expr = match lsn_override {
+        Some(lsn) => format!("'{lsn}'::pg_lsn"),
+        None => "pg_current_wal_lsn()".to_string(),
+    };
+
+    let mut total: i64 = 0;
+
+    // Deleted rows: in pre but no longer in the table.
+    let del_sql = format!(
+        "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+         SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
+         FROM __pgt_pre_{pgt_id} pre \
+         LEFT JOIN {quoted_table} post ON pre.__pgt_row_id = post.__pgt_row_id \
+         WHERE post.__pgt_row_id IS NULL"
+    );
+    total += Spi::connect_mut(|c| {
+        Ok::<i64, PgTrickleError>(
+            c.update(&del_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .len() as i64,
+        )
+    })?;
+
+    // Inserted rows: in table (scoped to delta row_ids) but not in pre.
+    let ins_sql = format!(
+        "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+         SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
+         FROM {quoted_table} post \
+         JOIN (SELECT DISTINCT __pgt_row_id FROM __pgt_delta_{pgt_id}) delta \
+           ON delta.__pgt_row_id = post.__pgt_row_id \
+         LEFT JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+         WHERE pre.__pgt_row_id IS NULL"
+    );
+    total += Spi::connect_mut(|c| {
+        Ok::<i64, PgTrickleError>(
+            c.update(&ins_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .len() as i64,
+        )
+    })?;
+
+    // Changed rows: same row_id, different column values.
+    if !is_distinct_pairs.is_empty() {
+        let chg_del_sql = format!(
+            "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+             SELECT {lsn_expr}, 'D', {pre_pk_hash}, {pre_col_refs} \
+             FROM __pgt_pre_{pgt_id} pre \
+             JOIN {quoted_table} post ON post.__pgt_row_id = pre.__pgt_row_id \
+             WHERE {is_distinct_pairs}"
+        );
+        total += Spi::connect_mut(|c| {
+            Ok::<i64, PgTrickleError>(
+                c.update(&chg_del_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .len() as i64,
+            )
+        })?;
+
+        let chg_ins_sql = format!(
+            "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+             SELECT {lsn_expr}, 'I', {post_pk_hash}, {post_col_refs} \
+             FROM {quoted_table} post \
+             JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+             WHERE {is_distinct_pairs}"
+        );
+        total += Spi::connect_mut(|c| {
+            Ok::<i64, PgTrickleError>(
+                c.update(&chg_ins_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .len() as i64,
+            )
+        })?;
+    }
+
+    Ok(total)
+}
+
 /// Build the SQL for creating a bypass temp table and inserting delta rows.
 ///
 /// Pure-logic helper for unit testing.
@@ -840,6 +1034,7 @@ pub fn build_bypass_capture_sql(
     pgt_id: i64,
     user_cols_typed: &[(String, String)],
     bypass_table: &str,
+    lsn_override: Option<&str>,
 ) -> String {
     let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
         .chain(std::iter::once("action \"char\"".to_string()))
@@ -869,13 +1064,52 @@ pub fn build_bypass_capture_sql(
     let col_names: Vec<String> = user_cols_typed.iter().map(|(n, _)| n.clone()).collect();
     let pk_hash_expr = build_content_hash_expr("d.", &col_names);
 
+    // DAG-4: Use the persistent buffer's LSN when available so the bypass
+    // rows fall within the downstream scan's frontier range.
+    let lsn_expr = match lsn_override {
+        Some(lsn) => format!("'{lsn}'::pg_lsn"),
+        None => "pg_current_wal_lsn()".to_string(),
+    };
+
     format!(
         "CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP;\n\
          INSERT INTO {bypass_table} (lsn, action, pk_hash, {new_col_list}) \
-         SELECT pg_current_wal_lsn(), d.__pgt_action, {pk_hash_expr}, {d_col_list} \
+         SELECT {lsn_expr}, d.__pgt_action, {pk_hash_expr}, {d_col_list} \
          FROM __pgt_delta_{pgt_id} d \
          WHERE d.__pgt_action IN ('I', 'D')"
     )
+}
+
+/// Capture the effective delta from a DIFFERENTIAL refresh into the ST's
+/// change buffer using a pre/post snapshot comparison.
+///
+/// Called after the explicit DML (DELETE + UPDATE + INSERT) when the ST has
+/// downstream consumers.  Delegates to [`capture_diff_to_table`] with the
+/// persistent `changes_pgt_{pgt_id}` buffer as the target.
+fn capture_incremental_diff_to_st_buffer(
+    st: &StreamTableMeta,
+    user_cols: &[String],
+) -> Result<i64, PgTrickleError> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let pgt_id = st.pgt_id;
+
+    if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+        return Ok(0);
+    }
+
+    let target_table = format!("\"{change_schema}\".changes_pgt_{pgt_id}");
+    let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id, None)?;
+
+    if total > 0 {
+        pgrx::debug1!(
+            "[pg_trickle] ST-ST INCR: captured {} diff rows to changes_pgt_{} for {}.{}",
+            total,
+            pgt_id,
+            st.pgt_schema,
+            st.pgt_name,
+        );
+    }
+    Ok(total)
 }
 
 /// Capture the full-refresh diff into the ST's change buffer.
@@ -3536,6 +3770,54 @@ pub fn execute_differential_refresh(
         Spi::run(&materialize_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         let t_mat = t_mat_start.elapsed();
 
+        // ST-ST-10: When this ST has downstream ST consumers, snapshot
+        // the affected rows BEFORE applying DML.  The weight-aggregation
+        // wrapper collapses D+I pairs for the same __pgt_row_id into a
+        // single I action, which is correct for the MERGE but loses the
+        // DELETE for old column values.  The pre-snapshot lets us compute
+        // the true effective delta (including value-change DELETEs) after
+        // the DML completes.
+        let needs_diff_capture = has_downstream_st_consumers(st.pgt_id);
+        let diff_capture_cols = if needs_diff_capture {
+            let cols = get_st_user_columns(st);
+            let col_list: String = cols
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let qt = format!(
+                "\"{}\".\"{}\"",
+                schema.replace('"', "\"\""),
+                name.replace('"', "\"\""),
+            );
+
+            let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_pre_{}", st.pgt_id));
+
+            let snapshot_sql = format!(
+                "CREATE TEMP TABLE __pgt_pre_{pgt_id} ON COMMIT DROP AS \
+                 SELECT __pgt_row_id, {col_list} FROM {qt} \
+                 WHERE __pgt_row_id IN (\
+                   SELECT __pgt_row_id FROM __pgt_delta_{pgt_id}\
+                 )",
+                pgt_id = st.pgt_id,
+            );
+            if let Err(e) = Spi::run(&snapshot_sql) {
+                pgrx::warning!(
+                    "[pg_trickle] ST-ST-10: pre-snapshot failed for {}.{}: {} — \
+                     falling back to delta-based capture",
+                    schema,
+                    name,
+                    e,
+                );
+                Vec::new()
+            } else {
+                cols
+            }
+        } else {
+            Vec::new()
+        };
+
         // Step 2: DELETE removed rows (AFTER DELETE triggers fire)
         let t_del_start = Instant::now();
         let del_count = Spi::connect_mut(|client| {
@@ -3580,16 +3862,31 @@ pub fn execute_differential_refresh(
             name,
         );
 
-        // ST-ST-2: Capture delta to change buffer for downstream ST consumers.
-        if has_downstream_st_consumers(st.pgt_id) {
-            let user_cols = get_st_user_columns(st);
-            if let Err(e) = capture_delta_to_st_buffer(st, &user_cols) {
-                pgrx::warning!(
-                    "[pg_trickle] ST-ST: delta capture failed for {}.{}: {}",
-                    schema,
-                    name,
-                    e,
-                );
+        // ST-ST-2/ST-ST-10: Capture effective delta to change buffer for
+        // downstream ST consumers.  When a pre-snapshot was taken
+        // (diff_capture_cols is non-empty), use the pre/post comparison
+        // to produce accurate I/D pairs that include value-change DELETEs.
+        // Otherwise, fall back to the delta-based capture.
+        if needs_diff_capture {
+            if !diff_capture_cols.is_empty() {
+                if let Err(e) = capture_incremental_diff_to_st_buffer(st, &diff_capture_cols) {
+                    pgrx::warning!(
+                        "[pg_trickle] ST-ST-10: incremental diff capture failed for {}.{}: {}",
+                        schema,
+                        name,
+                        e,
+                    );
+                }
+            } else {
+                let user_cols = get_st_user_columns(st);
+                if let Err(e) = capture_delta_to_st_buffer(st, &user_cols) {
+                    pgrx::warning!(
+                        "[pg_trickle] ST-ST: delta capture failed for {}.{}: {}",
+                        schema,
+                        name,
+                        e,
+                    );
+                }
             }
         }
 
@@ -4695,6 +4992,7 @@ mod tests {
                 ("name".to_string(), "text".to_string()),
             ],
             "pg_temp.__pgt_bypass_42",
+            None,
         );
         // ST-ST-9: pk_hash should be content hash, not d.__pgt_row_id
         assert!(sql.contains("pg_trickle_hash_multi(ARRAY[d.\"id\"::TEXT, d.\"name\"::TEXT])"));
@@ -4816,6 +5114,7 @@ mod pg_tests {
                 ("name".to_string(), "text".to_string()),
             ],
             "pg_temp.__pgt_bypass_42",
+            None,
         );
         assert!(sql.contains("CREATE TEMP TABLE IF NOT EXISTS pg_temp.__pgt_bypass_42"));
         assert!(sql.contains("ON COMMIT DROP"));
@@ -4831,6 +5130,7 @@ mod pg_tests {
             7,
             &[("col\"name".to_string(), "text".to_string())],
             "pg_temp.__pgt_bypass_7",
+            None,
         );
         // Column with quote should be properly escaped.
         assert!(sql.contains(r#""new_col""name""#));
@@ -4846,6 +5146,7 @@ mod pg_tests {
                 ("b".to_string(), "text".to_string()),
             ],
             "pg_temp.__pgt_bypass_1",
+            None,
         );
         // Verify the column definitions in CREATE TEMP TABLE.
         assert!(sql.contains("lsn pg_lsn"));
@@ -4853,6 +5154,31 @@ mod pg_tests {
         assert!(sql.contains("pk_hash bigint"));
         assert!(sql.contains("\"new_a\" bigint"));
         assert!(sql.contains("\"new_b\" text"));
+    }
+
+    #[test]
+    fn test_build_bypass_capture_sql_lsn_override() {
+        let sql = build_bypass_capture_sql(
+            42,
+            &[("id".to_string(), "integer".to_string())],
+            "pg_temp.__pgt_bypass_42",
+            Some("0/1A2B3C"),
+        );
+        // Should use the literal LSN, not pg_current_wal_lsn()
+        assert!(sql.contains("'0/1A2B3C'::pg_lsn"));
+        assert!(!sql.contains("pg_current_wal_lsn()"));
+    }
+
+    #[test]
+    fn test_build_bypass_capture_sql_no_lsn_override() {
+        let sql = build_bypass_capture_sql(
+            42,
+            &[("id".to_string(), "integer".to_string())],
+            "pg_temp.__pgt_bypass_42",
+            None,
+        );
+        // Should use pg_current_wal_lsn() by default
+        assert!(sql.contains("pg_current_wal_lsn()"));
     }
 
     #[test]
