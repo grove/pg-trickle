@@ -2443,8 +2443,9 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | G14-MDED | **MERGE deduplication profiling.** Profile how often concurrent-write scenarios produce duplicate key entries requiring pre-MERGE compaction. If ≥10% of refresh cycles need dedup, write an RFC for a two-pass MERGE strategy. | 3–5d | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PROF-DLT | **Delta SQL query plan profiling (`explain_delta()` function).** Capture `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` for auto-generated delta SQL queries to identify PostgreSQL execution bottlenecks (join algorithms, scan types, sort spills). Add `pgtrickle.explain_delta(st_name, format DEFAULT 'text')` SQL function; optional `PGS_PROFILE_DELTA=1` environment variable for E2E test auto-capture to `/tmp/delta_plans/<st>.json`. Enables identification of operator-level performance issues (semi-join full scans, deep join chains). Prerequisite for data-driven MERGE optimization. | 1–2w | [PLAN_TPC_H_BENCHMARKING.md §1-5](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
 
-> **MERGE profiling subtotal: ~3–5 days**
+> **MERGE profiling subtotal: ~1–3 weeks**
 
 ### dbt Macro Updates (Phase 8)
 
@@ -2461,7 +2462,7 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 
 > **dbt macro updates subtotal: ~2–3.5 days**
 
-> **v0.13.0 total: ~11–17 weeks**
+> **v0.13.0 total: ~12–19 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d)
 
 **Exit criteria:**
 - [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
@@ -2473,6 +2474,7 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 - [ ] A1-3b: HASH partitioning uses per-partition MERGE loop; only affected child partitions are targeted
 - [ ] PART-WARN: `WARNING` emitted when default partition has rows after refresh
 - [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
+- [ ] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json; `PGS_PROFILE_DELTA=1` enables auto-capture in E2E tests; documented in SQL_REFERENCE.md
 - [ ] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
 - [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
