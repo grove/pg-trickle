@@ -9,6 +9,7 @@
 //! - Tier 3d: DRed in DIFFERENTIAL mode — rederivation (multi-path / diamond)
 //! - Tier 3e: DRed in DIFFERENTIAL mode — derived-column propagation (P2-1)
 //! - Tier 3f: Recursive CTEs — IMMEDIATE mode (semi-naive, DRed, depth guard)
+//! - Tier 3h: Non-monotone recursive CTEs — recomputation fallback in DIFFERENTIAL mode
 //! - Subqueries in FROM (T_RangeSubselect)
 //!
 //! Prerequisites: `./tests/build_e2e_image.sh`
@@ -2963,6 +2964,172 @@ async fn test_recursive_cte_immediate_mode_depth_guard() {
     );
 
     db.alter_system_reset_and_wait("pg_trickle.ivm_recursive_max_depth", &default_depth)
+        .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tier 3h — Non-monotone recursive CTEs (recomputation fallback)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// SQL-RECUR audit: when the recursive term of a WITH RECURSIVE CTE contains
+// a non-monotone operator (aggregate, EXCEPT, DISTINCT, anti-join, window),
+// `diff_recursive_cte` detects this via `recursive_term_is_non_monotone` and
+// falls back to the recomputation strategy instead of semi-naive propagation.
+//
+// The recomputation strategy re-runs the full defining query on each refresh
+// and computes the symmetric difference against the stored rows. This is
+// always correct for non-monotone recursive structures, at the cost of O(n)
+// work per refresh cycle.
+//
+// These tests verify:
+//   1. DIFFERENTIAL stream tables with non-monotone recursive CTEs are
+//      created successfully (no parse error).
+//   2. Refreshes produce correct results under INSERT, UPDATE, and DELETE.
+//
+// Result: G1.3 (non-monotone recursive CTEs) confirmed correct via
+// recomputation fallback — downgraded to P4 (tracked, no further action).
+
+/// Recursive CTE whose recursive term contains an **aggregate subquery** in
+/// the FROM clause (CROSS JOIN with `SELECT MAX(ceiling) FROM nm_limit`).
+///
+/// The DVM detects `OpTree::Aggregate` inside the `Subquery` of the
+/// recursive term's JOIN via `recursive_term_is_non_monotone` and switches
+/// to the recomputation delta strategy.
+///
+/// Verifies correct row counts after creation, ceiling expansion, and
+/// ceiling contraction.
+#[tokio::test]
+async fn test_recursive_cte_non_monotone_agg_subquery_recomputation() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nm_limit (ceiling INT)").await;
+    db.execute("INSERT INTO nm_limit VALUES (4)").await;
+
+    // Recursive term cross-joins with an aggregate subquery: non-monotone.
+    // The recursive term generates id = 1, 2, …, MAX(ceiling).
+    let query = "WITH RECURSIVE t(id) AS (\
+                     SELECT 1 AS id \
+                     UNION ALL \
+                     SELECT t.id + 1 AS id \
+                     FROM t \
+                     CROSS JOIN (SELECT MAX(ceiling) AS ceiling FROM nm_limit) bounds \
+                     WHERE t.id < bounds.ceiling\
+                 ) SELECT id FROM t";
+
+    db.create_st("nm_limit_st", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    // Initial populate: ceiling=4 → {1, 2, 3, 4}
+    assert_eq!(
+        db.count("public.nm_limit_st").await,
+        4,
+        "Initial: ids 1..4 with ceiling=4"
+    );
+    db.assert_st_matches_query("public.nm_limit_st", query)
+        .await;
+
+    // Expand: ceiling → 6 → {1, 2, 3, 4, 5, 6}
+    db.execute("UPDATE nm_limit SET ceiling = 6").await;
+    db.refresh_st("nm_limit_st").await;
+
+    assert_eq!(
+        db.count("public.nm_limit_st").await,
+        6,
+        "After ceiling=6: ids 1..6"
+    );
+    db.assert_st_matches_query("public.nm_limit_st", query)
+        .await;
+
+    // Contract: ceiling → 2 → {1, 2}
+    db.execute("UPDATE nm_limit SET ceiling = 2").await;
+    db.refresh_st("nm_limit_st").await;
+
+    assert_eq!(
+        db.count("public.nm_limit_st").await,
+        2,
+        "After ceiling=2: ids 1..2 only"
+    );
+    db.assert_st_matches_query("public.nm_limit_st", query)
+        .await;
+}
+
+/// Recursive CTE whose recursive term contains **EXCEPT** (set difference)
+/// implemented via a subquery in the UNION ALL rarg.
+///
+/// The rarg `SelectStmt` has `op = SETOP_EXCEPT`, so `parse_set_operation`
+/// builds `OpTree::Except { … }` for the recursive term.
+/// `recursive_term_is_non_monotone` returns `Some("EXCEPT")`, triggering
+/// the recomputation fallback.
+///
+/// Verifies that rows excluded by the EXCEPT branch are correctly absent
+/// and that updates propagate via recomputation.
+#[tokio::test]
+async fn test_recursive_cte_non_monotone_except_in_recursive_term() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE nm_tree (id INT PRIMARY KEY, parent_id INT)")
+        .await;
+    db.execute("CREATE TABLE nm_blocked (blocked_id INT PRIMARY KEY)")
+        .await;
+    db.execute("INSERT INTO nm_tree VALUES (1, NULL), (2, 1), (3, 1), (4, 2)")
+        .await;
+    db.execute("INSERT INTO nm_blocked VALUES (4)").await;
+
+    // Recursive term: reach children EXCEPT those whose id is in nm_blocked.
+    // This EXCEPT makes the recursive term non-monotone (set difference).
+    //
+    //   WITH RECURSIVE reachable AS (
+    //     SELECT id FROM nm_tree WHERE parent_id IS NULL   -- base: root
+    //     UNION ALL
+    //     (SELECT c.id FROM nm_tree c JOIN reachable r ON c.parent_id = r.id
+    //      EXCEPT
+    //      SELECT blocked_id FROM nm_blocked)             -- exclude blocked
+    //   )
+    //   SELECT id FROM reachable
+    let query = "WITH RECURSIVE reachable(id) AS (\
+                     SELECT id FROM nm_tree WHERE parent_id IS NULL \
+                     UNION ALL \
+                     (SELECT c.id FROM nm_tree c \
+                      JOIN reachable r ON c.parent_id = r.id \
+                      EXCEPT \
+                      SELECT blocked_id FROM nm_blocked)\
+                 ) SELECT id FROM reachable";
+
+    db.create_st("nm_except_st", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    // Initial: root(1), child(2), child(3) reachable; 4 is blocked.
+    assert_eq!(
+        db.count("public.nm_except_st").await,
+        3,
+        "Initial: 1, 2, 3 reachable; 4 blocked"
+    );
+    db.assert_st_matches_query("public.nm_except_st", query)
+        .await;
+
+    // Unblock id=4 → it becomes reachable as child of 2.
+    db.execute("DELETE FROM nm_blocked WHERE blocked_id = 4")
+        .await;
+    db.refresh_st("nm_except_st").await;
+
+    assert_eq!(
+        db.count("public.nm_except_st").await,
+        4,
+        "After unblocking 4: 1, 2, 3, 4 all reachable"
+    );
+    db.assert_st_matches_query("public.nm_except_st", query)
+        .await;
+
+    // Re-block id=2 → 2 and its descendant 4 disappear.
+    db.execute("INSERT INTO nm_blocked VALUES (2)").await;
+    db.refresh_st("nm_except_st").await;
+
+    assert_eq!(
+        db.count("public.nm_except_st").await,
+        2,
+        "After blocking 2: only 1 and 3 reachable"
+    );
+    db.assert_st_matches_query("public.nm_except_st", query)
         .await;
 }
 

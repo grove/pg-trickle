@@ -2533,9 +2533,9 @@ cleanup for PG 16+ expression types.
 - [ ] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional
 - [ ] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend
 - [ ] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
-- [ ] SQL-RECUR: Recursive CTE non-monotone audit complete; either E2E test passes (G1.3 downgraded to P4) or non-monotone guard added with clear error message
-- [ ] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
-- [ ] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
+- [x] SQL-RECUR: Recursive CTE non-monotone audit complete; G1.3 downgraded to P4 — two Tier 3h E2E tests verify recomputation fallback is correct ✅ Done
+- [x] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
+- [x] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
 - [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
