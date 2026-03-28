@@ -4998,6 +4998,109 @@ mod tests {
         assert!(sql.contains("pg_trickle_hash_multi(ARRAY[d.\"id\"::TEXT, d.\"name\"::TEXT])"));
         assert!(!sql.contains("d.__pgt_row_id"));
     }
+
+    // ── Phase 6 (TESTING_GAPS_2): determine_refresh_action unit tests ────────
+
+    #[test]
+    fn test_determine_refresh_action_needs_reinit_takes_priority() {
+        // needs_reinit=true always → Reinitialize, regardless of changes flag
+        let st = test_st(RefreshMode::Differential, true);
+        assert_eq!(
+            determine_refresh_action(&st, true),
+            RefreshAction::Reinitialize
+        );
+        assert_eq!(
+            determine_refresh_action(&st, false),
+            RefreshAction::Reinitialize
+        );
+    }
+
+    #[test]
+    fn test_determine_refresh_action_no_upstream_changes_returns_no_data() {
+        // has_upstream_changes=false → NoData (unless needs_reinit)
+        let st_diff = test_st(RefreshMode::Differential, false);
+        let st_full = test_st(RefreshMode::Full, false);
+        assert_eq!(
+            determine_refresh_action(&st_diff, false),
+            RefreshAction::NoData
+        );
+        assert_eq!(
+            determine_refresh_action(&st_full, false),
+            RefreshAction::NoData
+        );
+    }
+
+    #[test]
+    fn test_determine_refresh_action_differential_mode_with_changes() {
+        let st = test_st(RefreshMode::Differential, false);
+        assert_eq!(
+            determine_refresh_action(&st, true),
+            RefreshAction::Differential
+        );
+    }
+
+    #[test]
+    fn test_determine_refresh_action_full_mode_with_changes() {
+        let st = test_st(RefreshMode::Full, false);
+        assert_eq!(determine_refresh_action(&st, true), RefreshAction::Full);
+    }
+
+    #[test]
+    fn test_determine_refresh_action_immediate_falls_back_to_full() {
+        let st = test_st(RefreshMode::Immediate, false);
+        // IMMEDIATE is trigger-maintained; manual refresh → Full fallback
+        assert_eq!(determine_refresh_action(&st, true), RefreshAction::Full);
+    }
+
+    // ── Phase 6: build_is_distinct_clause boundary tests ────────────────────
+    //
+    // The threshold between column-list and hash-based comparison is
+    // WIDE_TABLE_HASH_THRESHOLD (50).  Test straddling that boundary.
+
+    #[test]
+    fn test_build_is_distinct_clause_exactly_at_threshold_uses_columns() {
+        let cols: Vec<String> = (1..=WIDE_TABLE_HASH_THRESHOLD)
+            .map(|i| format!("col{i}"))
+            .collect();
+        let sql = build_is_distinct_clause(&cols);
+        // At the threshold: use per-column IS DISTINCT FROM
+        assert!(
+            sql.contains("IS DISTINCT FROM"),
+            "Threshold should use per-column comparison"
+        );
+        assert!(
+            !sql.contains("pg_trickle_hash"),
+            "Threshold should NOT use hash comparison"
+        );
+    }
+
+    #[test]
+    fn test_build_is_distinct_clause_one_over_threshold_uses_hash() {
+        let cols: Vec<String> = (1..=(WIDE_TABLE_HASH_THRESHOLD + 1))
+            .map(|i| format!("col{i}"))
+            .collect();
+        let sql = build_is_distinct_clause(&cols);
+        assert!(
+            sql.contains("pg_trickle_hash"),
+            "One over threshold should use hash comparison"
+        );
+        // Per-column path uses `::text IS DISTINCT FROM`; hash path does not.
+        assert!(
+            !sql.contains("::text IS DISTINCT FROM"),
+            "Wide table should NOT use per-column comparison; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_build_is_distinct_clause_double_quotes_in_col_name_are_escaped() {
+        let cols = vec!["weird\"name".to_string()];
+        let sql = build_is_distinct_clause(&cols);
+        // The double quote inside the name should be escaped as ""
+        assert!(
+            sql.contains("\"\""),
+            "Double quotes in column names must be escaped; got: {sql}"
+        );
+    }
 }
 
 #[cfg(feature = "pg_test")]

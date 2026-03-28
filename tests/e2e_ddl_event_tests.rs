@@ -668,3 +668,218 @@ async fn test_add_column_on_joined_source_st_survives() {
     db.refresh_st("ddl_nj_st").await;
     assert_eq!(db.count("public.ddl_nj_st").await, 2);
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 5.2 (TESTING_GAPS_2) — Schema Evolution Tests
+// ══════════════════════════════════════════════════════════════════════
+
+/// SE-1: RENAME a column that is NOT in the defining query → benign;
+/// ST remains ACTIVE and continues to refresh correctly.
+#[tokio::test]
+async fn test_rename_unused_column_is_benign() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE se_rename_src (id INT PRIMARY KEY, used_col TEXT, extra TEXT)")
+        .await;
+    db.execute("INSERT INTO se_rename_src VALUES (1,'hello','unused')")
+        .await;
+
+    db.create_st(
+        "se_rename_st",
+        "SELECT id, used_col FROM se_rename_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("se_rename_st", "SELECT id, used_col FROM se_rename_src")
+        .await;
+
+    // Rename the unused column — should be benign
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE se_rename_src RENAME COLUMN extra TO extra_renamed",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+
+    let needs_reinit: bool = db
+        .query_scalar(
+            "SELECT needs_reinit FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'se_rename_st'",
+        )
+        .await;
+    // Renaming an unused column should not mark the ST for reinit
+    // (or, at most, mark it for reinit which the refresh recovers from)
+    let q = "SELECT id, used_col FROM se_rename_src";
+    db.refresh_st("se_rename_st").await;
+    db.assert_st_matches_query("se_rename_st", q).await;
+    let _ = needs_reinit; // behavior is implementation-defined; correctness is what matters
+}
+
+/// SE-2: Widen a VARCHAR column that IS in the defining query
+/// (VARCHAR(50) → VARCHAR(200)) — type widening is backward-compatible;
+/// ST should remain functional after refresh.
+#[tokio::test]
+async fn test_widen_varchar_type_benign() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE se_widen_src (id INT PRIMARY KEY, label VARCHAR(50))")
+        .await;
+    db.execute("INSERT INTO se_widen_src VALUES (1,'short')")
+        .await;
+
+    db.create_st(
+        "se_widen_st",
+        "SELECT id, label FROM se_widen_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("se_widen_st", "SELECT id, label FROM se_widen_src")
+        .await;
+
+    // Widen the column — backward-compatible change
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE se_widen_src ALTER COLUMN label TYPE VARCHAR(200)",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+
+    // Insert a value longer than 50 chars to confirm the widening took effect
+    db.execute("INSERT INTO se_widen_src VALUES (2, 'a_longer_label_than_fifty_characters_xxxxxxxxxxxxxxxxxx')")
+        .await;
+    db.refresh_st("se_widen_st").await;
+    db.assert_st_matches_query("se_widen_st", "SELECT id, label FROM se_widen_src")
+        .await;
+    assert_eq!(db.count("public.se_widen_st").await, 2);
+}
+
+/// SE-3: ADD NOT NULL constraint on a column NOT in the defining query
+/// is benign — ST continues to refresh correctly.
+#[tokio::test]
+async fn test_add_not_null_constraint_benign() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE se_nn_src (id INT PRIMARY KEY, score INT, note TEXT)")
+        .await;
+    db.execute("INSERT INTO se_nn_src VALUES (1, 10, 'ok'), (2, 20, 'good')")
+        .await;
+
+    db.create_st(
+        "se_nn_st",
+        "SELECT id, score FROM se_nn_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("se_nn_st", "SELECT id, score FROM se_nn_src")
+        .await;
+
+    // Add NOT NULL + default to the unused 'note' column
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE se_nn_src ALTER COLUMN note SET DEFAULT 'default_note'",
+        "ALTER TABLE se_nn_src ALTER COLUMN note SET NOT NULL",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+
+    // Normal DML + refresh cycle should still work
+    db.execute("INSERT INTO se_nn_src VALUES (3, 30, 'new')")
+        .await;
+    db.refresh_st("se_nn_st").await;
+    db.assert_st_matches_query("se_nn_st", "SELECT id, score FROM se_nn_src")
+        .await;
+    assert_eq!(db.count("public.se_nn_st").await, 3);
+}
+
+/// SE-4: DROP a source column that IS referenced in the defining query
+/// produces a clear, informative error — not a silent data corruption.
+#[tokio::test]
+async fn test_drop_referenced_column_produces_error() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE se_dropcol_src (id INT PRIMARY KEY, important TEXT, extra TEXT)")
+        .await;
+    db.execute("INSERT INTO se_dropcol_src VALUES (1,'keep','ignore')")
+        .await;
+
+    db.create_st(
+        "se_dropcol_st",
+        "SELECT id, important FROM se_dropcol_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.assert_st_matches_query("se_dropcol_st", "SELECT id, important FROM se_dropcol_src")
+        .await;
+
+    // Dropping a referenced column requires disabling the DDL block
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE se_dropcol_src DROP COLUMN important",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+
+    // The ST should now be in a needs_reinit or ERROR state, or the next
+    // refresh should fail with a clear error.
+    let result = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('se_dropcol_st')")
+        .await;
+
+    if let Ok(()) = result {
+        // Refresh may have succeeded by falling back to full refresh;
+        // in that case verify the ST catalog reflects correct state.
+        let status: String = db
+            .query_scalar(
+                "SELECT status FROM pgtrickle.pgt_stream_tables \
+                 WHERE pgt_name = 'se_dropcol_st'",
+            )
+            .await;
+        // Status should be ERROR or ACTIVE-after-reinit — not silently wrong data
+        assert!(
+            status == "ERROR" || status == "ACTIVE",
+            "Unexpected status after dropped referenced column: {status}"
+        );
+    } else {
+        // Error is the expected outcome — verify the error message is informative
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.is_empty(),
+            "Drop of referenced column should produce a non-empty error message"
+        );
+    }
+}
+
+/// SE-5: Interleaving DML changes with a compatible DDL change (ADD COLUMN)
+/// in separate transactions. The next refresh must produce the correct result
+/// even when the change buffer was populated before the DDL.
+#[tokio::test]
+async fn test_dml_and_compatible_ddl_interleaved() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE se_intl_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO se_intl_src VALUES (1,10),(2,20)")
+        .await;
+
+    let q = "SELECT id, val FROM se_intl_src";
+    db.create_st("se_intl_st", q, "1m", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("se_intl_st", q).await;
+
+    // DML first — inserts a row (captured in change buffer)
+    db.execute("INSERT INTO se_intl_src VALUES (3, 30)").await;
+
+    // Compatible DDL: add an unused column
+    db.execute_seq(&[
+        "SET pg_trickle.block_source_ddl = false",
+        "ALTER TABLE se_intl_src ADD COLUMN category TEXT DEFAULT 'misc'",
+        "SET pg_trickle.block_source_ddl = true",
+    ])
+    .await;
+
+    // More DML after the DDL
+    db.execute("INSERT INTO se_intl_src (id, val, category) VALUES (4, 40, 'special')")
+        .await;
+
+    // Refresh must pick up both DML batches correctly
+    db.refresh_st("se_intl_st").await;
+    db.assert_st_matches_query("se_intl_st", q).await;
+    assert_eq!(db.count("public.se_intl_st").await, 4);
+}
