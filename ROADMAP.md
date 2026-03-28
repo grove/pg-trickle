@@ -2396,12 +2396,14 @@ large design changes; all build on existing infrastructure.
 columnar change tracking and shared change buffers — alongside the
 partitioning enhancements that build on v0.11.0's RANGE partitioning spike,
 a MERGE deduplication profiling pass, the dbt macro updates, per-database
-worker quotas for multi-tenant deployments, and the TPC-H-derived
-benchmarking harness for data-driven performance validation.
+worker quotas for multi-tenant deployments, the TPC-H-derived benchmarking
+harness for data-driven performance validation, and a small SQL coverage
+cleanup for PG 16+ expression types.
 
 > **Phases from PLAN_0_12_0.md:** Phases 5 (Scalability), 6 (Partitioning),
-> 7 (MERGE Profiling), and 8 (dbt Macro Updates). Plus two new phases: 9
-> (Multi-Tenant Scheduler Isolation) and 10 (TPC-H Benchmark Harness).
+> 7 (MERGE Profiling), and 8 (dbt Macro Updates). Plus three new phases: 9
+> (Multi-Tenant Scheduler Isolation), 10 (TPC-H Benchmark Harness), and 11
+> (SQL Coverage Cleanup).
 
 ### Scalability Foundations (Phase 5)
 
@@ -2498,7 +2500,23 @@ benchmarking harness for data-driven performance validation.
 
 > **TPC-H benchmark harness subtotal: ~1 day**
 
-> **v0.13.0 total: ~15–23 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d, Multi-tenant: 2–3w, TPC-H harness: ~1d)
+### SQL Coverage Cleanup (Phase 11)
+
+> **In plain terms:** Three small SQL expression gaps that are unscheduled
+> anywhere. Two are PG 16+ standard SQL syntax currently rejected with errors;
+> one is an audit-gated correctness check for recursive CTEs with non-monotone
+> operators. All are low-effort items that round out DVM coverage without
+> adding scope risk.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| SQL-RECUR | **Recursive CTE non-monotone divergence audit.** Write an E2E test for a recursive CTE with `EXCEPT` or aggregation in the recursive term (`WITH RECURSIVE … SELECT … EXCEPT SELECT …`). If the test passes → downgrade G1.3 to P4 (verified correct, no code change). If it fails → add a guard in `diff_recursive_cte` that detects non-monotone recursive terms and rejects them with `ERROR: non-monotone recursive CTEs are not supported in DIFFERENTIAL mode — use FULL`. | 6–8h | [GAP_SQL_PHASE_7.md §G1.3](plans/sql/GAP_SQL_PHASE_7.md) |
+| SQL-PG16-1 | **`IS JSON` predicate support (PG 16+).** `expr IS JSON`, `expr IS JSON OBJECT`, `expr IS JSON ARRAY`, `expr IS JSON SCALAR`, `expr IS JSON WITH UNIQUE KEYS` — standard SQL/JSON predicates rejected today. Add a `T_JsonIsPredicate` arm in `parser.rs`; the predicate is treated opaquely (no delta decomposition); it passes through to the delta SQL unchanged where the PG executor evaluates it natively. | 2–3h | [GAP_SQL_PHASE_6.md §G1.4](plans/sql/GAP_SQL_PHASE_6.md) |
+| SQL-PG16-2 | **SQL/JSON constructor support (PG 16+).** `JSON_OBJECT(…)`, `JSON_ARRAY(…)`, `JSON_OBJECTAGG(…)`, `JSON_ARRAYAGG(…)` — standard SQL/JSON constructors (`T_JsonConstructorExpr`) currently rejected. Add opaque pass-through in `parser.rs`; treat as scalar expressions (no incremental maintenance of the JSON value itself); handle the aggregate variants the same way as other custom aggregates (full group rescan). | 4–6h | [GAP_SQL_PHASE_6.md §G1.5](plans/sql/GAP_SQL_PHASE_6.md) |
+
+> **SQL coverage cleanup subtotal: ~1–2 days**
+
+> **v0.13.0 total: ~15–23 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d, Multi-tenant: 2–3w, TPC-H harness: ~1d, SQL cleanup: ~1–2d)
 
 **Exit criteria:**
 - [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
@@ -2515,6 +2533,9 @@ benchmarking harness for data-driven performance validation.
 - [ ] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional
 - [ ] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend
 - [ ] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
+- [ ] SQL-RECUR: Recursive CTE non-monotone audit complete; either E2E test passes (G1.3 downgraded to P4) or non-monotone guard added with clear error message
+- [ ] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
+- [ ] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
 - [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
