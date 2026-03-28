@@ -1,0 +1,40 @@
+-- pg_trickle 0.12.0 -> 0.13.0 upgrade script
+--
+-- Changes will be documented here as phases are implemented.
+--
+-- Phase 5 (scalability foundations):
+--   A-2: Columnar change tracking -- per-column bitmask in CDC triggers;
+--        skip rows where no referenced column changed; lightweight UPDATE-only path.
+--   D-4: Shared change buffers -- single buffer per source shared across all
+--        dependent STs; multi-frontier cleanup coordination.
+--   PERF-2: Auto buffer partitioning -- 'auto' option added to
+--           pg_trickle.buffer_partitioning GUC.
+--
+-- Phase 6 (partitioning enhancements):
+--   A1-1b: Multi-column partition keys.
+--   A1-1c: alter_stream_table(partition_by => …) support.
+--   A1-1d: LIST partitioning support.
+--   A1-3b: HASH partitioning via per-partition MERGE loop.
+--   PART-WARN: Default-partition growth warning.
+--
+-- Phase 7 (MERGE profiling):
+--   G14-MDED: MERGE deduplication profiling.
+--   PROF-DLT: pgtrickle.explain_delta(st_name, format) SQL function.
+--
+-- Phase 8 (dbt macro updates):
+--   DBT-1/2/3: partition_by, fuse, fuse_ceiling, fuse_sensitivity exposed.
+--
+-- Phase 9 (multi-tenant scheduler isolation):
+--   C-3: Per-database worker quotas.
+--
+-- Phase 10 (TPC-H benchmark harness):
+--   TPCH-1/2/3: Benchmark infrastructure.
+--
+-- Phase 11 (SQL coverage cleanup):
+--   SQL-RECUR: Recursive CTE non-monotone divergence audit.
+--   SQL-PG16-1: IS JSON predicate support.
+--   SQL-PG16-2: SQL/JSON constructor support.
+--
+-- ── Phase 0: Carry-Forward Functions from v0.12.0 ────────────────────────────
+-- (Functions added in v0.12.0 that must be present after upgrade)
+
