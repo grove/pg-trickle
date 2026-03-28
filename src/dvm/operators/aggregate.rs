@@ -10,7 +10,7 @@
 //! - Changes value → UPDATE (emitted as DELETE + INSERT pair)
 
 use crate::dvm::diff::{DeltaSource, DiffContext, DiffResult, quote_ident};
-use crate::dvm::operators::scan::build_hash_expr;
+use crate::dvm::operators::scan::{build_hash_expr, compute_varbit_key_cols_mask};
 use crate::dvm::parser::{AggExpr, AggFunc, CteRegistry, Expr, OpTree};
 use crate::error::PgTrickleError;
 
@@ -1179,6 +1179,46 @@ fn generate_direct_agg_delta(
         val_d_parts.push(format!("c.{}", quote_ident(&format!("old_{name}"))));
     }
 
+    // ── A-2: Value-only UPDATE optimization ──────────────────────────
+    //
+    // When a key mask is available, value-only UPDATEs (where only aggregate
+    // argument columns changed, not GROUP BY keys) can be handled as a single
+    // net-correction row ('V') instead of the standard I+D pair. This halves
+    // row volume entering the GROUP BY for value-only updates.
+    //
+    // The 'V' side carries: group columns from new_* (unchanged since keys
+    // didn't change), and for each value column: (new_val - old_val) as the
+    // net correction. Counts don't change (no 'I' or 'D' contribution).
+    let cdc_cols = ctx.source_cdc_columns.get(table_oid);
+    let key_cols = ctx.source_key_columns.get(table_oid);
+    let key_mask_info = match (key_cols, cdc_cols) {
+        (Some(kc), Some(cc)) => compute_varbit_key_cols_mask(kc, cc),
+        _ => None,
+    };
+
+    let has_value_only = key_mask_info.is_some();
+    let (val_v_row, value_only_pred) = if let Some((ref mask, ref zero)) = key_mask_info {
+        // Build the 'V' (value-only) LATERAL VALUES row.
+        let mut val_v_parts = vec!["'V'".to_string()];
+        // Group columns: use new_* (key didn't change, so new = old).
+        for name in &group_output {
+            val_v_parts.push(format!("c.{}", quote_ident(&format!("new_{name}"))));
+        }
+        // Value columns: net correction = new - old.
+        for name in &arg_cols {
+            let new_col = format!("c.{}", quote_ident(&format!("new_{name}")));
+            let old_col = format!("c.{}", quote_ident(&format!("old_{name}")));
+            val_v_parts.push(format!("({new_col} - {old_col})"));
+        }
+        let pred = format!(
+            "c.action = 'U' AND c.changed_cols IS NOT NULL \
+             AND (c.changed_cols & B'{mask}') = B'{zero}'"
+        );
+        (Some(val_v_parts.join(", ")), Some(pred))
+    } else {
+        (None, None)
+    };
+
     // ── Build SELECT expressions ──────────────────────────────────────
     let delta_cte = ctx.next_cte_name("agg_delta");
     let mut select_exprs = Vec::new();
@@ -1193,6 +1233,8 @@ fn generate_direct_agg_delta(
     }
 
     // __ins_count, __del_count (total row counts per group)
+    // A-2: 'V' (value-only) rows don't contribute to counts since the row
+    // stays in the same group — the D+I pair would cancel out anyway.
     select_exprs
         .push("SUM(CASE WHEN v.side = 'I' THEN 1 ELSE 0 END)::bigint AS __ins_count".to_string());
     select_exprs
@@ -1200,7 +1242,7 @@ fn generate_direct_agg_delta(
 
     // Per-aggregate delta expressions
     for agg in aggregates {
-        let (ins_expr, del_expr) = direct_agg_delta_exprs(agg);
+        let (ins_expr, del_expr) = direct_agg_delta_exprs(agg, has_value_only);
         select_exprs.push(format!(
             "{ins_expr} AS {}",
             quote_ident(&format!("__ins_{}", agg.alias)),
@@ -1222,21 +1264,49 @@ fn generate_direct_agg_delta(
         format!("\nGROUP BY {}", refs.join(", "))
     };
 
+    // A-2: Build LATERAL VALUES rows and WHERE clause.
+    // Standard: 2 rows (I, D). Value-only optimized: 3 rows (I, D, V) with
+    // routing so value-only UPDATEs only emit the V (net correction) row.
+    let (lateral_values, where_clause) = if let (Some(v_row), Some(vo_pred)) =
+        (&val_v_row, &value_only_pred)
+    {
+        let vals = format!(
+            "LATERAL (VALUES\n    ({val_i}),\n    ({val_d}),\n    ({v_row})\n) v({val_aliases})",
+            val_i = val_i_parts.join(", "),
+            val_d = val_d_parts.join(", "),
+            val_aliases = val_aliases.join(", "),
+        );
+        // Route value-only UPDATEs to 'V' only; key-changing UPDATEs and
+        // pure inserts/deletes get the standard I/D expansion.
+        let whr = format!(
+            "WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn\n  \
+             AND ((v.side = 'I' AND c.action != 'D' AND NOT ({vo_pred}))\n    \
+             OR (v.side = 'D' AND c.action != 'I' AND NOT ({vo_pred}))\n    \
+             OR (v.side = 'V' AND ({vo_pred})))"
+        );
+        (vals, whr)
+    } else {
+        let vals = format!(
+            "LATERAL (VALUES\n    ({val_i}),\n    ({val_d})\n) v({val_aliases})",
+            val_i = val_i_parts.join(", "),
+            val_d = val_d_parts.join(", "),
+            val_aliases = val_aliases.join(", "),
+        );
+        let whr = format!(
+            "WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn\n  \
+             AND ((v.side = 'I' AND c.action != 'D')\n    \
+             OR (v.side = 'D' AND c.action != 'I'))"
+        );
+        (vals, whr)
+    };
+
     let delta_sql = format!(
         "\
 SELECT {selects}
 FROM {change_table} c,
-LATERAL (VALUES
-    ({val_i}),
-    ({val_d})
-) v({val_aliases})
-WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn
-  AND ((v.side = 'I' AND c.action != 'D')
-    OR (v.side = 'D' AND c.action != 'I')){group_by}",
+{lateral_values}
+{where_clause}{group_by}",
         selects = select_exprs.join(",\n       "),
-        val_i = val_i_parts.join(", "),
-        val_d = val_d_parts.join(", "),
-        val_aliases = val_aliases.join(", "),
         group_by = group_by_clause,
     );
 
@@ -1248,13 +1318,19 @@ WHERE c.lsn > '{prev_lsn}'::pg_lsn AND c.lsn <= '{new_lsn}'::pg_lsn
 /// Generate per-aggregate delta expressions for the P5 direct bypass CTE.
 ///
 /// References VALUES alias columns `v."val_{col}"` and `v.side`.
-fn direct_agg_delta_exprs(agg: &AggExpr) -> (String, String) {
+///
+/// When `has_value_only` is true, the 'V' (value-only net correction) row
+/// is present in the LATERAL VALUES. For SUM, the 'V' row's net correction
+/// (`new - old`) is accumulated on the insert side; for COUNT/COUNT(*),
+/// 'V' rows contribute zero (no membership change).
+fn direct_agg_delta_exprs(agg: &AggExpr, has_value_only: bool) -> (String, String) {
     if agg.is_distinct {
         unreachable!("P5 bypass does not support DISTINCT aggregates")
     }
 
     match &agg.function {
         AggFunc::CountStar => (
+            // 'V' rows don't contribute to counts (side is neither 'I' nor 'D').
             "SUM(CASE WHEN v.side = 'I' THEN 1 ELSE 0 END)::bigint".to_string(),
             "SUM(CASE WHEN v.side = 'D' THEN 1 ELSE 0 END)::bigint".to_string(),
         ),
@@ -1264,6 +1340,7 @@ fn direct_agg_delta_exprs(agg: &AggExpr) -> (String, String) {
                 .as_ref()
                 .map(|e| format!("v.{}", quote_ident(&format!("val_{}", e.output_name()))))
                 .unwrap_or_else(|| "1".to_string());
+            // 'V' rows don't contribute to counts.
             (
                 format!(
                     "SUM(CASE WHEN v.side = 'I' AND {col} IS NOT NULL THEN 1 ELSE 0 END)::bigint"
@@ -1279,10 +1356,20 @@ fn direct_agg_delta_exprs(agg: &AggExpr) -> (String, String) {
                 .as_ref()
                 .map(|e| format!("v.{}", quote_ident(&format!("val_{}", e.output_name()))))
                 .unwrap_or_else(|| "0".to_string());
-            (
-                format!("SUM(CASE WHEN v.side = 'I' THEN {col} ELSE 0 END)"),
-                format!("SUM(CASE WHEN v.side = 'D' THEN {col} ELSE 0 END)"),
-            )
+            if has_value_only {
+                // A-2: 'V' rows carry net correction (new - old) on the insert side.
+                // The merge formula `old + ins - del` then computes:
+                // old + (net_correction) - 0 = old + (new - old) = new ✓
+                (
+                    format!("SUM(CASE WHEN v.side IN ('I', 'V') THEN {col} ELSE 0 END)"),
+                    format!("SUM(CASE WHEN v.side = 'D' THEN {col} ELSE 0 END)"),
+                )
+            } else {
+                (
+                    format!("SUM(CASE WHEN v.side = 'I' THEN {col} ELSE 0 END)"),
+                    format!("SUM(CASE WHEN v.side = 'D' THEN {col} ELSE 0 END)"),
+                )
+            }
         }
         AggFunc::Min | AggFunc::Max => {
             // Should never be reached — eligibility check excludes MIN/MAX
@@ -5001,6 +5088,164 @@ mod tests {
         assert!(
             result.is_none(),
             "CteScan with missing registry entry should return None"
+        );
+    }
+
+    // ── A-2: Value-only UPDATE optimization tests ───────────────────
+
+    #[test]
+    fn test_direct_agg_delta_exprs_sum_without_value_only() {
+        let agg = sum_col("amount", "total");
+        let (ins, del) = direct_agg_delta_exprs(&agg, false);
+        assert!(
+            ins.contains("v.side = 'I'"),
+            "SUM insert expr should match 'I': {ins}"
+        );
+        assert!(
+            !ins.contains("'V'"),
+            "SUM insert expr should NOT include 'V' without value-only: {ins}"
+        );
+        assert!(
+            del.contains("v.side = 'D'"),
+            "SUM delete expr should match 'D': {del}"
+        );
+    }
+
+    #[test]
+    fn test_direct_agg_delta_exprs_sum_with_value_only() {
+        let agg = sum_col("amount", "total");
+        let (ins, del) = direct_agg_delta_exprs(&agg, true);
+        assert!(
+            ins.contains("('I', 'V')"),
+            "SUM insert expr should include 'V' with value-only: {ins}"
+        );
+        assert!(
+            del.contains("v.side = 'D'"),
+            "SUM delete expr should only match 'D': {del}"
+        );
+        assert!(
+            !del.contains("'V'"),
+            "SUM delete expr should NOT include 'V': {del}"
+        );
+    }
+
+    #[test]
+    fn test_direct_agg_delta_exprs_count_star_ignores_value_only() {
+        // COUNT(*) should not include 'V' even with has_value_only=true,
+        // because value-only updates don't change row counts.
+        let agg = count_star("cnt");
+        let (ins, del) = direct_agg_delta_exprs(&agg, true);
+        assert!(
+            !ins.contains("'V'"),
+            "COUNT(*) insert should not include 'V': {ins}"
+        );
+        assert!(
+            !del.contains("'V'"),
+            "COUNT(*) delete should not include 'V': {del}"
+        );
+    }
+
+    #[test]
+    fn test_direct_agg_delta_exprs_count_col_ignores_value_only() {
+        let agg = AggExpr {
+            function: AggFunc::Count,
+            argument: Some(colref("id")),
+            alias: "cnt".to_string(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+        };
+        let (ins, del) = direct_agg_delta_exprs(&agg, true);
+        assert!(
+            !ins.contains("'V'"),
+            "COUNT(col) insert should not include 'V': {ins}"
+        );
+        assert!(
+            !del.contains("'V'"),
+            "COUNT(col) delete should not include 'V': {del}"
+        );
+    }
+
+    #[test]
+    fn test_a2_p5_value_only_generates_v_row() {
+        // Full integration: generate_direct_agg_delta with key columns set
+        // should produce LATERAL VALUES with a 'V' row and routing logic.
+        let child = scan(1, "t", "public", "t", &["id", "region", "amount"]);
+        let group_by = vec![colref("region")];
+        let aggs = vec![sum_col("amount", "total")];
+        let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
+            crate::version::Frontier::default(),
+            crate::version::Frontier::default(),
+        );
+        // Set up key columns (region is a GROUP BY key) and CDC columns.
+        ctx.source_key_columns.insert(1, vec!["region".to_string()]);
+        ctx.source_cdc_columns.insert(
+            1,
+            vec!["id".to_string(), "region".to_string(), "amount".to_string()],
+        );
+        let result = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs);
+        assert!(result.is_ok());
+        let (cte_name, _group_out) = result.unwrap();
+        // Find the generated CTE SQL
+        let sql = ctx.cte_sql(&cte_name).expect("CTE should exist");
+        assert!(
+            sql.contains("'V'"),
+            "P5 SQL should contain 'V' value-only row when key mask is set: {sql}"
+        );
+        assert!(
+            sql.contains("changed_cols"),
+            "P5 SQL should reference changed_cols for value-only detection: {sql}"
+        );
+        assert!(
+            sql.contains("v.side IN ('I', 'V')"),
+            "P5 SUM should include 'V' in insert side accumulation: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_a2_p5_no_value_only_without_key_columns() {
+        // Without key columns set, the standard P5 path should be used (no 'V').
+        let child = scan(1, "t", "public", "t", &["id", "region", "amount"]);
+        let group_by = vec![colref("region")];
+        let aggs = vec![sum_col("amount", "total")];
+        let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
+            crate::version::Frontier::default(),
+            crate::version::Frontier::default(),
+        );
+        // No source_key_columns or source_cdc_columns set.
+        let result = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs);
+        assert!(result.is_ok());
+        let (cte_name, _group_out) = result.unwrap();
+        let sql = ctx.cte_sql(&cte_name).expect("CTE should exist");
+        assert!(
+            !sql.contains("'V'"),
+            "P5 SQL should NOT contain 'V' without key columns: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_a2_p5_all_keys_no_value_only() {
+        // When all columns are key columns, compute_varbit_key_cols_mask
+        // returns None → no value-only optimization.
+        let child = scan(1, "t", "public", "t", &["id", "region"]);
+        let group_by = vec![colref("id"), colref("region")];
+        let aggs = vec![count_star("cnt")];
+        let mut ctx = crate::dvm::diff::DiffContext::new_standalone(
+            crate::version::Frontier::default(),
+            crate::version::Frontier::default(),
+        );
+        ctx.source_key_columns
+            .insert(1, vec!["id".to_string(), "region".to_string()]);
+        ctx.source_cdc_columns
+            .insert(1, vec!["id".to_string(), "region".to_string()]);
+        let result = generate_direct_agg_delta(&mut ctx, &child, &group_by, &aggs);
+        assert!(result.is_ok());
+        let (cte_name, _) = result.unwrap();
+        let sql = ctx.cte_sql(&cte_name).expect("CTE should exist");
+        assert!(
+            !sql.contains("'V'"),
+            "All columns are keys — no value-only optimization: {sql}"
         );
     }
 }

@@ -429,6 +429,15 @@ impl DiffContext {
         self.not_materialized_ctes.insert(name.to_string());
     }
 
+    /// Look up the SQL body of a CTE by name (test helper).
+    #[cfg(test)]
+    pub fn cte_sql(&self, name: &str) -> Option<&str> {
+        self.ctes
+            .iter()
+            .find(|(n, _, _, _)| n == name)
+            .map(|(_, sql, _, _)| sql.as_str())
+    }
+
     /// Build the final WITH query from accumulated CTEs.
     pub(crate) fn build_with_query(&self, final_cte: &str) -> String {
         if self.ctes.is_empty() {
