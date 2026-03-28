@@ -2519,7 +2519,7 @@ cleanup for PG 16+ expression types.
 > **v0.13.0 total: ~15–23 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d, Multi-tenant: 2–3w, TPC-H harness: ~1d, SQL cleanup: ~1–2d)
 
 **Exit criteria:**
-- [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; key column classification ✅, `__pgt_key_changed` annotation ✅, P5 value-only fast path ✅, `DiffResult.has_key_changed` signal propagation ✅, MERGE value-only UPDATE optimization ✅; remaining: E2E benchmark verification
+- [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; key column classification ✅, `__pgt_key_changed` annotation ✅, P5 value-only fast path ✅, `DiffResult.has_key_changed` signal propagation ✅, MERGE value-only UPDATE optimization ✅, upgrade script ✅; remaining: E2E benchmark verification
 - [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup never races; property-based test with 5 concurrent consumers passes
 - [ ] PERF-2: `buffer_partitioning = 'auto'` activates RANGE(lsn) partitioned mode for high-throughput sources
 - [x] A1-1b: Multi-column RANGE partition keys work end-to-end; composite ROW() predicate triggers partition pruning; 3 E2E tests + 5 unit tests ✅ Done
@@ -2536,7 +2536,7 @@ cleanup for PG 16+ expression types.
 - [x] SQL-RECUR: Recursive CTE non-monotone audit complete; G1.3 downgraded to P4 — two Tier 3h E2E tests verify recomputation fallback is correct ✅ Done
 - [x] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
 - [x] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
-- [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
+- [x] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`) ✅ Done — 58 functions, 8 new columns, all covered
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
 ---
