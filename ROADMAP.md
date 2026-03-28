@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-03-28
 > **Latest release:** 0.12.0 (2026-03-28)
-> **Current milestone:** v0.13.0 — Scalability Foundations, Partitioning Enhancements & MERGE Profiling
+> **Current milestone:** v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -29,7 +29,7 @@ coverage, all in plain language.
 - [v0.10.0 — DVM Hardening, Connection Pooler Compatibility, Core Refresh Optimizations & Infrastructure Prep](#v0100--dvm-hardening-connection-pooler-compatibility-core-refresh-optimizations--infrastructure-prep)
 - [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness](#v0110--partitioned-stream-tables-prometheus--grafana-observability-safety-hardening--correctness)
 - [v0.12.0 — Correctness, Reliability & Developer Tooling](#v0120--correctness-reliability--developer-tooling)
-- [v0.13.0 — Scalability Foundations, Partitioning Enhancements & MERGE Profiling](#v0130--scalability-foundations-partitioning-enhancements--merge-profiling)
+- [v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling](#v0130--scalability-foundations-partitioning-enhancements-merge-profiling--multi-tenant-scheduling)
 - [v0.14.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers](#v0140--tiered-scheduling-pg-backward-compatibility--unlogged-buffers)
 - [v0.15.0 — Native DDL Syntax, External Test Suites & Integration](#v0150--native-ddl-syntax-external-test-suites--integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
@@ -2390,15 +2390,20 @@ large design changes; all build on existing infrastructure.
 
 ---
 
-## v0.13.0 — Scalability Foundations, Partitioning Enhancements & MERGE Profiling
+## v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling
 
 **Goal:** Deliver the scalability foundations deferred from v0.12.0 —
 columnar change tracking and shared change buffers — alongside the
 partitioning enhancements that build on v0.11.0's RANGE partitioning spike,
-a MERGE deduplication profiling pass, and the dbt macro updates.
+a MERGE deduplication profiling pass, the dbt macro updates, per-database
+worker quotas for multi-tenant deployments, the TPC-H-derived benchmarking
+harness for data-driven performance validation, and a small SQL coverage
+cleanup for PG 16+ expression types.
 
 > **Phases from PLAN_0_12_0.md:** Phases 5 (Scalability), 6 (Partitioning),
-> 7 (MERGE Profiling), and 8 (dbt Macro Updates).
+> 7 (MERGE Profiling), and 8 (dbt Macro Updates). Plus three new phases: 9
+> (Multi-Tenant Scheduler Isolation), 10 (TPC-H Benchmark Harness), and 11
+> (SQL Coverage Cleanup).
 
 ### Scalability Foundations (Phase 5)
 
@@ -2443,8 +2448,9 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | G14-MDED | **MERGE deduplication profiling.** Profile how often concurrent-write scenarios produce duplicate key entries requiring pre-MERGE compaction. If ≥10% of refresh cycles need dedup, write an RFC for a two-pass MERGE strategy. | 3–5d | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
+| PROF-DLT | **Delta SQL query plan profiling (`explain_delta()` function).** Capture `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` for auto-generated delta SQL queries to identify PostgreSQL execution bottlenecks (join algorithms, scan types, sort spills). Add `pgtrickle.explain_delta(st_name, format DEFAULT 'text')` SQL function; optional `PGS_PROFILE_DELTA=1` environment variable for E2E test auto-capture to `/tmp/delta_plans/<st>.json`. Enables identification of operator-level performance issues (semi-join full scans, deep join chains). Prerequisite for data-driven MERGE optimization. | 1–2w | [PLAN_TPC_H_BENCHMARKING.md §1-5](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
 
-> **MERGE profiling subtotal: ~3–5 days**
+> **MERGE profiling subtotal: ~1–3 weeks**
 
 ### dbt Macro Updates (Phase 8)
 
@@ -2461,7 +2467,56 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 
 > **dbt macro updates subtotal: ~2–3.5 days**
 
-> **v0.13.0 total: ~11–17 weeks**
+### Multi-Tenant Scheduler Isolation (Phase 9)
+
+> **In plain terms:** As deployments grow past 10 databases on a single cluster,
+> all schedulers compete for the same global background-worker pool. One busy
+> database can starve the others. Phase 9 gives operators per-database quotas
+> and a priority queue so critical databases always get workers.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| C-3 | **Per-database worker quotas.** Add `pg_trickle.per_database_worker_quota` GUC (default: equal share of `max_dynamic_refresh_workers`); configurable via `ALTER DATABASE … SET pg_trickle.worker_quota = N`. Priority ordering when demand exceeds budget: IMMEDIATE > Hot > Warm > Cold STs. Burst capacity up to 150% when other databases are under quota. Store quota state in shared memory; rebalance every scheduler tick. | 2–3 wk | [PLAN_NEW_STUFF.md §C-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> ⚠️ C-3 depends on C-1 (tiered scheduling) for Hot/Warm/Cold classification. If C-1
+> is not ready, fall back to IMMEDIATE > all-other ordering with equal priority within
+> each tier; add full tier-aware ordering as a follow-on when C-1 lands in v0.14.0.
+
+> **Multi-tenant scheduler isolation subtotal: ~2–3 weeks**
+
+### TPC-H Benchmark Harness (Phase 10)
+
+> **In plain terms:** The existing TPC-H correctness suite (22/22 queries passing)
+> has no timing infrastructure. Phase 10 adds benchmark mode so we can measure
+> FULL vs DIFFERENTIAL speedups across all 22 queries — the only way to validate
+> that A-2, D-4, and other v0.13.0 changes actually help on realistic analytical
+> workloads, and to catch per-query regressions at larger scale factors.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TPCH-1 | **`TPCH_BENCH=1` benchmark mode for Phase 3.** Instrument `test_tpch_full_vs_differential` with warm-up cycles (`WARMUP_CYCLES=2`), reuse `extract_last_profile()` for `[PGS_PROFILE]` extraction, emit `[TPCH_BENCH]` structured output per cycle (`query=q01 tier=2 cycle=1 mode=DIFF ms=12.7 decision=0.41 merge=11.3 …`). Add `print_tpch_summary()` with per-query FULL/DIFF median, speedup, P95, and MERGE% table. | 4–5h | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
+| TPCH-2 | **`just bench-tpch` / `bench-tpch-large` / `bench-tpch-fast` justfile targets.** `bench-tpch`: SF-0.01 with `TPCH_BENCH=1`; `bench-tpch-large`: SF-0.1 with 5 cycles; `bench-tpch-fast`: skip Docker image rebuild. Enables before/after measurement for every v0.13.0 optimization. | 15 min | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
+| TPCH-3 | **TPC-H OpTree Criterion micro-benchmarks.** Add composite `OpTree` benchmarks to `benches/diff_operators.rs` representing TPC-H query shapes (`diff_tpch_q01`, `diff_tpch_q05`, `diff_tpch_q08`, `diff_tpch_q18`, `diff_tpch_q21`). Measures pure-Rust delta SQL generation time for complex multi-join/semi-join trees; catches DVM engine regressions without a running database. | 4h | [PLAN_TPC_H_BENCHMARKING.md §4](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
+
+> **TPC-H benchmark harness subtotal: ~1 day**
+
+### SQL Coverage Cleanup (Phase 11)
+
+> **In plain terms:** Three small SQL expression gaps that are unscheduled
+> anywhere. Two are PG 16+ standard SQL syntax currently rejected with errors;
+> one is an audit-gated correctness check for recursive CTEs with non-monotone
+> operators. All are low-effort items that round out DVM coverage without
+> adding scope risk.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| SQL-RECUR | **Recursive CTE non-monotone divergence audit.** Write an E2E test for a recursive CTE with `EXCEPT` or aggregation in the recursive term (`WITH RECURSIVE … SELECT … EXCEPT SELECT …`). If the test passes → downgrade G1.3 to P4 (verified correct, no code change). If it fails → add a guard in `diff_recursive_cte` that detects non-monotone recursive terms and rejects them with `ERROR: non-monotone recursive CTEs are not supported in DIFFERENTIAL mode — use FULL`. | 6–8h | [GAP_SQL_PHASE_7.md §G1.3](plans/sql/GAP_SQL_PHASE_7.md) |
+| SQL-PG16-1 | **`IS JSON` predicate support (PG 16+).** `expr IS JSON`, `expr IS JSON OBJECT`, `expr IS JSON ARRAY`, `expr IS JSON SCALAR`, `expr IS JSON WITH UNIQUE KEYS` — standard SQL/JSON predicates rejected today. Add a `T_JsonIsPredicate` arm in `parser.rs`; the predicate is treated opaquely (no delta decomposition); it passes through to the delta SQL unchanged where the PG executor evaluates it natively. | 2–3h | [GAP_SQL_PHASE_6.md §G1.4](plans/sql/GAP_SQL_PHASE_6.md) |
+| SQL-PG16-2 | **SQL/JSON constructor support (PG 16+).** `JSON_OBJECT(…)`, `JSON_ARRAY(…)`, `JSON_OBJECTAGG(…)`, `JSON_ARRAYAGG(…)` — standard SQL/JSON constructors (`T_JsonConstructorExpr`) currently rejected. Add opaque pass-through in `parser.rs`; treat as scalar expressions (no incremental maintenance of the JSON value itself); handle the aggregate variants the same way as other custom aggregates (full group rescan). | 4–6h | [GAP_SQL_PHASE_6.md §G1.5](plans/sql/GAP_SQL_PHASE_6.md) |
+
+> **SQL coverage cleanup subtotal: ~1–2 days**
+
+> **v0.13.0 total: ~15–23 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d, Multi-tenant: 2–3w, TPC-H harness: ~1d, SQL cleanup: ~1–2d)
 
 **Exit criteria:**
 - [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
@@ -2473,7 +2528,14 @@ a MERGE deduplication profiling pass, and the dbt macro updates.
 - [ ] A1-3b: HASH partitioning uses per-partition MERGE loop; only affected child partitions are targeted
 - [ ] PART-WARN: `WARNING` emitted when default partition has rows after refresh
 - [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
+- [ ] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json; `PGS_PROFILE_DELTA=1` enables auto-capture in E2E tests; documented in SQL_REFERENCE.md
+- [ ] C-3: Per-database worker quota enforced; one busy database cannot starve others; quota respected under 8-database concurrent workload
+- [ ] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional
+- [ ] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend
 - [ ] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
+- [ ] SQL-RECUR: Recursive CTE non-monotone audit complete; either E2E test passes (G1.3 downgraded to P4) or non-monotone guard added with clear error message
+- [ ] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
+- [ ] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
 - [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
@@ -2794,7 +2856,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.10.0 — DVM Hardening, Connection Pooler Compat, Core Refresh Opts & Infra Prep | ~7–10d + ~26–40 wk | — | |
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
 | v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
-| v0.13.0 — Tiered Scheduling, PG Backward Compat & UNLOGGED Buffers | ~5–12 wk | — | |
+| v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
 | v0.14.0 — Native DDL Syntax, External Test Suites & Integration | ~140–230h | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
