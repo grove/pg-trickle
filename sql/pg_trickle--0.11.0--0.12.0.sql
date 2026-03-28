@@ -58,16 +58,12 @@ LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'explain_refresh_mode_wrapper';
 
 -- ── Phase 1.5: Update Stream Table Creation Functions ───────────────────────────
--- (Add partition_by parameter to existing stream table creation functions)
--- First, drop the old function signatures (without partition_by).
--- We can't use CASCADE here because it would drop dependent views/constraints.
+-- (Ensure partition_by parameter is present on stream table creation functions)
+-- Note: the 0.10.0→0.11.0 upgrade already added partition_by, but a fresh
+-- 0.11.0 install from the archived SQL did not include it. We use
+-- CREATE OR REPLACE to handle both cases safely.
 
-DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool); 
-DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool);
-DROP FUNCTION IF EXISTS pgtrickle."create_or_replace_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool);
-
--- Now create the new versions with partition_by parameter
-CREATE FUNCTION pgtrickle."create_stream_table"(
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
@@ -83,7 +79,7 @@ CREATE FUNCTION pgtrickle."create_stream_table"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
 
-CREATE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
@@ -99,7 +95,7 @@ CREATE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
 
-CREATE FUNCTION pgtrickle."create_or_replace_stream_table"(
+CREATE OR REPLACE FUNCTION pgtrickle."create_or_replace_stream_table"(
         "name" TEXT,
         "query" TEXT,
         "schedule" TEXT DEFAULT 'calculated',
