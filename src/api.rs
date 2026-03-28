@@ -5255,8 +5255,11 @@ fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> 
 /// SELECT output columns.
 ///
 /// Checks:
-/// 1. The supplied column name is non-empty.
-/// 2. The column appears in the stream table's SELECT output (from `columns`).
+/// 1. The supplied column name(s) are non-empty.
+/// 2. Each column appears in the stream table's SELECT output (from `columns`).
+///
+/// A1-1b: Supports comma-separated multi-column partition keys
+/// (e.g. `"event_day,customer_id"`).
 ///
 /// A valid partition key ensures the refresh path can inject a range predicate
 /// (A1-3) and that the partitioned storage table can be created correctly.
@@ -5264,23 +5267,42 @@ fn validate_partition_key(
     partition_key: &str,
     columns: &[ColumnDef],
 ) -> Result<(), PgTrickleError> {
-    let trimmed = partition_key.trim();
-    if trimmed.is_empty() {
+    let parts = parse_partition_key_columns(partition_key);
+    if parts.is_empty() {
         return Err(PgTrickleError::InvalidArgument(
-            "partition_by must be a non-empty column name".to_string(),
+            "partition_by must contain at least one non-empty column name".to_string(),
         ));
     }
-    let found = columns.iter().any(|c| c.name.eq_ignore_ascii_case(trimmed));
-    if !found {
-        let available: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
-        return Err(PgTrickleError::InvalidArgument(format!(
-            "partition_by column '{}' is not in the stream table's SELECT output. \
-             Available columns: {}",
-            trimmed,
-            available.join(", "),
-        )));
+    let available: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    for part in &parts {
+        let found = columns.iter().any(|c| c.name.eq_ignore_ascii_case(part));
+        if !found {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "partition_by column '{}' is not in the stream table's SELECT output. \
+                 Available columns: {}",
+                part,
+                available.join(", "),
+            )));
+        }
     }
     Ok(())
+}
+
+/// Parse a comma-separated partition key specification into individual column
+/// names. Trims whitespace from each component and filters out empty entries.
+///
+/// # Examples
+/// ```text
+/// "event_day"              → ["event_day"]
+/// "event_day, customer_id" → ["event_day", "customer_id"]
+/// " a , b , c "            → ["a", "b", "c"]
+/// ```
+pub(crate) fn parse_partition_key_columns(partition_key: &str) -> Vec<String> {
+    partition_key
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Column metadata from a defining query.
@@ -6269,9 +6291,17 @@ fn build_create_table_sql(
         ));
     }
 
-    // A1-1: partition clause — appended after the closing ')' of CREATE TABLE.
+    // A1-1/A1-1b: partition clause — appended after the closing ')' of
+    // CREATE TABLE.  Supports single and multi-column RANGE keys.
     let partition_clause = partition_key
-        .map(|k| format!("\nPARTITION BY RANGE ({})", quote_identifier(k)))
+        .map(|k| {
+            let cols = parse_partition_key_columns(k);
+            let quoted: Vec<String> = cols
+                .iter()
+                .map(|c| quote_identifier(c).to_string())
+                .collect();
+            format!("\nPARTITION BY RANGE ({})", quoted.join(", "))
+        })
         .unwrap_or_default();
 
     format!(
@@ -7717,5 +7747,77 @@ mod tests {
         ) {
             let _ = cron_is_due(&cron_expr, epoch);
         }
+    }
+
+    // ── A1-1b: parse_partition_key_columns tests ────────────────────────────
+
+    #[test]
+    fn test_parse_partition_key_single_column() {
+        let cols = parse_partition_key_columns("event_day");
+        assert_eq!(cols, vec!["event_day"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_two_columns() {
+        let cols = parse_partition_key_columns("event_day, customer_id");
+        assert_eq!(cols, vec!["event_day", "customer_id"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_whitespace_handling() {
+        let cols = parse_partition_key_columns("  a , b , c  ");
+        assert_eq!(cols, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_empty_string() {
+        let cols = parse_partition_key_columns("");
+        assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_parse_partition_key_trailing_comma() {
+        let cols = parse_partition_key_columns("a,b,");
+        assert_eq!(cols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_validate_partition_key_multi_column_valid() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "sale_date".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        assert!(validate_partition_key("sale_date,region", &columns).is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_key_multi_column_one_missing() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "sale_date".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        let err = validate_partition_key("sale_date,nonexistent", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent"),
+            "Error should mention the missing column: {msg}"
+        );
     }
 }

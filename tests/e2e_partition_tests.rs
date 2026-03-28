@@ -968,3 +968,299 @@ async fn test_partitioned_st_empty_delta_skips_merge() {
     )
     .await;
 }
+
+// ── A1-1b: Multi-column RANGE partition key tests ──────────────────────────
+
+/// A1-1b: Create a stream table partitioned by two columns (date + region).
+/// Verify the storage table uses `PARTITION BY RANGE (col_a, col_b)`,
+/// a default partition exists, and the initial FULL refresh populates data.
+#[tokio::test]
+async fn test_partitioned_st_multi_column_create_and_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE mc_src (
+            id SERIAL PRIMARY KEY,
+            sale_date DATE NOT NULL,
+            region TEXT NOT NULL,
+            amount NUMERIC NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO mc_src (sale_date, region, amount)
+         SELECT
+             DATE '2026-01-01' + (i % 90),
+             CASE WHEN i % 3 = 0 THEN 'US' WHEN i % 3 = 1 THEN 'EU' ELSE 'APAC' END,
+             (i * 10)::numeric
+         FROM generate_series(1, 300) AS s(i)",
+    )
+    .await;
+
+    // A1-1b: multi-column partition key
+    db.create_st_partitioned(
+        "mc_summary",
+        "SELECT sale_date, region, SUM(amount) AS total FROM mc_src GROUP BY sale_date, region",
+        "1m",
+        "DIFFERENTIAL",
+        "sale_date,region",
+    )
+    .await;
+
+    // Verify partition key stored in catalog
+    let pk: String = db
+        .query_scalar(
+            "SELECT st_partition_key FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'mc_summary'",
+        )
+        .await;
+    assert_eq!(
+        pk, "sale_date,region",
+        "Multi-column partition key must be persisted"
+    );
+
+    // Verify storage is RANGE partitioned
+    let relkind: String = db
+        .query_scalar("SELECT relkind FROM pg_class WHERE relname = 'mc_summary'")
+        .await;
+    assert_eq!(
+        relkind, "p",
+        "Storage table must be partitioned (relkind='p')"
+    );
+
+    // Verify default partition exists
+    let default_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_inherits pi \
+             JOIN pg_class pc ON pc.oid = pi.inhrelid \
+             WHERE pc.relname = 'mc_summary_default')",
+        )
+        .await;
+    assert!(default_exists, "Default partition must exist");
+
+    // Verify initial refresh populates data
+    let count: i64 = db.count("mc_summary").await;
+    assert!(
+        count > 0,
+        "Initial refresh should populate rows, got {count}"
+    );
+
+    // Verify correctness
+    db.assert_st_matches_query(
+        "mc_summary",
+        "SELECT sale_date, region, SUM(amount) AS total FROM mc_src GROUP BY sale_date, region",
+    )
+    .await;
+}
+
+/// A1-1b: DIFFERENTIAL refresh with multi-column partition key correctly
+/// applies incremental changes.
+#[tokio::test]
+async fn test_partitioned_st_multi_column_differential_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE mc2_src (
+            id SERIAL PRIMARY KEY,
+            event_day DATE NOT NULL,
+            customer_id INT NOT NULL,
+            qty INT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO mc2_src (event_day, customer_id, qty)
+         SELECT
+             DATE '2026-03-01' + (i % 10),
+             100 + (i % 5),
+             i
+         FROM generate_series(1, 100) AS s(i)",
+    )
+    .await;
+
+    db.create_st_partitioned(
+        "mc2_st",
+        "SELECT event_day, customer_id, SUM(qty) AS total_qty FROM mc2_src GROUP BY event_day, customer_id",
+        "1m",
+        "DIFFERENTIAL",
+        "event_day, customer_id",
+    )
+    .await;
+
+    db.refresh_st("mc2_st").await;
+
+    let count_before: i64 = db.count("mc2_st").await;
+    assert!(count_before > 0, "Should have rows after initial refresh");
+
+    // Now insert new data and refresh again (DIFFERENTIAL path)
+    db.execute(
+        "INSERT INTO mc2_src (event_day, customer_id, qty)
+         SELECT
+             DATE '2026-03-15' + (i % 5),
+             200 + (i % 3),
+             i * 2
+         FROM generate_series(1, 50) AS s(i)",
+    )
+    .await;
+
+    db.refresh_st("mc2_st").await;
+
+    let count_after: i64 = db.count("mc2_st").await;
+    assert!(
+        count_after >= count_before,
+        "Row count should increase or stay same after insert+refresh"
+    );
+
+    db.assert_st_matches_query(
+        "mc2_st",
+        "SELECT event_day, customer_id, SUM(qty) AS total_qty FROM mc2_src GROUP BY event_day, customer_id",
+    )
+    .await;
+}
+
+/// A1-1b: Validate that a multi-column partition key with an invalid column
+/// returns an appropriate error.
+#[tokio::test]
+async fn test_partitioned_st_multi_column_invalid_column_error() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE mc3_src (
+            id SERIAL PRIMARY KEY,
+            sale_date DATE NOT NULL,
+            amount NUMERIC NOT NULL
+        )",
+    )
+    .await;
+
+    let result = db
+        .try_execute(
+            "SELECT pgtrickle.create_stream_table(\
+             'mc3_st', $$SELECT sale_date, SUM(amount) AS total FROM mc3_src GROUP BY sale_date$$, \
+             '1m', 'DIFFERENTIAL', partition_by => 'sale_date,nonexistent')",
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Should fail when one partition column does not exist in SELECT output"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("nonexistent"),
+        "Error should mention the invalid column: {err_msg}"
+    );
+}
+
+// ── PART-WARN: Default partition growth warning tests ──────────────────────
+
+/// PART-WARN: When all data lands in the default partition (no explicit named
+/// partitions), verifying correctness still works. The WARNING is emitted in
+/// server logs (not easily asserted in E2E, but this test verifies the code
+/// path does not crash).
+#[tokio::test]
+async fn test_partitioned_st_default_partition_warning_no_crash() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE pw_src (
+            id SERIAL PRIMARY KEY,
+            sale_date DATE NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+
+    db.execute(
+        "INSERT INTO pw_src (sale_date, val)
+         SELECT DATE '2026-01-01' + (i % 30), i
+         FROM generate_series(1, 100) AS s(i)",
+    )
+    .await;
+
+    // Create partitioned ST — only default partition exists (no explicit ranges).
+    // The PART-WARN code path will fire after refresh.
+    db.create_st_partitioned(
+        "pw_st",
+        "SELECT sale_date, SUM(val) AS total FROM pw_src GROUP BY sale_date",
+        "1m",
+        "DIFFERENTIAL",
+        "sale_date",
+    )
+    .await;
+
+    db.refresh_st("pw_st").await;
+
+    // All rows should be in the default partition — verify data is correct.
+    let default_count: i64 = db.count("pw_st_default").await;
+    assert!(default_count > 0, "Default partition should have rows");
+
+    db.assert_st_matches_query(
+        "pw_st",
+        "SELECT sale_date, SUM(val) AS total FROM pw_src GROUP BY sale_date",
+    )
+    .await;
+}
+
+/// PART-WARN: When explicit partitions cover all data, the default partition
+/// should be empty and no warning should fire. Verify data correctness as well.
+#[tokio::test]
+async fn test_partitioned_st_explicit_partitions_no_warning() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute(
+        "CREATE TABLE pw2_src (
+            id SERIAL PRIMARY KEY,
+            sale_date DATE NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+
+    // Create ST while source is empty so default partition is empty
+    db.create_st_partitioned(
+        "pw2_st",
+        "SELECT sale_date, SUM(val) AS total FROM pw2_src GROUP BY sale_date",
+        "1m",
+        "DIFFERENTIAL",
+        "sale_date",
+    )
+    .await;
+
+    // Add explicit partitions covering our data range
+    db.execute(
+        "CREATE TABLE pw2_st_jan PARTITION OF pw2_st \
+         FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')",
+    )
+    .await;
+    db.execute(
+        "CREATE TABLE pw2_st_feb PARTITION OF pw2_st \
+         FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')",
+    )
+    .await;
+
+    // Insert data only in Jan-Feb
+    db.execute(
+        "INSERT INTO pw2_src (sale_date, val)
+         SELECT DATE '2026-01-01' + (i % 59), i
+         FROM generate_series(1, 100) AS s(i)",
+    )
+    .await;
+
+    db.refresh_st("pw2_st").await;
+
+    // Default partition should be empty
+    let default_count: i64 = db.count("pw2_st_default").await;
+    assert_eq!(
+        default_count, 0,
+        "Default partition should be empty when explicit partitions cover all data"
+    );
+
+    db.assert_st_matches_query(
+        "pw2_st",
+        "SELECT sale_date, SUM(val) AS total FROM pw2_src GROUP BY sale_date",
+    )
+    .await;
+}

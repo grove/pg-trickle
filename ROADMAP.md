@@ -2317,11 +2317,11 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A1-1b | **Multi-column partition keys.** Extend `partition_by` to accept a comma-separated list of columns; emit `PARTITION BY RANGE (col_a, col_b)`; extend `extract_partition_range()` to compute min/max tuples; inject composite `BETWEEN (a_min, b_min) AND (a_max, b_max)` predicate into MERGE ON clause. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~A1-1b~~ | ~~**Multi-column partition keys.** Comma-separated `partition_by`; `PARTITION BY RANGE (col_a, col_b)`; multi-column MIN/MAX extraction; ROW() comparison predicates for partition pruning.~~ ✅ Done — `parse_partition_key_columns()`, composite `extract_partition_range()`, ROW comparison in `inject_partition_predicate()`; 5 unit tests + 3 E2E tests | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
 | A1-1c | **`alter_stream_table(partition_by => …)` support.** Allow adding or changing the partition key on an existing stream table. Requires repartitioning the underlying storage table in-place (`CREATE TABLE … AS SELECT` + rename + drop + rename sequence), updating the catalog, and rebuilding the MERGE template. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
 | A1-1d | **LIST partitioning support.** Let `partition_by` name a low-cardinality column for `PARTITION BY LIST` storage. Requires a new predicate style (`IN (…)` collecting the distinct partition-key values from the delta) instead of `BETWEEN`. | 1 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
 | A1-3b | **HASH partitioning via per-partition MERGE loop.** Predicate injection cannot prune HASH partitions (the hash function is not invertible). Implement Approach 2 from PLAN_PARTITIONING_SPIKE.md §3: at refresh time, query which child partitions contain delta rows, then issue one targeted MERGE per affected partition. | 2–3 wk | [PLAN_PARTITIONING_SPIKE.md §3](plans/PLAN_PARTITIONING_SPIKE.md) |
-| PART-WARN | **Default-partition growth warning.** Emit a PostgreSQL `WARNING` (via `pgrx::warning!()`) when the default catch-all partition of a partitioned stream table contains rows after a refresh, prompting the user to create named partition ranges. | 1–2d | [PLAN_PARTITIONING_SPIKE.md §11](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~PART-WARN~~ | ~~**Default-partition growth warning.** `warn_default_partition_growth()` emits `pgrx::warning!()` after FULL and DIFFERENTIAL refresh when the default partition has rows; includes example DDL.~~ ✅ Done — 2 E2E tests | — | [src/refresh.rs](src/refresh.rs) |
 
 > **Auto-partition creation** (TimescaleDB-style automatic chunk management) remains
 > a post-1.0 item as stated in PLAN_PARTITIONING_SPIKE.md §10.
@@ -2435,11 +2435,11 @@ cleanup for PG 16+ expression types.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A1-1b | **Multi-column partition keys.** Extend `partition_by` to accept a comma-separated list of columns; composite `BETWEEN` predicate in MERGE ON clause. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~A1-1b~~ | ~~**Multi-column partition keys.** Comma-separated `partition_by`; ROW() predicate for composite keys.~~ ✅ Done | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
 | A1-1c | **`alter_stream_table(partition_by => …)` support.** Allow adding or changing the partition key on an existing stream table with in-place repartitioning. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
 | A1-1d | **LIST partitioning support.** `PARTITION BY LIST` for low-cardinality columns; `IN (…)` predicate style from the delta. | 1 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
 | A1-3b | **HASH partitioning via per-partition MERGE loop.** Predicate injection cannot prune HASH partitions; issue one targeted MERGE per affected child partition at refresh time. | 2–3 wk | [PLAN_PARTITIONING_SPIKE.md §3](plans/PLAN_PARTITIONING_SPIKE.md) |
-| PART-WARN | **Default-partition growth warning.** Emit `WARNING` when the default catch-all partition contains rows after a refresh. | 1–2d | [PLAN_PARTITIONING_SPIKE.md §11](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~PART-WARN~~ | ~~**Default-partition growth warning.** `warn_default_partition_growth()` after FULL and DIFFERENTIAL refresh.~~ ✅ Done | — | [src/refresh.rs](src/refresh.rs) |
 
 > **Partitioning enhancements subtotal: ~5–8 weeks**
 
@@ -2522,11 +2522,11 @@ cleanup for PG 16+ expression types.
 - [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
 - [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup never races; property-based test with 5 concurrent consumers passes
 - [ ] PERF-2: `buffer_partitioning = 'auto'` activates RANGE(lsn) partitioned mode for high-throughput sources
-- [ ] A1-1b: Multi-column RANGE partition keys work end-to-end; composite predicate triggers partition pruning
+- [x] A1-1b: Multi-column RANGE partition keys work end-to-end; composite ROW() predicate triggers partition pruning; 3 E2E tests + 5 unit tests ✅ Done
 - [ ] A1-1c: `alter_stream_table(partition_by => …)` repartitions existing storage table without data loss
 - [ ] A1-1d: LIST partitioning creates `PARTITION BY LIST` storage; IN-list predicate confirmed via `EXPLAIN`
 - [ ] A1-3b: HASH partitioning uses per-partition MERGE loop; only affected child partitions are targeted
-- [ ] PART-WARN: `WARNING` emitted when default partition has rows after refresh
+- [x] PART-WARN: `WARNING` emitted when default partition has rows after refresh; `warn_default_partition_growth()` on both FULL and DIFFERENTIAL paths ✅ Done
 - [x] G14-MDED: Deduplication frequency profiling complete; `TOTAL_DIFF_REFRESHES` + `DEDUP_NEEDED_REFRESHES` shared-memory atomic counters; `pgtrickle.dedup_stats()` reports ratio; RFC threshold documented at ≥10% ✅ Done
 - [x] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json/xml/yaml; `PGS_PROFILE_DELTA=1` auto-capture to `/tmp/delta_plans/`; documented in SQL_REFERENCE.md ✅ Done
 - [x] C-3: Per-database worker quota enforced; tier-aware priority sort (IMMEDIATE > Hot > Warm > Cold) implemented; GUC + E2E quota tests added; `compute_per_db_quota()` with burst at 80% cluster load ✅ Done

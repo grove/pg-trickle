@@ -2108,6 +2108,12 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         );
     }
 
+    // PART-WARN: After a successful FULL refresh, warn if the default
+    // partition of a partitioned stream table has accumulated rows.
+    if st.st_partition_key.is_some() {
+        warn_default_partition_growth(schema, name);
+    }
+
     Ok((rows_inserted as i64, 0))
 }
 
@@ -2360,44 +2366,139 @@ fn pg_quote_literal(val: &str) -> String {
     format!("'{}'", val.replace('\'', "''"))
 }
 
-/// A1-2: Extract the MIN and MAX of the partition key column from the resolved
-/// delta SQL. Returns `None` when the delta is empty (no changes to apply).
+/// A1-2/A1-1b: Per-column min/max values for partition pruning predicates.
+type PartitionRange = (Vec<String>, Vec<String>);
+
+/// A1-2/A1-1b: Extract the MIN and MAX of each partition key column from the
+/// resolved delta SQL. Returns `None` when the delta is empty.
 ///
-/// The returned strings are the column values cast to `TEXT`, which PostgreSQL
-/// can implicitly cast back to the actual column type in the BETWEEN predicate.
+/// For multi-column keys the returned vectors have one element per column in
+/// the same order as the partition key specification.
 fn extract_partition_range(
     resolved_delta_sql: &str,
     partition_key: &str,
-) -> Result<Option<(String, String)>, PgTrickleError> {
-    let qk = crate::api::quote_identifier(partition_key);
-    let min_sql = format!("SELECT MIN({qk})::text FROM ({resolved_delta_sql}) AS __pgt_part_probe");
-    let max_sql = format!("SELECT MAX({qk})::text FROM ({resolved_delta_sql}) AS __pgt_part_probe");
-    let min_val = Spi::get_one::<String>(&min_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("partition range MIN: {e}")))?;
-    let max_val = Spi::get_one::<String>(&max_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("partition range MAX: {e}")))?;
-    Ok(min_val.zip(max_val))
+) -> Result<Option<PartitionRange>, PgTrickleError> {
+    let cols = crate::api::parse_partition_key_columns(partition_key);
+    let min_exprs: Vec<String> = cols
+        .iter()
+        .map(|c| format!("MIN({})::text", crate::api::quote_identifier(c)))
+        .collect();
+    let max_exprs: Vec<String> = cols
+        .iter()
+        .map(|c| format!("MAX({})::text", crate::api::quote_identifier(c)))
+        .collect();
+    let select_clause = min_exprs
+        .iter()
+        .chain(max_exprs.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {select_clause} FROM ({resolved_delta_sql}) AS __pgt_part_probe");
+    let result = Spi::connect(|client| {
+        let row = client
+            .select(&sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(format!("partition range: {e}")))?
+            .first();
+        let n = cols.len();
+        let mut mins = Vec::with_capacity(n);
+        let mut maxs = Vec::with_capacity(n);
+        for i in 0..n {
+            let map_spi = |e: pgrx::spi::SpiError| {
+                PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
+            };
+            match row.get::<String>(i + 1).map_err(map_spi)? {
+                Some(v) => mins.push(v),
+                None => return Ok(None), // delta is empty
+            }
+        }
+        for i in 0..n {
+            let map_spi = |e: pgrx::spi::SpiError| {
+                PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
+            };
+            match row.get::<String>(n + i + 1).map_err(map_spi)? {
+                Some(v) => maxs.push(v),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some((mins, maxs)))
+    })?;
+    Ok(result)
 }
 
-/// A1-3: Replace the `__PGT_PART_PRED__` placeholder in the MERGE SQL with
-/// an explicit partition-key range predicate for the current delta.
+/// A1-3/A1-1b: Replace the `__PGT_PART_PRED__` placeholder in the MERGE SQL
+/// with an explicit partition-key range predicate for the current delta.
 ///
-/// The injected predicate `AND st.<key> BETWEEN <min> AND <max>` is added to
-/// the MERGE ON clause. Because it is a literal range (not a parameter), the
-/// PostgreSQL planner can use it for partition pruning during MERGE execution.
+/// For a **single-column** key the predicate is:
+///   `AND st."col" BETWEEN '<min>' AND '<max>'`
+///
+/// For a **multi-column** key the predicate uses PostgreSQL row comparison:
+///   `AND ROW(st."a", st."b") >= ROW('<min_a>', '<min_b>')
+///    AND ROW(st."a", st."b") <= ROW('<max_a>', '<max_b>')`
+///
+/// Both forms enable PostgreSQL partition pruning because the planner
+/// recognises literal range bounds.
 fn inject_partition_predicate(
     merge_sql: &str,
     partition_key: &str,
-    min_val: &str,
-    max_val: &str,
+    min_vals: &[String],
+    max_vals: &[String],
 ) -> String {
-    let qk = crate::api::quote_identifier(partition_key);
-    let pred = format!(
-        " AND st.{qk} BETWEEN {} AND {}",
-        pg_quote_literal(min_val),
-        pg_quote_literal(max_val),
-    );
+    let cols = crate::api::parse_partition_key_columns(partition_key);
+    let pred = if cols.len() == 1 {
+        // Single-column: simple BETWEEN (backward compatible)
+        let qk = crate::api::quote_identifier(&cols[0]);
+        format!(
+            " AND st.{qk} BETWEEN {} AND {}",
+            pg_quote_literal(&min_vals[0]),
+            pg_quote_literal(&max_vals[0]),
+        )
+    } else {
+        // Multi-column: ROW comparison
+        let st_cols: Vec<String> = cols
+            .iter()
+            .map(|c| format!("st.{}", crate::api::quote_identifier(c)))
+            .collect();
+        let min_literals: Vec<String> = min_vals.iter().map(|v| pg_quote_literal(v)).collect();
+        let max_literals: Vec<String> = max_vals.iter().map(|v| pg_quote_literal(v)).collect();
+        format!(
+            " AND ROW({}) >= ROW({}) AND ROW({}) <= ROW({})",
+            st_cols.join(", "),
+            min_literals.join(", "),
+            st_cols.join(", "),
+            max_literals.join(", "),
+        )
+    };
     merge_sql.replace("__PGT_PART_PRED__", &pred)
+}
+
+// ── PART-WARN: Default partition growth warning ─────────────────────
+
+/// After a successful refresh of a partitioned stream table, check whether
+/// the default (catch-all) partition has rows. If so, emit a WARNING
+/// prompting the user to create explicit named partitions.
+///
+/// The check is deliberately lightweight: a single `count(*)` on the default
+/// partition. If the default partition does not exist (unlikely but possible
+/// if the user detached it), the check is silently skipped.
+fn warn_default_partition_growth(schema: &str, name: &str) {
+    let default_name = format!("{name}_default");
+    let qschema = crate::api::quote_identifier(schema);
+    let qdefault = crate::api::quote_identifier(&default_name);
+    let sql = format!("SELECT count(*)::bigint FROM {qschema}.{qdefault}");
+    match Spi::get_one::<i64>(&sql) {
+        Ok(Some(count)) if count > 0 => {
+            pgrx::warning!(
+                "pg_trickle: PART-WARN: default partition {schema}.{default_name} of \
+                 stream table {schema}.{name} contains {count} row(s). \
+                 Create explicit named partitions to improve query performance and \
+                 enable partition pruning. Example:\n  \
+                 CREATE TABLE {schema}.{name}_2026q1 PARTITION OF {schema}.{name} \
+                 FOR VALUES FROM ('2026-01-01') TO ('2026-04-01');"
+            );
+        }
+        Ok(_) => {}  // Default partition is empty — no warning.
+        Err(_) => {} // Default partition does not exist — silently skip.
+    }
 }
 
 // ── DAG-3: Delta amplification detection ────────────────────────────
@@ -3496,16 +3597,16 @@ pub fn execute_differential_refresh(
                 );
                 return Ok((0, 0));
             }
-            Some((min_val, max_val)) => {
+            Some((min_vals, max_vals)) => {
                 pgrx::debug1!(
-                    "[pg_trickle] A1-3: partition range for {}.{}: [{}, {}]",
+                    "[pg_trickle] A1-3: partition range for {}.{}: [{:?}, {:?}]",
                     schema,
                     name,
-                    min_val,
-                    max_val,
+                    min_vals,
+                    max_vals,
                 );
                 resolved.merge_sql =
-                    inject_partition_predicate(&resolved.merge_sql, pk, &min_val, &max_val);
+                    inject_partition_predicate(&resolved.merge_sql, pk, &min_vals, &max_vals);
             }
         }
     }
@@ -3827,6 +3928,13 @@ pub fn execute_differential_refresh(
 
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("DIFFERENTIAL");
+
+    // PART-WARN: After a successful refresh, warn if the default partition
+    // of a partitioned stream table has accumulated rows.  This prompts the
+    // user to create explicit named partitions.
+    if st.st_partition_key.is_some() {
+        warn_default_partition_growth(schema, name);
+    }
 
     Ok((effective_count, 0))
 }
@@ -5048,8 +5156,12 @@ mod pg_tests {
     #[test]
     fn test_inject_partition_predicate_basic() {
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-        let result =
-            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let result = inject_partition_predicate(
+            merge_sql,
+            "event_date",
+            &["2024-01-01".to_string()],
+            &["2024-01-31".to_string()],
+        );
         assert!(result.contains("BETWEEN '2024-01-01' AND '2024-01-31'"));
         assert!(result.contains(r#""event_date""#));
         assert!(result.contains("st."));
@@ -5060,18 +5172,63 @@ mod pg_tests {
     fn test_inject_partition_predicate_no_placeholder() {
         // If there is no placeholder the SQL is returned unchanged
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id";
-        let result =
-            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let result = inject_partition_predicate(
+            merge_sql,
+            "event_date",
+            &["2024-01-01".to_string()],
+            &["2024-01-31".to_string()],
+        );
         assert_eq!(result, merge_sql);
     }
 
     #[test]
     fn test_inject_partition_predicate_value_with_single_quote() {
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-        let result = inject_partition_predicate(merge_sql, "name", "O'Brien", "O'Reilly");
+        let result = inject_partition_predicate(
+            merge_sql,
+            "name",
+            &["O'Brien".to_string()],
+            &["O'Reilly".to_string()],
+        );
         // Single quotes must be doubled inside the predicate literals
         assert!(result.contains("'O''Brien'"));
         assert!(result.contains("'O''Reilly'"));
+    }
+
+    // A1-1b: multi-column partition predicate tests
+
+    #[test]
+    fn test_inject_partition_predicate_multi_column() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let result = inject_partition_predicate(
+            merge_sql,
+            "event_day,customer_id",
+            &["2024-01-01".to_string(), "100".to_string()],
+            &["2024-01-31".to_string(), "999".to_string()],
+        );
+        // Multi-column uses ROW comparison instead of BETWEEN
+        assert!(
+            result
+                .contains("ROW(st.\"event_day\", st.\"customer_id\") >= ROW('2024-01-01', '100')")
+        );
+        assert!(
+            result
+                .contains("ROW(st.\"event_day\", st.\"customer_id\") <= ROW('2024-01-31', '999')")
+        );
+        assert!(!result.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_inject_partition_predicate_three_columns() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let result = inject_partition_predicate(
+            merge_sql,
+            "a, b, c",
+            &["1".to_string(), "x".to_string(), "10".to_string()],
+            &["9".to_string(), "z".to_string(), "90".to_string()],
+        );
+        assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") >= ROW('1', 'x', '10')"));
+        assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") <= ROW('9', 'z', '90')"));
     }
 
     // ── build_weight_agg_using ───────────────────────────────────────────────
