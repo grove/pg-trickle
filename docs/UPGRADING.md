@@ -374,6 +374,54 @@ reinitialise to add them.
 - Stream-table-to-stream-table row identity is now computed consistently between the change buffer and the downstream table, eliminating stale duplicate rows after upstream UPDATEs.
 - `pg_trickle.tiered_scheduling` defaults to `on` (same as 0.11.0 runtime behaviour; this release makes it the explicit default).
 
+### 0.12.0 → 0.13.0
+
+**Eight new catalog columns** added to `pgtrickle.pgt_stream_tables`:
+
+| Column | Type | Default | Purpose |
+|--------|------|---------|--------|
+| `effective_refresh_mode` | `TEXT` | `NULL` | Computed refresh mode after AUTO resolution |
+| `fuse_mode` | `TEXT NOT NULL` | `'off'` | Fuse configuration: off, auto, or manual |
+| `fuse_state` | `TEXT NOT NULL` | `'armed'` | Current fuse state: armed or blown |
+| `fuse_ceiling` | `BIGINT` | `NULL` | Maximum change count before fuse blows |
+| `fuse_sensitivity` | `INT` | `NULL` | Consecutive cycles above ceiling before triggering |
+| `blown_at` | `TIMESTAMPTZ` | `NULL` | Timestamp when the fuse last blew |
+| `blow_reason` | `TEXT` | `NULL` | Reason the fuse blew |
+| `st_partition_key` | `TEXT` | `NULL` | Partition key specification (RANGE, LIST, or HASH) |
+
+All columns use `ADD COLUMN IF NOT EXISTS` for idempotent upgrades.
+
+**Nine new SQL functions** (plus one replacement with new signature):
+
+| Function | Purpose |
+|----------|---------|
+| `pgtrickle.explain_delta(name, format)` | Delta SQL query plan inspection |
+| `pgtrickle.dedup_stats()` | MERGE deduplication frequency counters |
+| `pgtrickle.shared_buffer_stats()` | Per-source-buffer observability |
+| `pgtrickle.explain_refresh_mode(name)` | Refresh mode decision explanation |
+| `pgtrickle.reset_fuse(name)` | Reset a blown fuse |
+| `pgtrickle.fuse_status()` | Fuse state across all stream tables |
+| `pgtrickle.explain_query_rewrite(query)` | DVM rewrite pass inspection |
+| `pgtrickle.diagnose_errors(name)` | Error classification and remediation |
+| `pgtrickle.list_auxiliary_columns(name)` | Hidden `__pgt_*` column listing |
+| `pgtrickle.validate_query(query)` | Query compatibility validation |
+| `pgtrickle.alter_stream_table(...)` | *(replaced)* — new `partition_by` parameter |
+
+**New GUC variables:**
+
+| GUC | Default | Purpose |
+|-----|---------|---------|
+| `pg_trickle.per_database_worker_quota` | `0` (auto) | Per-database parallel worker limit |
+
+**Behavioral notes:**
+
+- **Shared change buffers:** Multiple stream tables reading from the same source now automatically share a single change buffer. No migration action required — existing per-source buffers continue to work.
+- **Columnar change tracking:** Wide-table UPDATEs that touch only value columns (not GROUP BY / JOIN / WHERE columns) now generate significantly less delta volume. This is fully automatic.
+- **Auto buffer partitioning:** Set `pg_trickle.buffer_partitioning = 'auto'` to let high-throughput buffers self-promote to partitioned mode for O(1) cleanup.
+- **dbt macros:** If you use dbt-pgtrickle, update your macros to the matching v0.13.0 version. New config options: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity`.
+
+**No breaking changes.** All v0.12.0 functions, views, and event triggers continue to work as before.
+
 ---
 
 ## Supported Upgrade Paths
@@ -397,9 +445,10 @@ automatically when you run `ALTER EXTENSION pg_trickle UPDATE`.
 | 0.9.0 | 0.10.0 | `pg_trickle--0.9.0--0.10.0.sql` |
 | 0.10.0 | 0.11.0 | `pg_trickle--0.10.0--0.11.0.sql` |
 | 0.11.0 | 0.12.0 | `pg_trickle--0.11.0--0.12.0.sql` |
+| 0.12.0 | 0.13.0 | `pg_trickle--0.12.0--0.13.0.sql` |
 
-That means any installation currently on 0.1.3 through 0.11.0 can upgrade to
-0.12.0 in one step after the new binaries are installed and PostgreSQL has been
+That means any installation currently on 0.1.3 through 0.12.0 can upgrade to
+0.13.0 in one step after the new binaries are installed and PostgreSQL has been
 restarted.
 
 ---

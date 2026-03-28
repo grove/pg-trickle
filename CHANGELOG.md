@@ -33,8 +33,135 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.13.0] — Unreleased
 
-_This release is under development. See [ROADMAP.md](ROADMAP.md) for planned
-items._
+0.13.0 is the **Scalability Foundations** release. It makes pg_trickle
+significantly more efficient for wide-table and multi-consumer workloads,
+adds powerful partitioning options, and improves operational visibility
+with new profiling and diagnostic functions.
+
+### Columnar Change Tracking (A-2)
+
+Wide tables (50+ columns) where UPDATEs touch only a few columns used to
+generate full-row deltas, forcing the incremental engine to process all
+columns even when most were unchanged. pg_trickle now classifies columns
+as **key columns** (used in GROUP BY, JOIN ON, WHERE) vs. **value columns**,
+and adds a `__pgt_key_changed` annotation to each delta row.
+
+When only value columns change:
+- **Scan→Aggregate queries** use a P5 fast path that emits a single net-correction
+  row (`new - old`) instead of the standard DELETE+INSERT pair — halving delta volume.
+- **MERGE updates** filter out D-side rows, converting DELETE+INSERT into a single
+  UPDATE — enabling HOT updates (no index churn) and reducing WAL volume.
+
+### Shared Change Buffers (D-4)
+
+Multiple stream tables reading from the same source table now share a single
+change buffer (`changes_{source_oid}`) instead of each maintaining its own copy.
+The buffer captures a column superset (union of all consumers' `columns_used`
+sets) and uses per-consumer frontier tracking with `MIN(frontier)` cleanup
+coordination — the slowest consumer protects buffer rows needed by all.
+
+New SQL function: **`pgtrickle.shared_buffer_stats()`** — returns per-buffer
+observability: source table, consumer count, consumer list, columns tracked,
+safe frontier LSN, row count, and partitioning status.
+
+### Auto Buffer Partitioning (PERF-2)
+
+The `pg_trickle.buffer_partitioning` GUC now supports an `'auto'` mode that
+starts with unpartitioned buffers and automatically promotes to `PARTITION BY
+RANGE (lsn)` when a buffer accumulates more rows than `compact_threshold` in a
+single refresh cycle. Once promoted, cleanup uses O(1) partition detach instead
+of O(n) DELETE. Keeps overhead low for quiet sources while scaling to
+high-throughput ones.
+
+### Partitioning Enhancements
+
+Building on v0.11.0's RANGE partitioning foundation:
+
+- **Multi-column partition keys** — `partition_by='col_a,col_b'` with composite
+  `ROW()` comparison predicates.
+- **LIST partitioning** — `partition_by='LIST:status'` with `IN (…)` predicate
+  injection for low-cardinality columns.
+- **HASH partitioning** — `partition_by='HASH:customer_id:8'` with per-partition
+  MERGE loop targeting only affected child partitions.
+- **ALTER partition key** — `alter_stream_table(partition_by => …)` repartitions
+  existing storage in place with data preservation.
+- **Default partition warning** — emits a `WARNING` when the catch-all default
+  partition grows, prompting creation of named partitions.
+
+### MERGE Profiling & Delta SQL Inspection
+
+Two new functions for understanding and optimizing refresh performance:
+
+- **`pgtrickle.explain_delta(st_name, format)`** — captures `EXPLAIN` output
+  for the auto-generated delta SQL query (text, JSON, XML, or YAML format).
+  Set `PGS_PROFILE_DELTA=1` to auto-capture plans to `/tmp/delta_plans/` during
+  E2E/bench runs.
+- **`pgtrickle.dedup_stats()`** — reports MERGE deduplication frequency:
+  `total_diff_refreshes`, `dedup_needed`, `dedup_ratio_pct`. If the ratio
+  exceeds 10% in production, a two-pass MERGE strategy RFC is warranted.
+
+### Multi-Tenant Scheduler Isolation (C-3)
+
+New GUC: **`pg_trickle.per_database_worker_quota`** — limits how many parallel
+refresh workers each database can claim from the shared pool. Priority ordering
+under contention: IMMEDIATE > Hot > Warm > Cold stream tables. Burst capacity
+up to 150% of quota when the cluster is under 80% loaded.
+
+### TPC-H Benchmark Harness
+
+`TPCH_BENCH=1` mode instruments TPC-H tests with warm-up cycles and structured
+`[TPCH_BENCH]` per-cycle output with a per-query median/P95/MERGE% summary
+table. Five OpTree Criterion micro-benchmarks (`q01`, `q05`, `q08`, `q18`,
+`q21`) measure pure-Rust delta SQL generation time without a database.
+New `just bench-tpch`, `just bench-tpch-fast`, `just bench-tpch-large` targets.
+
+### SQL Coverage
+
+- **`IS JSON` predicates** (PG 16+) — `expr IS JSON OBJECT/ARRAY/SCALAR/WITH UNIQUE KEYS`
+  now accepted in DIFFERENTIAL defining queries.
+- **SQL/JSON constructors** (PG 16+) — `JSON_OBJECT`, `JSON_ARRAY`,
+  `JSON_OBJECTAGG`, `JSON_ARRAYAGG` now accepted.
+- **Recursive CTE audit** — non-monotone recursive terms (EXCEPT, aggregation)
+  correctly fall back to recomputation; G1.3 downgraded to P4.
+
+### dbt Macro Updates
+
+- `{{ config(partition_by='customer_id') }}` — wire through to
+  `create_stream_table()` at creation time.
+- `{{ config(fuse='auto', fuse_ceiling=100000, fuse_sensitivity=3) }}` — wire
+  through to `alter_stream_table()` with change detection (only calls SQL when
+  values differ from catalog state).
+
+### New SQL Functions
+
+| Function | Returns | Purpose |
+|----------|---------|---------|
+| `pgtrickle.explain_delta(name, format)` | `SETOF TEXT` | Delta SQL query plan inspection |
+| `pgtrickle.dedup_stats()` | `TABLE(total, dedup_needed, ratio_pct)` | MERGE deduplication frequency |
+| `pgtrickle.shared_buffer_stats()` | `TABLE(source_oid, source_table, …)` | Per-buffer observability |
+| `pgtrickle.explain_refresh_mode(name)` | `TABLE(mode, reason)` | Why a ST got its refresh mode |
+| `pgtrickle.reset_fuse(name)` | `void` | Reset a blown fuse |
+| `pgtrickle.fuse_status()` | `TABLE(name, fuse_mode, state, …)` | Fuse state across all STs |
+
+### Catalog Changes
+
+Eight new columns on `pgtrickle.pgt_stream_tables`:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `effective_refresh_mode` | `TEXT` | Computed refresh mode (AUTO resolution) |
+| `fuse_mode` | `TEXT` | Fuse configuration: off/auto/manual |
+| `fuse_state` | `TEXT` | Current fuse state: armed/blown |
+| `fuse_ceiling` | `BIGINT` | Max change count before fuse blows |
+| `fuse_sensitivity` | `INT` | Consecutive cycles before trigger |
+| `blown_at` | `TIMESTAMPTZ` | When the fuse last blew |
+| `blow_reason` | `TEXT` | Why the fuse blew |
+| `st_partition_key` | `TEXT` | Partition key specification |
+
+### Updated SQL Functions
+
+`pgtrickle.alter_stream_table()` — new `partition_by` parameter for runtime
+partition key changes (add, change, or remove).
 
 ---
 

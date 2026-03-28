@@ -2529,8 +2529,8 @@ cleanup for PG 16+ expression types.
 - [x] G14-MDED: Deduplication frequency profiling complete; `TOTAL_DIFF_REFRESHES` + `DEDUP_NEEDED_REFRESHES` shared-memory atomic counters; `pgtrickle.dedup_stats()` reports ratio; RFC threshold documented at ≥10% ✅ Done
 - [x] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json/xml/yaml; `PGS_PROFILE_DELTA=1` auto-capture to `/tmp/delta_plans/`; documented in SQL_REFERENCE.md ✅ Done
 - [x] C-3: Per-database worker quota enforced; tier-aware priority sort (IMMEDIATE > Hot > Warm > Cold) implemented; GUC + E2E quota tests added; `compute_per_db_quota()` with burst at 80% cluster load ✅ Done
-- [ ] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional
-- [ ] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend
+- [x] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional ✅ Done
+- [x] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend ✅ Done
 - [x] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; change detection wired; integration tests added; README and SQL_REFERENCE.md updated ✅ Done
 - [x] SQL-RECUR: Recursive CTE non-monotone audit complete; G1.3 downgraded to P4 — two Tier 3h E2E tests verify recomputation fallback is correct ✅ Done
 - [x] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
