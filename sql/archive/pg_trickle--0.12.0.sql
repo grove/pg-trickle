@@ -1073,6 +1073,48 @@ AS 'MODULE_PATHNAME', 'get_staleness_wrapper';
 /* </end connected objects> */
 
 /* <begin connected objects> */
+-- Circuit-breaker fuse functions (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."reset_fuse"(
+        "name" TEXT,
+        "action" TEXT DEFAULT 'apply'
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'reset_fuse_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- Circuit-breaker fuse functions (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."fuse_status"() RETURNS TABLE (
+        "stream_table" TEXT,
+        "fuse_mode" TEXT,
+        "fuse_state" TEXT,
+        "fuse_ceiling" bigint,
+        "effective_ceiling" bigint,
+        "fuse_sensitivity" INT,
+        "blown_at" timestamp with time zone,
+        "blow_reason" TEXT
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'fuse_status_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
+-- Refresh mode explainer (added in 0.11.0)
+CREATE OR REPLACE FUNCTION pgtrickle."explain_refresh_mode"(
+        "name" TEXT
+) RETURNS TABLE (
+        "configured_mode" TEXT,
+        "effective_mode" TEXT,
+        "downgrade_reason" TEXT
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'explain_refresh_mode_wrapper';
+/* </end connected objects> */
+
+/* <begin connected objects> */
 -- src/lib.rs:583
 -- requires:
 --   _signal_launcher_rescan
