@@ -259,7 +259,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table_if_not_exists"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -307,7 +308,8 @@ CREATE  FUNCTION pgtrickle."create_or_replace_stream_table"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
@@ -888,7 +890,8 @@ CREATE  FUNCTION pgtrickle."create_stream_table"(
 	"diamond_schedule_policy" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"cdc_mode" TEXT DEFAULT NULL, /* core::option::Option<&str> */
 	"append_only" bool DEFAULT false, /* bool */
-	"pooler_compatibility_mode" bool DEFAULT false /* bool */
+	"pooler_compatibility_mode" bool DEFAULT false, /* bool */
+	"partition_by" TEXT DEFAULT NULL /* core::option::Option<&str> */
 ) RETURNS void
 
 LANGUAGE c /* Rust */
