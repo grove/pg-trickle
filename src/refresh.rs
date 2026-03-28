@@ -809,14 +809,45 @@ pub fn capture_delta_to_bypass_table(
 
     let bypass_table = format!("pg_temp.__pgt_bypass_{}", pgt_id);
 
-    let sql = build_bypass_capture_sql(pgt_id, user_cols_typed, &bypass_table);
+    // DAG-4/ST-ST-10: If a pre-snapshot table exists (created by the
+    // capture_incremental_diff_to_st_buffer path in explicit_dml), use a
+    // pre/post comparison to produce correct D+I pairs for value-changes.
+    // The weight-aggregated __pgt_delta_ collapses D+I with the same
+    // __pgt_row_id into a single I, which omits the D for old column values.
+    // Downstream STs with WHERE filters on changed columns would miss the
+    // deletion and retain stale rows.
+    let pre_snapshot_exists: bool = Spi::get_one::<bool>(&format!(
+        "SELECT to_regclass('__pgt_pre_{}') IS NOT NULL",
+        pgt_id
+    ))
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
 
-    let count = Spi::connect_mut(|client| {
-        let result = client
-            .update(&sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
+    let count = if pre_snapshot_exists {
+        let user_cols: Vec<String> = user_cols_typed.iter().map(|(n, _)| n.clone()).collect();
+        let col_defs: String = std::iter::once("lsn pg_lsn".to_string())
+            .chain(std::iter::once("action \"char\"".to_string()))
+            .chain(std::iter::once("pk_hash bigint".to_string()))
+            .chain(
+                user_cols_typed
+                    .iter()
+                    .map(|(name, typ)| format!("\"new_{}\" {}", name.replace('"', "\"\""), typ)),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
+        let create_sql =
+            format!("CREATE TEMP TABLE IF NOT EXISTS {bypass_table} ({col_defs}) ON COMMIT DROP",);
+        Spi::run(&create_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        capture_diff_to_table(st, &user_cols, &bypass_table, pgt_id)?
+    } else {
+        let sql = build_bypass_capture_sql(pgt_id, user_cols_typed, &bypass_table);
+        Spi::connect_mut(|client| {
+            let result = client
+                .update(&sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<i64, PgTrickleError>(result.len() as i64)
+        })?
+    };
 
     set_st_bypass(pgt_id, bypass_table.clone());
 
@@ -831,6 +862,131 @@ pub fn capture_delta_to_bypass_table(
     }
 
     Ok(count)
+}
+
+/// Shared pre/post diff logic for capturing D+I pairs into a target table.
+///
+/// Used by both `capture_delta_to_bypass_table` (FusedChain path) and
+/// `capture_incremental_diff_to_st_buffer` (persistent buffer path).
+///
+/// `target_table` must already exist with the appropriate schema
+/// (`lsn, action, pk_hash, new_col1, ...`).
+/// Reads the pre-snapshot from `__pgt_pre_{pgt_id}` and compares with the
+/// current state of the ST backing table.
+fn capture_diff_to_table(
+    st: &StreamTableMeta,
+    user_cols: &[String],
+    target_table: &str,
+    pgt_id: i64,
+) -> Result<i64, PgTrickleError> {
+    let schema = &st.pgt_schema;
+    let name = &st.pgt_name;
+    let quoted_table = format!(
+        "\"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        name.replace('"', "\"\""),
+    );
+
+    let new_col_list: String = user_cols
+        .iter()
+        .map(|c| format!("\"new_{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let pre_col_refs: String = user_cols
+        .iter()
+        .map(|c| format!("pre.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let post_col_refs: String = user_cols
+        .iter()
+        .map(|c| format!("post.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let is_distinct_pairs: String = user_cols
+        .iter()
+        .map(|c| {
+            let qc = format!("\"{}\"", c.replace('"', "\"\""));
+            format!("pre.{qc} IS DISTINCT FROM post.{qc}")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let pre_pk_hash = build_content_hash_expr("pre.", user_cols);
+    let post_pk_hash = build_content_hash_expr("post.", user_cols);
+
+    let mut total: i64 = 0;
+
+    // Deleted rows: in pre but no longer in the table.
+    let del_sql = format!(
+        "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+         SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
+         FROM __pgt_pre_{pgt_id} pre \
+         LEFT JOIN {quoted_table} post ON pre.__pgt_row_id = post.__pgt_row_id \
+         WHERE post.__pgt_row_id IS NULL"
+    );
+    total += Spi::connect_mut(|c| {
+        Ok::<i64, PgTrickleError>(
+            c.update(&del_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .len() as i64,
+        )
+    })?;
+
+    // Inserted rows: in table (scoped to delta row_ids) but not in pre.
+    let ins_sql = format!(
+        "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+         SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
+         FROM {quoted_table} post \
+         JOIN (SELECT DISTINCT __pgt_row_id FROM __pgt_delta_{pgt_id}) delta \
+           ON delta.__pgt_row_id = post.__pgt_row_id \
+         LEFT JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+         WHERE pre.__pgt_row_id IS NULL"
+    );
+    total += Spi::connect_mut(|c| {
+        Ok::<i64, PgTrickleError>(
+            c.update(&ins_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .len() as i64,
+        )
+    })?;
+
+    // Changed rows: same row_id, different column values.
+    if !is_distinct_pairs.is_empty() {
+        let chg_del_sql = format!(
+            "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+             SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
+             FROM __pgt_pre_{pgt_id} pre \
+             JOIN {quoted_table} post ON post.__pgt_row_id = pre.__pgt_row_id \
+             WHERE {is_distinct_pairs}"
+        );
+        total += Spi::connect_mut(|c| {
+            Ok::<i64, PgTrickleError>(
+                c.update(&chg_del_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .len() as i64,
+            )
+        })?;
+
+        let chg_ins_sql = format!(
+            "INSERT INTO {target_table} (lsn, action, pk_hash, {new_col_list}) \
+             SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
+             FROM {quoted_table} post \
+             JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
+             WHERE {is_distinct_pairs}"
+        );
+        total += Spi::connect_mut(|c| {
+            Ok::<i64, PgTrickleError>(
+                c.update(&chg_ins_sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                    .len() as i64,
+            )
+        })?;
+    }
+
+    Ok(total)
 }
 
 /// Build the SQL for creating a bypass temp table and inserting delta rows.
@@ -882,22 +1038,8 @@ pub fn build_bypass_capture_sql(
 /// change buffer using a pre/post snapshot comparison.
 ///
 /// Called after the explicit DML (DELETE + UPDATE + INSERT) when the ST has
-/// downstream consumers.  The weight-aggregation wrapper in the USING clause
-/// collapses D+I pairs for the same `__pgt_row_id` into a single I action,
-/// which is correct for the MERGE/DML steps but loses the DELETE for old
-/// column values.  Downstream STs that filter on changed columns would never
-/// learn that the old row was removed.
-///
-/// This function compares a scoped pre-DML snapshot (`__pgt_pre_{pgt_id}`)
-/// — containing only rows whose `__pgt_row_id` appears in the delta — with
-/// the post-DML state to produce accurate I/D pairs for downstream
-/// propagation.
-///
-/// Expects:
-///   - `__pgt_pre_{pgt_id}` temp table (created before DML with
-///     affected rows)
-///   - `__pgt_delta_{pgt_id}` temp table (the materialized delta,
-///     used to scope the "inserted" query to delta-affected row IDs)
+/// downstream consumers.  Delegates to [`capture_diff_to_table`] with the
+/// persistent `changes_pgt_{pgt_id}` buffer as the target.
 fn capture_incremental_diff_to_st_buffer(
     st: &StreamTableMeta,
     user_cols: &[String],
@@ -909,136 +1051,19 @@ fn capture_incremental_diff_to_st_buffer(
         return Ok(0);
     }
 
-    let schema = &st.pgt_schema;
-    let name = &st.pgt_name;
-    let quoted_table = format!(
-        "\"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        name.replace('"', "\"\""),
-    );
+    let target_table = format!("\"{change_schema}\".changes_pgt_{pgt_id}");
+    let total = capture_diff_to_table(st, user_cols, &target_table, pgt_id)?;
 
-    let new_col_list: String = user_cols
-        .iter()
-        .map(|c| format!("\"new_{}\"", c.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let pre_col_refs: String = user_cols
-        .iter()
-        .map(|c| format!("pre.\"{}\"", c.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let post_col_refs: String = user_cols
-        .iter()
-        .map(|c| format!("post.\"{}\"", c.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let is_distinct_pairs: String = user_cols
-        .iter()
-        .map(|c| {
-            let qc = format!("\"{}\"", c.replace('"', "\"\""));
-            format!("pre.{qc} IS DISTINCT FROM post.{qc}")
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ");
-
-    let pre_pk_hash = build_content_hash_expr("pre.", user_cols);
-    let post_pk_hash = build_content_hash_expr("post.", user_cols);
-
-    let mut total_count: i64 = 0;
-
-    // Deleted rows: in pre-snapshot but no longer in the table.
-    let deleted_sql = format!(
-        "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, pk_hash, {new_col_list}) \
-         SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
-         FROM __pgt_pre_{pgt_id} pre \
-         LEFT JOIN {quoted_table} post ON pre.__pgt_row_id = post.__pgt_row_id \
-         WHERE post.__pgt_row_id IS NULL"
-    );
-    let del_count = Spi::connect_mut(|client| {
-        let result = client
-            .update(&deleted_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
-    total_count += del_count;
-
-    // Inserted rows: in the table but not in the pre-snapshot.
-    // Scoped to rows whose __pgt_row_id appears in the delta to avoid
-    // scanning the entire table.
-    let inserted_sql = format!(
-        "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, pk_hash, {new_col_list}) \
-         SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
-         FROM {quoted_table} post \
-         JOIN (SELECT DISTINCT __pgt_row_id FROM __pgt_delta_{pgt_id}) delta \
-           ON delta.__pgt_row_id = post.__pgt_row_id \
-         LEFT JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
-         WHERE pre.__pgt_row_id IS NULL"
-    );
-    let ins_count = Spi::connect_mut(|client| {
-        let result = client
-            .update(&inserted_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
-    total_count += ins_count;
-
-    // Changed rows: same row_id but different column values.
-    // Emit D (old values) + I (new values) so downstream filters can
-    // correctly evaluate both the removal and the insertion.
-    if !is_distinct_pairs.is_empty() {
-        let changed_del_sql = format!(
-            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {new_col_list}) \
-             SELECT pg_current_wal_lsn(), 'D', {pre_pk_hash}, {pre_col_refs} \
-             FROM __pgt_pre_{pgt_id} pre \
-             JOIN {quoted_table} post ON post.__pgt_row_id = pre.__pgt_row_id \
-             WHERE {is_distinct_pairs}"
-        );
-        let chg_del_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&changed_del_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<i64, PgTrickleError>(result.len() as i64)
-        })?;
-        total_count += chg_del_count;
-
-        let changed_ins_sql = format!(
-            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-             (lsn, action, pk_hash, {new_col_list}) \
-             SELECT pg_current_wal_lsn(), 'I', {post_pk_hash}, {post_col_refs} \
-             FROM {quoted_table} post \
-             JOIN __pgt_pre_{pgt_id} pre ON post.__pgt_row_id = pre.__pgt_row_id \
-             WHERE {is_distinct_pairs}"
-        );
-        let chg_ins_count = Spi::connect_mut(|client| {
-            let result = client
-                .update(&changed_ins_sql, None, &[])
-                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-            Ok::<i64, PgTrickleError>(result.len() as i64)
-        })?;
-        total_count += chg_ins_count;
-    }
-
-    if total_count > 0 {
+    if total > 0 {
         pgrx::debug1!(
-            "[pg_trickle] ST-ST INCR: captured {} diff rows to changes_pgt_{} for {}.{} \
-             (deleted={}, inserted={}, changed={})",
-            total_count,
+            "[pg_trickle] ST-ST INCR: captured {} diff rows to changes_pgt_{} for {}.{}",
+            total,
             pgt_id,
-            schema,
-            name,
-            del_count,
-            ins_count,
-            total_count - del_count - ins_count,
+            st.pgt_schema,
+            st.pgt_name,
         );
     }
-
-    Ok(total_count)
+    Ok(total)
 }
 
 /// Capture the full-refresh diff into the ST's change buffer.
