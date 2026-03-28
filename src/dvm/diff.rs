@@ -59,6 +59,12 @@ pub struct DiffResult {
     /// When true, the delta output has at most one row per `__pgt_row_id`.
     /// The MERGE statement can skip the outer DISTINCT ON + ORDER BY.
     pub is_deduplicated: bool,
+    /// A-2: When true, the delta CTE includes a `__pgt_key_changed` boolean
+    /// column indicating whether any key column (GROUP BY, JOIN ON, WHERE)
+    /// was modified. Downstream operators can use this signal to optimize
+    /// value-only UPDATEs — e.g., skip the DELETE+INSERT cycle for
+    /// invertible aggregates when only aggregate argument columns changed.
+    pub has_key_changed: bool,
 }
 
 /// Context for delta query generation.
@@ -143,6 +149,14 @@ pub struct DiffContext {
     /// trigger. Used by `diff_scan_change_buffer` to build a bitmask filter
     /// that skips UPDATE rows where none of the referenced columns changed.
     pub source_cdc_columns: HashMap<u32, Vec<String>>,
+    /// A-2: Key column names per source table.
+    ///
+    /// Maps `table_oid` → column names that appear in key positions
+    /// (GROUP BY, JOIN ON, WHERE). Used by the scan operator to compute
+    /// a key-column-only bitmask. UPDATE rows where `changed_cols & key_mask
+    /// = 0` are "value-only" changes — the row stays in its group/join
+    /// bucket — enabling downstream optimization.
+    pub source_key_columns: HashMap<u32, Vec<String>>,
     /// P2-7: Predicate pushed down from a Filter node into the Scan.
     ///
     /// When a Filter sits directly above a Scan and the predicate only
@@ -197,6 +211,7 @@ impl DiffContext {
             st_column_alias_map: None,
             having_filter: false,
             source_cdc_columns: HashMap::new(),
+            source_key_columns: HashMap::new(),
             scan_pushed_predicate: None,
             st_source_pgt_ids: HashMap::new(),
             st_bypass_tables: HashMap::new(),
@@ -229,6 +244,7 @@ impl DiffContext {
             st_column_alias_map: None,
             having_filter: false,
             source_cdc_columns: HashMap::new(),
+            source_key_columns: HashMap::new(),
             scan_pushed_predicate: None,
             st_source_pgt_ids: HashMap::new(),
             st_bypass_tables: HashMap::new(),
@@ -339,10 +355,15 @@ impl DiffContext {
     pub fn differentiate_with_columns(
         &mut self,
         op: &OpTree,
-    ) -> Result<(String, Vec<String>, bool), PgTrickleError> {
+    ) -> Result<(String, Vec<String>, bool, bool), PgTrickleError> {
         let result = self.diff_node(op)?;
         let sql = self.build_with_query(&result.cte_name);
-        Ok((sql, result.columns, result.is_deduplicated))
+        Ok((
+            sql,
+            result.columns,
+            result.is_deduplicated,
+            result.has_key_changed,
+        ))
     }
 
     /// Recursively differentiate an operator tree node.
@@ -417,6 +438,15 @@ impl DiffContext {
     /// a subquery for each reference, avoiding the temp file issue.
     pub fn mark_cte_not_materialized(&mut self, name: &str) {
         self.not_materialized_ctes.insert(name.to_string());
+    }
+
+    /// Look up the SQL body of a CTE by name (test helper).
+    #[cfg(test)]
+    pub fn cte_sql(&self, name: &str) -> Option<&str> {
+        self.ctes
+            .iter()
+            .find(|(n, _, _, _)| n == name)
+            .map(|(_, sql, _, _)| sql.as_str())
     }
 
     /// Build the final WITH query from accumulated CTEs.
@@ -734,6 +764,7 @@ mod tests {
             cte_name: "cte_1".to_string(),
             columns: vec!["id".to_string()],
             is_deduplicated: true,
+            has_key_changed: false,
         };
         ctx.set_cte_delta(0, result);
         let cached = ctx.get_cte_delta(0).unwrap();

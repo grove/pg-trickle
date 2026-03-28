@@ -481,6 +481,7 @@ fn create_or_replace_stream_table_impl(
                 None, // fuse: not set via create_or_replace
                 None, // fuse_ceiling: not set via create_or_replace
                 None, // fuse_sensitivity: not set via create_or_replace
+                None, // partition_by: not changed via create_or_replace
             )?;
 
             pgrx::info!(
@@ -1056,20 +1057,44 @@ fn setup_storage_table(
     Spi::run(&storage_ddl)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to create storage table: {}", e)))?;
 
-    // A1-1: For partitioned storage tables, create a catch-all default partition
-    // so that rows are never rejected due to missing partition coverage.
-    // Users add explicit partitions via standard PostgreSQL DDL (ATTACH PARTITION).
-    if let Some(_pk) = partition_key {
-        let default_partition_sql = format!(
-            "CREATE TABLE {}.{} PARTITION OF {}.{} DEFAULT",
-            quote_identifier(schema),
-            quote_identifier(&format!("{table_name}_default")),
-            quote_identifier(schema),
-            quote_identifier(table_name),
-        );
-        Spi::run(&default_partition_sql).map_err(|e| {
-            PgTrickleError::SpiError(format!("Failed to create default partition: {}", e))
-        })?;
+    // A1-1/A1-3b: For partitioned storage tables, create child partitions.
+    // RANGE/LIST: create a catch-all default partition so rows are never rejected.
+    // HASH: create N child partitions (no default allowed by PostgreSQL).
+    if let Some(pk) = partition_key {
+        let method = parse_partition_method(pk);
+        match method {
+            PartitionMethod::Hash => {
+                let modulus = parse_hash_modulus(pk).unwrap_or(4);
+                for remainder in 0..modulus {
+                    let child_name = format!("{table_name}_p{remainder}");
+                    let child_sql = format!(
+                        "CREATE TABLE {}.{} PARTITION OF {}.{} \
+                         FOR VALUES WITH (modulus {modulus}, remainder {remainder})",
+                        quote_identifier(schema),
+                        quote_identifier(&child_name),
+                        quote_identifier(schema),
+                        quote_identifier(table_name),
+                    );
+                    Spi::run(&child_sql).map_err(|e| {
+                        PgTrickleError::SpiError(format!(
+                            "Failed to create hash partition {child_name}: {e}"
+                        ))
+                    })?;
+                }
+            }
+            PartitionMethod::Range | PartitionMethod::List => {
+                let default_partition_sql = format!(
+                    "CREATE TABLE {}.{} PARTITION OF {}.{} DEFAULT",
+                    quote_identifier(schema),
+                    quote_identifier(&format!("{table_name}_default")),
+                    quote_identifier(schema),
+                    quote_identifier(table_name),
+                );
+                Spi::run(&default_partition_sql).map_err(|e| {
+                    PgTrickleError::SpiError(format!("Failed to create default partition: {}", e))
+                })?;
+            }
+        }
     }
 
     let pgt_relid = get_table_oid(schema, table_name)?;
@@ -1816,7 +1841,7 @@ fn alter_stream_table_query(
                 &vq.sum2_aux_columns,
                 &vq.covar_aux_columns,
                 &vq.nonnull_aux_columns,
-                None, // alter_stream_table: partition_key changes not supported
+                st.st_partition_key.as_deref(), // A1-1c: preserve partition key on query change
             )?
         }
     };
@@ -2040,6 +2065,112 @@ fn alter_stream_table_query(
             SchemaChange::Compatible { .. } => "compatible",
             SchemaChange::Incompatible { .. } => "incompatible (full rebuild)",
         }
+    );
+
+    Ok(())
+}
+
+/// A1-1c: Change the partition key on an existing stream table.
+///
+/// This is a destructive operation that:
+/// 1. Validates the new partition key against the ST's output columns.
+/// 2. Drops the old storage table (detaching pgt_relid first).
+/// 3. Recreates it with the new partition scheme (or unpartitioned).
+/// 4. Updates the catalog.
+/// 5. Runs a full refresh to repopulate.
+fn alter_stream_table_partition_key(
+    st: &StreamTableMeta,
+    schema: &str,
+    table_name: &str,
+    new_partition_key: Option<&str>,
+) -> Result<(), PgTrickleError> {
+    // Get current storage columns for validation.
+    let columns = get_storage_table_columns(schema, table_name)?;
+
+    // Validate new partition key against current columns.
+    if let Some(pk) = new_partition_key {
+        validate_partition_key(pk, &columns)?;
+    }
+
+    pgrx::warning!(
+        "pg_trickle: ALTER partition_by on {schema}.{table_name} requires full storage rebuild. \
+         The storage table will be recreated and a full refresh applied."
+    );
+
+    // Detach pgt_relid so the sql_drop event trigger does not delete the
+    // catalog row when we drop the old table.
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET pgt_relid = 0 WHERE pgt_id = $1",
+        &[st.pgt_id.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    // Drop the old storage table (CASCADE drops child partitions too).
+    let drop_sql = format!(
+        "DROP TABLE IF EXISTS {}.{} CASCADE",
+        quote_identifier(schema),
+        quote_identifier(table_name),
+    );
+    Spi::run(&drop_sql)
+        .map_err(|e| PgTrickleError::SpiError(format!("Failed to drop storage table: {e}")))?;
+
+    // Recompute auxiliary column needs from the defining query.
+    let needs_pgt_count = crate::dvm::query_needs_pgt_count(&st.defining_query);
+    let needs_dual_count = crate::dvm::query_needs_dual_count(&st.defining_query);
+    let avg_aux = crate::dvm::query_avg_aux_columns(&st.defining_query);
+    let sum2_aux = crate::dvm::query_sum2_aux_columns(&st.defining_query);
+    let covar_aux = crate::dvm::query_covar_aux_columns(&st.defining_query);
+    let nonnull_aux = crate::dvm::query_nonnull_aux_columns(&st.defining_query);
+
+    // Recreate the storage table with the new partition scheme.
+    let new_pgt_relid = setup_storage_table(
+        schema,
+        table_name,
+        &columns,
+        needs_pgt_count,
+        needs_dual_count,
+        st.has_keyless_source,
+        st.refresh_mode,
+        None, // parsed_tree not needed for storage creation
+        &avg_aux,
+        &sum2_aux,
+        &covar_aux,
+        &nonnull_aux,
+        new_partition_key,
+    )?;
+
+    // Update catalog: new relid + new partition key.
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET pgt_relid = $1, st_partition_key = $2, \
+             is_populated = false, frontier = NULL, updated_at = now() \
+         WHERE pgt_id = $3",
+        &[
+            new_pgt_relid.into(),
+            new_partition_key.into(),
+            st.pgt_id.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+    // Invalidate caches.
+    shmem::bump_cache_generation();
+    refresh::invalidate_merge_cache(st.pgt_id);
+
+    // Full refresh to repopulate.
+    let updated_st = StreamTableMeta::get_by_name(schema, table_name)?;
+    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    let source_oids: Vec<pg_sys::Oid> = deps
+        .iter()
+        .filter(|d| d.source_type == "TABLE")
+        .map(|d| d.source_relid)
+        .collect();
+    execute_manual_full_refresh(&updated_st, schema, table_name, &source_oids)?;
+
+    pgrx::info!(
+        "pg_trickle: partition key for {schema}.{table_name} changed to {}; full refresh applied.",
+        new_partition_key.unwrap_or("(none)"),
     );
 
     Ok(())
@@ -2458,6 +2589,7 @@ fn alter_stream_table(
     fuse: default!(Option<&str>, "NULL"),
     fuse_ceiling: default!(Option<i64>, "NULL"),
     fuse_sensitivity: default!(Option<i32>, "NULL"),
+    partition_by: default!(Option<&str>, "NULL"),
 ) {
     let result = alter_stream_table_impl(
         name,
@@ -2474,6 +2606,7 @@ fn alter_stream_table(
         fuse,
         fuse_ceiling,
         fuse_sensitivity,
+        partition_by,
     );
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -2496,6 +2629,7 @@ fn alter_stream_table_impl(
     fuse: Option<&str>,
     fuse_ceiling_arg: Option<i64>,
     fuse_sensitivity_arg: Option<i32>,
+    partition_by: Option<&str>,
 ) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
@@ -2505,6 +2639,25 @@ fn alter_stream_table_impl(
     if let Some(new_query) = query {
         alter_stream_table_query(&st, &schema, &table_name, new_query)?;
         st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+    }
+
+    // ── A1-1c: Partition key migration ──────────────────────────────────
+    // partition_by => '' (empty string) removes partitioning.
+    // partition_by => 'col' or 'LIST:col' adds/changes partitioning.
+    // This requires storage table recreation + full refresh.
+    if let Some(new_pk_raw) = partition_by {
+        let new_pk = if new_pk_raw.trim().is_empty() {
+            None
+        } else {
+            Some(new_pk_raw)
+        };
+
+        // Only act when the partition key is actually changing.
+        let old_pk = st.st_partition_key.as_deref();
+        if new_pk != old_pk {
+            alter_stream_table_partition_key(&st, &schema, &table_name, new_pk)?;
+            st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+        }
     }
 
     let (requested_cdc_mode_override, effective_requested_cdc_mode, cdc_mode_source) =
@@ -4003,6 +4156,258 @@ fn explain_refresh_mode_impl(name: &str) -> Vec<(String, Option<String>, Option<
 
 // ── FUSE-3: reset_fuse() ───────────────────────────────────────────────────
 
+// ── PROF-DLT: explain_delta() ──────────────────────────────────────────────
+
+/// Show the delta SQL query plan for a stream table without executing a refresh.
+///
+/// Generates the differential delta SQL that would be used on the next refresh,
+/// then runs `EXPLAIN (ANALYZE false, FORMAT <format>)` on it and returns the
+/// plan lines. Useful for identifying slow joins, missing indexes, or
+/// unexpected plan shapes in the auto-generated delta query.
+///
+/// Parameters:
+/// - `name` — qualified stream table name (e.g. `'public.orders_summary'`)
+/// - `format` — output format: `'text'` (default), `'json'`, `'xml'`, `'yaml'`
+///
+/// The delta SQL is generated against a hypothetical "scan all changes" window
+/// (LSN 0/0 → FF/FFFFFFFF) so the plan shows full join/filter structure
+/// even when the change buffer is currently empty.
+///
+/// Example:
+/// ```sql
+/// SELECT line FROM pgtrickle.explain_delta('public.orders_summary');
+/// SELECT line FROM pgtrickle.explain_delta('public.orders_summary', 'json');
+/// ```
+#[pg_extern(schema = "pgtrickle", name = "explain_delta")]
+fn explain_delta_text(
+    name: &str,
+    format: default!(&str, "'text'"),
+) -> SetOfIterator<'static, String> {
+    let rows = match explain_delta_impl(name, format) {
+        Ok(r) => r,
+        Err(e) => raise_error_with_context(e),
+    };
+    SetOfIterator::new(rows)
+}
+
+fn explain_delta_impl(name: &str, format: &str) -> Result<Vec<String>, PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
+
+    // Get source OIDs by parsing the defining query.
+    let source_oids = crate::dvm::get_source_oids_for_query(&st.defining_query)?;
+
+    // Build a max new-frontier so the change buffer filter covers all rows
+    // (lsn > '0/0' AND lsn <= 'FF/FFFFFFFF'), giving a plan representative
+    // of a real refresh against a fully-populated change buffer.
+    let prev_frontier = crate::version::Frontier::new();
+    let mut new_frontier = crate::version::Frontier::new();
+    for &oid in &source_oids {
+        new_frontier.set_source(oid, "FF/FFFFFFFF".to_string(), String::new());
+    }
+
+    // Generate delta SQL.
+    let delta_result = crate::dvm::generate_delta_query(
+        &st.defining_query,
+        &prev_frontier,
+        &new_frontier,
+        &st.pgt_schema,
+        &st.pgt_name,
+    )?;
+
+    let delta_sql = &delta_result.delta_sql;
+
+    // Normalise format string.
+    let fmt_upper = format.trim().to_uppercase();
+    let fmt_kw = match fmt_upper.as_str() {
+        "JSON" | "XML" | "YAML" | "TEXT" => fmt_upper.as_str(),
+        other => {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "unsupported EXPLAIN format '{other}'; expected 'text', 'json', 'xml', or 'yaml'"
+            )));
+        }
+    };
+
+    // Run EXPLAIN without ANALYZE (no side effects).
+    let explain_sql = format!(
+        "EXPLAIN (ANALYZE false, FORMAT {fmt_kw}) \
+         SELECT * FROM ({delta_sql}) __pgt_explain_d"
+    );
+
+    let rows: Vec<String> = Spi::connect(|client| {
+        let result = client
+            .select(&explain_sql, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut lines = Vec::new();
+        for row in result {
+            let line: Option<String> = row
+                .get(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            if let Some(l) = line {
+                lines.push(l);
+            }
+        }
+        Ok::<Vec<String>, PgTrickleError>(lines)
+    })?;
+
+    Ok(rows)
+}
+
+// ── G14-MDED: dedup_stats() ────────────────────────────────────────────────
+
+/// Show MERGE deduplication profiling counters accumulated since server start.
+///
+/// When the delta cannot be guaranteed to have at most one row per
+/// `__pgt_row_id` (e.g. for aggregate queries or keyless sources), the MERGE
+/// must group + aggregate the delta before merging. This is tracked as
+/// "dedup needed". A high ratio indicates that pre-MERGE compaction in the
+/// change buffer would reduce refresh latency.
+///
+/// Counters reset to zero on server restart. Only differential refreshes that
+/// actually process rows (post no-data short-circuit) are counted.
+///
+/// Example:
+/// ```sql
+/// SELECT * FROM pgtrickle.dedup_stats();
+/// ```
+#[pg_extern(schema = "pgtrickle", name = "dedup_stats")]
+fn dedup_stats_fn() -> TableIterator<
+    'static,
+    (
+        name!(total_diff_refreshes, i64),
+        name!(dedup_needed, i64),
+        name!(dedup_ratio_pct, f64),
+    ),
+> {
+    let (total, dedup) = crate::shmem::read_dedup_stats();
+    let ratio = if total == 0 {
+        0.0_f64
+    } else {
+        (dedup as f64 / total as f64) * 100.0
+    };
+    TableIterator::new(vec![(total as i64, dedup as i64, ratio)])
+}
+
+/// D-4: Shared change buffer statistics.
+///
+/// Returns one row per shared change buffer (one per source table), showing
+/// how many stream tables share the buffer, the columns tracked, the safe
+/// cleanup frontier (MIN across all consumers), and the current buffer row count.
+///
+/// Example:
+/// ```sql
+/// SELECT * FROM pgtrickle.shared_buffer_stats();
+/// ```
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "shared_buffer_stats")]
+fn shared_buffer_stats_fn() -> TableIterator<
+    'static,
+    (
+        name!(source_oid, i64),
+        name!(source_table, String),
+        name!(consumer_count, i32),
+        name!(consumers, String),
+        name!(columns_tracked, i32),
+        name!(safe_frontier_lsn, Option<String>),
+        name!(buffer_rows, i64),
+        name!(is_partitioned, bool),
+    ),
+> {
+    let rows = shared_buffer_stats_impl();
+    TableIterator::new(rows)
+}
+
+#[allow(clippy::type_complexity)]
+fn shared_buffer_stats_impl() -> Vec<(i64, String, i32, String, i32, Option<String>, i64, bool)> {
+    let change_schema = "pgtrickle_changes";
+
+    let query = "\
+        SELECT ct.source_relid, \
+               format('%I.%I', n.nspname, c.relname) AS source_table, \
+               array_length(ct.tracked_by_pgt_ids, 1) AS consumer_count, \
+               ct.tracked_by_pgt_ids \
+        FROM pgtrickle.pgt_change_tracking ct \
+        JOIN pg_class c ON c.oid = ct.source_relid \
+        JOIN pg_namespace n ON n.oid = c.relnamespace \
+        ORDER BY ct.source_relid";
+
+    let mut rows = Vec::new();
+
+    Spi::connect(|client| {
+        if let Ok(table) = client.select(query, None, &[]) {
+            for row in table {
+                let source_oid: i64 = row
+                    .get_by_name::<i64, _>("source_relid")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                let source_table: String = row
+                    .get_by_name::<String, _>("source_table")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let consumer_count: i32 = row
+                    .get_by_name::<i32, _>("consumer_count")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+
+                let consumers = Spi::get_one::<String>(&format!(
+                    "SELECT string_agg(format('%I.%I', st.pgt_schema, st.pgt_name), ', ' \
+                     ORDER BY st.pgt_name) \
+                     FROM pgtrickle.pgt_stream_tables st \
+                     WHERE st.pgt_id = ANY( \
+                       (SELECT tracked_by_pgt_ids FROM pgtrickle.pgt_change_tracking \
+                        WHERE source_relid = {source_oid}))",
+                ))
+                .unwrap_or(None)
+                .unwrap_or_default();
+
+                let columns_tracked: i32 = Spi::get_one::<i64>(&format!(
+                    "SELECT count(*)::bigint FROM information_schema.columns \
+                     WHERE table_schema = '{change_schema}' \
+                       AND table_name = 'changes_{source_oid}' \
+                       AND column_name LIKE 'new\\_%'",
+                ))
+                .unwrap_or(None)
+                .unwrap_or(0) as i32;
+
+                let safe_frontier_lsn: Option<String> = Spi::get_one::<String>(&format!(
+                    "SELECT MIN((st.frontier->'sources'->'{source_oid}'->>'lsn')::pg_lsn)::TEXT \
+                     FROM pgtrickle.pgt_stream_tables st \
+                     JOIN pgtrickle.pgt_dependencies dep ON dep.pgt_id = st.pgt_id \
+                     WHERE dep.source_relid = {source_oid} \
+                       AND st.frontier IS NOT NULL \
+                       AND st.frontier->'sources'->'{source_oid}'->>'lsn' IS NOT NULL",
+                ))
+                .unwrap_or(None);
+
+                let buffer_rows: i64 = Spi::get_one::<i64>(&format!(
+                    "SELECT count(*)::bigint FROM \"{change_schema}\".changes_{source_oid}",
+                ))
+                .unwrap_or(None)
+                .unwrap_or(0);
+
+                let is_partitioned =
+                    crate::cdc::is_buffer_partitioned(change_schema, source_oid as u32);
+
+                rows.push((
+                    source_oid,
+                    source_table,
+                    consumer_count,
+                    consumers,
+                    columns_tracked,
+                    safe_frontier_lsn,
+                    buffer_rows,
+                    is_partitioned,
+                ));
+            }
+        }
+    });
+
+    rows
+}
+
 /// Reset a blown fuse on a stream table.
 ///
 /// The `action` parameter controls how pending changes are handled:
@@ -5131,8 +5536,11 @@ fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> 
 /// SELECT output columns.
 ///
 /// Checks:
-/// 1. The supplied column name is non-empty.
-/// 2. The column appears in the stream table's SELECT output (from `columns`).
+/// 1. The supplied column name(s) are non-empty.
+/// 2. Each column appears in the stream table's SELECT output (from `columns`).
+///
+/// A1-1b: Supports comma-separated multi-column partition keys
+/// (e.g. `"event_day,customer_id"`).
 ///
 /// A valid partition key ensures the refresh path can inject a range predicate
 /// (A1-3) and that the partitioned storage table can be created correctly.
@@ -5140,23 +5548,142 @@ fn validate_partition_key(
     partition_key: &str,
     columns: &[ColumnDef],
 ) -> Result<(), PgTrickleError> {
-    let trimmed = partition_key.trim();
-    if trimmed.is_empty() {
+    let parts = parse_partition_key_columns(partition_key);
+    if parts.is_empty() {
         return Err(PgTrickleError::InvalidArgument(
-            "partition_by must be a non-empty column name".to_string(),
+            "partition_by must contain at least one non-empty column name".to_string(),
         ));
     }
-    let found = columns.iter().any(|c| c.name.eq_ignore_ascii_case(trimmed));
-    if !found {
-        let available: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    // A1-1d/A1-3b: PostgreSQL LIST and HASH partitioning support exactly one column.
+    let method = parse_partition_method(partition_key);
+    if (method == PartitionMethod::List || method == PartitionMethod::Hash) && parts.len() > 1 {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "partition_by column '{}' is not in the stream table's SELECT output. \
-             Available columns: {}",
-            trimmed,
-            available.join(", "),
+            "{} partitioning supports only a single column",
+            match method {
+                PartitionMethod::List => "LIST",
+                PartitionMethod::Hash => "HASH",
+                _ => unreachable!(),
+            }
         )));
     }
+    // A1-3b: Validate HASH modulus if specified.
+    if method == PartitionMethod::Hash
+        && let Some(m) = parse_hash_modulus(partition_key)
+        && !(2..=256).contains(&m)
+    {
+        return Err(PgTrickleError::InvalidArgument(
+            "HASH partition modulus must be between 2 and 256".to_string(),
+        ));
+    }
+    let available: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    for part in &parts {
+        let found = columns.iter().any(|c| c.name.eq_ignore_ascii_case(part));
+        if !found {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "partition_by column '{}' is not in the stream table's SELECT output. \
+                 Available columns: {}",
+                part,
+                available.join(", "),
+            )));
+        }
+    }
     Ok(())
+}
+
+/// Parse a comma-separated partition key specification into individual column
+/// names. Trims whitespace from each component and filters out empty entries.
+///
+/// # Examples
+/// ```text
+/// "event_day"              → ["event_day"]
+/// "event_day, customer_id" → ["event_day", "customer_id"]
+/// " a , b , c "            → ["a", "b", "c"]
+/// ```
+pub(crate) fn parse_partition_key_columns(partition_key: &str) -> Vec<String> {
+    let raw = strip_partition_mode_prefix(partition_key);
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A1-1d/A1-3b: Partition method: RANGE (default), LIST, or HASH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartitionMethod {
+    Range,
+    List,
+    Hash,
+}
+
+/// Parse the partition method from the `partition_by` specification.
+///
+/// Format: `"[LIST:|HASH:]col[,col2]"`.  The `LIST:` prefix selects LIST
+/// partitioning, `HASH:` selects HASH; bare column names default to RANGE.
+/// For HASH, an optional `:N` suffix sets the modulus (e.g. `HASH:id:8`).
+///
+/// # Examples
+/// ```text
+/// "sale_date"              → Range
+/// "sale_date,region"       → Range  (multi-column RANGE)
+/// "LIST:region"            → List
+/// "HASH:customer_id"       → Hash  (default 4 partitions)
+/// "HASH:customer_id:8"     → Hash  (8 partitions)
+/// ```
+pub(crate) fn parse_partition_method(partition_key: &str) -> PartitionMethod {
+    let trimmed = partition_key.trim();
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("LIST:") {
+        PartitionMethod::List
+    } else if upper.starts_with("HASH:") {
+        PartitionMethod::Hash
+    } else {
+        PartitionMethod::Range
+    }
+}
+
+/// A1-3b: Parse the HASH modulus from a partition key specification.
+///
+/// `"HASH:id:8"` → `8`, `"HASH:id"` → `4` (default).
+/// Returns `None` for non-HASH partition methods.
+pub(crate) fn parse_hash_modulus(partition_key: &str) -> Option<u32> {
+    if parse_partition_method(partition_key) != PartitionMethod::Hash {
+        return None;
+    }
+    let trimmed = partition_key.trim();
+    // Strip "HASH:" prefix (5 chars)
+    let rest = &trimmed[5..];
+    // Look for second ":" — "col:N"
+    if let Some(pos) = rest.rfind(':') {
+        let modulus_str = &rest[pos + 1..];
+        if let Ok(m) = modulus_str.parse::<u32>() {
+            return Some(m);
+        }
+    }
+    Some(4) // default modulus
+}
+
+/// Strip the partition method prefix from a partition key specification,
+/// returning only the column name(s).  Case-insensitive.
+///
+/// `"LIST:region"` → `"region"`, `"HASH:id:8"` → `"id"`,
+/// `"sale_date"` → `"sale_date"`
+pub(crate) fn strip_partition_mode_prefix(partition_key: &str) -> &str {
+    let trimmed = partition_key.trim();
+    if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("LIST:") {
+        &trimmed[5..]
+    } else if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("HASH:") {
+        let rest = &trimmed[5..];
+        // Strip optional ":N" modulus suffix
+        if let Some(pos) = rest.rfind(':') {
+            let suffix = &rest[pos + 1..];
+            if suffix.parse::<u32>().is_ok() {
+                return &rest[..pos];
+            }
+        }
+        rest
+    } else {
+        trimmed
+    }
 }
 
 /// Column metadata from a defining query.
@@ -6145,9 +6672,23 @@ fn build_create_table_sql(
         ));
     }
 
-    // A1-1: partition clause — appended after the closing ')' of CREATE TABLE.
+    // A1-1/A1-1b/A1-1d: partition clause — appended after the closing ')' of
+    // CREATE TABLE.  Supports RANGE (single/multi-column) and LIST keys.
     let partition_clause = partition_key
-        .map(|k| format!("\nPARTITION BY RANGE ({})", quote_identifier(k)))
+        .map(|k| {
+            let method = parse_partition_method(k);
+            let cols = parse_partition_key_columns(k);
+            let quoted: Vec<String> = cols
+                .iter()
+                .map(|c| quote_identifier(c).to_string())
+                .collect();
+            let method_kw = match method {
+                PartitionMethod::Range => "RANGE",
+                PartitionMethod::List => "LIST",
+                PartitionMethod::Hash => "HASH",
+            };
+            format!("\nPARTITION BY {} ({})", method_kw, quoted.join(", "))
+        })
         .unwrap_or_default();
 
     format!(
@@ -7593,5 +8134,373 @@ mod tests {
         ) {
             let _ = cron_is_due(&cron_expr, epoch);
         }
+    }
+
+    // ── A1-1b: parse_partition_key_columns tests ────────────────────────────
+
+    #[test]
+    fn test_parse_partition_key_single_column() {
+        let cols = parse_partition_key_columns("event_day");
+        assert_eq!(cols, vec!["event_day"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_two_columns() {
+        let cols = parse_partition_key_columns("event_day, customer_id");
+        assert_eq!(cols, vec!["event_day", "customer_id"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_whitespace_handling() {
+        let cols = parse_partition_key_columns("  a , b , c  ");
+        assert_eq!(cols, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_empty_string() {
+        let cols = parse_partition_key_columns("");
+        assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_parse_partition_key_trailing_comma() {
+        let cols = parse_partition_key_columns("a,b,");
+        assert_eq!(cols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_validate_partition_key_multi_column_valid() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "sale_date".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        assert!(validate_partition_key("sale_date,region", &columns).is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_key_multi_column_one_missing() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "sale_date".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        let err = validate_partition_key("sale_date,nonexistent", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("nonexistent"),
+            "Error should mention the missing column: {msg}"
+        );
+    }
+
+    // ── A1-1d: LIST partitioning tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_partition_method_range_default() {
+        assert_eq!(parse_partition_method("sale_date"), PartitionMethod::Range);
+    }
+
+    #[test]
+    fn test_parse_partition_method_range_multi() {
+        assert_eq!(parse_partition_method("a,b"), PartitionMethod::Range,);
+    }
+
+    #[test]
+    fn test_parse_partition_method_list_upper() {
+        assert_eq!(parse_partition_method("LIST:region"), PartitionMethod::List,);
+    }
+
+    #[test]
+    fn test_parse_partition_method_list_lower() {
+        assert_eq!(parse_partition_method("list:region"), PartitionMethod::List,);
+    }
+
+    #[test]
+    fn test_parse_partition_method_list_mixed_case() {
+        assert_eq!(parse_partition_method("List:region"), PartitionMethod::List,);
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_none() {
+        assert_eq!(strip_partition_mode_prefix("sale_date"), "sale_date");
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_list() {
+        assert_eq!(strip_partition_mode_prefix("LIST:region"), "region");
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_list_lower() {
+        assert_eq!(strip_partition_mode_prefix("list:region"), "region");
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_mixed_case() {
+        assert_eq!(strip_partition_mode_prefix("LiSt:region"), "region");
+    }
+
+    #[test]
+    fn test_parse_partition_key_columns_with_list_prefix() {
+        let cols = parse_partition_key_columns("LIST:region");
+        assert_eq!(cols, vec!["region"]);
+    }
+
+    #[test]
+    fn test_validate_partition_key_list_single_column_ok() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        assert!(validate_partition_key("LIST:region", &columns).is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_key_list_multi_column_rejected() {
+        let columns = vec![
+            ColumnDef {
+                name: "region".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "category".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        let err = validate_partition_key("LIST:region,category", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("single column"),
+            "Error should mention single column: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_partition_key_list_missing_column() {
+        let columns = vec![ColumnDef {
+            name: "amount".to_string(),
+            type_oid: PgOid::Invalid,
+        }];
+        let err = validate_partition_key("LIST:region", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "Error should mention the missing column: {msg}"
+        );
+    }
+
+    // ── A1-3b: HASH partitioning tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_partition_method_hash_upper() {
+        assert_eq!(
+            parse_partition_method("HASH:customer_id"),
+            PartitionMethod::Hash,
+        );
+    }
+
+    #[test]
+    fn test_parse_partition_method_hash_lower() {
+        assert_eq!(
+            parse_partition_method("hash:customer_id"),
+            PartitionMethod::Hash,
+        );
+    }
+
+    #[test]
+    fn test_parse_partition_method_hash_mixed_case() {
+        assert_eq!(
+            parse_partition_method("Hash:customer_id"),
+            PartitionMethod::Hash,
+        );
+    }
+
+    #[test]
+    fn test_parse_partition_method_hash_with_modulus() {
+        assert_eq!(parse_partition_method("HASH:id:8"), PartitionMethod::Hash,);
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_default() {
+        assert_eq!(parse_hash_modulus("HASH:id"), Some(4));
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_explicit() {
+        assert_eq!(parse_hash_modulus("HASH:id:8"), Some(8));
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_min_value() {
+        assert_eq!(parse_hash_modulus("HASH:id:2"), Some(2));
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_large() {
+        assert_eq!(parse_hash_modulus("HASH:id:256"), Some(256));
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_non_hash_returns_none() {
+        assert_eq!(parse_hash_modulus("sale_date"), None);
+    }
+
+    #[test]
+    fn test_parse_hash_modulus_list_returns_none() {
+        assert_eq!(parse_hash_modulus("LIST:region"), None);
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_hash() {
+        assert_eq!(
+            strip_partition_mode_prefix("HASH:customer_id"),
+            "customer_id"
+        );
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_hash_lower() {
+        assert_eq!(
+            strip_partition_mode_prefix("hash:customer_id"),
+            "customer_id"
+        );
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_hash_with_modulus() {
+        assert_eq!(strip_partition_mode_prefix("HASH:id:8"), "id");
+    }
+
+    #[test]
+    fn test_strip_partition_mode_prefix_hash_with_modulus_256() {
+        assert_eq!(
+            strip_partition_mode_prefix("HASH:customer_id:256"),
+            "customer_id"
+        );
+    }
+
+    #[test]
+    fn test_parse_partition_key_columns_with_hash_prefix() {
+        let cols = parse_partition_key_columns("HASH:customer_id");
+        assert_eq!(cols, vec!["customer_id"]);
+    }
+
+    #[test]
+    fn test_parse_partition_key_columns_with_hash_modulus() {
+        let cols = parse_partition_key_columns("HASH:customer_id:8");
+        assert_eq!(cols, vec!["customer_id"]);
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_single_column_ok() {
+        let columns = vec![
+            ColumnDef {
+                name: "customer_id".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "amount".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        assert!(validate_partition_key("HASH:customer_id", &columns).is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_with_modulus_ok() {
+        let columns = vec![ColumnDef {
+            name: "id".to_string(),
+            type_oid: PgOid::Invalid,
+        }];
+        assert!(validate_partition_key("HASH:id:8", &columns).is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_multi_column_rejected() {
+        let columns = vec![
+            ColumnDef {
+                name: "a".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+            ColumnDef {
+                name: "b".to_string(),
+                type_oid: PgOid::Invalid,
+            },
+        ];
+        let err = validate_partition_key("HASH:a,b", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("single column"),
+            "Error should mention single column: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_missing_column() {
+        let columns = vec![ColumnDef {
+            name: "amount".to_string(),
+            type_oid: PgOid::Invalid,
+        }];
+        let err = validate_partition_key("HASH:customer_id", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("customer_id"),
+            "Error should mention the missing column: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_modulus_too_low() {
+        let columns = vec![ColumnDef {
+            name: "id".to_string(),
+            type_oid: PgOid::Invalid,
+        }];
+        let err = validate_partition_key("HASH:id:1", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("modulus"),
+            "Error should mention modulus: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_partition_key_hash_modulus_too_high() {
+        let columns = vec![ColumnDef {
+            name: "id".to_string(),
+            type_oid: PgOid::Invalid,
+        }];
+        let err = validate_partition_key("HASH:id:257", &columns);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("modulus"),
+            "Error should mention modulus: {msg}"
+        );
     }
 }

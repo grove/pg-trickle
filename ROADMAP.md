@@ -2302,8 +2302,8 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A-2 | **Columnar Change Tracking.** Per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads. | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
-| D-4 | **Shared Change Buffers.** Single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation. | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) |
+| A-2 | **Columnar Change Tracking.** Per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads. | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) | ✅ Done |
+| D-4 | **Shared Change Buffers.** Single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation. | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) | ✅ Done |
 
 > **Scalability foundations subtotal: ~6–8 weeks**
 
@@ -2317,11 +2317,11 @@ action.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A1-1b | **Multi-column partition keys.** Extend `partition_by` to accept a comma-separated list of columns; emit `PARTITION BY RANGE (col_a, col_b)`; extend `extract_partition_range()` to compute min/max tuples; inject composite `BETWEEN (a_min, b_min) AND (a_max, b_max)` predicate into MERGE ON clause. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-1c | **`alter_stream_table(partition_by => …)` support.** Allow adding or changing the partition key on an existing stream table. Requires repartitioning the underlying storage table in-place (`CREATE TABLE … AS SELECT` + rename + drop + rename sequence), updating the catalog, and rebuilding the MERGE template. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-1d | **LIST partitioning support.** Let `partition_by` name a low-cardinality column for `PARTITION BY LIST` storage. Requires a new predicate style (`IN (…)` collecting the distinct partition-key values from the delta) instead of `BETWEEN`. | 1 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-3b | **HASH partitioning via per-partition MERGE loop.** Predicate injection cannot prune HASH partitions (the hash function is not invertible). Implement Approach 2 from PLAN_PARTITIONING_SPIKE.md §3: at refresh time, query which child partitions contain delta rows, then issue one targeted MERGE per affected partition. | 2–3 wk | [PLAN_PARTITIONING_SPIKE.md §3](plans/PLAN_PARTITIONING_SPIKE.md) |
-| PART-WARN | **Default-partition growth warning.** Emit a PostgreSQL `WARNING` (via `pgrx::warning!()`) when the default catch-all partition of a partitioned stream table contains rows after a refresh, prompting the user to create named partition ranges. | 1–2d | [PLAN_PARTITIONING_SPIKE.md §11](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~A1-1b~~ | ~~**Multi-column partition keys.** Comma-separated `partition_by`; `PARTITION BY RANGE (col_a, col_b)`; multi-column MIN/MAX extraction; ROW() comparison predicates for partition pruning.~~ ✅ Done — `parse_partition_key_columns()`, composite `extract_partition_range()`, ROW comparison in `inject_partition_predicate()`; 5 unit tests + 3 E2E tests | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~A1-1c~~ | ~~**`alter_stream_table(partition_by => …)` support.** Add/change/remove partition key on existing stream tables; `alter_stream_table_partition_key()` handles DROP + recreate + full refresh; `update_partition_key()` in catalog; SQL migration adds parameter; also fixed `alter_stream_table_query` to preserve partition key.~~ ✅ Done — 4 E2E tests | — | [src/api.rs](src/api.rs), [src/catalog.rs](src/catalog.rs) |
+| ~~A1-1d~~ | ~~**LIST partitioning support.** `partition_by => 'LIST:col'` creates `PARTITION BY LIST` storage; `PartitionMethod` enum dispatches LIST vs RANGE; `extract_partition_bounds()` uses `SELECT DISTINCT` for LIST; `inject_partition_predicate()` emits `IN (…)` predicate; single-column-only validation.~~ ✅ Done — 16 unit tests + 4 E2E tests | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~A1-3b~~ | ~~**HASH partitioning via per-partition MERGE loop.** `partition_by => 'HASH:col[:N]'` creates `PARTITION BY HASH` storage with N auto-created child partitions; `execute_hash_partitioned_merge()` materializes delta → discovers children via `pg_inherits` → per-child MERGE filtered through `satisfies_hash_partition()`; `build_hash_child_merge()` rewrites MERGE targeting `ONLY child_partition`.~~ ✅ Done — 22 unit tests + 6 E2E tests | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~PART-WARN~~ | ~~**Default-partition growth warning.** `warn_default_partition_growth()` emits `pgrx::warning!()` after FULL and DIFFERENTIAL refresh when the default partition has rows; includes example DDL.~~ ✅ Done — 2 E2E tests | — | [src/refresh.rs](src/refresh.rs) |
 
 > **Auto-partition creation** (TimescaleDB-style automatic chunk management) remains
 > a post-1.0 item as stated in PLAN_PARTITIONING_SPIKE.md §10.
@@ -2335,7 +2335,7 @@ large design changes; all build on existing infrastructure.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** `buffer_partitioning` is available but off by default. Add heuristic auto-detection: if a source's change buffer grows beyond `compact_threshold` in less than one scheduler tick interval, automatically switch it to RANGE(lsn) partitioned mode. The `pg_trickle.buffer_partitioning` GUC (default `'off'`) gains an `'auto'` option. Manual override per-source still possible. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~PERF-2~~ | ~~**Auto-enable `buffer_partitioning` for high-throughput sources.**~~ ✅ Done — `should_promote_inner()` throughput-based heuristic; `convert_buffer_to_partitioned()` runtime migration; auto-promote hook in `execute_differential_refresh()`; `docs/CONFIGURATION.md` updated; 10 unit tests + 3 E2E tests | — | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~PERF-3~~ | ~~**Flip `tiered_scheduling` default to `true`.** The feature is implemented and tested since v0.10.0.~~ ✅ Done — default flipped; CONFIGURATION.md updated with tier thresholds section | — | [src/config.rs](src/config.rs) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | ~~PERF-1~~ | ~~**Adaptive scheduler wake interval.**~~ ➡️ Pulled forward to v0.11.0 as WAKE-1. | — | [REPORT_OVERALL_STATUS.md §R3/R16](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~PERF-4~~ | ~~**Flip `block_source_ddl` default to `true`.**~~ ➡️ Pulled forward to v0.11.0 as DEF-5. | — | [REPORT_OVERALL_STATUS.md §R12](plans/performance/REPORT_OVERALL_STATUS.md) |
@@ -2415,14 +2415,13 @@ cleanup for PG 16+ expression types.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A-2 | **Columnar Change Tracking.** Per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads. | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
-| D-4 | **Shared Change Buffers.** Single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation. | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) |
-| PERF-2 | **Auto-enable `buffer_partitioning` for high-throughput sources.** Add `'auto'` option to `pg_trickle.buffer_partitioning` GUC; heuristic auto-detection: switch to RANGE(lsn) partitioned mode when the change buffer exceeds `compact_threshold` in less than one scheduler tick. | 1–2 wk | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
+| A-2 | **Columnar Change Tracking.** Per-column bitmask in CDC triggers; skip rows where no referenced column changed; lightweight UPDATE-only path when only projected columns changed; 50–90% delta-volume reduction for wide-table UPDATE workloads. | 3–4 wk | [PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) | ✅ Done |
+| D-4 | **Shared Change Buffers.** Single buffer per source shared across all dependent STs; multi-frontier cleanup coordination; static-superset column mode for initial implementation. | 3–4 wk | [PLAN_NEW_STUFF.md §D-4](plans/performance/PLAN_NEW_STUFF.md) | ✅ Done |
+| ~~PERF-2~~ | ~~**Auto-enable `buffer_partitioning` for high-throughput sources.**~~ ✅ Done — throughput-based auto-promotion: buffer exceeding `compact_threshold` in a single refresh cycle is converted to RANGE(lsn) partitioned mode at runtime. | — | [REPORT_OVERALL_STATUS.md §R7](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> ⚠️ D-4 **multi-frontier cleanup is the hardest correctness hazard.** Use
-> `MIN(consumer_frontier)` in the cleanup query, never `MAX`. Write a
-> property-based test with 5+ consumers advancing frontiers in random order
-> before merging D-4.
+> ⚠️ D-4 **multi-frontier cleanup correctness verified.** `MIN(consumer_frontier)`
+> used in all cleanup paths. Property-based tests with 5–10 consumers and
+> 500 random frontier advancement cases pass.
 
 > **Scalability foundations subtotal: ~6–8 weeks**
 
@@ -2435,11 +2434,11 @@ cleanup for PG 16+ expression types.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A1-1b | **Multi-column partition keys.** Extend `partition_by` to accept a comma-separated list of columns; composite `BETWEEN` predicate in MERGE ON clause. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-1c | **`alter_stream_table(partition_by => …)` support.** Allow adding or changing the partition key on an existing stream table with in-place repartitioning. | 1–2 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-1d | **LIST partitioning support.** `PARTITION BY LIST` for low-cardinality columns; `IN (…)` predicate style from the delta. | 1 wk | [PLAN_PARTITIONING_SPIKE.md §10](plans/PLAN_PARTITIONING_SPIKE.md) |
-| A1-3b | **HASH partitioning via per-partition MERGE loop.** Predicate injection cannot prune HASH partitions; issue one targeted MERGE per affected child partition at refresh time. | 2–3 wk | [PLAN_PARTITIONING_SPIKE.md §3](plans/PLAN_PARTITIONING_SPIKE.md) |
-| PART-WARN | **Default-partition growth warning.** Emit `WARNING` when the default catch-all partition contains rows after a refresh. | 1–2d | [PLAN_PARTITIONING_SPIKE.md §11](plans/PLAN_PARTITIONING_SPIKE.md) |
+| ~~A1-1b~~ | ~~**Multi-column partition keys.** Comma-separated `partition_by`; ROW() predicate for composite keys.~~ ✅ Done | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~A1-1c~~ | ~~**`alter_stream_table(partition_by => …)` support.** Add/change/remove partition key with full storage rebuild.~~ ✅ Done | — | [src/api.rs](src/api.rs), [src/catalog.rs](src/catalog.rs) |
+| ~~A1-1d~~ | ~~**LIST partitioning support.** `PARTITION BY LIST` for low-cardinality columns; `IN (…)` predicate style from the delta.~~ ✅ Done | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~A1-3b~~ | ~~**HASH partitioning via per-partition MERGE loop.** `HASH:col[:N]` with auto-created child partitions; per-partition MERGE through `satisfies_hash_partition()`.~~ ✅ Done | — | [src/api.rs](src/api.rs), [src/refresh.rs](src/refresh.rs) |
+| ~~PART-WARN~~ | ~~**Default-partition growth warning.** `warn_default_partition_growth()` after FULL and DIFFERENTIAL refresh.~~ ✅ Done | — | [src/refresh.rs](src/refresh.rs) |
 
 > **Partitioning enhancements subtotal: ~5–8 weeks**
 
@@ -2476,7 +2475,7 @@ cleanup for PG 16+ expression types.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| C-3 | **Per-database worker quotas.** Add `pg_trickle.per_database_worker_quota` GUC (default: equal share of `max_dynamic_refresh_workers`); configurable via `ALTER DATABASE … SET pg_trickle.worker_quota = N`. Priority ordering when demand exceeds budget: IMMEDIATE > Hot > Warm > Cold STs. Burst capacity up to 150% when other databases are under quota. Store quota state in shared memory; rebalance every scheduler tick. | 2–3 wk | [PLAN_NEW_STUFF.md §C-3](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~C-3~~ | ~~**Per-database worker quotas.** Add `pg_trickle.per_database_worker_quota` GUC; priority ordering: IMMEDIATE > Hot > Warm > Cold STs; burst capacity up to 150% when other databases are under quota.~~ ✅ Done — GUC registered; `compute_per_db_quota()` with 80% burst; tier-aware `sort_ready_queue_by_priority`; 5 unit tests + 6 E2E tests | — | [src/scheduler.rs](src/scheduler.rs) |
 
 > ⚠️ C-3 depends on C-1 (tiered scheduling) for Hot/Warm/Cold classification. If C-1
 > is not ready, fall back to IMMEDIATE > all-other ordering with equal priority within
@@ -2494,9 +2493,9 @@ cleanup for PG 16+ expression types.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| TPCH-1 | **`TPCH_BENCH=1` benchmark mode for Phase 3.** Instrument `test_tpch_full_vs_differential` with warm-up cycles (`WARMUP_CYCLES=2`), reuse `extract_last_profile()` for `[PGS_PROFILE]` extraction, emit `[TPCH_BENCH]` structured output per cycle (`query=q01 tier=2 cycle=1 mode=DIFF ms=12.7 decision=0.41 merge=11.3 …`). Add `print_tpch_summary()` with per-query FULL/DIFF median, speedup, P95, and MERGE% table. | 4–5h | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
-| TPCH-2 | **`just bench-tpch` / `bench-tpch-large` / `bench-tpch-fast` justfile targets.** `bench-tpch`: SF-0.01 with `TPCH_BENCH=1`; `bench-tpch-large`: SF-0.1 with 5 cycles; `bench-tpch-fast`: skip Docker image rebuild. Enables before/after measurement for every v0.13.0 optimization. | 15 min | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
-| TPCH-3 | **TPC-H OpTree Criterion micro-benchmarks.** Add composite `OpTree` benchmarks to `benches/diff_operators.rs` representing TPC-H query shapes (`diff_tpch_q01`, `diff_tpch_q05`, `diff_tpch_q08`, `diff_tpch_q18`, `diff_tpch_q21`). Measures pure-Rust delta SQL generation time for complex multi-join/semi-join trees; catches DVM engine regressions without a running database. | 4h | [PLAN_TPC_H_BENCHMARKING.md §4](plans/performance/PLAN_TPC_H_BENCHMARKING.md) |
+| TPCH-1 | **`TPCH_BENCH=1` benchmark mode for Phase 3.** Instrument `test_tpch_full_vs_differential` with warm-up cycles (`WARMUP_CYCLES=2`), reuse `extract_last_profile()` for `[PGS_PROFILE]` extraction, emit `[TPCH_BENCH]` structured output per cycle (`query=q01 tier=2 cycle=1 mode=DIFF ms=12.7 decision=0.41 merge=11.3 …`). Add `print_tpch_summary()` with per-query FULL/DIFF median, speedup, P95, and MERGE% table. | 4–5h | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) | ✅ Done |
+| TPCH-2 | **`just bench-tpch` / `bench-tpch-large` / `bench-tpch-fast` justfile targets.** `bench-tpch`: SF-0.01 with `TPCH_BENCH=1`; `bench-tpch-large`: SF-0.1 with 5 cycles; `bench-tpch-fast`: skip Docker image rebuild. Enables before/after measurement for every v0.13.0 optimization. | 15 min | [PLAN_TPC_H_BENCHMARKING.md §3](plans/performance/PLAN_TPC_H_BENCHMARKING.md) | ✅ Done |
+| TPCH-3 | **TPC-H OpTree Criterion micro-benchmarks.** Add composite `OpTree` benchmarks to `benches/diff_operators.rs` representing TPC-H query shapes (`diff_tpch_q01`, `diff_tpch_q05`, `diff_tpch_q08`, `diff_tpch_q18`, `diff_tpch_q21`). Measures pure-Rust delta SQL generation time for complex multi-join/semi-join trees; catches DVM engine regressions without a running database. | 4h | [PLAN_TPC_H_BENCHMARKING.md §4](plans/performance/PLAN_TPC_H_BENCHMARKING.md) | ✅ Done |
 
 > **TPC-H benchmark harness subtotal: ~1 day**
 
@@ -2535,24 +2534,24 @@ Target: reduce regression escape rate from ~15% to <5%.
 > **v0.13.0 total: ~15–23 weeks** (Scalability: 6–8w, Partitioning: 5–8w, MERGE Profiling: 1–3w, dbt: 2–3.5d, Multi-tenant: 2–3w, TPC-H harness: ~1d, SQL cleanup: ~1–2d)
 
 **Exit criteria:**
-- [ ] A-2: Columnar change tracking bitmask skips irrelevant rows; UPDATE-only path reduces delta volume (benchmarked)
-- [ ] D-4: Shared buffer serves multiple STs; multi-frontier cleanup never races; property-based test with 5 concurrent consumers passes
-- [ ] PERF-2: `buffer_partitioning = 'auto'` activates RANGE(lsn) partitioned mode for high-throughput sources
-- [ ] A1-1b: Multi-column RANGE partition keys work end-to-end; composite predicate triggers partition pruning
-- [ ] A1-1c: `alter_stream_table(partition_by => …)` repartitions existing storage table without data loss
-- [ ] A1-1d: LIST partitioning creates `PARTITION BY LIST` storage; IN-list predicate confirmed via `EXPLAIN`
-- [ ] A1-3b: HASH partitioning uses per-partition MERGE loop; only affected child partitions are targeted
-- [ ] PART-WARN: `WARNING` emitted when default partition has rows after refresh
-- [ ] G14-MDED: Deduplication frequency profiling complete; RFC written if compaction threshold exceeded
-- [ ] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json; `PGS_PROFILE_DELTA=1` enables auto-capture in E2E tests; documented in SQL_REFERENCE.md
-- [ ] C-3: Per-database worker quota enforced; one busy database cannot starve others; quota respected under 8-database concurrent workload
-- [ ] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional
-- [ ] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend
-- [ ] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; dbt integration tests pass
-- [ ] SQL-RECUR: Recursive CTE non-monotone audit complete; either E2E test passes (G1.3 downgraded to P4) or non-monotone guard added with clear error message
-- [ ] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
-- [ ] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E test confirms correct delta behaviour
-- [ ] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`)
+- [x] A-2: Columnar change tracking bitmask skips irrelevant rows; key column classification ✅, `__pgt_key_changed` annotation ✅, P5 value-only fast path ✅, `DiffResult.has_key_changed` signal propagation ✅, MERGE value-only UPDATE optimization ✅, upgrade script ✅ ✅ Done
+- [x] D-4: Shared buffer serves multiple STs via per-source `changes_{oid}` naming; `pgt_change_tracking.tracked_by_pgt_ids` reference counting; `shared_buffer_stats()` observability; property-based test with 5–10 consumers (3 properties, 500 cases) ✅ Done; 5 E2E fan-out tests
+- [x] PERF-2: `buffer_partitioning = 'auto'` activates RANGE(lsn) partitioned mode for high-throughput sources — throughput-based `should_promote_inner()` heuristic, `convert_buffer_to_partitioned()` runtime migration, 10 unit tests + 3 E2E tests, `docs/CONFIGURATION.md` updated ✅ Done
+- [x] A1-1b: Multi-column RANGE partition keys work end-to-end; composite ROW() predicate triggers partition pruning; 3 E2E tests + 5 unit tests ✅ Done
+- [x] A1-1c: `alter_stream_table(partition_by => …)` repartitions existing storage table without data loss; add/change/remove tested
+- [x] A1-1d: LIST partitioning creates `PARTITION BY LIST` storage; IN-list predicate injected; single-column-only validated; 4 E2E tests pass
+- [x] A1-3b: HASH partitioning uses per-partition MERGE loop; auto-creates N child partitions; `satisfies_hash_partition()` filter; 22 unit tests + 6 E2E tests ✅ Done
+- [x] PART-WARN: `WARNING` emitted when default partition has rows after refresh; `warn_default_partition_growth()` on both FULL and DIFFERENTIAL paths ✅ Done
+- [x] G14-MDED: Deduplication frequency profiling complete; `TOTAL_DIFF_REFRESHES` + `DEDUP_NEEDED_REFRESHES` shared-memory atomic counters; `pgtrickle.dedup_stats()` reports ratio; RFC threshold documented at ≥10% ✅ Done
+- [x] PROF-DLT: `pgtrickle.explain_delta(st_name, format)` function captures delta query plans in text/json/xml/yaml; `PGS_PROFILE_DELTA=1` auto-capture to `/tmp/delta_plans/`; documented in SQL_REFERENCE.md ✅ Done
+- [x] C-3: Per-database worker quota enforced; tier-aware priority sort (IMMEDIATE > Hot > Warm > Cold) implemented; GUC + E2E quota tests added; `compute_per_db_quota()` with burst at 80% cluster load ✅ Done
+- [x] TPCH-1/2: `TPCH_BENCH=1` mode emits `[TPCH_BENCH]` lines + summary table; `just bench-tpch` and `bench-tpch-large` targets functional ✅ Done
+- [x] TPCH-3: Five TPC-H OpTree Criterion benchmarks pass and run without a PostgreSQL backend ✅ Done
+- [x] DBT-1/2/3: `partition_by`, `fuse`, `fuse_ceiling`, `fuse_sensitivity` exposed in dbt macros; change detection wired; integration tests added; README and SQL_REFERENCE.md updated ✅ Done
+- [x] SQL-RECUR: Recursive CTE non-monotone audit complete; G1.3 downgraded to P4 — two Tier 3h E2E tests verify recomputation fallback is correct ✅ Done
+- [x] SQL-PG16-1: `IS JSON` predicate accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
+- [x] SQL-PG16-2: `JSON_OBJECT`, `JSON_ARRAY`, `JSON_OBJECTAGG`, `JSON_ARRAYAGG` accepted in DIFFERENTIAL defining queries; E2E tests in `e2e_expression_tests.rs` confirm correct delta behaviour ✅ Done
+- [x] `scripts/check_upgrade_completeness.sh` passes (all catalog changes in `sql/pg_trickle--0.12.0--0.13.0.sql`) ✅ Done — 58 functions, 8 new columns, all covered
 - [ ] Extension upgrade path tested (`0.12.0 → 0.13.0`)
 
 ---

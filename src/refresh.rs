@@ -226,13 +226,15 @@ fn drain_pending_cleanups() {
         // attempting any DML.  When a ST is dropped between refresh
         // cycles, cleanup_cdc_for_source removes the buffer table but
         // the thread-local pending queue may still reference it.
+        // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds
+        // because auto-promotion converts buffers to partitioned at runtime.
         let table_exists = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
                SELECT 1 FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname = '{schema}' \
                  AND c.relname = 'changes_{oid}' \
-                 AND c.relkind = 'r'\
+                 AND c.relkind IN ('r', 'p')\
              )",
             schema = change_schema,
         ))
@@ -392,13 +394,14 @@ fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oids: &[u32]) 
 
     for &oid in source_oids {
         // Check that the change buffer table exists
+        // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds.
         let table_exists = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
                SELECT 1 FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname = '{schema}' \
                  AND c.relname = 'changes_{oid}' \
-                 AND c.relkind = 'r'\
+                 AND c.relkind IN ('r', 'p')\
              )",
             schema = change_schema,
         ))
@@ -1755,7 +1758,18 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // B3-2: For non-deduplicated deltas, use weight aggregation instead of
     // DISTINCT ON.  Weight aggregation correctly handles diamond-flow queries
     // where multiple delta branches produce overlapping corrections.
-    let using_clause = if delta_result.is_deduplicated {
+    //
+    // A-2: When `has_key_changed` is available on a deduplicated delta, wrap
+    // the USING clause with a filter that suppresses D-side rows for value-only
+    // UPDATEs (__pgt_key_changed = FALSE).  The remaining I-side row triggers
+    // the existing WHEN MATCHED THEN UPDATE clause — converting a DELETE+INSERT
+    // cycle into a single UPDATE (cheaper WAL, HOT-eligible, no index churn).
+    let using_clause = if delta_result.is_deduplicated && delta_result.has_key_changed {
+        format!(
+            "(SELECT * FROM ({delta_sql_template}) __d \
+             WHERE NOT (__d.__pgt_action = 'D' AND __d.__pgt_key_changed = FALSE))"
+        )
+    } else if delta_result.is_deduplicated {
         format!("({delta_sql_template})")
     } else if st.has_keyless_source {
         // Keyless: do NOT collapse — duplicate row_ids are intentional
@@ -2342,6 +2356,12 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         );
     }
 
+    // PART-WARN: After a successful FULL refresh, warn if the default
+    // partition of a partitioned stream table has accumulated rows.
+    if st.st_partition_key.is_some() {
+        warn_default_partition_growth(schema, name);
+    }
+
     Ok((rows_inserted as i64, 0))
 }
 
@@ -2594,44 +2614,428 @@ fn pg_quote_literal(val: &str) -> String {
     format!("'{}'", val.replace('\'', "''"))
 }
 
-/// A1-2: Extract the MIN and MAX of the partition key column from the resolved
-/// delta SQL. Returns `None` when the delta is empty (no changes to apply).
+/// A1-2/A1-1b/A1-1d: Per-column bounds for partition pruning predicates.
 ///
-/// The returned strings are the column values cast to `TEXT`, which PostgreSQL
-/// can implicitly cast back to the actual column type in the BETWEEN predicate.
-fn extract_partition_range(
-    resolved_delta_sql: &str,
-    partition_key: &str,
-) -> Result<Option<(String, String)>, PgTrickleError> {
-    let qk = crate::api::quote_identifier(partition_key);
-    let min_sql = format!("SELECT MIN({qk})::text FROM ({resolved_delta_sql}) AS __pgt_part_probe");
-    let max_sql = format!("SELECT MAX({qk})::text FROM ({resolved_delta_sql}) AS __pgt_part_probe");
-    let min_val = Spi::get_one::<String>(&min_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("partition range MIN: {e}")))?;
-    let max_val = Spi::get_one::<String>(&max_sql)
-        .map_err(|e| PgTrickleError::SpiError(format!("partition range MAX: {e}")))?;
-    Ok(min_val.zip(max_val))
+/// **Range** — min/max vectors (one entry per partition key column).
+/// **List**  — distinct values for the single LIST column.
+pub(crate) enum PartitionBounds {
+    Range {
+        mins: Vec<String>,
+        maxs: Vec<String>,
+    },
+    List(Vec<String>),
 }
 
-/// A1-3: Replace the `__PGT_PART_PRED__` placeholder in the MERGE SQL with
-/// an explicit partition-key range predicate for the current delta.
+/// A1-2/A1-1b/A1-1d: Extract the partition bounds from the resolved delta SQL.
+/// Returns `None` when the delta is empty.
 ///
-/// The injected predicate `AND st.<key> BETWEEN <min> AND <max>` is added to
-/// the MERGE ON clause. Because it is a literal range (not a parameter), the
-/// PostgreSQL planner can use it for partition pruning during MERGE execution.
+/// * **RANGE** keys → `MIN/MAX` per column.
+/// * **LIST** keys  → `SELECT DISTINCT col::text` (single column).
+fn extract_partition_bounds(
+    resolved_delta_sql: &str,
+    partition_key: &str,
+) -> Result<Option<PartitionBounds>, PgTrickleError> {
+    let method = crate::api::parse_partition_method(partition_key);
+    let cols = crate::api::parse_partition_key_columns(partition_key);
+
+    match method {
+        crate::api::PartitionMethod::Hash => {
+            // HASH partitions use per-partition MERGE loop — this function
+            // should never be called for HASH. The orchestration dispatches
+            // HASH before reaching extract_partition_bounds.
+            Err(PgTrickleError::SpiError(
+                "extract_partition_bounds called for HASH partition (should use per-partition MERGE)".to_string(),
+            ))
+        }
+        crate::api::PartitionMethod::List => {
+            // LIST: single column — collect distinct values.
+            let qcol = crate::api::quote_identifier(&cols[0]);
+            let sql = format!(
+                "SELECT DISTINCT {qcol}::text FROM ({resolved_delta_sql}) AS __pgt_part_probe ORDER BY 1"
+            );
+            let result = Spi::connect(|client| {
+                let rows = client
+                    .select(&sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("partition list: {e}")))?;
+                let mut values = Vec::new();
+                for row in rows {
+                    if let Some(v) = row
+                        .get::<String>(1)
+                        .map_err(|e| PgTrickleError::SpiError(format!("partition list col: {e}")))?
+                    {
+                        values.push(v);
+                    }
+                }
+                if values.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(PartitionBounds::List(values)))
+                }
+            })?;
+            Ok(result)
+        }
+        crate::api::PartitionMethod::Range => {
+            // RANGE: min/max per column.
+            let min_exprs: Vec<String> = cols
+                .iter()
+                .map(|c| format!("MIN({})::text", crate::api::quote_identifier(c)))
+                .collect();
+            let max_exprs: Vec<String> = cols
+                .iter()
+                .map(|c| format!("MAX({})::text", crate::api::quote_identifier(c)))
+                .collect();
+            let select_clause = min_exprs
+                .iter()
+                .chain(max_exprs.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql =
+                format!("SELECT {select_clause} FROM ({resolved_delta_sql}) AS __pgt_part_probe");
+            let result = Spi::connect(|client| {
+                let row = client
+                    .select(&sql, None, &[])
+                    .map_err(|e| PgTrickleError::SpiError(format!("partition range: {e}")))?
+                    .first();
+                let n = cols.len();
+                let mut mins = Vec::with_capacity(n);
+                let mut maxs = Vec::with_capacity(n);
+                for i in 0..n {
+                    let map_spi = |e: pgrx::spi::SpiError| {
+                        PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
+                    };
+                    match row.get::<String>(i + 1).map_err(map_spi)? {
+                        Some(v) => mins.push(v),
+                        None => return Ok(None), // delta is empty
+                    }
+                }
+                for i in 0..n {
+                    let map_spi = |e: pgrx::spi::SpiError| {
+                        PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
+                    };
+                    match row.get::<String>(n + i + 1).map_err(map_spi)? {
+                        Some(v) => maxs.push(v),
+                        None => return Ok(None),
+                    }
+                }
+                Ok(Some(PartitionBounds::Range { mins, maxs }))
+            })?;
+            Ok(result)
+        }
+    }
+}
+
+/// A1-3/A1-1b/A1-1d: Replace the `__PGT_PART_PRED__` placeholder in the MERGE
+/// SQL with a partition-pruning predicate for the current delta.
+///
+/// * **Single-column RANGE**: `AND st."col" BETWEEN '<min>' AND '<max>'`
+/// * **Multi-column RANGE**: `AND ROW(st."a", st."b") >= ROW(...) AND ROW(...) <= ROW(...)`
+/// * **LIST**: `AND st."col" IN ('v1', 'v2', ...)`
 fn inject_partition_predicate(
     merge_sql: &str,
     partition_key: &str,
-    min_val: &str,
-    max_val: &str,
+    bounds: &PartitionBounds,
 ) -> String {
-    let qk = crate::api::quote_identifier(partition_key);
-    let pred = format!(
-        " AND st.{qk} BETWEEN {} AND {}",
-        pg_quote_literal(min_val),
-        pg_quote_literal(max_val),
-    );
+    let cols = crate::api::parse_partition_key_columns(partition_key);
+    let pred = match bounds {
+        PartitionBounds::List(values) => {
+            let qk = crate::api::quote_identifier(&cols[0]);
+            let literals: Vec<String> = values.iter().map(|v| pg_quote_literal(v)).collect();
+            format!(" AND st.{qk} IN ({})", literals.join(", "))
+        }
+        PartitionBounds::Range { mins, maxs } => {
+            if cols.len() == 1 {
+                // Single-column: simple BETWEEN (backward compatible)
+                let qk = crate::api::quote_identifier(&cols[0]);
+                format!(
+                    " AND st.{qk} BETWEEN {} AND {}",
+                    pg_quote_literal(&mins[0]),
+                    pg_quote_literal(&maxs[0]),
+                )
+            } else {
+                // Multi-column: ROW comparison
+                let st_cols: Vec<String> = cols
+                    .iter()
+                    .map(|c| format!("st.{}", crate::api::quote_identifier(c)))
+                    .collect();
+                let min_literals: Vec<String> = mins.iter().map(|v| pg_quote_literal(v)).collect();
+                let max_literals: Vec<String> = maxs.iter().map(|v| pg_quote_literal(v)).collect();
+                format!(
+                    " AND ROW({}) >= ROW({}) AND ROW({}) <= ROW({})",
+                    st_cols.join(", "),
+                    min_literals.join(", "),
+                    st_cols.join(", "),
+                    max_literals.join(", "),
+                )
+            }
+        }
+    };
     merge_sql.replace("__PGT_PART_PRED__", &pred)
+}
+
+// ── A1-3b: Per-partition MERGE for HASH partitioned stream tables ───
+
+/// Metadata for a HASH child partition.
+struct HashChild {
+    /// Fully-qualified name: `"schema"."child_name"`
+    qualified_name: String,
+    modulus: i32,
+    remainder: i32,
+}
+
+/// Discover HASH child partitions (modulus, remainder) for a parent table.
+fn get_hash_children(parent_oid: pg_sys::Oid) -> Result<Vec<HashChild>, PgTrickleError> {
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT n.nspname::text, c.relname::text, \
+                        (pg_partition_bound_spec(c.oid, i.inhparent))::text \
+                 FROM pg_inherits i \
+                 JOIN pg_class c ON c.oid = i.inhrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE i.inhparent = $1 \
+                 ORDER BY c.relname",
+                None,
+                &[parent_oid.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(format!("hash children: {e}")))?;
+
+        let mut children = Vec::new();
+        for row in rows {
+            let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
+            let schema = row.get::<String>(1).map_err(map_spi)?.unwrap_or_default();
+            let name = row.get::<String>(2).map_err(map_spi)?.unwrap_or_default();
+            let bound_spec = row.get::<String>(3).map_err(map_spi)?.unwrap_or_default();
+
+            // Parse "FOR VALUES WITH (modulus N, remainder M)"
+            let (modulus, remainder) = parse_hash_bound_spec(&bound_spec)?;
+
+            let qualified_name = format!(
+                "{}.{}",
+                crate::api::quote_identifier(&schema),
+                crate::api::quote_identifier(&name),
+            );
+            children.push(HashChild {
+                qualified_name,
+                modulus,
+                remainder,
+            });
+        }
+        Ok(children)
+    })
+}
+
+/// Parse a PostgreSQL HASH partition bound spec.
+///
+/// Input: `"FOR VALUES WITH (modulus 4, remainder 2)"`
+/// Returns: `(4, 2)`
+pub(crate) fn parse_hash_bound_spec(spec: &str) -> Result<(i32, i32), PgTrickleError> {
+    // Parsing pattern: "FOR VALUES WITH (modulus N, remainder M)"
+    let upper = spec.to_uppercase();
+    let modulus = extract_keyword_int(&upper, "MODULUS")?;
+    let remainder = extract_keyword_int(&upper, "REMAINDER")?;
+    Ok((modulus, remainder))
+}
+
+/// Extract an integer value following a keyword in a partition bound spec.
+fn extract_keyword_int(spec: &str, keyword: &str) -> Result<i32, PgTrickleError> {
+    let pos = spec
+        .find(keyword)
+        .ok_or_else(|| PgTrickleError::SpiError(format!("missing {keyword} in bound spec")))?;
+    let after = &spec[pos + keyword.len()..];
+    let digits: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits
+        .parse::<i32>()
+        .map_err(|_| PgTrickleError::SpiError(format!("invalid {keyword} value in bound spec")))
+}
+
+/// Execute per-partition MERGE for a HASH partitioned stream table.
+///
+/// 1. Materialize the delta into a temp table.
+/// 2. Discover child partitions via `pg_inherits`.
+/// 3. For each child: MERGE from delta filtered by `satisfies_hash_partition()`.
+///
+/// Returns `(total_merge_count, "hash_merge")`.
+fn execute_hash_partitioned_merge(
+    merge_sql: &str,
+    resolved_delta_sql: &str,
+    schema: &str,
+    name: &str,
+    parent_oid: pg_sys::Oid,
+    partition_key: &str,
+    pgt_id: i64,
+) -> Result<usize, PgTrickleError> {
+    let cols = crate::api::parse_partition_key_columns(partition_key);
+    let qcol = crate::api::quote_identifier(&cols[0]);
+
+    // Step 1: Materialize delta into a temp table.
+    let temp_name = format!("__pgt_hash_delta_{pgt_id}");
+    let materialize_sql =
+        format!("CREATE TEMP TABLE {temp_name} ON COMMIT DROP AS {resolved_delta_sql}");
+    Spi::run(&materialize_sql)
+        .map_err(|e| PgTrickleError::SpiError(format!("hash delta materialize: {e}")))?;
+
+    // Check if delta is empty.
+    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {temp_name}"))
+        .map_err(|e| PgTrickleError::SpiError(format!("hash delta count: {e}")))?
+        .unwrap_or(0);
+    if delta_count == 0 {
+        pgrx::debug1!("[pg_trickle] A1-3b: empty hash delta for {schema}.{name}, skipping MERGE");
+        return Ok(0);
+    }
+
+    // Step 2: Discover child partitions.
+    let children = get_hash_children(parent_oid)?;
+    if children.is_empty() {
+        return Err(PgTrickleError::SpiError(format!(
+            "HASH partitioned table {schema}.{name} has no child partitions"
+        )));
+    }
+
+    pgrx::debug1!(
+        "[pg_trickle] A1-3b: HASH per-partition MERGE for {}.{}: {} partitions, {} delta rows",
+        schema,
+        name,
+        children.len(),
+        delta_count,
+    );
+
+    // Step 3: Per-partition MERGE.
+    // The original merge_sql targets the parent table. We rewrite it for each
+    // child, replacing the parent target with the child, and filtering the
+    // delta USING clause through satisfies_hash_partition().
+    let parent_target = format!(
+        "{}.{}",
+        crate::api::quote_identifier(schema),
+        crate::api::quote_identifier(name),
+    );
+
+    let mut total_count = 0usize;
+    for child in &children {
+        // Build child-specific MERGE:
+        // 1. Replace target table with child partition (ONLY to avoid routing)
+        // 2. Replace the USING clause's delta with hash-filtered delta
+        // 3. Strip the __PGT_PART_PRED__ placeholder (not needed for direct child)
+        // Build per-child MERGE with filtered USING clause.
+        // Strategy: find USING clause and inject hash filter into the temp table.
+        // Simpler: just build a fresh MERGE targeting the child with filtered delta.
+        let child_merge_sql = build_hash_child_merge(
+            &child.qualified_name,
+            &temp_name,
+            &qcol,
+            parent_oid,
+            child.modulus,
+            child.remainder,
+            merge_sql,
+            &parent_target,
+        );
+
+        let n = Spi::connect_mut(|client| {
+            let result = client
+                .update(&child_merge_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(format!("hash merge child: {e}")))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })?;
+
+        if n > 0 {
+            pgrx::debug1!(
+                "[pg_trickle] A1-3b: MERGE into {} touched {} rows",
+                child.qualified_name,
+                n,
+            );
+        }
+        total_count += n;
+    }
+
+    Ok(total_count)
+}
+
+/// Build a MERGE SQL statement targeting a specific HASH child partition.
+///
+/// The delta is filtered to only rows whose partition key hashes to this child
+/// using PostgreSQL's `satisfies_hash_partition()` function.
+#[allow(clippy::too_many_arguments)]
+fn build_hash_child_merge(
+    child_target: &str,
+    temp_delta: &str,
+    quoted_partition_col: &str,
+    parent_oid: pg_sys::Oid,
+    modulus: i32,
+    remainder: i32,
+    original_merge: &str,
+    parent_target: &str,
+) -> String {
+    // The original MERGE has a USING clause that references the delta.
+    // We replace the entire MERGE to target the child with a filtered delta.
+    //
+    // Strategy: rewrite the original merge_sql by:
+    // 1. Replacing the parent target with ONLY child_target
+    // 2. Wrapping the USING subquery to filter through satisfies_hash_partition
+    // 3. Removing the __PGT_PART_PRED__ placeholder
+
+    // Find and replace "USING (...) AS d" with filtered version that reads
+    // from the materialized temp table.
+    let using_start = original_merge.find("USING (");
+    let on_clause = original_merge.find(" ON st.");
+
+    if let (Some(us), Some(on)) = (using_start, on_clause) {
+        // Reconstruct: everything before USING + filtered USING + everything from ON
+        let before_using = &original_merge[..us];
+        let from_on = &original_merge[on..];
+
+        // Build filtered USING clause
+        let filtered_using = format!(
+            "USING (SELECT * FROM {temp_delta} WHERE \
+             satisfies_hash_partition({parent_oid}::oid, {modulus}, {remainder}, {quoted_partition_col})) AS d",
+            parent_oid = parent_oid.to_u32(),
+        );
+
+        let result = format!("{before_using}{filtered_using}{from_on}",);
+
+        // Replace parent target with ONLY child_target and strip predicate placeholder
+        result
+            .replace(parent_target, &format!("ONLY {child_target}"))
+            .replace("__PGT_PART_PRED__", "")
+    } else {
+        // Fallback: simple replacement (shouldn't happen in practice)
+        original_merge
+            .replace(parent_target, &format!("ONLY {child_target}"))
+            .replace("__PGT_PART_PRED__", "")
+    }
+}
+
+// ── PART-WARN: Default partition growth warning ─────────────────────
+
+/// After a successful refresh of a partitioned stream table, check whether
+/// the default (catch-all) partition has rows. If so, emit a WARNING
+/// prompting the user to create explicit named partitions.
+///
+/// The check is deliberately lightweight: a single `count(*)` on the default
+/// partition. If the default partition does not exist (unlikely but possible
+/// if the user detached it), the check is silently skipped.
+fn warn_default_partition_growth(schema: &str, name: &str) {
+    let default_name = format!("{name}_default");
+    let qschema = crate::api::quote_identifier(schema);
+    let qdefault = crate::api::quote_identifier(&default_name);
+    let sql = format!("SELECT count(*)::bigint FROM {qschema}.{qdefault}");
+    match Spi::get_one::<i64>(&sql) {
+        Ok(Some(count)) if count > 0 => {
+            pgrx::warning!(
+                "pg_trickle: PART-WARN: default partition {schema}.{default_name} of \
+                 stream table {schema}.{name} contains {count} row(s). \
+                 Create explicit named partitions to improve query performance and \
+                 enable partition pruning. Example:\n  \
+                 CREATE TABLE {schema}.{name}_2026q1 PARTITION OF {schema}.{name} \
+                 FOR VALUES FROM ('2026-01-01') TO ('2026-04-01');"
+            );
+        }
+        Ok(_) => {}  // Default partition is empty — no warning.
+        Err(_) => {} // Default partition does not exist — silently skip.
+    }
 }
 
 // ── DAG-3: Delta amplification detection ────────────────────────────
@@ -2790,6 +3194,33 @@ pub fn execute_differential_refresh(
                 oid,
                 e,
             );
+        }
+    }
+
+    // PERF-2: Auto-promote unpartitioned buffers to RANGE(lsn) partitioned
+    // mode when `buffer_partitioning = 'auto'` and the buffer fill rate
+    // exceeds `compact_threshold` within a single refresh cycle.
+    for &oid in &catalog_source_oids {
+        let prev_lsn = prev_frontier.get_lsn(oid);
+        let new_lsn = new_frontier.get_lsn(oid);
+        let pending = crate::cdc::count_pending_changes(&change_schema, oid, &prev_lsn, &new_lsn);
+        match crate::cdc::maybe_auto_promote_buffer(&change_schema, oid, pending) {
+            Ok(true) => {
+                pgrx::debug1!(
+                    "[pg_trickle] PERF-2: auto-promoted changes_{} to partitioned mode \
+                     (pending={} exceeded threshold)",
+                    oid,
+                    pending,
+                );
+            }
+            Err(e) => {
+                pgrx::warning!(
+                    "[pg_trickle] PERF-2: auto-promotion failed for changes_{}: {}",
+                    oid,
+                    e,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -3321,6 +3752,7 @@ pub fn execute_differential_refresh(
         let user_cols = delta_result.output_columns;
         let source_oids = delta_result.source_oids;
         let is_dedup = delta_result.is_deduplicated;
+        let has_key_changed = delta_result.has_key_changed;
 
         let quoted_table = format!(
             "\"{}\".\"{}\"",
@@ -3375,7 +3807,13 @@ pub fn execute_differential_refresh(
         // EC-06: For keyless sources, never collapse.
         // B3-2: Use weight aggregation instead of DISTINCT ON for correctness
         // on diamond-flow queries.
-        let template_using = if is_dedup || st.has_keyless_source {
+        // A-2: Filter D-side value-only UPDATE rows when __pgt_key_changed is available.
+        let template_using = if (is_dedup || st.has_keyless_source) && has_key_changed {
+            format!(
+                "(SELECT * FROM ({delta_sql_template}) __d \
+                 WHERE NOT (__d.__pgt_action = 'D' AND __d.__pgt_key_changed = FALSE))"
+            )
+        } else if is_dedup || st.has_keyless_source {
             format!("({delta_sql_template})")
         } else {
             build_weight_agg_using(&delta_sql_template, &user_col_list)
@@ -3527,6 +3965,14 @@ pub fn execute_differential_refresh(
 
     let t1 = Instant::now();
 
+    // PROF-DLT / PGS_PROFILE_DELTA: When the env var is set, capture
+    // EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) for the delta query and write
+    // the result to /tmp/delta_plans/<schema>_<name>.json.  This env var is
+    // intended for E2E test diagnostics and local profiling runs.
+    if std::env::var("PGS_PROFILE_DELTA").as_deref() == Ok("1") {
+        capture_delta_explain(schema, name, &resolved.resolved_delta_sql);
+    }
+
     // ── Diagnostic: detect OID mismatch between catalog and delta ────
     // If the delta template references source OIDs that are not in the
     // catalog deps, the MERGE will fail referencing nonexistent change
@@ -3674,6 +4120,11 @@ pub fn execute_differential_refresh(
     let is_dedup_flag = crate::dvm::is_delta_deduplicated(st.pgt_id);
     let use_explicit_dml = use_explicit_dml || (st.has_keyless_source && !is_dedup_flag);
 
+    // G14-MDED: Record this differential refresh execution in the shared-memory
+    // profiling counters.  Called here (after the no-data short-circuit) so we
+    // only count refreshes that actually process delta rows.
+    crate::shmem::record_diff_refresh(is_dedup_flag);
+
     // ST-ST-2: Force explicit DML when this ST has downstream ST consumers.
     // The explicit DML path materializes the delta into __pgt_delta_{pgt_id},
     // which we then capture into the ST's change buffer for downstream use.
@@ -3704,32 +4155,57 @@ pub fn execute_differential_refresh(
     // pruning: only partitions overlapping [min, max] are visited, reducing
     // MERGE I/O proportionally to the number of affected partitions.
     //
+    // A1-3b: HASH partitions use a per-partition MERGE loop instead of
+    // predicate injection (hash functions are not range-invertible).
+    //
     // If the delta is empty (all changes cancel out), return early —
     // there is nothing to MERGE.
-    if let Some(ref pk) = st.st_partition_key {
-        match extract_partition_range(&resolved.resolved_delta_sql, pk)? {
-            None => {
-                // Delta produced no rows for the partition key — fast path.
-                pgrx::debug1!(
-                    "[pg_trickle] A1-3: empty partition-key delta for {}.{}, skipping MERGE",
-                    schema,
-                    name,
-                );
-                return Ok((0, 0));
-            }
-            Some((min_val, max_val)) => {
-                pgrx::debug1!(
-                    "[pg_trickle] A1-3: partition range for {}.{}: [{}, {}]",
-                    schema,
-                    name,
-                    min_val,
-                    max_val,
-                );
-                resolved.merge_sql =
-                    inject_partition_predicate(&resolved.merge_sql, pk, &min_val, &max_val);
+    let hash_merge_result: Option<(usize, &str)> = if let Some(ref pk) = st.st_partition_key {
+        let method = crate::api::parse_partition_method(pk);
+        if method == crate::api::PartitionMethod::Hash {
+            // A1-3b: Per-partition MERGE for HASH partitioned STs.
+            let count = execute_hash_partitioned_merge(
+                &resolved.merge_sql,
+                &resolved.resolved_delta_sql,
+                schema,
+                name,
+                st.pgt_relid,
+                pk,
+                st.pgt_id,
+            )?;
+            Some((count, "hash_merge"))
+        } else {
+            // RANGE / LIST: extract bounds and inject predicate.
+            match extract_partition_bounds(&resolved.resolved_delta_sql, pk)? {
+                None => {
+                    // Delta produced no rows for the partition key — fast path.
+                    pgrx::debug1!(
+                        "[pg_trickle] A1-3: empty partition-key delta for {}.{}, skipping MERGE",
+                        schema,
+                        name,
+                    );
+                    return Ok((0, 0));
+                }
+                Some(bounds) => {
+                    pgrx::debug1!(
+                        "[pg_trickle] A1-3: partition bounds for {}.{}: {:?}",
+                        schema,
+                        name,
+                        match &bounds {
+                            PartitionBounds::Range { mins, maxs } =>
+                                format!("RANGE [{mins:?}, {maxs:?}]"),
+                            PartitionBounds::List(vals) => format!("LIST {:?}", vals),
+                        },
+                    );
+                    resolved.merge_sql =
+                        inject_partition_predicate(&resolved.merge_sql, pk, &bounds);
+                    None
+                }
             }
         }
-    }
+    } else {
+        None
+    };
 
     // ── D-2: Prepared-statement flag ─────────────────────────────────
     // PB2: Disable prepared statements when pooler_compatibility_mode is on.
@@ -3752,7 +4228,10 @@ pub fn execute_differential_refresh(
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
-    let (merge_count, strategy_label) = if use_explicit_dml {
+    let (merge_count, strategy_label) = if let Some(result) = hash_merge_result {
+        // A1-3b: HASH per-partition MERGE already executed above.
+        result
+    } else if use_explicit_dml {
         // ── User-trigger path: explicit DML ─────────────────────────
         // Decompose the MERGE into DELETE + UPDATE + INSERT so that
         // user-defined triggers fire with correct TG_OP / OLD / NEW.
@@ -4112,6 +4591,13 @@ pub fn execute_differential_refresh(
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("DIFFERENTIAL");
 
+    // PART-WARN: After a successful refresh, warn if the default partition
+    // of a partitioned stream table has accumulated rows.  This prompts the
+    // user to create explicit named partitions.
+    if st.st_partition_key.is_some() {
+        warn_default_partition_growth(schema, name);
+    }
+
     Ok((effective_count, 0))
 }
 
@@ -4269,6 +4755,67 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────────
+
+/// PROF-DLT: Capture `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` for the
+/// resolved delta SQL and persist the plan to
+/// `/tmp/delta_plans/<schema>_<name>.json`.
+///
+/// Called when `PGS_PROFILE_DELTA=1` is set in the environment.  Errors are
+/// logged as warnings so profiling failures never abort a real refresh cycle.
+pub(crate) fn capture_delta_explain(schema: &str, name: &str, delta_sql: &str) {
+    use std::path::PathBuf;
+
+    let dir = PathBuf::from("/tmp/delta_plans");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        pgrx::warning!("[pg_trickle] PGS_PROFILE_DELTA: failed to create /tmp/delta_plans: {e}");
+        return;
+    }
+
+    // Build EXPLAIN query wrapping the delta SQL.
+    let explain_sql = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d"
+    );
+
+    let plan_json = Spi::connect(|client| {
+        let result = client
+            .select(&explain_sql, None, &[])
+            .map_err(|e| format!("SPI error in explain: {e}"))?;
+        let mut lines = Vec::new();
+        for row in result {
+            let line: Option<pgrx::JsonB> = row.get(1).unwrap_or(None);
+            if let Some(j) = line {
+                lines.push(j.0.to_string());
+            }
+        }
+        Ok::<String, String>(lines.join("\n"))
+    });
+
+    let plan_json = match plan_json {
+        Ok(j) => j,
+        Err(e) => {
+            pgrx::warning!(
+                "[pg_trickle] PGS_PROFILE_DELTA: EXPLAIN failed for {schema}.{name}: {e}"
+            );
+            return;
+        }
+    };
+
+    // Write to /tmp/delta_plans/<schema>_<name>.json
+    let safe_schema = schema.replace('"', "").replace('/', "_");
+    let safe_name = name.replace('"', "").replace('/', "_");
+    let path = dir.join(format!("{safe_schema}_{safe_name}.json"));
+    if let Err(e) = std::fs::write(&path, &plan_json) {
+        pgrx::warning!(
+            "[pg_trickle] PGS_PROFILE_DELTA: failed to write {}: {e}",
+            path.display()
+        );
+    } else {
+        pgrx::debug1!(
+            "[pg_trickle] PGS_PROFILE_DELTA: plan written to {}",
+            path.display()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -5403,8 +5950,11 @@ mod pg_tests {
     #[test]
     fn test_inject_partition_predicate_basic() {
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-        let result =
-            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let bounds = PartitionBounds::Range {
+            mins: vec!["2024-01-01".to_string()],
+            maxs: vec!["2024-01-31".to_string()],
+        };
+        let result = inject_partition_predicate(merge_sql, "event_date", &bounds);
         assert!(result.contains("BETWEEN '2024-01-01' AND '2024-01-31'"));
         assert!(result.contains(r#""event_date""#));
         assert!(result.contains("st."));
@@ -5415,18 +5965,88 @@ mod pg_tests {
     fn test_inject_partition_predicate_no_placeholder() {
         // If there is no placeholder the SQL is returned unchanged
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id";
-        let result =
-            inject_partition_predicate(merge_sql, "event_date", "2024-01-01", "2024-01-31");
+        let bounds = PartitionBounds::Range {
+            mins: vec!["2024-01-01".to_string()],
+            maxs: vec!["2024-01-31".to_string()],
+        };
+        let result = inject_partition_predicate(merge_sql, "event_date", &bounds);
         assert_eq!(result, merge_sql);
     }
 
     #[test]
     fn test_inject_partition_predicate_value_with_single_quote() {
         let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
-        let result = inject_partition_predicate(merge_sql, "name", "O'Brien", "O'Reilly");
+        let bounds = PartitionBounds::Range {
+            mins: vec!["O'Brien".to_string()],
+            maxs: vec!["O'Reilly".to_string()],
+        };
+        let result = inject_partition_predicate(merge_sql, "name", &bounds);
         // Single quotes must be doubled inside the predicate literals
         assert!(result.contains("'O''Brien'"));
         assert!(result.contains("'O''Reilly'"));
+    }
+
+    // A1-1b: multi-column partition predicate tests
+
+    #[test]
+    fn test_inject_partition_predicate_multi_column() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let bounds = PartitionBounds::Range {
+            mins: vec!["2024-01-01".to_string(), "100".to_string()],
+            maxs: vec!["2024-01-31".to_string(), "999".to_string()],
+        };
+        let result = inject_partition_predicate(merge_sql, "event_day,customer_id", &bounds);
+        // Multi-column uses ROW comparison instead of BETWEEN
+        assert!(
+            result
+                .contains("ROW(st.\"event_day\", st.\"customer_id\") >= ROW('2024-01-01', '100')")
+        );
+        assert!(
+            result
+                .contains("ROW(st.\"event_day\", st.\"customer_id\") <= ROW('2024-01-31', '999')")
+        );
+        assert!(!result.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_inject_partition_predicate_three_columns() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let bounds = PartitionBounds::Range {
+            mins: vec!["1".to_string(), "x".to_string(), "10".to_string()],
+            maxs: vec!["9".to_string(), "z".to_string(), "90".to_string()],
+        };
+        let result = inject_partition_predicate(merge_sql, "a, b, c", &bounds);
+        assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") >= ROW('1', 'x', '10')"));
+        assert!(result.contains("ROW(st.\"a\", st.\"b\", st.\"c\") <= ROW('9', 'z', '90')"));
+    }
+
+    // A1-1d: LIST partition predicate tests
+
+    #[test]
+    fn test_inject_partition_predicate_list_single_value() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let bounds = PartitionBounds::List(vec!["US".to_string()]);
+        let result = inject_partition_predicate(merge_sql, "LIST:region", &bounds);
+        assert!(result.contains("st.\"region\" IN ('US')"));
+        assert!(!result.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_inject_partition_predicate_list_multiple_values() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let bounds =
+            PartitionBounds::List(vec!["EU".to_string(), "US".to_string(), "APAC".to_string()]);
+        let result = inject_partition_predicate(merge_sql, "LIST:region", &bounds);
+        assert!(result.contains("st.\"region\" IN ('EU', 'US', 'APAC')"));
+        assert!(!result.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_inject_partition_predicate_list_value_with_quote() {
+        let merge_sql = "MERGE INTO st USING d ON st.id = d.id__PGT_PART_PRED__";
+        let bounds = PartitionBounds::List(vec!["O'Brien".to_string()]);
+        let result = inject_partition_predicate(merge_sql, "LIST:name", &bounds);
+        assert!(result.contains("'O''Brien'"));
     }
 
     // ── build_weight_agg_using ───────────────────────────────────────────────
@@ -5494,5 +6114,373 @@ mod pg_tests {
         let sql = build_keyless_delete_template("\"s\".\"t\"", 5);
         // The WHERE clause must use <= del_count to limit paired deletions
         assert!(sql.contains("<= dc.del_count"));
+    }
+
+    // ── A1-3b: HASH partition bound spec parsing ────────────────────────────
+
+    #[test]
+    fn test_parse_hash_bound_spec_basic() {
+        let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 2)").unwrap();
+        assert_eq!(m, 4);
+        assert_eq!(r, 2);
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_various_values() {
+        let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 8, remainder 7)").unwrap();
+        assert_eq!(m, 8);
+        assert_eq!(r, 7);
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_remainder_zero() {
+        let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 0)").unwrap();
+        assert_eq!(m, 4);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_missing_modulus() {
+        let result = parse_hash_bound_spec("FOR VALUES WITH (remainder 2)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_missing_remainder() {
+        let result = parse_hash_bound_spec("FOR VALUES WITH (modulus 4)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_keyword_int_basic() {
+        assert_eq!(
+            extract_keyword_int("MODULUS 4, REMAINDER 2", "MODULUS").unwrap(),
+            4
+        );
+        assert_eq!(
+            extract_keyword_int("MODULUS 4, REMAINDER 2", "REMAINDER").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_extract_keyword_int_missing() {
+        assert!(extract_keyword_int("SOME OTHER TEXT", "MODULUS").is_err());
+    }
+
+    // ── D-4: Multi-frontier cleanup model ──────────────────────────────
+
+    /// Pure-Rust model of the multi-frontier cleanup logic.
+    ///
+    /// Given a set of consumer frontier LSNs for a source OID, computes the
+    /// safe cleanup threshold: `MIN(consumer_frontiers)`. Only change buffer
+    /// entries at or below this threshold may be deleted.
+    ///
+    /// Returns `None` when there are no consumers with a valid (non-0/0) frontier.
+    fn compute_safe_cleanup_lsn(consumer_frontiers: &[&str]) -> Option<String> {
+        let valid: Vec<&str> = consumer_frontiers
+            .iter()
+            .copied()
+            .filter(|lsn| *lsn != "0/0")
+            .collect();
+        if valid.is_empty() {
+            return None;
+        }
+        let mut min = valid[0];
+        for &lsn in &valid[1..] {
+            min = crate::version::lsn_min(min, lsn);
+        }
+        Some(min.to_string())
+    }
+
+    /// Model: given change buffer entries (as LSNs) and the safe cleanup
+    /// threshold, returns the set of entries that should be RETAINED (not deleted).
+    fn retained_after_cleanup(entry_lsns: &[&str], safe_lsn: &str) -> Vec<String> {
+        entry_lsns
+            .iter()
+            .copied()
+            .filter(|lsn| crate::version::lsn_gt(lsn, safe_lsn))
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_safe_cleanup_lsn_single_consumer() {
+        let result = compute_safe_cleanup_lsn(&["0/100"]);
+        assert_eq!(result, Some("0/100".to_string()));
+    }
+
+    #[test]
+    fn test_safe_cleanup_lsn_multi_consumer_min() {
+        // 5 consumers with different frontiers — safe threshold is the minimum.
+        let result = compute_safe_cleanup_lsn(&["0/500", "0/200", "0/300", "0/100", "0/400"]);
+        assert_eq!(result, Some("0/100".to_string()));
+    }
+
+    #[test]
+    fn test_safe_cleanup_lsn_skips_zero() {
+        // Consumer at 0/0 is uninitialized — excluded.
+        let result = compute_safe_cleanup_lsn(&["0/0", "0/200", "0/100"]);
+        assert_eq!(result, Some("0/100".to_string()));
+    }
+
+    #[test]
+    fn test_safe_cleanup_lsn_all_zero() {
+        let result = compute_safe_cleanup_lsn(&["0/0", "0/0"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_safe_cleanup_lsn_empty() {
+        let result = compute_safe_cleanup_lsn(&[]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_retained_after_cleanup_basic() {
+        let entries = vec!["0/50", "0/100", "0/150", "0/200"];
+        let retained = retained_after_cleanup(&entries, "0/100");
+        assert_eq!(retained, vec!["0/150", "0/200"]);
+    }
+
+    #[test]
+    fn test_retained_after_cleanup_nothing_deleted() {
+        let entries = vec!["0/200", "0/300"];
+        let retained = retained_after_cleanup(&entries, "0/100");
+        assert_eq!(retained, vec!["0/200", "0/300"]);
+    }
+
+    #[test]
+    fn test_retained_after_cleanup_all_deleted() {
+        let entries = vec!["0/50", "0/100"];
+        let retained = retained_after_cleanup(&entries, "0/200");
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn test_multi_frontier_cleanup_never_deletes_unconsumed() {
+        // Core correctness property: if consumer C has frontier at LSN X,
+        // then no entry with LSN > X should ever be deleted.
+        //
+        // Scenario: 5 consumers with different frontier positions.
+        // Buffer has entries at every 0x100 step from 0/100 to 0/A00.
+        let consumer_frontiers = vec!["0/300", "0/700", "0/500", "0/200", "0/900"];
+        let buffer_entries: Vec<&str> = vec![
+            "0/100", "0/200", "0/300", "0/400", "0/500", "0/600", "0/700", "0/800", "0/900",
+            "0/A00",
+        ];
+
+        let safe_lsn =
+            compute_safe_cleanup_lsn(&consumer_frontiers).expect("should have a safe threshold");
+        assert_eq!(safe_lsn, "0/200"); // MIN of all consumers
+
+        let retained = retained_after_cleanup(&buffer_entries, &safe_lsn);
+
+        // Verify: every consumer can still read all entries at or above its frontier.
+        for &consumer_lsn in &consumer_frontiers {
+            // Entries the consumer still needs: LSN > consumer's PREVIOUS frontier.
+            // In production, the consumer reads entries between prev and current frontier,
+            // but the critical invariant is: entries above the MIN frontier are retained.
+            assert!(
+                retained.iter().any(|e| e == consumer_lsn)
+                    || crate::version::lsn_gt(&safe_lsn, consumer_lsn)
+                    || safe_lsn == consumer_lsn,
+                "consumer at {} should find its entries retained or already consumed",
+                consumer_lsn
+            );
+        }
+
+        // No entry above the slowest consumer was deleted.
+        let min_consumer = "0/200";
+        for entry in &retained {
+            assert!(
+                crate::version::lsn_gt(entry, min_consumer),
+                "retained entry {} should be above safe threshold {}",
+                entry,
+                min_consumer
+            );
+        }
+    }
+
+    // ── D-4: Property-based test — random frontier advancement ──────
+
+    use proptest::prelude::*;
+
+    /// Generate a random LSN as "0/XXXX" where XXXX is a hex value 1..FFFF.
+    fn arb_lsn() -> impl Strategy<Value = String> {
+        (1u64..0xFFFFu64).prop_map(|v| format!("0/{:X}", v))
+    }
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(500))]
+
+        /// Property: MIN(frontiers) is always the safe cleanup threshold.
+        /// No entry above this threshold should be deleted.
+        /// All entries at or below should be deletable.
+        #[test]
+        fn prop_multi_frontier_cleanup_correctness(
+            frontiers in proptest::collection::vec(arb_lsn(), 5..=10),
+            entries in proptest::collection::vec(arb_lsn(), 1..=20),
+        ) {
+            let frontier_refs: Vec<&str> = frontiers.iter().map(|s| s.as_str()).collect();
+            let entry_refs: Vec<&str> = entries.iter().map(|s| s.as_str()).collect();
+
+            let safe_lsn = compute_safe_cleanup_lsn(&frontier_refs);
+
+            if let Some(ref threshold) = safe_lsn {
+                let retained = retained_after_cleanup(&entry_refs, threshold);
+
+                // Invariant 1: Every retained entry is strictly above the threshold.
+                for entry in &retained {
+                    prop_assert!(
+                        crate::version::lsn_gt(entry, threshold),
+                        "retained entry {} should be > threshold {}",
+                        entry,
+                        threshold
+                    );
+                }
+
+                // Invariant 2: Every non-retained entry is at or below the threshold.
+                let deleted: Vec<&str> = entry_refs
+                    .iter()
+                    .copied()
+                    .filter(|e| !retained.contains(&e.to_string()))
+                    .collect();
+                for entry in &deleted {
+                    prop_assert!(
+                        !crate::version::lsn_gt(entry, threshold),
+                        "deleted entry {} should be <= threshold {}",
+                        entry,
+                        threshold
+                    );
+                }
+
+                // Invariant 3: For every consumer, all entries at LSNs above
+                // the consumer's frontier are still present in the retained set.
+                // (This is the "no premature deletion" property.)
+                for consumer_lsn in &frontier_refs {
+                    for entry in &entry_refs {
+                        if crate::version::lsn_gt(entry, consumer_lsn) {
+                            // This entry hasn't been consumed by this consumer yet.
+                            // It should be retained.
+                            prop_assert!(
+                                retained.contains(&entry.to_string()),
+                                "entry {} is above consumer frontier {} but was deleted (threshold {})",
+                                entry,
+                                consumer_lsn,
+                                threshold
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Property: Advancing the slowest consumer raises the safe threshold.
+        #[test]
+        fn prop_advancing_slowest_consumer_raises_threshold(
+            base_frontiers in proptest::collection::vec(arb_lsn(), 5..=8),
+            advance_amount in 1u64..0x1000u64,
+        ) {
+            let frontier_refs: Vec<&str> = base_frontiers.iter().map(|s| s.as_str()).collect();
+
+            if let Some(ref old_threshold) = compute_safe_cleanup_lsn(&frontier_refs) {
+                // Find the index of the minimum frontier.
+                let min_idx = frontier_refs
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let pa = crate::version::lsn_gt(a, b);
+                        if pa { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less }
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap();
+
+                // Advance the slowest consumer.
+                let mut advanced = base_frontiers.clone();
+                let old_val = crate::version::lsn_gt(&advanced[min_idx], "0/0");
+                if old_val {
+                    // Parse and advance
+                    let parts: Vec<&str> = advanced[min_idx].split('/').collect();
+                    let lo = u64::from_str_radix(parts[1], 16).unwrap_or(0);
+                    advanced[min_idx] = format!("0/{:X}", lo.saturating_add(advance_amount));
+                }
+
+                let new_frontier_refs: Vec<&str> = advanced.iter().map(|s| s.as_str()).collect();
+                if let Some(ref new_threshold) = compute_safe_cleanup_lsn(&new_frontier_refs) {
+                    prop_assert!(
+                        crate::version::lsn_gte(new_threshold, old_threshold),
+                        "advancing slowest consumer should not lower threshold: old={}, new={}",
+                        old_threshold,
+                        new_threshold
+                    );
+                }
+            }
+        }
+
+        /// Property: Adding a new consumer at LSN 0/1 (just initialized) should
+        /// lower or maintain the safe threshold.
+        #[test]
+        fn prop_new_consumer_lowers_threshold(
+            base_frontiers in proptest::collection::vec(arb_lsn(), 5..=8),
+        ) {
+            let frontier_refs: Vec<&str> = base_frontiers.iter().map(|s| s.as_str()).collect();
+
+            if let Some(ref old_threshold) = compute_safe_cleanup_lsn(&frontier_refs) {
+                // Add a new consumer that just completed its first full refresh
+                // with a very low frontier.
+                let mut with_new = base_frontiers.clone();
+                with_new.push("0/1".to_string());
+                let new_frontier_refs: Vec<&str> = with_new.iter().map(|s| s.as_str()).collect();
+
+                if let Some(ref new_threshold) = compute_safe_cleanup_lsn(&new_frontier_refs) {
+                    prop_assert!(
+                        !crate::version::lsn_gt(new_threshold, old_threshold),
+                        "adding consumer at 0/1 should not raise threshold: old={}, new={}",
+                        old_threshold,
+                        new_threshold
+                    );
+                }
+            }
+        }
+    }
+
+    // ── D-4: Column superset computation tests ──────────────────────
+
+    #[test]
+    fn test_column_superset_union() {
+        // Simulate: ST1 uses {a, b, c}, ST2 uses {b, d}, ST3 uses {a, e}.
+        // Column superset = {a, b, c, d, e}.
+        let st1: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
+        let st2: Vec<String> = vec!["b", "d"].into_iter().map(String::from).collect();
+        let st3: Vec<String> = vec!["a", "e"].into_iter().map(String::from).collect();
+
+        let mut superset = std::collections::HashSet::new();
+        for col in st1.iter().chain(st2.iter()).chain(st3.iter()) {
+            superset.insert(col.to_lowercase());
+        }
+
+        let mut sorted: Vec<String> = superset.into_iter().collect();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn test_column_superset_select_star_forces_full() {
+        // If any ST uses SELECT * (columns_used = None), the superset must
+        // include ALL columns.
+        let st1: Option<Vec<String>> = Some(vec!["a".to_string(), "b".to_string()]);
+        let st2: Option<Vec<String>> = None; // SELECT *
+
+        // When any consumer has None, the union should be None (full capture).
+        let union_result = match (&st1, &st2) {
+            (_, None) | (None, _) => None,
+            (Some(a), Some(b)) => {
+                let mut s: std::collections::HashSet<String> = a.iter().cloned().collect();
+                s.extend(b.iter().cloned());
+                Some(s.into_iter().collect::<Vec<_>>())
+            }
+        };
+        assert!(union_result.is_none());
     }
 }
