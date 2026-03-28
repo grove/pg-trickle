@@ -57,6 +57,57 @@ STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'explain_refresh_mode_wrapper';
 
+-- ── Phase 1.5: Update Stream Table Creation Functions ───────────────────────────
+-- (Add partition_by parameter to existing stream table creation functions)
+
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
+        "name" TEXT,
+        "query" TEXT,
+        "schedule" TEXT DEFAULT 'calculated',
+        "refresh_mode" TEXT DEFAULT 'AUTO',
+        "initialize" bool DEFAULT true,
+        "diamond_consistency" TEXT DEFAULT NULL,
+        "diamond_schedule_policy" TEXT DEFAULT NULL,
+        "cdc_mode" TEXT DEFAULT NULL,
+        "append_only" bool DEFAULT false,
+        "pooler_compatibility_mode" bool DEFAULT false,
+        "partition_by" TEXT DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
+        "name" TEXT,
+        "query" TEXT,
+        "schedule" TEXT DEFAULT 'calculated',
+        "refresh_mode" TEXT DEFAULT 'AUTO',
+        "initialize" bool DEFAULT true,
+        "diamond_consistency" TEXT DEFAULT NULL,
+        "diamond_schedule_policy" TEXT DEFAULT NULL,
+        "cdc_mode" TEXT DEFAULT NULL,
+        "append_only" bool DEFAULT false,
+        "pooler_compatibility_mode" bool DEFAULT false,
+        "partition_by" TEXT DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."create_or_replace_stream_table"(
+        "name" TEXT,
+        "query" TEXT,
+        "schedule" TEXT DEFAULT 'calculated',
+        "refresh_mode" TEXT DEFAULT 'AUTO',
+        "initialize" bool DEFAULT true,
+        "diamond_consistency" TEXT DEFAULT NULL,
+        "diamond_schedule_policy" TEXT DEFAULT NULL,
+        "cdc_mode" TEXT DEFAULT NULL,
+        "append_only" bool DEFAULT false,
+        "pooler_compatibility_mode" bool DEFAULT false,
+        "partition_by" TEXT DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_or_replace_stream_table_wrapper';
+
 -- ── Phase 2: Developer Diagnostic Functions ───────────────────────────────
 
 -- DT-1: explain_query_rewrite — walk a query through every DVM rewrite pass.
