@@ -1,4 +1,4 @@
-# PLAN_TEST_GAPS_1.md — Regression Risk Analysis & Test Hardening Plan
+# TESTING_GAPS_2.md — Regression Risk Analysis & Test Hardening Plan
 
 **Date:** 2026-03-28  
 **Branch:** pre-release-0.12.0-b  
