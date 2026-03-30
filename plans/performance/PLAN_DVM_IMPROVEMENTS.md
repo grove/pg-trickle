@@ -197,9 +197,20 @@ deltas — potentially large.
 at every reference site. PostgreSQL evaluates each inline subquery
 independently, causing redundant EXCEPT ALL + full table scans.
 
-**Proposal:** Emit each per-leaf L₀ as a **named CTE** (with NOT MATERIALIZED
-hint to let the planner fold it when beneficial, or MATERIALIZED when the
-reference count exceeds a threshold, e.g. ≥3).
+**Proposal:** Emit each per-leaf L₀ as a **named CTE** with `NOT MATERIALIZED`
+hint by default (letting the planner fold it into downstream scans when
+beneficial). When the reference count exceeds a threshold (≥3), switch to
+`MATERIALIZED` to force a single evaluation.
+
+The default of `NOT MATERIALIZED` is chosen because:
+- For small CTEs (e.g., 100 rows at SF=0.01), the planner may inline the CTE
+  more efficiently than materializing it.
+- For large CTEs at SF=1, the planner's cost model can decide whether to
+  materialize based on actual row-count estimates.
+- The ≥3 reference-count threshold is conservative — it triggers only for
+  deep join chains (4+ tables) where redundant evaluation is demonstrably
+  expensive. The threshold can be refined based on SF=1 benchmark results
+  (DI-10).
 
 **Implementation:**
 1. In `build_pre_change_snapshot_sql()` (`join_common.rs:399`), instead of
@@ -254,50 +265,89 @@ EXCEPT ALL SELECT new_col1, ... FROM changes_NNN WHERE action IN ('I', 'U')
 UNION ALL  SELECT old_col1, ... FROM changes_NNN WHERE action IN ('D', 'U')
 
 -- New: filter unchanged rows + read pre-image directly (cheap)
-SELECT col1, ... FROM base_table
-  WHERE pk NOT IN (SELECT pk_hash FROM changes_NNN)
+SELECT col1, ... FROM base_table b
+  WHERE NOT EXISTS (
+    SELECT 1 FROM changes_NNN c WHERE c.pk_hash = b.pk_hash
+  )
 UNION ALL
 SELECT old_col1, ... FROM changes_NNN WHERE action IN ('D', 'U')
 ```
 
-The `WHERE pk NOT IN (...)` subquery uses the existing `lsn_pk_cid` covering
-index and returns only untouched rows. The `old_*` values come directly from
-the already-populated change buffer columns.
+The `NOT EXISTS` anti-join uses the existing `lsn_pk_cid` covering index and
+returns only untouched rows. `NOT EXISTS` is preferred over `NOT IN` because:
+- PostgreSQL's planner reliably chooses hash anti-join for `NOT EXISTS`,
+  while `NOT IN` can degrade to nested-loop anti-join at higher cardinalities.
+- `NOT EXISTS` is NULL-safe: if `pk_hash` is ever NULL (e.g., keyless tables),
+  `NOT IN` silently returns zero rows; `NOT EXISTS` correctly handles NULLs.
+- The semantic intent ("rows not touched by this delta") maps directly to
+  an anti-join, which `NOT EXISTS` expresses precisely.
+
+The `old_*` values come directly from the already-populated change buffer
+columns.
 
 **Implementation:**
 1. Add `change_schema`, `lsn_range` access to `build_pre_change_snapshot_sql()`
    (currently it only receives the `OpTree`, not `DiffContext`). Thread the
    context through the call chain in `join_common.rs`.
-2. For `Scan` nodes in that function, emit the pk-filter + `old_*` UNION ALL
-   instead of the current `EXCEPT ALL` inline expression.
-3. For `Scan` nodes where the source has **no** delta rows in the current cycle
+2. For `Scan` nodes in that function, emit the `NOT EXISTS` anti-join + `old_*`
+   UNION ALL instead of the current `EXCEPT ALL` inline expression.
+3. **Per-leaf conditional fallback:** At generation time, if the change buffer
+   row count for this leaf exceeds `max_delta_fraction × estimated_table_rows`
+   (using stats already available in `DiffContext`), emit the old `EXCEPT ALL`
+   formula for that leaf instead of the `NOT EXISTS` anti-join. This provides
+   finer-grained control than the per-ST threshold in DI-7 — a single
+   high-churn leaf can fall back independently while sibling leaves use the
+   fast path.
+4. For `Scan` nodes where the source has **no** delta rows in the current cycle
    (detected via existing delta-branch pruning), skip the UNION ALL entirely
    and emit the base table reference directly — L₀ = L₁ when no changes occurred.
-4. Test all DML combinations: INSERT-only, UPDATE-only, DELETE-only,
+5. Test all DML combinations: INSERT-only, UPDATE-only, DELETE-only,
    mixed UPDATE+DELETE, keyless tables (all-column content hash).
+
+**Aggregate UPDATE-split (subsumes DI-8 band-aid):** In addition to the join-
+level pre-image capture, DI-2 includes an aggregate-level UPDATE-split:
+for UPDATE rows in the change buffer, the aggregate delta CTE evaluates the
+aggregate expression using `old_*` column values for the 'D' side and `new_*`
+for the 'I' side. This makes the algebraic formula correct even when CASE
+conditions reference mutable columns — the 'D' side evaluates `SUM(CASE WHEN
+old_o_orderpriority …)` and the 'I' side evaluates `SUM(CASE WHEN
+new_o_orderpriority …)`. Once this lands, DI-8's `Expr::Raw` check in
+`is_algebraically_invertible()` can be removed and SUM(CASE WHEN) restored
+to the faster algebraic path.
 
 **Estimated impact:** Eliminates `EXCEPT ALL` against full base tables for L₀
 construction — for Q05/Q09 (6-table joins, ~100K rows/table at SF=1), this
 replaces 5 full-table sorts/hashes with 5 indexed pk lookups. Expected 60–90%
 reduction in intermediate data volume.
 
-**Effort:** Medium (3–5 days).
+**Effort:** Medium (3.5–5.5 days).
 - CDC trigger: no changes required.
 - Schema migration: no changes required — `old_*` columns already exist.
 - SQL generator: core change is ~50–80 lines in `build_pre_change_snapshot_sql()`
   plus context threading through 2–3 call sites.
+- Per-leaf conditional fallback: ~0.5 day (change buffer stats lookup +
+  EXCEPT ALL fallback emission).
+- Aggregate UPDATE-split: ~0.5 day (modify `agg_delta_exprs()` in
+  `aggregate.rs` to reference `old_*` columns for UPDATE rows on the 'D' side;
+  add test coverage for SUM(CASE WHEN) with UPDATE mutations; remove DI-8
+  band-aid check after verification).
 - Tests: ~1 day for comprehensive DML coverage.
 
 **Risk:** Medium.
-- The `pk NOT IN (subquery)` plan can degrade with very large delta sets
-  (>30% of table rows changed in one cycle). At those rates FULL refresh
-  is already the better strategy, so DI-7 (strategy selector) provides the
-  safety net.
-- Keyless tables use an all-column content hash as `pk_hash` — the filter
+- The per-leaf conditional fallback (step 3) mitigates the risk of `NOT EXISTS`
+  degradation at very large delta sets (>25% of table rows). Unlike the per-ST
+  `max_delta_fraction` in DI-7 which decides at the scheduler level, this
+  fallback is per-leaf and decided at SQL generation time — protecting only
+  the affected leaf while siblings use the fast path.
+- Keyless tables use an all-column content hash as `pk_hash` — the anti-join
   still works but requires careful column ordering in the `old_*` SELECT
   to match the base table's column order expected by downstream CTEs.
 - `DiffContext` threading into `build_pre_change_snapshot_sql()` affects
   several call sites; must verify no regression in non-join paths.
+- The aggregate UPDATE-split adds ~0.5 day to the DI-2 scope: the
+  `agg_delta_exprs()` function in `aggregate.rs` must be modified to emit
+  `old_*` column references for the 'D' side when change buffer rows have
+  `action = 'U'`.
 
 **Prerequisite:** DI-1 (named CTE) remains beneficial even with DI-2
 land — it deduplicates the pk-filter subqueries themselves across multiple
@@ -352,9 +402,21 @@ old_rescan volume. Real-world impact depends on data distribution.
 branch of `diff_aggregate`.
 
 **Risk:** Low. The group-key filter is a pure optimization — it doesn't change
-the EXCEPT ALL semantics, just reduces its input. Edge case: if the group
-column has NULLs, the IN clause must use `IS NOT DISTINCT FROM` semantics
-(which the existing join conditions already handle).
+the EXCEPT ALL semantics, just reduces its input. For NULLable group-by
+columns, the filter must use `EXISTS` with `IS NOT DISTINCT FROM` instead of
+`IN` to correctly include NULL groups:
+
+```sql
+WHERE EXISTS (
+  SELECT 1 FROM delta_cte d
+  WHERE d.group_col1 IS NOT DISTINCT FROM base.group_col1
+    AND d.group_col2 IS NOT DISTINCT FROM base.group_col2
+)
+```
+
+Standard `IN` on NULLable columns silently excludes NULL groups, producing
+incorrect old aggregate values. `IS NOT DISTINCT FROM` treats `NULL = NULL`
+as true, which is the correct semantics for group-key matching.
 
 **Prerequisite:** None. Independent of all other proposals.
 
@@ -569,49 +631,67 @@ algebraic formula assumes the CASE condition is stable across the row's
 lifecycle. It is not, when the condition references non-group-key columns
 that can be mutated by UPDATE.
 
-**Proposal:** In `is_algebraically_invertible()`, return `false` when
-`agg.argument` is `Some(Expr::Case {..})`. The aggregate falls back to
-`GROUP_RESCAN` (EXCEPT ALL), which correctly reads pre-change state via the
-std per-leaf EXCEPT ALL path and produces correct old/new values.
+**Parser representation:** The `Expr` enum has no `Case` variant. CASE WHEN
+expressions are deparsed to `Expr::Raw("CASE WHEN … END")` by `node_to_expr()`
+in `parser.rs:12646`. Detection must therefore use string-prefix matching on
+`Expr::Raw`, not structural pattern matching.
+
+**Proposal:** In `is_algebraically_invertible()`, return `false` when the SUM
+argument is an `Expr::Raw` whose deparsed SQL starts with `CASE`. The aggregate
+falls back to `GROUP_RESCAN` (EXCEPT ALL), which correctly reads pre-change
+state via the standard per-leaf EXCEPT ALL path and produces correct old/new
+values.
 
 ```rust
 fn is_algebraically_invertible(agg: &AggExpr) -> bool {
     if agg.is_distinct { return false; }
     // SUM(CASE WHEN …) can drift when the CASE condition references mutable
     // non-group-key columns — fall back to GROUP_RESCAN (EXCEPT ALL).
-    if matches!(agg.function, AggFunc::Sum)
-        && matches!(&agg.argument, Some(Expr::Case { .. }))
-    {
-        return false;
+    if matches!(agg.function, AggFunc::Sum) {
+        if let Some(Expr::Raw(s)) = &agg.argument {
+            if s.trim_start().to_uppercase().starts_with("CASE") {
+                return false;
+            }
+        }
     }
     matches!(agg.function, AggFunc::CountStar | AggFunc::Count | AggFunc::Sum)
 }
 ```
 
-This fix does **not** affect `COUNT(CASE WHEN …)` (not algebraic-invertible
-for unrelated reasons), `SUM(col)` (no CASE, path unaffected), or Q14
-(`100 * SUM(CASE …) / NULLIF(SUM(…), 0)` — the outer expression wraps the
-SUM call, so the argument of the SUM itself is a CASE and the check fires
-correctly).
+**Q14 is unaffected:** Q14's target expression is `100.00 * SUM(CASE …) /
+CASE WHEN SUM(…) = 0 THEN NULL ELSE SUM(…) END`. Because the top-level
+target node is an arithmetic expression (not a bare `T_FuncCall`), the parser
+stores it as `AggFunc::ComplexExpression(raw_sql)` with `argument = None` —
+not as `AggFunc::Sum`. `ComplexExpression` never matches `is_algebraically_invertible()`
+and already takes the GROUP_RESCAN path. DI-8's `Expr::Raw` check on
+`AggFunc::Sum` arguments does not apply to Q14 at all.
 
-A more surgical long-term fix is to route UPDATE rows through a split
-(D-with-old-values / I-with-new-values) at the leaf level, mirroring the
-EC-01 split at the join level. This is DI-2 territory for aggregates. For
-v0.13.0, the conservative GROUP_RESCAN fallback is correct and safe.
+**Why Q12 drifts but Q14 doesn't:** Q12 has bare `SUM(CASE WHEN ...)` as
+the top-level target (parser: `AggFunc::Sum`, algebraic path). Q14's nested
+`SUM(CASE WHEN ...)` is inside a multiplication/division (parser:
+`AggFunc::ComplexExpression`, GROUP_RESCAN path). The drift is specific to
+the algebraic path — GROUP_RESCAN always produces correct results because
+it re-evaluates the full expression from the pre-change snapshot.
+
+**Long-term elimination of the band-aid:** When DI-2 lands with aggregate
+UPDATE-split support (see below), the algebraic path can evaluate the CASE
+condition using `old_*` column values for the 'D' side and `new_*` values
+for the 'I' side — making the algebraic formula correct even for mutable
+CASE conditions. At that point, this `Expr::Raw` check can be removed and
+`SUM(CASE WHEN …)` restored to the faster algebraic path. See DI-2
+"Aggregate UPDATE-split" subsection for details.
 
 **Estimated impact:** Q12 passes DIFFERENTIAL correctness; removed from
 `DIFFERENTIAL_SKIP_ALLOWLIST`. TPC-H DIFFERENTIAL correctness gate: 20/22
 → 21/22 (combined with DI-1/DI-2 for Q05/Q09: 22/22).
-Q14 (`SUM(CASE WHEN l_shipmode = 'MAIL' THEN …)`) already passes; this change
-does **not** regress it (its SUM argument is wrapped in multiplication, not bare
-CASE).
 
 **Effort:** Low (~0.5 day: 1h code + regression E2E run).
 
 **Risk:** Very low. This is a pure restriction — the EXCEPT ALL path already
-works correctly for all other GROUP_RESCAN aggregates. Performance cost for
-Q12-style aggregates is slightly higher (EXCEPT ALL instead of algebraic) but
-is not a concern at SF=0.01.
+works correctly for all GROUP_RESCAN aggregates. Performance impact: Q12-style
+bare `SUM(CASE WHEN …)` queries switch from algebraic to GROUP_RESCAN, which
+is slightly slower but correct. Q14 and all other `ComplexExpression`
+aggregates are wholly unaffected. After DI-2, the band-aid can be removed.
 
 **Prerequisite:** None. Fully independent.
 
@@ -659,9 +739,28 @@ mixing IMMEDIATE and DIFFERENTIAL stream tables.
 **Effort:** Low (0.5 day: config cap change + scheduler guard + test).
 
 **Risk:** Very low. Skipping IMMEDIATE tables in the scheduler is semantically
-correct — they are self-refreshing. The only edge case is a CALCULATED table
-downstream of an IMMEDIATE root; that path is handled separately by the
-scheduler's topology walk and is unaffected by this change.
+correct — they are self-refreshing.
+
+**CALCULATED dependant edge case (verified safe):** The concern is whether
+skipping IMMEDIATE tables in the scheduler would starve downstream CALCULATED
+tables that depend on them. Verification:
+
+1. IMMEDIATE tables refresh synchronously in the user’s transaction, which
+   **drains the TABLE-source change buffer** (`changes_{oid}`) as part of each
+   refresh cycle.
+2. When the scheduler evaluates a downstream CALCULATED table, it calls
+   `check_upstream_changes()` → `has_table_source_changes()`, which checks
+   `SELECT EXISTS(SELECT 1 FROM changes_{oid} LIMIT 1)`. Since the IMMEDIATE
+   root already drained this buffer, the check returns `false`.
+3. If the IMMEDIATE root’s refresh produces output changes, those are written
+   to the root’s own `changes_pgt_{id}` buffer. Downstream CALCULATED tables
+   detect these via `has_stream_table_source_changes()` and are scheduled
+   normally — this path is part of the scheduler’s topology walk and is
+   independent of whether the IMMEDIATE root itself is "due for refresh".
+4. Therefore: skipping IMMEDIATE tables in `is_refresh_due()` does not affect
+   downstream CALCULATED scheduling. The scheduler’s job-selection loop for
+   CALCULATED tables operates on their own `check_upstream_changes()` result,
+   not on their upstream’s refresh-due status.
 
 **Prerequisite:** None. Fully independent.
 
@@ -690,6 +789,13 @@ bench-tpch-sf1:
 
 The TPC-H data generation path already reads `TPCH_SF` (or can be parameterised
 with a 1-line change). Docker volume requirement: ~1 GB vs. ~10 MB.
+
+**CI placement:** The SF=1 run is too slow for PR checks or daily schedule
+(expected runtime: 60–180 minutes including data generation on first run).
+It should be triggered via **manual dispatch** (`gh workflow run ci.yml
+--ref <branch>`) before cutting the v0.13.0 release, and optionally after
+each DI-* item lands to track incremental progress. The CI job should have a
+4-hour timeout and run on a dedicated large runner.
 
 **Estimated impact:** SF=1 numbers are the definitive validation that Phase 10
 improvements are production-grade. Any regression visible only at SF=1 is
