@@ -223,6 +223,14 @@ pub fn diff_window(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     let all_cols_st = all_output_cols
         .iter()
         .map(|c| {
+            // Auxiliary columns from the child diff (e.g. __pgt_count from
+            // an Aggregate) always exist in the ST storage table (they are
+            // added during CREATE/ALTER). Read them directly instead of
+            // checking st_stored_cols, which only reflects user-visible
+            // output_columns() and omits internal __pgt_* columns.
+            if aux_cols.contains(c) {
+                return format!("st.{}", quote_ident(c));
+            }
             let col_exists_in_st = st_stored_cols
                 .as_ref()
                 .map(|cols| cols.contains(c))
