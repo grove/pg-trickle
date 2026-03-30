@@ -76,7 +76,7 @@ async fn test_statement_timeout_during_refresh_recovers() {
     // The consecutive_errors counter should be 0 after a successful refresh.
     let errs: i64 = db
         .query_scalar(
-            "SELECT consecutive_errors FROM pgtrickle.pgt_stream_tables \
+            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'fr_timeout_st'",
         )
         .await;
@@ -204,7 +204,7 @@ async fn test_refresh_after_repeated_failures_counter_grows() {
     // consecutive_errors must have grown
     let errs: i64 = db
         .query_scalar(
-            "SELECT consecutive_errors FROM pgtrickle.pgt_stream_tables \
+            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'fr_rep_st'",
         )
         .await;
@@ -236,7 +236,7 @@ async fn test_refresh_after_repeated_failures_counter_grows() {
 
     let errs_after: i64 = db
         .query_scalar(
-            "SELECT consecutive_errors FROM pgtrickle.pgt_stream_tables \
+            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'fr_rep_st'",
         )
         .await;
@@ -286,7 +286,7 @@ async fn test_recovery_after_consecutive_errors_reset() {
 
     let final_errs: i64 = db
         .query_scalar(
-            "SELECT consecutive_errors FROM pgtrickle.pgt_stream_tables \
+            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
              WHERE pgt_name = 'fr_reset_st'",
         )
         .await;

@@ -2547,6 +2547,23 @@ fn create_stream_table_impl(
         {
             pgrx::debug1!("[pg_trickle] Failed to record initial last_full_ms: {}", e);
         }
+
+        // G12-ERM-1: Record the effective refresh mode for the initial
+        // population so monitoring and tests can observe the mode from
+        // the very first cycle without waiting for a scheduler refresh.
+        let initial_eff_mode = if vq.topk_info.is_some() {
+            "TOP_K"
+        } else {
+            refresh_mode.as_str()
+        };
+        if let Err(e) = StreamTableMeta::update_effective_refresh_mode(pgt_id, initial_eff_mode) {
+            pgrx::debug1!(
+                "[pg_trickle] Failed to set initial effective_refresh_mode for {}.{}: {}",
+                schema,
+                table_name,
+                e
+            );
+        }
     }
 
     // Pre-warm delta SQL + MERGE template cache for DIFFERENTIAL mode,
@@ -3470,6 +3487,14 @@ fn execute_manual_refresh(
                 None,
                 false,
             );
+            // G12-ERM-1: Persist the effective refresh mode for manual
+            // refreshes, mirroring the scheduler path.  Without this,
+            // effective_refresh_mode stays NULL after every manual refresh,
+            // which breaks diagnostics and test assertions.
+            let eff_mode = crate::refresh::take_effective_mode();
+            if !eff_mode.is_empty() {
+                let _ = StreamTableMeta::update_effective_refresh_mode(st.pgt_id, eff_mode);
+            }
         }
         Err(e) => {
             let _ = RefreshRecord::complete(
