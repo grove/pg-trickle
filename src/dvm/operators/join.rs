@@ -83,8 +83,8 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_pre_change_snapshot_sql, build_snapshot_sql, is_join_child,
-    is_simple_child, join_scan_count, rewrite_join_condition, use_pre_change_snapshot,
+    build_base_table_key_exprs, build_snapshot_sql, is_join_child, is_simple_child,
+    join_scan_count, rewrite_join_condition, use_pre_change_snapshot,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
@@ -306,11 +306,10 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 
     let left_part2_source = if use_l0 {
         if is_join_child(left) {
-            // EC01B-1: Deep join child — use per-leaf CTE-based snapshot.
-            // Each leaf Scan's pre-change state is cheap (single-table
-            // EXCEPT ALL), and the results are re-joined with the original
-            // conditions. No full-snapshot materialization needed.
-            let pre_change = build_pre_change_snapshot_sql(left, &ctx.scan_delta_ctes);
+            // DI-1: Register per-leaf pre-change snapshot as a named CTE.
+            // Subsequent references to the same subtree reuse the CTE,
+            // eliminating redundant EXCEPT ALL evaluations.
+            let pre_change = ctx.get_or_register_snapshot_cte(left);
 
             // Mark all leaf delta CTEs as NOT MATERIALIZED since they're
             // now referenced in both the inner join delta and the per-leaf
@@ -407,8 +406,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 
     let right_part1_source = if use_r0 {
         if is_join_child(right) {
-            // EC01B-1: Deep join child — use per-leaf CTE-based snapshot.
-            let pre_change = build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes);
+            // DI-1: Named CTE snapshot for right pre-change state.
+            let pre_change = ctx.get_or_register_snapshot_cte(right);
 
             // Mark leaf delta CTEs NOT MATERIALIZED
             mark_leaf_delta_ctes_not_materialized(right, ctx);

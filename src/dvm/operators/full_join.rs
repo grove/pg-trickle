@@ -28,8 +28,7 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_pre_change_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
-    use_pre_change_snapshot,
+    build_snapshot_sql, is_join_child, rewrite_join_condition, use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
@@ -152,8 +151,8 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     let r0_snapshot = if use_r0 {
         if is_join_child(right) {
-            // EC01B-1: Deep join child — per-leaf CTE-based snapshot
-            let pre_change = build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes);
+            // DI-1: Named CTE snapshot for right pre-change state.
+            let pre_change = ctx.get_or_register_snapshot_cte(right);
             mark_leaf_delta_ctes_not_materialized(right, ctx);
             Some(pre_change)
         } else {
