@@ -52,6 +52,60 @@ We also do not think the use of AI should lower the standard for trust. If anyth
 - **Crash-safe** — row-level locks prevent concurrent refreshes; crash recovery marks in-flight refreshes as failed and resumes normal operation.
 - **Observable** — built-in monitoring views, refresh history, slot health checks, staleness reporting, SCC status, watermark status, `NOTIFY`-based alerting, and dedicated helper functions such as `health_check`, `change_buffer_sizes`, `dependency_tree`, `refresh_timeline`, `trigger_inventory`, `list_sources`, `diamond_groups`, and `pgt_scc_status`.
 
+## Performance
+
+pg_trickle is designed for low-latency, high-throughput incremental view maintenance. Differential refresh processes only changed rows — not the entire base table — yielding significant speedups over full recomputation.
+
+### Differential vs Full Refresh
+
+Benchmarked at 100K rows with 1% change rate (a typical production workload):
+
+| Query Type | FULL (ms) | DIFFERENTIAL (ms) | Speedup |
+|---|---|---|---|
+| Table scan | 326 | 47 | **7.0x** |
+| Filter (WHERE) | 267 | 34 | **7.9x** |
+| Aggregate (GROUP BY) | 28 | 11 | **2.6x** |
+| Join (INNER JOIN) | 384 | 64 | **6.0x** |
+| Join + Aggregate | 67 | 22 | **3.1x** |
+
+Speedup scales with table size and inversely with change rate. At 1% churn on larger tables, speedups of **5–50x** are typical. At 50% churn, the two modes converge.
+
+### Zero-Change Latency
+
+When no data has changed, the scheduler's per-cycle overhead is minimal:
+
+| Metric | Value |
+|---|---|
+| Average | 3.2 ms |
+| Max | 5.1 ms |
+| Target | < 10 ms |
+
+### Where Time Is Spent
+
+Rust-side delta SQL generation takes **< 1%** of total refresh time (sub-microsecond to ~50 µs depending on operator complexity). PostgreSQL's MERGE execution dominates at **70–97%** of wall-clock time — the extension gets out of the way and lets the database do what it does best.
+
+### DAG Propagation
+
+Changes propagate through multi-level stream table DAGs efficiently:
+
+| Topology | Stream Tables | Propagation Time |
+|---|---|---|
+| Linear chain (depth 10) | 10 | ~820 ms |
+| Wide DAG (3 levels × 20 wide) | 60 | ~2,430 ms |
+| Diamond (4-way fan-out + join) | 5 | ~200 ms |
+
+PARALLEL refresh mode processes independent branches concurrently, reducing wall-clock time for wide DAGs.
+
+### IMMEDIATE Mode
+
+For use cases that require read-your-writes consistency, IMMEDIATE mode maintains the stream table **within the same transaction** as the DML — no scheduler, no change buffers, no additional latency. The delta is computed from PostgreSQL's transition tables and applied inline.
+
+### Change Buffer Compaction
+
+High-churn tables benefit from automatic compaction of CDC change buffers, which collapses cancelling INSERT/DELETE pairs and sequential changes to the same row, reducing delta scan overhead by **50–90%**.
+
+For full benchmark methodology and how to run your own benchmarks, see [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
 ## SQL Support
 
 Every operator listed here works in `DIFFERENTIAL` mode (incremental delta computation) unless noted otherwise. `FULL` mode always works — it re-runs the entire query on each refresh.
