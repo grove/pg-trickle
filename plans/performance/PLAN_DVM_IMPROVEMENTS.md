@@ -21,6 +21,9 @@ the O(n²) blowup on correlated semi-joins (Q20).
    - [DI-5: Part 3 Correction Consolidation](#di-5-part-3-correction-consolidation)
    - [DI-6: Lazy Semi-Join R_old Materialization](#di-6-lazy-semi-join-r_old-materialization)
    - [DI-7: Scan-Count-Aware Strategy Selector](#di-7-scan-count-aware-strategy-selector)
+   - [DI-8: SUM(CASE WHEN …) Algebraic Drift Fix](#di-8-sumcase-when--algebraic-drift-fix)
+   - [DI-9: Scheduler Skips IMMEDIATE-Mode Tables](#di-9-scheduler-skips-immediate-mode-tables)
+   - [DI-10: SF=1 Benchmark Validation Target](#di-10-sf1-benchmark-validation-target)
 5. [Dependency Graph](#5-dependency-graph)
 6. [Priority & Schedule](#6-priority--schedule)
 7. [Background: EC-01 and EC-01B](#7-background-ec-01-and-ec-01b)
@@ -225,57 +228,83 @@ names matching what inline SQL currently produces.
 
 ### DI-2: Pre-Image Capture from Change Buffer
 
-**Problem:** EXCEPT ALL is fundamentally expensive — it requires sorting or
+**Problem:** `EXCEPT ALL` is fundamentally expensive — it requires sorting or
 hashing the full base table to subtract delta inserts. For large tables
 this dominates refresh time.
 
-**Proposal:** Capture the **old row values** (pre-image) in the CDC trigger
-alongside the new values already captured. The change buffer would store
-both old and new tuples, enabling direct computation of L₀ rows without
-any EXCEPT ALL against the base table.
+**Key finding:** The CDC change buffer **already stores `old_*` typed columns**
+for every source column. Code inspection of `src/cdc.rs` confirms:
+- `build_row_trigger_fn_sql()`: INSERT writes `new_*`; UPDATE writes both
+  `new_*` and `old_*`; DELETE writes `old_*`.
+- `build_stmt_trigger_fn_sql()`: same pattern via transition tables.
+- `create_change_buffer_table()`: emits `"new_col" TYPE, "old_col" TYPE`
+  for all source columns.
+
+The CDC trigger change previously treated as "fundamental architecture work"
+(justifying v1.x deferral) is therefore already complete. Only the delta SQL
+generator needs to be updated to use this data.
+
+**Proposal:** Replace per-leaf L₀ `EXCEPT ALL` reconstruction with a
+pk-hash filter + direct pre-image read from the change buffer:
+
+```sql
+-- Old: full base table minus delta inserts (expensive)
+SELECT * FROM base_table
+EXCEPT ALL SELECT new_col1, ... FROM changes_NNN WHERE action IN ('I', 'U')
+UNION ALL  SELECT old_col1, ... FROM changes_NNN WHERE action IN ('D', 'U')
+
+-- New: filter unchanged rows + read pre-image directly (cheap)
+SELECT col1, ... FROM base_table
+  WHERE pk NOT IN (SELECT pk_hash FROM changes_NNN)
+UNION ALL
+SELECT old_col1, ... FROM changes_NNN WHERE action IN ('D', 'U')
+```
+
+The `WHERE pk NOT IN (...)` subquery uses the existing `lsn_pk_cid` covering
+index and returns only untouched rows. The `old_*` values come directly from
+the already-populated change buffer columns.
 
 **Implementation:**
-1. Modify the AFTER trigger in `cdc.rs` to capture `OLD.*` for UPDATE and
-   DELETE operations (INSERT captures `NEW.*` only, as today).
-2. Extend the change buffer schema to include `old_row` columns (or a JSONB
-   `old_values` column).
-3. In delta SQL generation, replace:
-   ```sql
-   SELECT * FROM base_table
-   EXCEPT ALL SELECT cols FROM delta WHERE action='I'
-   UNION ALL SELECT cols FROM delta WHERE action='D'
-   ```
-   with:
-   ```sql
-   SELECT * FROM base_table  -- already correct for inserts
-   -- For updates: old values come from change buffer directly
-   -- For deletes: old values come from change buffer directly
-   ```
-   Effectively, L₀ = current table state with targeted row replacements
-   from the change buffer, no set-difference needed.
+1. Add `change_schema`, `lsn_range` access to `build_pre_change_snapshot_sql()`
+   (currently it only receives the `OpTree`, not `DiffContext`). Thread the
+   context through the call chain in `join_common.rs`.
+2. For `Scan` nodes in that function, emit the pk-filter + `old_*` UNION ALL
+   instead of the current `EXCEPT ALL` inline expression.
+3. For `Scan` nodes where the source has **no** delta rows in the current cycle
+   (detected via existing delta-branch pruning), skip the UNION ALL entirely
+   and emit the base table reference directly — L₀ = L₁ when no changes occurred.
+4. Test all DML combinations: INSERT-only, UPDATE-only, DELETE-only,
+   mixed UPDATE+DELETE, keyless tables (all-column content hash).
 
-**Estimated impact:** Eliminates EXCEPT ALL entirely. For Q05/Q09, removes
-the single largest source of intermediate data. Expected 50–80% reduction
-in temp file usage for deep joins.
+**Estimated impact:** Eliminates `EXCEPT ALL` against full base tables for L₀
+construction — for Q05/Q09 (6-table joins, ~100K rows/table at SF=1), this
+replaces 5 full-table sorts/hashes with 5 indexed pk lookups. Expected 60–90%
+reduction in intermediate data volume.
 
-**Effort:** High (1–2 weeks). Requires CDC trigger changes, change buffer
-schema migration, delta SQL generator rewrite for pre-image mode, and
-comprehensive testing of UPDATE edge cases (partial column updates, TOAST
-columns, nullable columns).
+**Effort:** Medium (3–5 days).
+- CDC trigger: no changes required.
+- Schema migration: no changes required — `old_*` columns already exist.
+- SQL generator: core change is ~50–80 lines in `build_pre_change_snapshot_sql()`
+  plus context threading through 2–3 call sites.
+- Tests: ~1 day for comprehensive DML coverage.
 
-**Risk:** Medium-High.
-- CDC trigger overhead increases (capturing OLD.* doubles the per-row cost
-  for UPDATEs and DELETEs).
-- TOAST columns: PostgreSQL doesn't detoast unchanged columns in OLD, so
-  the pre-image may contain compressed/external pointers that can't be
-  used directly in equality comparisons.
-- Schema migration: existing change buffers need a migration path.
-- This is a fundamental CDC architecture change.
+**Risk:** Medium.
+- The `pk NOT IN (subquery)` plan can degrade with very large delta sets
+  (>30% of table rows changed in one cycle). At those rates FULL refresh
+  is already the better strategy, so DI-7 (strategy selector) provides the
+  safety net.
+- Keyless tables use an all-column content hash as `pk_hash` — the filter
+  still works but requires careful column ordering in the `old_*` SELECT
+  to match the base table's column order expected by downstream CTEs.
+- `DiffContext` threading into `build_pre_change_snapshot_sql()` affects
+  several call sites; must verify no regression in non-join paths.
 
-**Prerequisite:** None, but conflicts with DI-1 (which optimizes the current
-EXCEPT ALL approach). DI-1 should be done first as a cheaper interim fix.
+**Prerequisite:** DI-1 (named CTE) remains beneficial even with DI-2
+land — it deduplicates the pk-filter subqueries themselves across multiple
+references. Implement DI-1 first, then DI-2 replaces the body of each
+named CTE.
 
-**Target:** v1.x (deferred — aligns with existing ADR decision).
+**Target:** v0.13.0 (promoted from v1.x — CDC capture already complete).
 
 ---
 
@@ -483,30 +512,197 @@ strategy based on join tree characteristics:
 | 4–6 | Named CTE L₀ with materialization (DI-1) + group-key filtering (DI-3) |
 | 7+ | Automatic fallback to FULL refresh for the affected stream table |
 
-Additionally, expose a per-stream-table GUC or catalog option:
+Additionally, expose two per-stream-table catalog options:
 ```sql
 SELECT pgtrickle.alter_stream_table('my_complex_view',
-  refresh_mode => 'auto',       -- default: try DIFFERENTIAL, fall back
-  max_differential_joins => 6   -- above this, use FULL refresh
+  refresh_mode => 'auto',        -- try DIFFERENTIAL, fall back
+  max_differential_joins => 6,   -- above this, use FULL refresh
+  max_delta_fraction => 0.25     -- if delta > 25% of table, use FULL refresh
 );
 ```
+
+The `max_delta_fraction` threshold addresses DI-2's high delta-rate
+degradation: the `pk_hash NOT IN (changes)` filter in DI-2 performs well
+at low delta rates (<25%) but becomes expensive when the NOT IN set is
+large. When `COUNT(*) FROM change_buffer / ST row count > max_delta_fraction`,
+auto-fallback to FULL refresh for that cycle.
 
 **Implementation:**
 1. Add `join_scan_count()` call at the start of `diff_node()` for join trees.
 2. If count exceeds threshold, return a `DiffResult` that signals "use FULL".
 3. Add a `max_differential_joins` column to `pgtrickle.pgt_stream_tables`.
-4. Default threshold: 6 (covers Q07/Q08 but falls back for pathological cases).
+4. Add a `max_delta_fraction` column to `pgtrickle.pgt_stream_tables` (default 0.25).
+5. In the scheduler, before generating delta SQL, compare
+   `change_buffer_count / last_known_row_count`; if above threshold, choose FULL.
+6. Default threshold: 6 joins (covers Q07/Q08 but falls back for pathological cases).
 
 **Estimated impact:** Prevents pathological blowup for very complex views.
-Acts as a safety net rather than a performance optimization per se.
+The `max_delta_fraction` guard prevents DI-2 performance regression under
+bulk-load workloads where delta rows rival base table size.
 
-**Effort:** Low (1 day). The `join_scan_count` function already exists.
+**Effort:** Low–Medium (1–2 days). `join_scan_count` already exists;
+`max_delta_fraction` adds one catalog column and a pre-refresh check.
 
-**Risk:** Low. This is a conservative fallback — it reduces the blast radius
-of complex delta SQL rather than trying to optimize it.
+**Risk:** Low. Both are conservative fallbacks — they reduce blast radius
+rather than introducing new correctness risk.
 
-**Prerequisite:** None, but most valuable **after** DI-1/DI-3/DI-6 raise the
-practical threshold for what DIFFERENTIAL mode can handle.
+**Prerequisite:** DI-2 must land before `max_delta_fraction` is meaningful.
+Otherwise most valuable **after** DI-1/DI-3/DI-6 raise the practical threshold.
+
+---
+
+### DI-8: SUM(CASE WHEN …) Algebraic Drift Fix
+
+**Problem:** `is_algebraically_invertible()` in `src/dvm/operators/aggregate.rs`
+returns `true` for any `AggFunc::Sum`, including `SUM(CASE WHEN col IN (…)
+THEN 1 ELSE 0 END)` patterns (TPC-H Q12: `SUM(CASE WHEN o_orderpriority IN
+('1-URGENT','2-HIGH') THEN 1 ELSE 0 END)`).
+
+The algebraic formula `old = new − ins + del` computes both the 'D' and 'I'
+halves using the change buffer row's *current* (post-UPDATE) column values.
+When `o_orderpriority` changes via UPDATE, the 'D' side of the delta evaluates
+the CASE condition with the **new** value rather than the old one — so
+`__del_high_line_count` is miscounted and the running total drifts.
+
+This is the same root cause class as EC-01 (join key change split): the
+algebraic formula assumes the CASE condition is stable across the row's
+lifecycle. It is not, when the condition references non-group-key columns
+that can be mutated by UPDATE.
+
+**Proposal:** In `is_algebraically_invertible()`, return `false` when
+`agg.argument` is `Some(Expr::Case {..})`. The aggregate falls back to
+`GROUP_RESCAN` (EXCEPT ALL), which correctly reads pre-change state via the
+std per-leaf EXCEPT ALL path and produces correct old/new values.
+
+```rust
+fn is_algebraically_invertible(agg: &AggExpr) -> bool {
+    if agg.is_distinct { return false; }
+    // SUM(CASE WHEN …) can drift when the CASE condition references mutable
+    // non-group-key columns — fall back to GROUP_RESCAN (EXCEPT ALL).
+    if matches!(agg.function, AggFunc::Sum)
+        && matches!(&agg.argument, Some(Expr::Case { .. }))
+    {
+        return false;
+    }
+    matches!(agg.function, AggFunc::CountStar | AggFunc::Count | AggFunc::Sum)
+}
+```
+
+This fix does **not** affect `COUNT(CASE WHEN …)` (not algebraic-invertible
+for unrelated reasons), `SUM(col)` (no CASE, path unaffected), or Q14
+(`100 * SUM(CASE …) / NULLIF(SUM(…), 0)` — the outer expression wraps the
+SUM call, so the argument of the SUM itself is a CASE and the check fires
+correctly).
+
+A more surgical long-term fix is to route UPDATE rows through a split
+(D-with-old-values / I-with-new-values) at the leaf level, mirroring the
+EC-01 split at the join level. This is DI-2 territory for aggregates. For
+v0.13.0, the conservative GROUP_RESCAN fallback is correct and safe.
+
+**Estimated impact:** Q12 passes DIFFERENTIAL correctness; removed from
+`DIFFERENTIAL_SKIP_ALLOWLIST`. TPC-H DIFFERENTIAL correctness gate: 20/22
+→ 21/22 (combined with DI-1/DI-2 for Q05/Q09: 22/22).
+Q14 (`SUM(CASE WHEN l_shipmode = 'MAIL' THEN …)`) already passes; this change
+does **not** regress it (its SUM argument is wrapped in multiplication, not bare
+CASE).
+
+**Effort:** Low (~0.5 day: 1h code + regression E2E run).
+
+**Risk:** Very low. This is a pure restriction — the EXCEPT ALL path already
+works correctly for all other GROUP_RESCAN aggregates. Performance cost for
+Q12-style aggregates is slightly higher (EXCEPT ALL instead of algebraic) but
+is not a concern at SF=0.01.
+
+**Prerequisite:** None. Fully independent.
+
+---
+
+### DI-9: Scheduler Skips IMMEDIATE-Mode Tables
+
+**Problem:** The scheduler background worker fires every `scheduler_interval_ms`
+(hard-capped at 60,000 ms in `src/config.rs`). On every tick it acquires a lock
+on *all* due stream tables, including those with `refresh_mode = IMMEDIATE`.
+IMMEDIATE-mode stream tables are refreshed inline on every DML transaction by
+BEFORE triggers — the scheduler has no incremental work to do for them. Yet
+it still acquires the table lock, competing with IMMEDIATE transactions.
+
+In the TPC-H DIFF+IMM comparison test (duration ~328 s), the scheduler fires
+~5 times during the test window. Its AccessShareLock acquisitions conflict with
+the BEFORE trigger's ExclusiveLock, producing `lock_timeout` cancellations that
+the test records as "lock-timeout events" (Q12, Q17, Q19).
+
+**Proposal — two-part fix:**
+
+**(a) Short-term GUC cap lift.** Raise `scheduler_interval_ms` maximum from
+`60_000` ms to `600_000` ms in `src/config.rs`. Set `scheduler_interval_ms =
+600000` in the TPC-H test GUC configuration so the scheduler does not fire
+during the ~328 s test window.
+
+**(b) Semantic fix (correct long-term solution).** In the scheduler's
+job-selection loop, skip any stream table whose `refresh_mode = IMMEDIATE` and
+which has no DIFFERENTIAL-mode downstream dependants that require a scheduled
+catchup. IMMEDIATE tables never accumulate a pending-change backlog that the
+scheduler should process — refreshes happen synchronously in the user's
+transaction. The scheduler's involvement is both unnecessary and a source of
+lock contention.
+
+Code change for (b): in the `is_refresh_due` / pending-change check path,
+return `false` early when `st.refresh_mode == RefreshMode::Immediate`. The
+scheduler will still manage topology-driven CALCULATED dependants of IMMEDIATE
+roots if any exist.
+
+**Estimated impact:** Elimination of lock-timeout events for Q12/Q17/Q19 in
+the DIFF+IMM comparison test. Removes false negatives from the CI "deadlock"
+counter. Also reduces unnecessary lock contention in production deployments
+mixing IMMEDIATE and DIFFERENTIAL stream tables.
+
+**Effort:** Low (0.5 day: config cap change + scheduler guard + test).
+
+**Risk:** Very low. Skipping IMMEDIATE tables in the scheduler is semantically
+correct — they are self-refreshing. The only edge case is a CALCULATED table
+downstream of an IMMEDIATE root; that path is handled separately by the
+scheduler's topology walk and is unaffected by this change.
+
+**Prerequisite:** None. Fully independent.
+
+---
+
+### DI-10: SF=1 Benchmark Validation Target
+
+**Problem:** All TPC-H Phase 10 correctness and speedup measurements are taken
+at SF=0.01 (~10 MB data). Real OLAP workloads operate at SF≥1. Improvements
+that look good at SF=0.01 may still spill, stall, or lose their speedup
+advantage at SF=1 (~1 GB) due to:
+- Buffer pool pressure (warm at SF=0.01; cold at SF=1)
+- Planner row-count estimates changing join strategy at larger N
+- `temp_file_limit` headroom consumed faster at SF=1
+
+**Proposal:** Add a `bench-tpch-sf1` justfile target that runs the TPC-H
+`TPCH_BENCH=1` suite with `TPCH_SF=1`. Record one baseline run before Phase 10
+ships and one after. Gate v0.13.0 release on at least the correctness check
+(22/22 queries pass) at SF=1 in addition to the SF=0.01 gate.
+
+```makefile
+bench-tpch-sf1:
+    TPCH_BENCH=1 TPCH_SF=1 cargo test --test e2e_tpch_tests \\
+        -- --ignored --test-threads=1 --nocapture 2>&1 | tee bench-sf1.log
+```
+
+The TPC-H data generation path already reads `TPCH_SF` (or can be parameterised
+with a 1-line change). Docker volume requirement: ~1 GB vs. ~10 MB.
+
+**Estimated impact:** SF=1 numbers are the definitive validation that Phase 10
+improvements are production-grade. Any regression visible only at SF=1 is
+caught before release.
+
+**Effort:** Very low (30 min to add target; ~2–3 h to run and record first
+baseline; one-time Docker volume expansion).
+
+**Risk:** None beyond existing TPC-H infrastructure. The SF=1 run is additive;
+it does not alter any existing tests.
+
+**Prerequisite:** All DI-1 through DI-9 should be complete (or in progress)
+before the SF=1 gate is evaluated for the release blocker.
 
 ---
 
@@ -514,17 +710,24 @@ practical threshold for what DIFFERENTIAL mode can handle.
 
 ```
 DI-1 (Named CTE L₀)
- └──→ DI-4 (Shared R₀ cache) ──→ DI-2 (Pre-image capture, v1.x)
+ └──→ DI-2 (Pre-image capture, replaces L₀ CTE body)
+ └──→ DI-4 (Shared R₀ cache, builds on named CTEs)
 
 DI-3 (Group-key aggregate filter) — independent
 DI-5 (Part 3 consolidation) — independent
 DI-6 (Lazy semi-join R_old) — independent
-DI-7 (Strategy selector) — after DI-1, DI-3, DI-6
+DI-7 (Strategy selector + max_delta_fraction) — after DI-1, DI-2, DI-3, DI-6
+
+DI-8 (SUM(CASE WHEN) drift fix) — independent
+DI-9 (Scheduler IMMEDIATE skip) — independent
+DI-10 (SF=1 benchmark target) — after DI-1 … DI-9
 ```
 
-DI-1, DI-3, DI-5, DI-6 can all be developed in parallel.
-DI-4 depends on DI-1. DI-7 should come last (tuning after optimizations land).
-DI-2 is a v1.x architectural change; all others are v0.x candidates.
+DI-1, DI-3, DI-5, DI-6, DI-8, DI-9 can all be developed in parallel.
+DI-2 depends on DI-1 (the named CTEs become the mount point for the pre-image
+formula). DI-4 also depends on DI-1. DI-7 should come last among the engine
+changes. DI-10 (SF=1 gate) is a validation step, not a code change, and depends
+on all others being complete.
 
 ---
 
@@ -534,23 +737,40 @@ DI-2 is a v1.x architectural change; all others are v0.x candidates.
 |----------|----------|--------|--------|--------|
 | P0 | DI-1: Named CTE L₀ | High (Q05/Q09) | Medium | v0.13 |
 | P0 | DI-3: Group-key aggregate filter | Medium-High | Low | v0.13 |
+| P0 | DI-8: SUM(CASE WHEN) drift fix | High (Q12 correctness) | Very low | v0.13 |
+| P0 | DI-9: Scheduler IMMEDIATE skip | High (Q12/Q17/Q19 lock contention) | Low | v0.13 |
+| P1 | DI-2: Pre-image capture | Very high | Medium | v0.13 |
 | P1 | DI-6: Lazy semi-join R_old | High (Q20) | Medium | v0.13 |
 | P1 | DI-4: Shared R₀ cache | Medium | Medium | v0.13 |
-| P2 | DI-7: Strategy selector | Safety net | Low | v0.13 |
+| P2 | DI-7: Strategy selector + max_delta_fraction | Safety net | Low–Medium | v0.13 |
 | P2 | DI-5: Part 3 consolidation | Low-Medium | Medium | v0.13 |
-| P3 | DI-2: Pre-image capture | Very high | High | v1.x |
+| P2 | DI-10: SF=1 benchmark gate | Validation | Very low | v0.13 |
+
+> **Note on DI-2 promotion:** Previously listed as v1.x, requiring "fundamental
+> CDC architecture changes". Code inspection of `src/cdc.rs` reveals that
+> `old_*` typed columns are already captured in the change buffer for all
+> UPDATE and DELETE rows — the CDC trigger change was already done as part
+> of the typed-column CDC rewrite. Only the delta SQL generator needs updating.
 
 **Recommended sequence for v0.13:**
-1. DI-1 (unblocks DI-4, biggest single improvement for deep joins)
-2. DI-3 (independent, small, high ROI for aggregate queries)
-3. DI-6 (semi-join optimization, improves Q20 and similar)
-4. DI-4 (builds on DI-1's CTE infrastructure)
-5. DI-7 (safety net after other optimizations raise the bar)
+1. DI-8 (one-line correctness fix — independent, closes Q12 drift immediately)
+2. DI-9 (scheduler IMMEDIATE skip — independent, closes Q12/Q17/Q19 lock contention)
+3. DI-1 (named CTEs — unblocks DI-2 and DI-4, quickest win for deep joins)
+4. DI-3 (independent, small, high ROI for aggregate queries)
+5. DI-2 (replaces EXCEPT ALL in DI-1 CTE bodies with pk-filter + old_* read)
+6. DI-6 (semi-join optimization, improves Q20 and similar)
+7. DI-4 (builds on DI-1's named CTE infrastructure)
+8. DI-7 + max_delta_fraction (safety net after other optimizations raise the bar)
+9. DI-5 (correction consolidation — lowest priority, validates last)
+10. DI-10 (SF=1 benchmark run — validation gate before v0.13.0 release cut)
 
-**Validation gate:** After DI-1 + DI-3, re-run TPC-H at SF=0.01 with
-`temp_file_limit = '4GB'`. If Q05/Q09 pass, the v0.13.0 correctness gate
-(22/22) is met. If not, temporarily raise
-`temp_file_limit` and measure actual disk usage delta.
+**Validation gate:** After DI-8 + DI-9, Q12 leaves `DIFFERENTIAL_SKIP_ALLOWLIST`
+and lock-timeout events in the DIFF+IMM comparison test drop to zero. After
+DI-1 + DI-3, re-run TPC-H at SF=0.01 with `temp_file_limit = '4GB'` — if
+Q05/Q09 pass, DIFFERENTIAL correctness reaches 22/22 (the v0.13.0 gate). After
+DI-2 lands, verify that intermediate CTE volume (e.g. via `EXPLAIN (BUFFERS)`)
+is measurably reduced. After all items are complete, run DI-10 (SF=1 gate)
+to confirm results hold at realistic scale before cutting the release.
 
 ---
 
@@ -575,7 +795,11 @@ avoid the Q21 numwait regression.
 
 **Code:** `use_pre_change_snapshot()` in `src/dvm/operators/join_common.rs:1342+`
 
-### Pre-Image Capture (deferred to v1.x)
+### Pre-Image Capture (promoted from v1.x — CDC already complete)
 
-Capture OLD row values in the CDC trigger to eliminate EXCEPT ALL entirely.
-See DI-2 above and ADR-001/ADR-002 in `plans/adrs/PLAN_ADRS.md`.
+`old_*` column capture in the CDC trigger was part of the typed-column CDC
+rewrite (now in production). The DI-2 work is entirely in the delta SQL
+generator: replacing `EXCEPT ALL` in `build_pre_change_snapshot_sql()` with
+a pk-hash filter + direct `old_*` read. See DI-2 above for implementation
+details. The ADR-001/ADR-002 decision to use trigger-based CDC (rather than
+logical replication) in `plans/adrs/PLAN_ADRS.md` is unaffected.
