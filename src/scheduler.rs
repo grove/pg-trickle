@@ -3246,7 +3246,20 @@ fn load_st_by_id(pgt_id: i64) -> Option<StreamTableMeta> {
 ///
 /// G-7: When tiered scheduling is enabled, the tier multiplier is applied
 /// to duration-based schedules. Frozen-tier STs always return `false`.
+///
+/// DI-9: IMMEDIATE-mode STs always return `false` — they are refreshed
+/// synchronously within the user's transaction by AFTER triggers. The
+/// scheduler has no work to do for them and acquiring locks would only
+/// cause contention with the IMMEDIATE trigger path. Downstream CALCULATED
+/// dependants are unaffected: they detect upstream changes via
+/// `has_stream_table_source_changes()` independently.
 fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
+    // DI-9: IMMEDIATE-mode tables refresh inline — the scheduler must not
+    // compete for locks on them.
+    if st.refresh_mode.is_immediate() {
+        return false;
+    }
+
     // If not yet populated, always needs refresh
     if !st.is_populated {
         return true;

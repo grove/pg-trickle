@@ -417,8 +417,25 @@ pub fn agg_to_rescan_sql(agg: &AggExpr) -> String {
 /// COUNT, COUNT_STAR, and SUM are algebraically invertible.
 /// AVG is algebraic via auxiliary columns (SUM + COUNT) — handled separately.
 /// MIN/MAX/AVG and group-rescan aggregates require a full rescan of old data.
+///
+/// DI-8: SUM(CASE WHEN …) is NOT algebraically invertible because the CASE
+/// condition may reference non-group-key columns that change via UPDATE.
+/// The algebraic formula evaluates both 'D' and 'I' sides using the post-change
+/// column values, causing the 'D' side to miscount when the CASE condition
+/// references a mutated column. Falls back to GROUP_RESCAN which correctly
+/// reads pre-change state via EXCEPT ALL. This band-aid can be removed once
+/// DI-2 (aggregate UPDATE-split using old_* columns) lands.
 fn is_algebraically_invertible(agg: &AggExpr) -> bool {
     if agg.is_distinct {
+        return false;
+    }
+
+    // DI-8: SUM(CASE WHEN …) can drift when the CASE condition references
+    // mutable non-group-key columns — fall back to GROUP_RESCAN (EXCEPT ALL).
+    if matches!(agg.function, AggFunc::Sum)
+        && let Some(Expr::Raw(s)) = &agg.argument
+        && s.trim_start().to_uppercase().starts_with("CASE")
+    {
         return false;
     }
 
@@ -3004,6 +3021,64 @@ mod tests {
         assert!(
             is_algebraic_via_aux(&agg),
             "AVG should be algebraic via auxiliary columns"
+        );
+    }
+
+    // ── DI-8: SUM(CASE WHEN …) drift fix tests ─────────────────────
+
+    #[test]
+    fn test_sum_case_when_not_algebraically_invertible() {
+        let agg = AggExpr {
+            function: AggFunc::Sum,
+            argument: Some(Expr::Raw(
+                "CASE WHEN o_orderpriority IN ('1-URGENT','2-HIGH') THEN 1 ELSE 0 END".into(),
+            )),
+            alias: "high_line_count".to_string(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+        };
+        assert!(
+            !is_algebraically_invertible(&agg),
+            "SUM(CASE WHEN …) should NOT be algebraically invertible (DI-8)"
+        );
+    }
+
+    #[test]
+    fn test_sum_plain_column_still_algebraically_invertible() {
+        let agg = sum_col("amount", "total");
+        assert!(
+            is_algebraically_invertible(&agg),
+            "SUM(col) should remain algebraically invertible"
+        );
+    }
+
+    #[test]
+    fn test_sum_case_when_with_leading_whitespace() {
+        let agg = AggExpr {
+            function: AggFunc::Sum,
+            argument: Some(Expr::Raw(
+                "  CASE WHEN status = 'A' THEN qty ELSE 0 END".into(),
+            )),
+            alias: "active_qty".to_string(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+        };
+        assert!(
+            !is_algebraically_invertible(&agg),
+            "SUM(CASE …) with leading whitespace should still be caught (DI-8)"
+        );
+    }
+
+    #[test]
+    fn test_count_star_still_algebraically_invertible() {
+        let agg = count_star("cnt");
+        assert!(
+            is_algebraically_invertible(&agg),
+            "COUNT(*) should remain algebraically invertible"
         );
     }
 
