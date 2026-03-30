@@ -77,13 +77,14 @@ fn rf_count() -> usize {
 
 /// Queries allowed to be skipped in DIFFERENTIAL mode.
 const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
-    // q05: multi-table joins produce DVM SQL that exceeds
-    // the Docker container's temp_file_limit (4 GB).  The generated delta
-    // queries create large intermediate results for complex join graphs.
+    // q05: 6-table join delta SQL generates cascading intermediate CTEs
+    // that exceed temp_file_limit even with DI-1 (CTE caching) + DI-2
+    // (NOT EXISTS anti-join). The per-level join decomposition (Parts 1/2/3)
+    // for 5 join levels produces O(n²) CTE fan-out. Needs delta SQL
+    // restructuring (e.g., semi-naive iteration) to fit within temp limits.
     "q05",
-    // q09: 6-table join (nation, supplier, part, partsupp, orders, lineitem)
-    // generates delta queries that exceed the Docker container's
-    // temp_file_limit (4 GB) — same root cause as q05.
+    // q09: same root cause as q05 — 6-table join (nation, supplier, part,
+    // partsupp, orders, lineitem) exceeds temp_file_limit.
     "q09",
 ];
 
