@@ -175,7 +175,12 @@ async fn create_database_from_template(
 ///
 /// Returns the name of the created template database.
 async fn create_extension_template(admin_connection_string: &str, port: u16) -> String {
-    let template_name = "pgt_ext_template";
+    // Use a PID-scoped name so that multiple test binary processes sharing
+    // the same PostgreSQL server (e.g. the light-E2E shared container where
+    // PGT_LIGHT_E2E_PORT is set) each get their own template without
+    // conflicting with each other.
+    let template_name = format!("pgt_ext_template_{}", std::process::id());
+    let template_name = template_name.as_str();
 
     create_database(admin_connection_string, template_name).await;
 
