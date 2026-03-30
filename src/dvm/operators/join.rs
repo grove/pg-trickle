@@ -83,11 +83,17 @@
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join_common::{
-    build_base_table_key_exprs, build_pre_change_snapshot_sql, build_snapshot_sql, is_join_child,
+    build_base_table_key_exprs, build_leaf_snapshot_sql, build_snapshot_sql, is_join_child,
     is_simple_child, join_scan_count, rewrite_join_condition, use_pre_change_snapshot,
 };
 use crate::dvm::parser::{Expr, OpTree};
 use crate::error::PgTrickleError;
+
+/// DI-5: Maximum number of Scan nodes in the left child for which Part 3
+/// correction is emitted. Raised from 3 (original) to 5 thanks to DI-1's
+/// named CTE L₀ snapshots reducing temp file pressure. Covers up to
+/// 6-table semi-join chains.
+const PART3_MAX_SCAN_COUNT: usize = 5;
 
 /// Returns true if `op` is a join whose **both** children are simple (Scan)
 /// nodes.  Previously this gated Part 3 correction term generation — now
@@ -239,16 +245,22 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
     // Part 3 correction condition: dl (delta left) + dr (delta right).
     // Used when Part 2 uses L₁ (post-change) instead of L₀.  The
     // correction cancels the (ΔL ⋈ ΔR) double-counting error introduced
-    // by using L₁.  Generated for join children up to 3 scan nodes
-    // (one level beyond the L₀ threshold of ≤ 2).  This fixes Q07-type
-    // revenue drift in 6-table join chains.  Deeper levels (4+ scans)
-    // omit the correction to avoid cascading CTE complexity that causes
-    // temp file bloat on PostgreSQL.
+    // by using L₁.  Generated for join children up to PART3_MAX_SCAN_COUNT
+    // scan nodes.  This fixes Q07-type revenue drift in multi-table join
+    // chains that contain semi-joins.
+    //
+    // DI-5: Threshold raised from 3 to 5 — DI-1's named CTE L₀ snapshots
+    // make delta CTEs cheaper, and the Part 3 correction joins two
+    // already-computed delta CTEs (NOT MATERIALIZED), so temp file
+    // pressure is lower than the pre-DI-1 era where full snapshot CTEs
+    // were inlined. Covers 6-table semi-join chains (e.g. Q21 variants).
     //
     // The correction is computed eagerly here but only emitted when
     // `!use_l0` (see `correction_sql` below).
+    let left_scan_count = join_scan_count(left);
     let join_cond_correction =
-        if !is_simple_child(left) && is_join_child(left) && join_scan_count(left) <= 3 {
+        if !is_simple_child(left) && is_join_child(left) && left_scan_count <= PART3_MAX_SCAN_COUNT
+        {
             Some(rewrite_join_condition(condition, left, "dl", right, "dr"))
         } else {
             None
@@ -306,11 +318,10 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 
     let left_part2_source = if use_l0 {
         if is_join_child(left) {
-            // EC01B-1: Deep join child — use per-leaf CTE-based snapshot.
-            // Each leaf Scan's pre-change state is cheap (single-table
-            // EXCEPT ALL), and the results are re-joined with the original
-            // conditions. No full-snapshot materialization needed.
-            let pre_change = build_pre_change_snapshot_sql(left, &ctx.scan_delta_ctes);
+            // DI-1: Register per-leaf pre-change snapshot as a named CTE.
+            // Subsequent references to the same subtree reuse the CTE,
+            // eliminating redundant EXCEPT ALL evaluations.
+            let pre_change = ctx.get_or_register_snapshot_cte(left);
 
             // Mark all leaf delta CTEs as NOT MATERIALIZED since they're
             // now referenced in both the inner join delta and the per-leaf
@@ -337,23 +348,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             }
         } else {
             // Scan, Subquery/Aggregate child: use L₀ via single-table
-            // EXCEPT ALL (cheap, no join explosion)
-            let left_data_cols: String = left_cols
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let left_alias = left.alias();
-            let left_pre_change = format!(
-                "(SELECT {left_data_cols} FROM {left_table} {la} \
-                 EXCEPT ALL \
-                 SELECT {left_data_cols} FROM {delta_left} WHERE __pgt_action = 'I' \
-                 UNION ALL \
-                 SELECT {left_data_cols} FROM {delta_left} WHERE __pgt_action = 'D')",
-                la = quote_ident(left_alias),
-                delta_left = left_result.cte_name,
-            );
+            // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
+            let left_pre_change = build_leaf_snapshot_sql(left, &left_result.cte_name, left_cols);
             // Apply semi-join filter to L₀ if equi-keys are available
             if equi_keys.is_empty() {
                 left_pre_change
@@ -407,8 +403,8 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
 
     let right_part1_source = if use_r0 {
         if is_join_child(right) {
-            // EC01B-1: Deep join child — use per-leaf CTE-based snapshot.
-            let pre_change = build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes);
+            // DI-1: Named CTE snapshot for right pre-change state.
+            let pre_change = ctx.get_or_register_snapshot_cte(right);
 
             // Mark leaf delta CTEs NOT MATERIALIZED
             mark_leaf_delta_ctes_not_materialized(right, ctx);
@@ -433,23 +429,9 @@ pub fn diff_inner_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult,
             }
         } else {
             // Scan, Subquery/Aggregate child: use R₀ via single-table
-            // EXCEPT ALL for DELETE delta rows
-            let right_data_cols: String = right_cols
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let right_alias = right.alias();
-            let right_pre_change = format!(
-                "(SELECT {right_data_cols} FROM {right_table} {ra} \
-                 EXCEPT ALL \
-                 SELECT {right_data_cols} FROM {delta_right} WHERE __pgt_action = 'I' \
-                 UNION ALL \
-                 SELECT {right_data_cols} FROM {delta_right} WHERE __pgt_action = 'D')",
-                ra = quote_ident(right_alias),
-                delta_right = right_result.cte_name,
-            );
+            // snapshot (DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback)
+            let right_pre_change =
+                build_leaf_snapshot_sql(right, &right_result.cte_name, right_cols);
             // Apply semi-join filter to R₀
             if equi_keys.is_empty() {
                 right_pre_change
@@ -532,6 +514,9 @@ JOIN {delta_right} dr ON {cond}",
                 delta_right = right_result.cte_name,
             )
         } else {
+            // DI-5: Part 3 correction suppressed — either left child is
+            // not a join, or scan count exceeds PART3_MAX_SCAN_COUNT.
+            // This may cause minor drift for very deep semi-join chains.
             String::new()
         }
     } else if use_r0 && is_simple_child(left) {
@@ -611,7 +596,7 @@ WHERE dl.__pgt_action = 'I'
 UNION ALL
 
 -- Part 1b: delta_left DELETES JOIN pre-change_right R₀ (EC-01 fix)
--- R₀ = R_current EXCEPT ALL ΔR_inserts UNION ALL ΔR_deletes
+-- R₀ = R_current NOT EXISTS ΔR + old rows (DI-2)
 -- Ensures deleted left rows find their old right partner even when
 -- the right partner was simultaneously deleted.
 SELECT {hash_part1} AS __pgt_row_id,
@@ -624,7 +609,7 @@ WHERE dl.__pgt_action = 'D'
 UNION ALL
 
 -- Part 2: pre-change_left JOIN delta_right
--- For Scan children: L₀ = L_current EXCEPT ALL Δ_inserts UNION ALL Δ_deletes
+-- For Scan children: L₀ via NOT EXISTS anti-join (DI-2)
 -- For nested joins: L₁ = current snapshot (semi-join filtered, corrected below)
 SELECT {hash_part2} AS __pgt_row_id,
        dr.__pgt_action,
@@ -648,7 +633,7 @@ JOIN {right_table_filtered} r ON {join_cond_part1}
 UNION ALL
 
 -- Part 2: pre-change_left JOIN delta_right
--- For Scan children: L₀ = L_current EXCEPT ALL Δ_inserts UNION ALL Δ_deletes
+-- For Scan children: L₀ via NOT EXISTS anti-join (DI-2)
 -- For nested joins: L₁ = current snapshot (semi-join filtered, corrected below)
 SELECT {hash_part2} AS __pgt_row_id,
        dr.__pgt_action,
@@ -916,16 +901,16 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Part 2 should use L₀ = L_current EXCEPT ALL Δ_inserts UNION ALL Δ_deletes
-        // Part 1b should use R₀ = R_current EXCEPT ALL ΔR_inserts UNION ALL ΔR_deletes
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // Part 2 should use L₀ via NOT EXISTS anti-join (DI-2)
+        // Part 1b should use R₀ via NOT EXISTS anti-join (DI-2)
+        assert_sql_contains(&sql, "NOT EXISTS");
         assert_sql_contains(&sql, "__pgt_action = 'I'");
         assert_sql_contains(&sql, "__pgt_action = 'D'");
-        // Both L₀ and R₀ should be present (at least two EXCEPT ALL occurrences)
-        let except_count = sql.matches("EXCEPT ALL").count();
+        // Both L₀ and R₀ should be present (at least two NOT EXISTS occurrences)
+        let ne_count = sql.matches("NOT EXISTS").count();
         assert!(
-            except_count >= 2,
-            "expected ≥2 EXCEPT ALL (L₀ + R₀), got {except_count}\n{sql}"
+            ne_count >= 2,
+            "expected ≥2 NOT EXISTS (L₀ + R₀), got {ne_count}\n{sql}"
         );
     }
 
@@ -1082,11 +1067,11 @@ mod tests {
         );
         let dr = result.unwrap();
         let sql = ctx.build_with_query(&dr.cte_name);
-        // Should produce Part 1 + Part 2 (with L₀ via EXCEPT ALL)
+        // Should produce Part 1 + Part 2 (with L₀ via NOT EXISTS)
         assert_sql_contains(&sql, "Part 1");
         assert_sql_contains(&sql, "Part 2");
-        // L₀ uses EXCEPT ALL for the pre-change snapshot
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // L₀ uses NOT EXISTS anti-join for pre-change snapshot (DI-2)
+        assert_sql_contains(&sql, "NOT EXISTS");
         // Outer join: left child is a nested join (not a Scan), so the
         // outer join's CTE does NOT emit an EC-02 correction.
         // (The inner 2-Scan join may have its own EC-02 correction.)
@@ -1134,8 +1119,8 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // L₀ via EXCEPT ALL should be present in the outer join's Part 2
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // L₀ via NOT EXISTS should be present in the outer join's Part 2
+        assert_sql_contains(&sql, "NOT EXISTS");
         // Outer join: left is nested join (not Scan) → no EC-02 or L₁ correction.
         // (The inner 2-Scan join may have its own EC-02 correction.)
         let outer_cte_marker = format!("{} AS", result.cte_name);
@@ -1169,6 +1154,7 @@ mod tests {
     #[test]
     fn test_diff_inner_join_nested_skips_semijoin_optimization() {
         // When a child is a nested join, semi-join optimization is skipped
+        // at the OUTER join level (the inner join's own optimization is fine).
         let a = scan(1, "a", "public", "a", &["id"]);
         let b = scan(2, "b", "public", "b", &["id"]);
         let inner = inner_join(eq_cond("a", "id", "b", "id"), a, b);
@@ -1178,8 +1164,11 @@ mod tests {
         let mut ctx = test_ctx();
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        // Semi-join would contain EXISTS; nested join should NOT have it
-        assert_sql_not_contains(&sql, "EXISTS");
+        // The outer join CTE should NOT have equi-join semi-join filter.
+        // Extract only the outer join CTE body (after its name).
+        let outer_cte_marker = format!("{} AS", result.cte_name);
+        let outer_sql = sql.split(&outer_cte_marker).last().unwrap_or("");
+        assert_sql_not_contains(outer_sql, "IN (SELECT DISTINCT");
     }
 
     #[test]
@@ -1305,14 +1294,14 @@ mod tests {
         let b = scan(2, "b", "public", "b", &["id"]);
         let c = scan(3, "c", "public", "c", &["id"]);
 
-        // left = a ⋈ b (2 scans) — per-leaf CTE snapshot with EXCEPT ALL
+        // left = a ⋈ b (2 scans) — per-leaf CTE snapshot with NOT EXISTS (DI-2)
         let j_ab = inner_join(eq_cond("a", "id", "b", "id"), a.clone(), b);
         let tree_3 = inner_join(eq_cond("a", "id", "c", "id"), j_ab, c);
 
         let mut ctx = test_ctx();
         let result = diff_inner_join(&mut ctx, &tree_3).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        assert_sql_contains(&sql, "NOT EXISTS");
 
         // left = a ⋈ b ⋈ c (3 scans) — EC01B-1: per-leaf CTE, no Part 3
         let a2 = scan(1, "a", "public", "a", &["id"]);
@@ -1326,11 +1315,113 @@ mod tests {
         let mut ctx2 = test_ctx();
         let result2 = diff_inner_join(&mut ctx2, &tree_4).unwrap();
         let sql2 = ctx2.build_with_query(&result2.cte_name);
-        // Per-leaf CTE: EXCEPT ALL present at leaf level; no L₁→L₀ nested-join
+        // Per-leaf CTE: NOT EXISTS present at leaf level; no L₁→L₀ nested-join
         // correction (note: EC-02 still uses "Part 3" label for Scan⋈Scan inner
         // joins, so we only check for the specific nested-join correction marker).
-        assert_sql_contains(&sql2, "EXCEPT ALL");
+        assert_sql_contains(&sql2, "NOT EXISTS");
         assert_sql_not_contains(&sql2, "Correction for nested join");
+    }
+
+    #[test]
+    fn test_di5_part3_threshold_raised_covers_4_scan_semijoin_chain() {
+        // DI-5: Part 3 correction threshold raised from 3 → 5.
+        // Build a left child with join_scan_count = 4 that contains a
+        // semi-join — this triggers `use_l0 = false` (semi-join present)
+        // and should emit Part 3 correction at the outer join.
+        //
+        // Structure: inner_join(
+        //   left = inner_join(
+        //     left = inner_join(
+        //       left = inner_join(A, B),  // 2 scans
+        //       right = C                  // 1 scan
+        //     ),  // 3 scans
+        //     right = D                    // 1 scan
+        //   ),  // 4 scans, no semi-join here
+        //   right = semi_join(E, F)       // 0 scan_count
+        // )  → left has scan_count = 4, contains_semijoin due to right
+        //
+        // Actually, the right side being a semi_join makes the diff
+        // dispatch go to diff_semi_join for the right child. Instead,
+        // wrap the semi-join inside the left subtree.
+        //
+        // Use structure where left child = inner_join(chain4, semi_join(E, F)):
+        //   chain4 = (A ⋈ B) ⋈ C ⋈ D  (4 scans)
+        //   left = chain4 ⋈ semi_join(E, F)  → 4 + 0 = 4 scan_count
+        //   contains_semijoin(left) = true
+        let a = scan(1, "a", "public", "a", &["id"]);
+        let b = scan(2, "b", "public", "b", &["id"]);
+        let c = scan(3, "c", "public", "c", &["id"]);
+        let d = scan(4, "d", "public", "d", &["id"]);
+        let e = scan(5, "e", "public", "e", &["id"]);
+        let f = scan(6, "f", "public", "f", &["id"]);
+        let g = scan(7, "g", "public", "g", &["id"]);
+
+        // chain4: (((a ⋈ b) ⋈ c) ⋈ d)
+        let j_ab = inner_join(eq_cond("a", "id", "b", "id"), a, b);
+        let j_abc = inner_join(eq_cond("a", "id", "c", "id"), j_ab, c);
+        let chain4 = inner_join(eq_cond("a", "id", "d", "id"), j_abc, d);
+
+        // left: chain4 ⋈ semi_join(e, f)
+        // The semi_join is wrapped inside the left's inner_join,
+        // but inner_join dispatches diff_inner_join for itself,
+        // calling diff_node on each child separately.
+        // The outer diff_inner_join sees left = inner_join(chain4, semi_join(e,f))
+        // → is_join_child(left) = true, contains_semijoin(left) = true
+        // → join_scan_count(left) = 4 + 0 = 4
+        let sj = semi_join(eq_cond("e", "id", "f", "id"), e, f);
+        let left = inner_join(eq_cond("a", "id", "e", "id"), chain4, sj);
+
+        // Verify preconditions
+        assert_eq!(join_scan_count(&left), 4);
+        assert!(is_join_child(&left));
+
+        // Outer join: left ⋈ g
+        let tree = inner_join(eq_cond("a", "id", "g", "id"), left, g);
+
+        let mut ctx = test_ctx();
+        let result = diff_inner_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // DI-5: With threshold 5, scan_count 4 is within range →
+        // Part 3 correction should be emitted.
+        assert_sql_contains(&sql, "Correction for nested join");
+    }
+
+    #[test]
+    fn test_di5_part3_suppressed_above_threshold() {
+        // DI-5: Part 3 correction suppressed when join_scan_count > 5.
+        // Build a left child with join_scan_count = 6 (exceeds threshold).
+        let a = scan(1, "a", "public", "a", &["id"]);
+        let b = scan(2, "b", "public", "b", &["id"]);
+        let c = scan(3, "c", "public", "c", &["id"]);
+        let d = scan(4, "d", "public", "d", &["id"]);
+        let e = scan(5, "e", "public", "e", &["id"]);
+        let f = scan(6, "f", "public", "f", &["id"]);
+        let g = scan(7, "g", "public", "g", &["id"]);
+        let h = scan(8, "h", "public", "h", &["id"]);
+        let i = scan(9, "i", "public", "i", &["id"]);
+
+        // chain6: ((((a ⋈ b) ⋈ c) ⋈ d) ⋈ e) ⋈ f — 6 scans
+        let j_ab = inner_join(eq_cond("a", "id", "b", "id"), a, b);
+        let j_abc = inner_join(eq_cond("a", "id", "c", "id"), j_ab, c);
+        let j_abcd = inner_join(eq_cond("a", "id", "d", "id"), j_abc, d);
+        let j_abcde = inner_join(eq_cond("a", "id", "e", "id"), j_abcd, e);
+        let chain6 = inner_join(eq_cond("a", "id", "f", "id"), j_abcde, f);
+
+        // left: chain6 ⋈ semi_join(g, h) → scan_count = 6 + 0 = 6
+        let sj = semi_join(eq_cond("g", "id", "h", "id"), g, h);
+        let left = inner_join(eq_cond("a", "id", "g", "id"), chain6, sj);
+
+        assert_eq!(join_scan_count(&left), 6);
+
+        let tree = inner_join(eq_cond("a", "id", "i", "id"), left, i);
+
+        let mut ctx = test_ctx();
+        let result = diff_inner_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // scan_count 6 > PART3_MAX_SCAN_COUNT (5) → correction suppressed
+        assert_sql_not_contains(&sql, "Correction for nested join");
     }
 
     // ── EC-01: R₀ via EXCEPT ALL tests ──────────────────────────────
@@ -1374,11 +1465,11 @@ mod tests {
         let result = diff_inner_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // Should have at least 2 EXCEPT ALL occurrences: one for L₀, one for R₀.
-        let except_count = sql.matches("EXCEPT ALL").count();
+        // Should have at least 2 NOT EXISTS occurrences: one for L₀, one for R₀.
+        let ne_count = sql.matches("NOT EXISTS").count();
         assert!(
-            except_count >= 2,
-            "expected ≥2 EXCEPT ALL (L₀ + R₀), got {except_count}"
+            ne_count >= 2,
+            "expected ≥2 NOT EXISTS (L₀ + R₀), got {ne_count}"
         );
 
         // R₀ references the right-side table ("b")
@@ -1491,8 +1582,8 @@ mod tests {
         // SQL itself must have parts
         assert_sql_contains(&sql, "UNION ALL");
 
-        // Verify it uses the pre-change snapshot (EXCEPT ALL) for correctness
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // Verify it uses the pre-change snapshot (NOT EXISTS) for correctness
+        assert_sql_contains(&sql, "NOT EXISTS");
     }
 
     /// `A INNER JOIN (B INNER JOIN C)` — right child is a nested inner join.

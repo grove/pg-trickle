@@ -443,8 +443,8 @@ pub fn register_gucs() {
         c"Scheduler wake interval in milliseconds.",
         c"Controls how frequently the background scheduler checks for STs that need refresh.",
         &PGS_SCHEDULER_INTERVAL_MS,
-        100,    // min
-        60_000, // max
+        100,     // min
+        600_000, // max (DI-9: raised from 60s to 600s for long-running benchmarks)
         GucContext::Suset,
         GucFlags::default(),
     );

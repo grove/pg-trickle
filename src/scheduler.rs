@@ -3246,7 +3246,20 @@ fn load_st_by_id(pgt_id: i64) -> Option<StreamTableMeta> {
 ///
 /// G-7: When tiered scheduling is enabled, the tier multiplier is applied
 /// to duration-based schedules. Frozen-tier STs always return `false`.
+///
+/// DI-9: IMMEDIATE-mode STs always return `false` — they are refreshed
+/// synchronously within the user's transaction by AFTER triggers. The
+/// scheduler has no work to do for them and acquiring locks would only
+/// cause contention with the IMMEDIATE trigger path. Downstream CALCULATED
+/// dependants are unaffected: they detect upstream changes via
+/// `has_stream_table_source_changes()` independently.
 fn check_schedule(st: &StreamTableMeta, _dag: &StDag) -> bool {
+    // DI-9: IMMEDIATE-mode tables refresh inline — the scheduler must not
+    // compete for locks on them.
+    if st.refresh_mode.is_immediate() {
+        return false;
+    }
+
     // If not yet populated, always needs refresh
     if !st.is_populated {
         return true;
@@ -4182,6 +4195,32 @@ fn execute_scheduled_refresh(
                             }
 
                             Ok((ins, del))
+                        }
+                        // DI-7: When QueryTooComplex is returned (e.g. join
+                        // count exceeds max_differential_joins), fall back to
+                        // FULL refresh immediately instead of reinitializing.
+                        Err(crate::error::PgTrickleError::QueryTooComplex(ref msg)) => {
+                            log!(
+                                "pg_trickle: DI-7 fallback for {}.{}: {}; using FULL refresh",
+                                st.pgt_schema,
+                                st.pgt_name,
+                                msg
+                            );
+                            match refresh::execute_full_refresh(st) {
+                                Ok((ins, del)) => {
+                                    if let Err(e) =
+                                        StreamTableMeta::store_frontier(st.pgt_id, &new_frontier)
+                                    {
+                                        log!("pg_trickle: failed to store frontier: {}", e);
+                                    }
+                                    refresh::post_full_refresh_cleanup(st);
+                                    if let Some(counter) = drift_counter {
+                                        *counter = 0;
+                                    }
+                                    Ok((ins, del))
+                                }
+                                Err(e) => Err(e),
+                            }
                         }
                         Err(e) => {
                             log!(

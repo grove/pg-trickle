@@ -28,7 +28,7 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_pre_change_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
+    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
     use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
@@ -152,26 +152,13 @@ pub fn diff_full_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
 
     let r0_snapshot = if use_r0 {
         if is_join_child(right) {
-            // EC01B-1: Deep join child — per-leaf CTE-based snapshot
-            let pre_change = build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes);
+            // DI-1: Named CTE snapshot for right pre-change state.
+            let pre_change = ctx.get_or_register_snapshot_cte(right);
             mark_leaf_delta_ctes_not_materialized(right, ctx);
             Some(pre_change)
         } else {
-            let right_all_cols: String = right_cols
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let right_alias = right.alias();
-            let r0 = format!(
-                "(SELECT {right_all_cols} FROM {right_table} {ra} \
-                 EXCEPT ALL \
-                 SELECT {right_all_cols} FROM {delta_right} WHERE __pgt_action = 'I' \
-                 UNION ALL \
-                 SELECT {right_all_cols} FROM {delta_right} WHERE __pgt_action = 'D')",
-                ra = quote_ident(right_alias),
-                delta_right = right_result.cte_name,
-            );
+            // DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback for others
+            let r0 = build_leaf_snapshot_sql(right, &right_result.cte_name, right_cols);
             Some(r0)
         }
     } else {
@@ -504,8 +491,8 @@ mod tests {
         let result = diff_full_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // R₀ uses EXCEPT ALL pattern
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // R₀ uses DI-2 NOT EXISTS anti-join pattern
+        assert_sql_contains(&sql, "NOT EXISTS");
         // Part 1b and Part 3b present
         assert_sql_contains(&sql, "Part 1b");
         assert_sql_contains(&sql, "Part 3b");

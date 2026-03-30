@@ -24,7 +24,7 @@
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_pre_change_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
+    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
     use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
@@ -141,25 +141,19 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Used to check whether a left row had ANY matching right row BEFORE
     // the current cycle's changes, preventing spurious NULL-padded D/I.
     let right_user_cols: Vec<&String> = right_cols.iter().filter(|c| *c != "__pgt_count").collect();
-    let right_col_list: String = right_user_cols
-        .iter()
-        .map(|c| quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let right_alias = right.alias();
 
     let r_old_snapshot = if is_join_child(right) {
-        // EC01B-1: Deep join right child — per-leaf CTE-based snapshot
-        build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes)
+        // DI-1: Named CTE snapshot for right pre-change state.
+        ctx.get_or_register_snapshot_cte(right)
     } else {
-        format!(
-            "(SELECT {right_col_list} FROM {right_table} {ra} \
-             EXCEPT ALL \
-             SELECT {right_col_list} FROM {delta_right} WHERE __pgt_action = 'I' \
-             UNION ALL \
-             SELECT {right_col_list} FROM {delta_right} WHERE __pgt_action = 'D')",
-            ra = quote_ident(right_alias),
-            delta_right = right_result.cte_name,
+        // DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback for others
+        build_leaf_snapshot_sql(
+            right,
+            &right_result.cte_name,
+            &right_user_cols
+                .iter()
+                .map(|c| (*c).clone())
+                .collect::<Vec<_>>(),
         )
     };
 
@@ -182,26 +176,13 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // which filters out __pgt_count).
     let r0_snapshot = if use_r0 {
         if is_join_child(right) {
-            // EC01B-1: Deep join child — per-leaf CTE-based snapshot
-            let pre_change = build_pre_change_snapshot_sql(right, &ctx.scan_delta_ctes);
+            // DI-1: Named CTE snapshot for right pre-change state.
+            let pre_change = ctx.get_or_register_snapshot_cte(right);
             mark_leaf_delta_ctes_not_materialized(right, ctx);
             Some(pre_change)
         } else {
-            let right_all_cols: String = right_cols
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let right_alias = right.alias();
-            let r0 = format!(
-                "(SELECT {right_all_cols} FROM {right_table} {ra} \
-                 EXCEPT ALL \
-                 SELECT {right_all_cols} FROM {delta_right} WHERE __pgt_action = 'I' \
-                 UNION ALL \
-                 SELECT {right_all_cols} FROM {delta_right} WHERE __pgt_action = 'D')",
-                ra = quote_ident(right_alias),
-                delta_right = right_result.cte_name,
-            );
+            // DI-2: NOT EXISTS for Scan, EXCEPT ALL fallback for others
+            let r0 = build_leaf_snapshot_sql(right, &right_result.cte_name, right_cols);
             Some(r0)
         }
     } else {
@@ -256,7 +237,7 @@ WHERE dl.__pgt_action = 'I'
 UNION ALL
 
 -- Part 1b: delta_left DELETES JOIN pre-change_right R₀ (EC-01 fix)
--- R₀ = R_current EXCEPT ALL ΔR_inserts UNION ALL ΔR_deletes
+-- R₀ via NOT EXISTS anti-join + old rows (DI-2)
 -- Ensures deleted left rows find their old right partner even when
 -- the right partner was simultaneously deleted.
 SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, pgtrickle.pg_trickle_hash(row_to_json(r)::text)::TEXT]) AS __pgt_row_id,
@@ -474,8 +455,8 @@ mod tests {
         let result = diff_left_join(&mut ctx, &tree).unwrap();
         let sql = ctx.build_with_query(&result.cte_name);
 
-        // R₀ uses EXCEPT ALL pattern
-        assert_sql_contains(&sql, "EXCEPT ALL");
+        // R₀ uses DI-2 NOT EXISTS anti-join pattern
+        assert_sql_contains(&sql, "NOT EXISTS");
         // Part 1b filters DELETEs only
         assert_sql_contains(&sql, "Part 1b");
         // Part 3b filters DELETEs only

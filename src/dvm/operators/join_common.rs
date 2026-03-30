@@ -373,6 +373,92 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
     )
 }
 
+// ── DI-2: NOT EXISTS anti-join for pre-change snapshot ──────────────────
+
+/// Build the pk_hash expression for a Scan node matching the CDC trigger's
+/// hash computation.
+///
+/// For single-column PKs: `pgtrickle.pg_trickle_hash(alias.col::text)`
+/// For multi-column PKs: `pgtrickle.pg_trickle_hash_multi(ARRAY[alias.col1::text, ...])`
+/// For keyless tables: uses all columns as hash input.
+fn build_pk_hash_expr(
+    alias: &str,
+    columns: &[crate::dvm::parser::Column],
+    pk_columns: &[String],
+) -> String {
+    let hash_cols: Vec<&str> = if pk_columns.is_empty() {
+        columns.iter().map(|c| c.name.as_str()).collect()
+    } else {
+        pk_columns.iter().map(|s| s.as_str()).collect()
+    };
+    let hash_args: Vec<String> = hash_cols
+        .iter()
+        .map(|c| format!("{}.{}::text", quote_ident(alias), quote_ident(c)))
+        .collect();
+    if hash_args.len() == 1 {
+        format!("pgtrickle.pg_trickle_hash({})", hash_args[0])
+    } else {
+        format!(
+            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
+            hash_args.join(", "),
+        )
+    }
+}
+
+/// DI-2: Build a pre-change snapshot for any non-join child operator.
+///
+/// For `Scan` nodes, generates a NOT EXISTS anti-join against the delta
+/// CTE's `__pgt_row_id` (pk_hash match), which replaces the expensive
+/// EXCEPT ALL that required sorting/hashing the full base table.
+///
+/// For non-`Scan` children (Filter, Subquery, Aggregate, etc.), falls
+/// back to the traditional EXCEPT ALL approach.
+pub fn build_leaf_snapshot_sql(op: &OpTree, delta_cte: &str, data_cols: &[String]) -> String {
+    let col_list: String = data_cols
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    match op {
+        OpTree::Scan {
+            schema,
+            table_name,
+            alias,
+            columns,
+            pk_columns,
+            ..
+        } => {
+            let pk_hash_expr = build_pk_hash_expr(alias, columns, pk_columns);
+            format!(
+                "(SELECT {col_list} FROM \"{schema}\".\"{table_name}\" {alias_q} \
+                 WHERE NOT EXISTS (\
+                   SELECT 1 FROM {delta_cte} __pgt_d \
+                   WHERE __pgt_d.__pgt_row_id = {pk_hash_expr}\
+                 ) \
+                 UNION ALL \
+                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
+                schema = schema.replace('"', "\"\""),
+                table_name = table_name.replace('"', "\"\""),
+                alias_q = quote_ident(alias),
+            )
+        }
+        _ => {
+            // Fallback: EXCEPT ALL for non-Scan children (Filter, Subquery, etc.)
+            let table = build_snapshot_sql(op);
+            let alias = op.alias();
+            format!(
+                "(SELECT {col_list} FROM {table} {alias_q} \
+                 EXCEPT ALL \
+                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I' \
+                 UNION ALL \
+                 SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
+                alias_q = quote_ident(alias),
+            )
+        }
+    }
+}
+
 // ── EC01B-1: Per-leaf CTE-based pre-change snapshot ─────────────────────
 
 /// Build a SQL expression for the pre-change (L₀/R₀) snapshot of an
@@ -383,8 +469,8 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
 /// function decomposes the snapshot into per-leaf pre-change states that
 /// are individually cheap to compute, then re-joins them.
 ///
-/// **For Scan leaves**: `(SELECT cols FROM table EXCEPT ALL delta_inserts
-///   UNION ALL delta_deletes)` — operates on a single table, cheap.
+/// **For Scan leaves**: uses NOT EXISTS anti-join (DI-2) for fast pk-hash
+///   matching against the delta CTE.
 ///
 /// **For join nodes**: recursively builds pre-change children and joins
 ///   them with the original condition and column disambiguation.
@@ -396,36 +482,20 @@ fn build_join_snapshot(join_type: &str, condition: &Expr, left: &OpTree, right: 
 ///
 /// `scan_delta_ctes` maps each Scan alias to its delta CTE name, as
 /// populated by `diff_scan` during the diff traversal.
+///
+/// DI-2: For Scan leaves, uses NOT EXISTS anti-join against the delta
+/// CTE's `__pgt_row_id` (pk_hash) instead of the expensive EXCEPT ALL.
 pub fn build_pre_change_snapshot_sql(
     op: &OpTree,
     scan_delta_ctes: &HashMap<String, String>,
 ) -> String {
     match op {
-        OpTree::Scan {
-            schema,
-            table_name,
-            alias,
-            columns,
-            ..
-        } => {
+        OpTree::Scan { alias, columns, .. } => {
             if let Some(delta_cte) = scan_delta_ctes.get(alias.as_str()) {
-                // Per-leaf EXCEPT ALL: reconstruct pre-change state from
-                // current table minus inserts plus deletes.
-                let col_list: String = columns
-                    .iter()
-                    .map(|c| quote_ident(&c.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "(SELECT {col_list} FROM \"{schema}\".\"{table_name}\" {alias_q} \
-                     EXCEPT ALL \
-                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'I' \
-                     UNION ALL \
-                     SELECT {col_list} FROM {delta_cte} WHERE __pgt_action = 'D')",
-                    schema = schema.replace('"', "\"\""),
-                    table_name = table_name.replace('"', "\"\""),
-                    alias_q = quote_ident(alias),
-                )
+                // DI-2: Delegate to build_leaf_snapshot_sql which uses
+                // NOT EXISTS for Scan nodes.
+                let data_cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+                build_leaf_snapshot_sql(op, delta_cte, &data_cols)
             } else {
                 // No delta for this scan — fall back to current state
                 build_snapshot_sql(op)
@@ -1727,6 +1797,81 @@ mod tests {
         assert!(
             use_pre_change_snapshot(&j, false),
             "2-scan join should allow pre-change snapshot"
+        );
+    }
+
+    // ── DI-2: NOT EXISTS anti-join snapshot tests ───────────────────
+
+    #[test]
+    fn test_di2_leaf_snapshot_scan_single_pk() {
+        // DI-2: Scan with single-column PK uses NOT EXISTS + pg_trickle_hash.
+        let op = scan_with_pk(1, "orders", "public", "o", &["id", "amount"], &["id"]);
+        let sql = build_leaf_snapshot_sql(&op, "scan_o", &["id".into(), "amount".into()]);
+        assert!(
+            sql.contains("NOT EXISTS"),
+            "DI-2: single-PK Scan should use NOT EXISTS\n{sql}"
+        );
+        assert!(
+            sql.contains("pgtrickle.pg_trickle_hash("),
+            "DI-2: single-PK should use pg_trickle_hash\n{sql}"
+        );
+        assert!(
+            sql.contains("__pgt_action = 'D'"),
+            "DI-2: should UNION ALL with delete rows\n{sql}"
+        );
+        // Should NOT contain EXCEPT ALL
+        assert!(
+            !sql.contains("EXCEPT ALL"),
+            "DI-2: Scan should NOT use EXCEPT ALL\n{sql}"
+        );
+    }
+
+    #[test]
+    fn test_di2_leaf_snapshot_scan_multi_pk() {
+        // DI-2: Scan with multi-column PK uses pg_trickle_hash_multi.
+        let op = scan_with_pk(1, "t", "public", "t", &["a", "b", "val"], &["a", "b"]);
+        let sql = build_leaf_snapshot_sql(&op, "scan_t", &["a".into(), "b".into(), "val".into()]);
+        assert!(
+            sql.contains("pgtrickle.pg_trickle_hash_multi(ARRAY["),
+            "DI-2: multi-PK should use pg_trickle_hash_multi\n{sql}"
+        );
+        assert!(
+            sql.contains(r#""t"."a"::text"#) && sql.contains(r#""t"."b"::text"#),
+            "DI-2: hash should reference both PK columns\n{sql}"
+        );
+    }
+
+    #[test]
+    fn test_di2_leaf_snapshot_scan_keyless() {
+        // DI-2: Keyless Scan uses all columns for hash.
+        let op = scan(1, "t", "public", "t", &["x", "y"]);
+        let sql = build_leaf_snapshot_sql(&op, "scan_t", &["x".into(), "y".into()]);
+        assert!(
+            sql.contains("NOT EXISTS"),
+            "DI-2: keyless Scan should still use NOT EXISTS\n{sql}"
+        );
+        assert!(
+            sql.contains(r#""t"."x"::text"#) && sql.contains(r#""t"."y"::text"#),
+            "DI-2: keyless hash should include all columns\n{sql}"
+        );
+    }
+
+    #[test]
+    fn test_di2_leaf_snapshot_non_scan_falls_back() {
+        // DI-2: Non-Scan child (Aggregate) falls back to EXCEPT ALL.
+        let child = aggregate(
+            vec![colref("region")],
+            vec![count_star("cnt")],
+            scan(1, "t", "public", "t", &["id", "region"]),
+        );
+        let sql = build_leaf_snapshot_sql(&child, "agg_delta", &["region".into(), "cnt".into()]);
+        assert!(
+            sql.contains("EXCEPT ALL"),
+            "DI-2: non-Scan child should fall back to EXCEPT ALL\n{sql}"
+        );
+        assert!(
+            !sql.contains("NOT EXISTS"),
+            "DI-2: non-Scan child should NOT use NOT EXISTS\n{sql}"
         );
     }
 }

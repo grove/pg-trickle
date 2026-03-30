@@ -85,10 +85,6 @@ const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
     // generates delta queries that exceed the Docker container's
     // temp_file_limit (4 GB) — same root cause as q05.
     "q09",
-    // q12: CASE WHEN with IN-list predicate produces non-deterministic
-    // incremental results — known DVM drift issue (row content mismatch
-    // in high_line_count / low_line_count aggregates).
-    "q12",
 ];
 
 /// Queries allowed to be skipped in IMMEDIATE mode.

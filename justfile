@@ -202,6 +202,14 @@ bench-tpch-fast:
 bench-tpch-large: build-e2e-image
     TPCH_BENCH=1 TPCH_SCALE=0.1 TPCH_CYCLES=5 ./scripts/run_e2e_tests.sh --test e2e_tpch_tests --run-ignored all --no-capture -E 'test(test_tpch_performance_comparison)'
 
+# DI-10: Run TPC-H benchmark at SF=1 (~1 GB data, 60-180 min).
+# Validates that DVM improvements hold at realistic OLAP scale.
+# Gate v0.13.0 release on 22/22 queries at SF=1.
+# CI: manual dispatch only (4h timeout); local runs require ~2 GB Docker volume.
+[group: "tpch"]
+bench-tpch-sf1: build-e2e-image
+    TPCH_BENCH=1 TPCH_SCALE=1 TPCH_CYCLES=3 ./scripts/run_e2e_tests.sh --test e2e_tpch_tests --run-ignored all --no-capture -E 'test(test_tpch_performance_comparison)'
+
 # ── Correctness Gate (Phase 9) ────────────────────────────────────────────
 
 # Run Phase 9 external correctness gate (rebuilds Docker image, ~5-10 min)

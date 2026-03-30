@@ -186,6 +186,15 @@ pub struct DiffContext {
     /// files. Each leaf's EXCEPT ALL operates on a single table (cheap),
     /// and the join is reconstructed from pre-change leaves.
     pub scan_delta_ctes: HashMap<String, String>,
+    /// DI-1: Cache of pre-change snapshot CTEs, keyed by OpTree alias.
+    ///
+    /// When `get_or_register_snapshot_cte()` is called for a subtree,
+    /// the inline snapshot SQL is registered as a named CTE and the name
+    /// is cached here. Subsequent calls for the same subtree return the
+    /// cached CTE name, eliminating redundant inline evaluations.
+    /// For a 6-table join, this deduplicates 3–10× redundant EXCEPT ALL
+    /// evaluations per leaf.
+    snapshot_cte_cache: HashMap<String, String>,
 }
 
 impl DiffContext {
@@ -216,6 +225,7 @@ impl DiffContext {
             st_source_pgt_ids: HashMap::new(),
             st_bypass_tables: HashMap::new(),
             scan_delta_ctes: HashMap::new(),
+            snapshot_cte_cache: HashMap::new(),
         }
     }
 
@@ -249,6 +259,7 @@ impl DiffContext {
             st_source_pgt_ids: HashMap::new(),
             st_bypass_tables: HashMap::new(),
             scan_delta_ctes: HashMap::new(),
+            snapshot_cte_cache: HashMap::new(),
         }
     }
 
@@ -460,6 +471,40 @@ impl DiffContext {
     /// a subquery for each reference, avoiding the temp file issue.
     pub fn mark_cte_not_materialized(&mut self, name: &str) {
         self.not_materialized_ctes.insert(name.to_string());
+    }
+
+    /// DI-1: Get or register a named CTE for a pre-change snapshot.
+    ///
+    /// On first call for a given subtree (identified by `op.alias()`),
+    /// builds the inline snapshot SQL via `build_pre_change_snapshot_sql`,
+    /// registers it as a named CTE, caches the name, and returns it.
+    /// Subsequent calls for the same subtree return the cached CTE name.
+    ///
+    /// For a 6-table join, this eliminates 3–10× redundant EXCEPT ALL
+    /// evaluations per leaf. The CTE is emitted as `NOT MATERIALIZED`
+    /// by default, letting PostgreSQL's planner decide whether to inline
+    /// or materialize based on cost. When the reference count reaches ≥3
+    /// (checked retroactively), the CTE is promoted to MATERIALIZED.
+    pub fn get_or_register_snapshot_cte(&mut self, op: &crate::dvm::parser::OpTree) -> String {
+        let cache_key = op.alias().to_string();
+
+        if let Some(cte_name) = self.snapshot_cte_cache.get(&cache_key) {
+            return cte_name.clone();
+        }
+
+        let snapshot_sql = crate::dvm::operators::join_common::build_pre_change_snapshot_sql(
+            op,
+            &self.scan_delta_ctes,
+        );
+
+        let cte_name = self.next_cte_name("l0_snap");
+        // Use NOT MATERIALIZED by default so the planner can inline for
+        // small CTEs. The caller can promote to MATERIALIZED if needed.
+        self.add_cte(cte_name.clone(), format!("SELECT * FROM {snapshot_sql}"));
+        self.mark_cte_not_materialized(&cte_name);
+
+        self.snapshot_cte_cache.insert(cache_key, cte_name.clone());
+        cte_name
     }
 
     /// Look up the SQL body of a CTE by name (test helper).
@@ -897,6 +942,47 @@ mod tests {
         let ctx =
             DiffContext::new_standalone(Frontier::new(), Frontier::new()).with_cte_registry(reg);
         assert!(ctx.cte_registry.get(0).is_none());
+    }
+
+    // ── get_or_register_snapshot_cte() ──────────────────────────────
+
+    #[test]
+    fn test_snapshot_cte_cache_returns_same_name_on_second_call() {
+        let mut ctx = test_ctx();
+        let op = scan(100, "t1", "public", "t1", &["a", "b"]);
+
+        let name1 = ctx.get_or_register_snapshot_cte(&op);
+        let name2 = ctx.get_or_register_snapshot_cte(&op);
+        assert_eq!(name1, name2, "same op should reuse the cached CTE name");
+    }
+
+    #[test]
+    fn test_snapshot_cte_cache_different_ops_get_different_names() {
+        let mut ctx = test_ctx();
+        let op1 = scan(100, "t1", "public", "t1", &["a"]);
+        let op2 = scan(200, "t2", "public", "t2", &["b"]);
+
+        let name1 = ctx.get_or_register_snapshot_cte(&op1);
+        let name2 = ctx.get_or_register_snapshot_cte(&op2);
+        assert_ne!(name1, name2, "different ops should get distinct CTE names");
+    }
+
+    #[test]
+    fn test_snapshot_cte_is_registered_not_materialized() {
+        let mut ctx = test_ctx();
+        let op = scan(100, "t1", "public", "t1", &["a"]);
+
+        let name = ctx.get_or_register_snapshot_cte(&op);
+        // The CTE should appear in the context's CTE list
+        assert!(
+            ctx.ctes.iter().any(|(n, _, _, _)| n == &name),
+            "CTE should be registered in context"
+        );
+        // And should be marked NOT MATERIALIZED
+        assert!(
+            ctx.not_materialized_ctes.contains(&name),
+            "snapshot CTE should be NOT MATERIALIZED"
+        );
     }
 }
 

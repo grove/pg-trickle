@@ -91,6 +91,19 @@
             qualified_name, defining_query, schedule, refresh_mode, initialize, cdc_mode,
             partition_by=partition_by
          ) }}
+
+      {# -- Apply fuse/status settings that CREATE doesn't support -- #}
+      {% if status is not none or fuse is not none or fuse_ceiling is not none or fuse_sensitivity is not none %}
+        {%- set current_info = dbt_pgtrickle.pgtrickle_get_stream_table_info(qualified_name) -%}
+        {% if current_info %}
+          {{ dbt_pgtrickle.pgtrickle_alter_stream_table(
+               qualified_name, schedule, refresh_mode,
+               status=status, current_info=current_info,
+               cdc_mode=cdc_mode,
+               fuse=fuse, fuse_ceiling=fuse_ceiling, fuse_sensitivity=fuse_sensitivity
+             ) }}
+        {% endif %}
+      {% endif %}
     {% else %}
       {# -- UPDATE: stream table exists — check if query changed -- #}
       {%- set current_info = dbt_pgtrickle.pgtrickle_get_stream_table_info(qualified_name) -%}

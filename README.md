@@ -26,6 +26,8 @@ It also became an experiment in what coding agents could realistically help buil
 
 That constraint changed how we worked. Agents can produce a lot of surface area quickly, but database systems are unforgiving of vague assumptions and hidden edge cases. To make the project hold together, we had to be unusually explicit about architecture, operator semantics, failure handling, and test coverage. In practice, that pushed us toward more written design, more reviewable behavior, and more verification than a quick prototype would normally get.
 
+The result is a **spec-driven** development process, not vibe-coding. Every feature starts as a written plan — an architecture decision record, a gap analysis, or a phased implementation spec — before any code is generated. The [`plans/`](plans/) directory contains over 110 documents (~72,500 lines) covering operator semantics, CDC tradeoffs, performance strategies, ecosystem comparisons, and edge case catalogues. Agents work from these specs; the specs are reviewed and revised by humans. This is what makes it possible to maintain coherence across a large codebase without manually editing every line: the design is explicit, the invariants are written down, and the tests verify both.
+
 We also do not think the use of AI should lower the standard for trust. If anything, it raises it. The point of the experiment was not to ask people to trust the toolchain; it was to see whether disciplined use of coding agents could help produce a serious, inspectable PostgreSQL extension. Whether that worked is for readers and users to judge, but the intent is simple: make the code, the tests, the documentation, and the tradeoffs visible enough that the project can stand on its own merits.
 
 ## Key Features
@@ -67,18 +69,8 @@ Every operator listed here works in `DIFFERENTIAL` mode (incremental delta compu
 | **Joins** | `NATURAL JOIN` | ✅ Full | Resolved at parse time; explicit equi-join synthesized |
 | **Joins** | Nested joins (3+ tables) | ✅ Full | `a JOIN b JOIN c` — snapshot subqueries with disambiguated columns |
 | **Aggregation** | `GROUP BY` + `COUNT`, `SUM`, `AVG` | ✅ Full | Fully algebraic — no rescan needed |
-| **Aggregation** | `GROUP BY` + `MIN`, `MAX` | ✅ Full | Semi-algebraic — uses `LEAST`/`GREATEST` merge; per-group rescan when extremum is deleted |
-| **Aggregation** | `GROUP BY` + `BOOL_AND`, `BOOL_OR` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `STRING_AGG`, `ARRAY_AGG` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `JSON_AGG`, `JSONB_AGG` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `BIT_AND`, `BIT_OR`, `BIT_XOR` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `JSON_OBJECT_AGG`, `JSONB_OBJECT_AGG` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `STDDEV`, `STDDEV_POP`, `STDDEV_SAMP` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `GROUP BY` + `VARIANCE`, `VAR_POP`, `VAR_SAMP` | ✅ Full | Group-rescan — affected groups are re-aggregated from source |
-| **Aggregation** | `MODE() WITHIN GROUP (ORDER BY …)` | ✅ Full | Ordered-set aggregate — group-rescan strategy |
-| **Aggregation** | `PERCENTILE_CONT` / `PERCENTILE_DISC` `WITHIN GROUP (ORDER BY …)` | ✅ Full | Ordered-set aggregate — group-rescan strategy |
-| **Aggregation** | `CORR`, `COVAR_*`, `REGR_*` (12 regression aggregates) | ✅ Full | Group-rescan strategy |
-| **Aggregation** | `JSON_ARRAYAGG`, `JSON_OBJECTAGG` (SQL standard) | ✅ Full | Group-rescan strategy; PostgreSQL 16+ |
+| **Aggregation** | `GROUP BY` + `MIN`, `MAX` | ✅ Full | Semi-algebraic — `LEAST`/`GREATEST` merge; per-group rescan on extremum deletion |
+| **Aggregation** | 30+ other aggregates (`STRING_AGG`, `ARRAY_AGG`, `BOOL_AND/OR`, `JSON[B]_AGG`, `STDDEV`, `VARIANCE`, `MODE`, `PERCENTILE_*`, `CORR`, `COVAR_*`, `REGR_*`, etc.) | ✅ Full | Group-rescan — affected groups re-aggregated from source |
 | **Aggregation** | `FILTER (WHERE …)` on aggregates | ✅ Full | Filter predicate applied within delta computation |
 | **Deduplication** | `DISTINCT` | ✅ Full | Reference-counted multiplicity tracking |
 | **Deduplication** | `DISTINCT ON (…)` | ✅ Full | Auto-rewritten to `ROW_NUMBER()` window subquery |
@@ -123,16 +115,16 @@ See [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) for the full differentiation 
 ### Prerequisites
 
 - PostgreSQL 18.x
-- Rust 1.82+ with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17.x
+- Rust 1.85+ (edition 2024) with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17.x
 
 ### Install
 
 ```bash
 # Build and install the extension
-cargo pgrx install --release --pg-config $(pg_config --bindir)/pg_config
+cargo pgrx install --release
 
 # Or package for deployment
-cargo pgrx package --pg-config $(pg_config --bindir)/pg_config
+cargo pgrx package
 ```
 
 Add to `postgresql.conf`:
@@ -155,7 +147,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle-ext:0.10.0
+docker pull ghcr.io/grove/pg_trickle-ext:0.12.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -169,7 +161,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/grove/pg_trickle-ext:0.10.0
+          reference: ghcr.io/grove/pg_trickle-ext:0.12.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -249,7 +241,7 @@ SELECT pgtrickle.drop_stream_table('regional_totals');
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) | Supported operators and differentiation rules |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | GUC variables and tuning guide |
-| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.12.0) |
+| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.13.0) |
 
 ### Research & Plans
 
@@ -368,23 +360,15 @@ Supported SQL features include all DIFFERENTIAL-mode constructs: JOINs, aggregat
 ## Testing
 
 ```bash
-# Unit tests (no database required)
-cargo test --lib
-
-# Integration tests (requires Docker for Testcontainers)
-cargo test --test '*'
-
-# Property-based tests
-cargo test --test property_tests
-
-# All tests
-cargo test
-
-# Benchmarks
-cargo bench
+just test-unit           # Pure Rust unit tests (no Docker needed)
+just test-integration    # Testcontainers-based integration tests
+just test-light-e2e      # Light E2E (stock postgres container, fast)
+just test-e2e            # Full E2E (custom Docker image)
+just test-all            # All of the above + pgrx tests
+just bench               # Criterion benchmarks
 ```
 
-**Test counts:** ~1,590 unit tests + integration tests + ~1,260 E2E tests.
+**Test counts:** ~1,710 unit tests + integration tests + ~1,280 E2E tests.
 
 ### Code Coverage
 
