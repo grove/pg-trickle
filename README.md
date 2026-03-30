@@ -104,6 +104,31 @@ For use cases that require read-your-writes consistency, IMMEDIATE mode maintain
 
 High-churn tables benefit from automatic compaction of CDC change buffers, which collapses cancelling INSERT/DELETE pairs and sequential changes to the same row, reducing delta scan overhead by **50–90%**.
 
+### Write-Path Overhead
+
+Incremental view maintenance is not free on the write side. CDC triggers add overhead to every INSERT, UPDATE, and DELETE on source tables. The trade-off is intentional: atomic, transactional change tracking with zero data loss, in exchange for modest write-side cost.
+
+**Per-row trigger overhead: 20–55 µs.** At typical OLTP write rates (< 1,000 writes/sec per source), this adds **< 5%** to DML latency — well below network round-trip time.
+
+**Write amplification** (measured via [E2E CDC overhead benchmarks](docs/BENCHMARK.md)):
+
+| Operation | Write Amplification |
+|---|---|
+| Single-row INSERT | ~2.0x |
+| Bulk INSERT (10K rows) | ~2.1x |
+| Bulk UPDATE (10K rows) | ~2.2x |
+| Bulk DELETE (10K rows) | ~2.3x |
+
+Several layers reduce this cost automatically:
+
+- **Hybrid CDC** — triggers bootstrap change capture with zero config; when `wal_level = logical` is available, the system transitions to WAL-based capture for lower write-side overhead (~5 µs/row). Controlled by `pg_trickle.cdc_mode` (default: `auto`).
+- **Columnar change tracking** — CDC records only the columns referenced by the defining query, using a VARBIT bitmask. UPDATEs that touch only unreferenced columns are skipped entirely, reducing delta volume by **50–90%** for wide tables.
+- **Delta predicate pushdown** — WHERE predicates from the defining query are injected into change buffer scans, filtering irrelevant changes at read time (**5–10x** delta volume reduction for selective queries).
+- **Event-driven scheduler wake** — CDC triggers emit `pg_notify()` to wake the scheduler immediately instead of polling, reducing propagation latency from ~515 ms to ~15 ms median.
+- **Adaptive FULL fallback** — when the change ratio exceeds a threshold (default: 50%), the engine automatically switches to FULL refresh for that cycle, avoiding the case where differential is slower than recomputation.
+
+For write-heavy workloads where trigger overhead is a concern, FULL refresh mode bypasses CDC entirely — no triggers are installed, and each refresh re-executes the full query.
+
 For full benchmark methodology and how to run your own benchmarks, see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## SQL Support
