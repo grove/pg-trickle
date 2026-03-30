@@ -197,6 +197,45 @@ pub struct DiffContext {
     snapshot_cte_cache: HashMap<String, String>,
 }
 
+/// Build a unique cache key for an OpTree's pre-change snapshot CTE.
+///
+/// For Scan nodes, uses the table alias. For join nodes, collects all
+/// leaf Scan aliases in tree order and joins them with `+`. This ensures
+/// that `(t1 ⋈ t2)` and `(t1 ⋈ t2) ⋈ t3` get distinct cache keys even
+/// though both have `alias() == "join"`.
+fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> String {
+    use crate::dvm::parser::OpTree;
+    fn collect_leaf_aliases(op: &OpTree, out: &mut Vec<String>) {
+        match op {
+            OpTree::Scan { alias, .. } | OpTree::CteScan { alias, .. } => {
+                out.push(alias.clone());
+            }
+            OpTree::InnerJoin { left, right, .. }
+            | OpTree::LeftJoin { left, right, .. }
+            | OpTree::FullJoin { left, right, .. } => {
+                collect_leaf_aliases(left, out);
+                collect_leaf_aliases(right, out);
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Distinct { child }
+            | OpTree::Window { child, .. }
+            | OpTree::Aggregate { child, .. } => {
+                collect_leaf_aliases(child, out);
+            }
+            OpTree::Subquery { child, .. } => {
+                collect_leaf_aliases(child, out);
+            }
+            _ => {
+                out.push(op.alias().to_string());
+            }
+        }
+    }
+    let mut aliases = Vec::new();
+    collect_leaf_aliases(op, &mut aliases);
+    aliases.join("+")
+}
+
 impl DiffContext {
     /// Create a new differentiation context.
     pub fn new(prev_frontier: Frontier, new_frontier: Frontier) -> Self {
@@ -486,7 +525,7 @@ impl DiffContext {
     /// or materialize based on cost. When the reference count reaches ≥3
     /// (checked retroactively), the CTE is promoted to MATERIALIZED.
     pub fn get_or_register_snapshot_cte(&mut self, op: &crate::dvm::parser::OpTree) -> String {
-        let cache_key = op.alias().to_string();
+        let cache_key = snapshot_cache_key(op);
 
         if let Some(cte_name) = self.snapshot_cte_cache.get(&cache_key) {
             return cte_name.clone();
