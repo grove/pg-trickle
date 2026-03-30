@@ -531,9 +531,10 @@ impl E2eDb {
         db.execute("ALTER SYSTEM SET max_wal_size = '1GB'").await;
         // Cap temp file usage per query to prevent runaway disk
         // consumption from CTE materialisation and sort spills.
-        // DI-1 (CTE caching) + DI-2 (NOT EXISTS anti-join) reduced
-        // per-leaf snapshot pressure, but Q05/Q09 6-table join delta
-        // SQL still exceeds this via cascading intermediate CTEs.
+        // DI-11 deep-join planner hints (SET LOCAL temp_file_limit=-1)
+        // override this per-transaction for 5+ table join delta queries,
+        // but the system-wide cap protects against unlimited growth from
+        // other queries (initial full refresh, IMMEDIATE IVM triggers).
         db.execute("ALTER SYSTEM SET temp_file_limit = '4GB'").await;
         // Aggressive autovacuum: change-buffer tables and stream tables
         // accumulate dead tuples rapidly during differential refreshes.

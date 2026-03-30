@@ -246,6 +246,15 @@ pub fn query_join_scan_count(query: &str) -> Result<usize, PgTrickleError> {
     Ok(operators::join_common::join_scan_count(&result.tree))
 }
 
+/// Count the total number of Scan nodes in the defining query, traversing
+/// through ALL node types (Aggregate, Window, Distinct, etc.).
+/// Used by DI-11 planner hints to detect deep-join queries that need
+/// aggressive plan guidance.
+pub fn query_total_scan_count(query: &str) -> Result<usize, PgTrickleError> {
+    let result = parse_defining_query_full(query)?;
+    Ok(operators::join_common::total_scan_count(&result.tree))
+}
+
 /// Check whether an OpTree is a "scan-chain" — only Scan, Filter, Project,
 /// and Subquery nodes (no Aggregate, Join, UnionAll, Distinct, Window,
 /// RecursiveCte, or CteScan).

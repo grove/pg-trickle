@@ -1438,6 +1438,35 @@ pub fn join_scan_count(op: &OpTree) -> usize {
     }
 }
 
+/// Count the total number of Scan nodes in the operator tree, traversing
+/// through ALL node types including Aggregate, Window, Distinct, etc.
+/// Used by the DI-11 planner hints to detect deep-join queries.
+pub fn total_scan_count(op: &OpTree) -> usize {
+    match op {
+        OpTree::Scan { .. } => 1,
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => total_scan_count(left) + total_scan_count(right),
+        OpTree::SemiJoin { left, right, .. } | OpTree::AntiJoin { left, right, .. } => {
+            total_scan_count(left) + total_scan_count(right)
+        }
+        OpTree::Filter { child, .. }
+        | OpTree::Project { child, .. }
+        | OpTree::Subquery { child, .. } => total_scan_count(child),
+        OpTree::Aggregate { child, .. }
+        | OpTree::Window { child, .. }
+        | OpTree::Distinct { child, .. } => total_scan_count(child),
+        OpTree::UnionAll { children, .. } => children.iter().map(total_scan_count).sum(),
+        OpTree::CteScan { body, .. } => body.as_ref().map_or(0, |b| total_scan_count(b)),
+        OpTree::RecursiveCte {
+            base, recursive, ..
+        } => total_scan_count(base) + total_scan_count(recursive),
+        OpTree::RecursiveSelfRef { .. } => 0,
+        // Intersect, Except, LateralFunction, Values, etc.
+        _ => 0,
+    }
+}
+
 /// Returns true when the pre-change snapshot (via per-leaf CTE-based
 /// reconstruction) should be used for the given child node.  This is
 /// safe when:
@@ -1460,10 +1489,26 @@ pub fn join_scan_count(op: &OpTree) -> usize {
 ///
 /// SemiJoin/AntiJoin-containing subtrees still fall back to L₁/R₁
 /// (post-change) to avoid the Q21-type numwait regression.
-pub fn use_pre_change_snapshot(child: &OpTree, inside_semijoin: bool) -> bool {
-    is_simple_child(child)
-        || !is_join_child(child)
-        || (!contains_semijoin(child) && !inside_semijoin)
+///
+/// DI-11: Deep join children (≥ `deep_scan_threshold` scans) also fall
+/// back to L₁ + Part 3 correction — the per-leaf CTE reconstruction at
+/// that depth generates 100+ GB of temp files from cascading hash joins.
+pub fn use_pre_change_snapshot(
+    child: &OpTree,
+    inside_semijoin: bool,
+    deep_scan_threshold: usize,
+) -> bool {
+    if is_simple_child(child) || !is_join_child(child) {
+        return true;
+    }
+    if contains_semijoin(child) || inside_semijoin {
+        return false;
+    }
+    // DI-11: For deep join children, skip L₀ reconstruction and use
+    // L₁ + Part 3 correction instead. The per-leaf CTE snapshot at
+    // this depth generates enormous temp file spills.
+    let sc = join_scan_count(child);
+    sc < deep_scan_threshold
 }
 
 #[cfg(test)]
@@ -1723,7 +1768,7 @@ mod tests {
     fn test_pre_change_snapshot_simple_scan() {
         let child = scan(1, "t", "public", "t", &["id"]);
         assert!(
-            use_pre_change_snapshot(&child, false),
+            use_pre_change_snapshot(&child, false, 999),
             "Simple scan should use pre-change snapshot"
         );
     }
@@ -1734,7 +1779,7 @@ mod tests {
         let b = scan(2, "b", "public", "b", &["id"]);
         let j = inner_join(eq_cond("a", "id", "b", "id"), a, b);
         assert!(
-            use_pre_change_snapshot(&j, false),
+            use_pre_change_snapshot(&j, false, 999),
             "2-scan join should use pre-change snapshot (EC-01 applies)"
         );
     }
@@ -1750,7 +1795,7 @@ mod tests {
         let j_ab = inner_join(eq_cond("a", "id", "b", "id"), a, b);
         let j_abc = inner_join(eq_cond("a", "id", "c", "id"), j_ab, c);
         assert!(
-            use_pre_change_snapshot(&j_abc, false),
+            use_pre_change_snapshot(&j_abc, false, 999),
             "3-scan join should use per-leaf pre-change snapshot (EC01B-1)"
         );
     }
@@ -1762,7 +1807,7 @@ mod tests {
         let j = inner_join(eq_cond("a", "id", "b", "id"), a, b);
         // inside_semijoin=true forces fallback regardless of scan count
         assert!(
-            !use_pre_change_snapshot(&j, true),
+            !use_pre_change_snapshot(&j, true, 999),
             "Inside semijoin should fall back even for 2-scan join"
         );
     }
@@ -1776,7 +1821,7 @@ mod tests {
             scan(1, "t", "public", "t", &["id", "region"]),
         );
         assert!(
-            use_pre_change_snapshot(&child, false),
+            use_pre_change_snapshot(&child, false, 999),
             "Non-join child (Aggregate) should use pre-change snapshot"
         );
     }
@@ -1800,7 +1845,7 @@ mod tests {
         let outer = inner_join(eq_cond("a", "b_id", "b", "id"), a, inner);
         assert_eq!(join_scan_count(&outer), 3);
         assert!(
-            use_pre_change_snapshot(&outer, false),
+            use_pre_change_snapshot(&outer, false, 999),
             "≥3-scan join subtree should use per-leaf pre-change snapshot (EC01B-1)"
         );
     }
@@ -1817,7 +1862,7 @@ mod tests {
         let abcd = inner_join(eq_cond("a", "id", "b", "id"), a, bcd);
         assert_eq!(join_scan_count(&abcd), 4);
         assert!(
-            use_pre_change_snapshot(&abcd, false),
+            use_pre_change_snapshot(&abcd, false, 999),
             "4-scan join subtree should use per-leaf pre-change snapshot (EC01B-1)"
         );
     }
@@ -1833,7 +1878,7 @@ mod tests {
         let right_outer = inner_join(eq_cond("r2", "id", "r3", "id"), right_inner, r3);
         assert_eq!(join_scan_count(&right_outer), 3);
         assert!(
-            use_pre_change_snapshot(&right_outer, false),
+            use_pre_change_snapshot(&right_outer, false, 999),
             "Right subtree with 3 scans should use per-leaf pre-change snapshot (EC01B-1)"
         );
     }
@@ -1846,8 +1891,52 @@ mod tests {
         let j = inner_join(eq_cond("a", "id", "b", "id"), a, b);
         assert_eq!(join_scan_count(&j), 2);
         assert!(
-            use_pre_change_snapshot(&j, false),
+            use_pre_change_snapshot(&j, false, 999),
             "2-scan join should allow pre-change snapshot"
+        );
+    }
+
+    // ── DI-11: Deep join L₀ threshold tests ────────────────────────
+
+    #[test]
+    fn test_di11_deep_join_4_scans_skips_l0_at_threshold_4() {
+        // 4-scan join child with threshold=4 → skip L₀, use L₁ + Part 3
+        let a = scan(1, "a", "public", "a", &["id"]);
+        let b = scan(2, "b", "public", "b", &["id"]);
+        let c = scan(3, "c", "public", "c", &["id"]);
+        let d = scan(4, "d", "public", "d", &["id"]);
+        let ab = inner_join(eq_cond("a", "id", "b", "id"), a, b);
+        let abc = inner_join(eq_cond("b", "id", "c", "id"), ab, c);
+        let abcd = inner_join(eq_cond("c", "id", "d", "id"), abc, d);
+        assert_eq!(join_scan_count(&abcd), 4);
+        assert!(
+            !use_pre_change_snapshot(&abcd, false, 4),
+            "4-scan join at threshold=4 should skip L₀"
+        );
+    }
+
+    #[test]
+    fn test_di11_deep_join_3_scans_keeps_l0_at_threshold_4() {
+        // 3-scan join child with threshold=4 → keep L₀
+        let a = scan(1, "a", "public", "a", &["id"]);
+        let b = scan(2, "b", "public", "b", &["id"]);
+        let c = scan(3, "c", "public", "c", &["id"]);
+        let ab = inner_join(eq_cond("a", "id", "b", "id"), a, b);
+        let abc = inner_join(eq_cond("b", "id", "c", "id"), ab, c);
+        assert_eq!(join_scan_count(&abc), 3);
+        assert!(
+            use_pre_change_snapshot(&abc, false, 4),
+            "3-scan join at threshold=4 should keep L₀"
+        );
+    }
+
+    #[test]
+    fn test_di11_simple_scan_unaffected_by_threshold() {
+        // Simple scan child always uses L₀ regardless of threshold
+        let child = scan(1, "t", "public", "t", &["id"]);
+        assert!(
+            use_pre_change_snapshot(&child, false, 1),
+            "Simple scan should always use L₀ even at threshold=1"
         );
     }
 

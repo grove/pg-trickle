@@ -77,15 +77,9 @@ fn rf_count() -> usize {
 
 /// Queries allowed to be skipped in DIFFERENTIAL mode.
 const DIFFERENTIAL_SKIP_ALLOWLIST: &[&str] = &[
-    // q05: 6-table join delta SQL generates cascading intermediate CTEs
-    // that exceed temp_file_limit even with DI-1 (CTE caching) + DI-2
-    // (NOT EXISTS anti-join). The per-level join decomposition (Parts 1/2/3)
-    // for 5 join levels produces O(n²) CTE fan-out. Needs delta SQL
-    // restructuring (e.g., semi-naive iteration) to fit within temp limits.
-    "q05",
-    // q09: same root cause as q05 — 6-table join (nation, supplier, part,
-    // partsupp, orders, lineitem) exceeds temp_file_limit.
-    "q09",
+    // DI-11 deep-join planner hints (disable nestloop, raise work_mem,
+    // bump join_collapse_limit, temp_file_limit=-1) resolved Q05/Q09.
+    // All 22 TPC-H queries now pass DIFFERENTIAL mode.
 ];
 
 /// Queries allowed to be skipped in IMMEDIATE mode.

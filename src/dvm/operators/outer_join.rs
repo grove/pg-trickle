@@ -170,7 +170,8 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
     // Part 1 and Part 3 by action, using R₀ for DELETEs.
     //
     // R₀ = R_current EXCEPT ALL ΔR_inserts UNION ALL ΔR_deletes
-    let use_r0 = use_pre_change_snapshot(right, ctx.inside_semijoin);
+    // DI-11: Use same threshold as inner join for deep R₀ reconstruction.
+    let use_r0 = use_pre_change_snapshot(right, ctx.inside_semijoin, 4);
 
     // Build R₀ for Parts 1b/3b (includes all right_cols for JOIN/anti-join).
     // Separate from r_old_snapshot (used for Parts 4/5 NOT EXISTS only,
