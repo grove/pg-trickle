@@ -8,7 +8,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [0.13.0 — Unreleased](#0130--unreleased)
+- [0.13.0 — 2026-03-31](#0130--2026-03-31)
 - [0.12.0 — 2026-03-28](#0120--2026-03-28)
 - [0.11.0 — 2026-03-26](#0110--2026-03-26)
 - [0.10.0 — 2026-03-25](#0100--2026-03-25)
@@ -31,137 +31,184 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [0.13.0] — Unreleased
+## [0.13.0] — 2026-03-31
 
-0.13.0 is the **Scalability Foundations** release. It makes pg_trickle
-significantly more efficient for wide-table and multi-consumer workloads,
-adds powerful partitioning options, and improves operational visibility
-with new profiling and diagnostic functions.
+0.13.0 is the **Scalability Foundations** release. It makes pg_trickle handle
+large tables, complex queries, and multi-tenant deployments much more
+efficiently — and it achieves a major milestone: **all 22 TPC-H benchmark
+queries now run in incremental (DIFFERENTIAL) mode**, meaning the engine no
+longer needs to fall back to slow full-refresh for any standard analytical
+query pattern.
 
-### Columnar Change Tracking (A-2)
+### Smarter Change Detection for Wide Tables
 
-Wide tables (50+ columns) where UPDATEs touch only a few columns used to
-generate full-row deltas, forcing the incremental engine to process all
-columns even when most were unchanged. pg_trickle now classifies columns
-as **key columns** (used in GROUP BY, JOIN ON, WHERE) vs. **value columns**,
-and adds a `__pgt_key_changed` annotation to each delta row.
+When you UPDATE a few columns in a large table — say, changing a `status`
+column in a 60-column table — pg_trickle used to treat every column as
+potentially changed, doing extra work to keep all downstream views up to date.
 
-When only value columns change:
-- **Scan→Aggregate queries** use a P5 fast path that emits a single net-correction
-  row (`new - old`) instead of the standard DELETE+INSERT pair — halving delta volume.
-- **MERGE updates** filter out D-side rows, converting DELETE+INSERT into a single
-  UPDATE — enabling HOT updates (no index churn) and reducing WAL volume.
+Now it knows the difference. Columns used in GROUP BY, JOIN, or WHERE clauses
+are "key columns"; everything else is a "value column." When only value columns
+change, the engine takes a shortcut: it sends a single correction row instead
+of a full delete-and-reinsert pair. For wide-table workloads, this can cut the
+volume of data processed by 50% or more.
 
-### Shared Change Buffers (D-4)
+### Shared Change Buffers
 
-Multiple stream tables reading from the same source table now share a single
-change buffer (`changes_{source_oid}`) instead of each maintaining its own copy.
-The buffer captures a column superset (union of all consumers' `columns_used`
-sets) and uses per-consumer frontier tracking with `MIN(frontier)` cleanup
-coordination — the slowest consumer protects buffer rows needed by all.
+If you have several stream tables watching the same source table, each one used
+to maintain its own private copy of the change log. That's wasteful. Now they
+share a single change buffer per source, and each consumer simply tracks how
+far it has read. The slowest reader protects the buffer for everyone.
 
-New SQL function: **`pgtrickle.shared_buffer_stats()`** — returns per-buffer
-observability: source table, consumer count, consumer list, columns tracked,
-safe frontier LSN, row count, and partitioning status.
+You can see how this is working with the new `pgtrickle.shared_buffer_stats()`
+function — it shows each buffer, who's reading from it, how many rows are
+queued, and whether it's been automatically partitioned for performance.
 
-### Auto Buffer Partitioning (PERF-2)
+### Automatic Buffer Partitioning
 
-The `pg_trickle.buffer_partitioning` GUC now supports an `'auto'` mode that
-starts with unpartitioned buffers and automatically promotes to `PARTITION BY
-RANGE (lsn)` when a buffer accumulates more rows than `compact_threshold` in a
-single refresh cycle. Once promoted, cleanup uses O(1) partition detach instead
-of O(n) DELETE. Keeps overhead low for quiet sources while scaling to
-high-throughput ones.
+Set `pg_trickle.buffer_partitioning = 'auto'` and pg_trickle will start with
+simple, unpartitioned change buffers. If a buffer starts accumulating a lot of
+rows (high-throughput sources), it automatically converts to a partitioned
+layout where old data can be removed almost instantly instead of deleting rows
+one by one.
 
-### Partitioning Enhancements
+### More Partitioning Options for Stream Tables
 
-Building on v0.11.0's RANGE partitioning foundation:
+Building on the RANGE partitioning added in v0.11.0, you can now partition
+stream tables in three additional ways:
 
-- **Multi-column partition keys** — `partition_by='col_a,col_b'` with composite
-  `ROW()` comparison predicates.
-- **LIST partitioning** — `partition_by='LIST:status'` with `IN (…)` predicate
-  injection for low-cardinality columns.
-- **HASH partitioning** — `partition_by='HASH:customer_id:8'` with per-partition
-  MERGE loop targeting only affected child partitions.
-- **ALTER partition key** — `alter_stream_table(partition_by => …)` repartitions
-  existing storage in place with data preservation.
-- **Default partition warning** — emits a `WARNING` when the catch-all default
-  partition grows, prompting creation of named partitions.
+- **Multi-column keys** — partition by a combination of columns
+  (`partition_by='region,year'`)
+- **LIST partitioning** — for low-cardinality columns like `status` or `type`
+  (`partition_by='LIST:status'`)
+- **HASH partitioning** — for even distribution across a fixed number of
+  partitions (`partition_by='HASH:customer_id:8'`)
 
-### MERGE Profiling & Delta SQL Inspection
+You can also change the partition key of an existing stream table at runtime
+with `alter_stream_table(partition_by => ...)` — data is preserved
+automatically. If rows land in the default (catch-all) partition, a WARNING
+is emitted to prompt you to add explicit partitions.
 
-Two new functions for understanding and optimizing refresh performance:
+### All 22 TPC-H Queries Now Run Incrementally
 
-- **`pgtrickle.explain_delta(st_name, format)`** — captures `EXPLAIN` output
-  for the auto-generated delta SQL query (text, JSON, XML, or YAML format).
-  Set `PGS_PROFILE_DELTA=1` to auto-capture plans to `/tmp/delta_plans/` during
-  E2E/bench runs.
-- **`pgtrickle.dedup_stats()`** — reports MERGE deduplication frequency:
-  `total_diff_refreshes`, `dedup_needed`, `dedup_ratio_pct`. If the ratio
-  exceeds 10% in production, a two-pass MERGE strategy RFC is warranted.
+The DVM (differential view maintenance) engine received its most significant
+set of improvements yet, targeting the complex multi-table join patterns found
+in standard analytical benchmarks:
 
-### Multi-Tenant Scheduler Isolation (C-3)
+- **Smarter pre-image lookups** — instead of reconstructing what the data
+  looked like before a change by subtracting deltas (expensive for large
+  tables), the engine now uses targeted index lookups that only touch the rows
+  that actually changed.
+- **Predicate pushdown** — WHERE conditions from the original query are now
+  pushed into the delta computation, preventing unnecessary cross-products
+  in multi-table joins.
+- **Deep-join optimizations** — queries joining 5+ tables get automatic planner
+  hints (more memory, smarter join strategies) to avoid spilling to disk.
+- **Scan-count-aware strategy selector** — queries that exceed configurable
+  join complexity or delta volume thresholds automatically fall back to full
+  refresh on a per-query basis rather than failing.
 
-New GUC: **`pg_trickle.per_database_worker_quota`** — limits how many parallel
-refresh workers each database can claim from the shared pool. Priority ordering
-under contention: IMMEDIATE > Hot > Warm > Cold stream tables. Burst capacity
-up to 150% of quota when the cluster is under 80% loaded.
+The result: all 22 TPC-H queries pass at SF=0.01 in DIFFERENTIAL mode
+with zero drift across 3 refresh cycles. The `DIFFERENTIAL_SKIP_ALLOWLIST`
+(queries that previously required full refresh) is now empty.
+
+### Refresh Performance Inspection Tools
+
+Two new functions help you understand what pg_trickle is doing under the hood:
+
+- **`pgtrickle.explain_delta(name, format)`** — shows you the query plan for
+  the auto-generated delta SQL, the same way `EXPLAIN` works for regular
+  queries. Available in text, JSON, XML, or YAML format.
+- **`pgtrickle.dedup_stats()`** — reports how often concurrent writes produce
+  duplicate entries that need pre-processing before the MERGE step.
+
+### Multi-Tenant Worker Quotas
+
+New setting: **`pg_trickle.per_database_worker_quota`** — if you run many
+databases on one PostgreSQL cluster, this prevents a busy database from
+monopolizing all the refresh workers. Workers are assigned by priority
+(immediate-mode tables first, then hot, warm, and cold), with burst capacity
+up to 150% when other databases are idle.
 
 ### TPC-H Benchmark Harness
 
-`TPCH_BENCH=1` mode instruments TPC-H tests with warm-up cycles and structured
-`[TPCH_BENCH]` per-cycle output with a per-query median/P95/MERGE% summary
-table. Five OpTree Criterion micro-benchmarks (`q01`, `q05`, `q08`, `q18`,
-`q21`) measure pure-Rust delta SQL generation time without a database.
-New `just bench-tpch`, `just bench-tpch-fast`, `just bench-tpch-large` targets.
+You can now measure refresh performance across all 22 TPC-H queries in a
+structured way. Run `just bench-tpch` to get per-query timing, FULL vs.
+DIFFERENTIAL comparison, and P95 latency numbers. Five synthetic benchmarks
+(`q01`, `q05`, `q08`, `q18`, `q21`) also measure the pure Rust delta-SQL
+generation time without needing a database.
 
-### SQL Coverage
+### Broader SQL Support
 
-- **`IS JSON` predicates** (PG 16+) — `expr IS JSON OBJECT/ARRAY/SCALAR/WITH UNIQUE KEYS`
-  now accepted in DIFFERENTIAL defining queries.
-- **SQL/JSON constructors** (PG 16+) — `JSON_OBJECT`, `JSON_ARRAY`,
-  `JSON_OBJECTAGG`, `JSON_ARRAYAGG` now accepted.
-- **Recursive CTE audit** — non-monotone recursive terms (EXCEPT, aggregation)
-  correctly fall back to recomputation; G1.3 downgraded to P4.
+- **`IS JSON` predicates** (PG 16+) — expressions like
+  `expr IS JSON OBJECT` now work in incremental mode.
+- **SQL/JSON constructors** (PG 16+) — `JSON_OBJECT(...)`, `JSON_ARRAY(...)`,
+  `JSON_OBJECTAGG(...)`, and `JSON_ARRAYAGG(...)` are now accepted.
+- **Recursive CTEs** — recursive queries with non-monotone operators (like
+  `EXCEPT`) correctly fall back to full refresh instead of producing
+  wrong results.
 
-### dbt Macro Updates
+### dbt Integration Updates
 
-- `{{ config(partition_by='customer_id') }}` — wire through to
-  `create_stream_table()` at creation time.
-- `{{ config(fuse='auto', fuse_ceiling=100000, fuse_sensitivity=3) }}` — wire
-  through to `alter_stream_table()` with change detection (only calls SQL when
-  values differ from catalog state).
+If you use dbt-pgtrickle, you can now set partitioning and fuse options
+directly from dbt model config:
+
+- `{{ config(partition_by='customer_id') }}` for partitioned stream tables
+- `{{ config(fuse='auto', fuse_ceiling=100000, fuse_sensitivity=3) }}` for
+  circuit-breaker protection
+
+### Bug Fixes
+
+- **Scheduler cascade fix** — stream tables downstream of FULL-mode upstream
+  tables now detect changes correctly via a `last_refresh_at` fallback,
+  preventing stale data in chains where the upstream uses full refresh.
+- **SUM(CASE WHEN ...) drift fix** — aggregate expressions using CASE were
+  occasionally producing slightly wrong incremental results; these are now
+  correctly detected and processed via a group rescan.
+- **Duplicate column DDL fix** — removed a duplicate column definition in the
+  `pgt_stream_tables` DDL that could cause issues on fresh installs.
+
+### Testing Improvements
+
+- New regression test suite targeting 9 structural weaknesses: join multi-cycle
+  correctness (7 tests), differential-equals-full equivalence (11 tests), DVM
+  operator execution, failure recovery, and MERGE template unit tests.
+- E2E test infrastructure now uses template databases, cutting per-test setup
+  time significantly.
 
 ### New SQL Functions
 
-| Function | Returns | Purpose |
-|----------|---------|---------|
-| `pgtrickle.explain_delta(name, format)` | `SETOF TEXT` | Delta SQL query plan inspection |
-| `pgtrickle.dedup_stats()` | `TABLE(total, dedup_needed, ratio_pct)` | MERGE deduplication frequency |
-| `pgtrickle.shared_buffer_stats()` | `TABLE(source_oid, source_table, …)` | Per-buffer observability |
-| `pgtrickle.explain_refresh_mode(name)` | `TABLE(mode, reason)` | Why a ST got its refresh mode |
-| `pgtrickle.reset_fuse(name)` | `void` | Reset a blown fuse |
-| `pgtrickle.fuse_status()` | `TABLE(name, fuse_mode, state, …)` | Fuse state across all STs |
+| Function | Purpose |
+|----------|---------|
+| `pgtrickle.explain_delta(name, format)` | Show the query plan for the delta SQL |
+| `pgtrickle.dedup_stats()` | MERGE deduplication frequency counters |
+| `pgtrickle.shared_buffer_stats()` | Per-source change buffer status |
+| `pgtrickle.explain_refresh_mode(name)` | Why a stream table uses its current refresh mode |
+| `pgtrickle.reset_fuse(name)` | Reset a blown circuit-breaker fuse |
+| `pgtrickle.fuse_status()` | Fuse state across all stream tables |
 
-### Catalog Changes
+### New Catalog Columns
 
-Eight new columns on `pgtrickle.pgt_stream_tables`:
+Ten new columns on `pgtrickle.pgt_stream_tables`:
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| `effective_refresh_mode` | `TEXT` | Computed refresh mode (AUTO resolution) |
-| `fuse_mode` | `TEXT` | Fuse configuration: off/auto/manual |
-| `fuse_state` | `TEXT` | Current fuse state: armed/blown |
-| `fuse_ceiling` | `BIGINT` | Max change count before fuse blows |
-| `fuse_sensitivity` | `INT` | Consecutive cycles before trigger |
-| `blown_at` | `TIMESTAMPTZ` | When the fuse last blew |
-| `blow_reason` | `TEXT` | Why the fuse blew |
-| `st_partition_key` | `TEXT` | Partition key specification |
+| Column | Purpose |
+|--------|---------|
+| `effective_refresh_mode` | The actual refresh mode after AUTO resolution |
+| `fuse_mode` | Circuit-breaker configuration (off / auto / manual) |
+| `fuse_state` | Current fuse state (armed / blown) |
+| `fuse_ceiling` | Maximum change count before fuse blows |
+| `fuse_sensitivity` | Consecutive cycles above ceiling before triggering |
+| `blown_at` | When the fuse last blew |
+| `blow_reason` | Why the fuse blew |
+| `st_partition_key` | Partition key specification |
+| `max_differential_joins` | Maximum join count for differential mode |
+| `max_delta_fraction` | Maximum delta-to-table ratio for differential mode |
 
-### Updated SQL Functions
+### Upgrading
 
-`pgtrickle.alter_stream_table()` — new `partition_by` parameter for runtime
-partition key changes (add, change, or remove).
+Run `ALTER EXTENSION pg_trickle UPDATE;` after installing the new binaries.
+All new columns and functions are added automatically. No breaking changes —
+everything from v0.12.0 continues to work as before. See
+[UPGRADING.md](docs/UPGRADING.md) for details.
 
 ---
 
