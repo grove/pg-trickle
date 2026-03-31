@@ -224,35 +224,6 @@ pg_trickle is validated against the full TPC-H benchmark suite — all 22 standa
 | Drift detected | 0 |
 | Refresh failures | 0 |
 
-**Per-query FULL vs DIFFERENTIAL latency (SF=0.01, T1-B, avg over 3 cycles):**
-
-| Query | Tier | FULL (ms) | DIFF (ms) | Speedup |
-|---|---|---|---|---|
-| q02 | T1 | 24.6 | 16.9 | 1.45x |
-| q21 | T1 | 12.4 | 12.1 | 1.02x |
-| q13 | T1 | 9.4 | 18.3 | 0.51x |
-| q11 | T1 | 11.0 | 9.0 | 1.22x |
-| q08 | T1 | 18.0 | 43.7 | 0.41x |
-| q01 | T2 | 13.3 | 19.4 | 0.69x |
-| q05 | T2 | 15.0 | 202.5 | 0.07x |
-| q07 | T2 | 15.2 | 33.5 | 0.45x |
-| q09 | T2 | 15.6 | 129.5 | 0.12x |
-| q16 | T2 | 11.5 | 8.6 | 1.33x |
-| q22 | T2 | 10.4 | 17.0 | 0.61x |
-| q03 | T3 | 8.2 | 7.6 | 1.08x |
-| q04 | T3 | 12.0 | 20.5 | 0.58x |
-| q06 | T3 | 9.0 | 11.1 | 0.81x |
-| q10 | T3 | 9.6 | 8.4 | 1.13x |
-| q12 | T3 | 11.0 | 19.6 | 0.56x |
-| q14 | T3 | 10.6 | 21.2 | 0.50x |
-| q15 | T3 | 14.9 | 18.3 | 0.82x |
-| q17 | T3 | 11.5 | 51.4 | 0.22x |
-| q18 | T3 | 10.0 | 8.4 | 1.19x |
-| q19 | T3 | 12.3 | 29.8 | 0.41x |
-| q20 | T3 | 13.4 | 5663.0 | 0.00x |
-
-> **Note:** SF=0.01 is a very small dataset (1,500 orders). At this scale, FULL refresh is competitive because base table scans are cheap. q20 (a correlated subquery) is a known differential outlier — at higher scale factors where table scans dominate, differential speedups grow substantially. The `ADAPTIVE` fallback mode automatically selects FULL when the change ratio exceeds the threshold, covering the q20-class case.
-
 For full benchmark methodology and how to run your own benchmarks, see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Quick Start
@@ -388,13 +359,6 @@ SELECT pgtrickle.drop_stream_table('regional_totals');
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | GUC variables and tuning guide |
 | [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.13.0) |
 
-### Research & Plans
-
-| Document | Description |
-|---|---|
-| [plans/sql/PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) | Plan for `CREATE MATERIALIZED VIEW ... WITH (pgtrickle.stream)` syntax |
-| [plans/sql/REPORT_CUSTOM_SQL_SYNTAX.md](plans/sql/REPORT_CUSTOM_SQL_SYNTAX.md) | Research: PostgreSQL extension syntax mechanisms |
-
 ### Deep-Dive Tutorials
 
 | Tutorial | Description |
@@ -514,30 +478,6 @@ just bench               # Criterion benchmarks
 ```
 
 **Test counts:** ~1,660 unit tests + integration tests + ~1,130 E2E tests.
-
-### Code Coverage
-
-Generate coverage reports for unit tests using [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov):
-
-```bash
-# Full report (HTML + LCOV)
-just coverage
-
-# Or use the script directly
-./scripts/coverage.sh
-
-# LCOV only (for CI / Codecov upload)
-./scripts/coverage.sh --lcov
-
-# Quick terminal summary
-./scripts/coverage.sh --text
-```
-
-Reports are written to `coverage/`:
-- `coverage/html/index.html` — browsable HTML report
-- `coverage/lcov.info` — LCOV data for upload to [Codecov](https://codecov.io)
-
-Coverage is automatically collected and uploaded to Codecov on every push to `main` and on pull requests via the **Coverage** GitHub Actions workflow.
 
 ## Contributors
 
