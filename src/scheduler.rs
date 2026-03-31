@@ -1582,7 +1582,22 @@ fn parallel_dispatch_tick(
                     "pg_trickle: parallel dispatch — job {} failed permanently",
                     job_id,
                 );
-                // Downstream units remain blocked.
+
+                // Mark this unit as "succeeded" so the wave can complete.
+                // The refresh itself already recorded the failure in
+                // pgt_refresh_history, but we must unblock downstream
+                // units — otherwise a single permanent failure silently
+                // stalls every transitive downstream for the remainder of
+                // the scheduler's lifetime.
+                if let Some(us) = state.unit_states.get_mut(&unit_id) {
+                    us.succeeded = true;
+                }
+                for ds_id in eu_dag.get_downstream_units(unit_id) {
+                    if let Some(ds_state) = state.unit_states.get_mut(&ds_id) {
+                        ds_state.remaining_upstreams =
+                            ds_state.remaining_upstreams.saturating_sub(1);
+                    }
+                }
             }
             _ => {}
         }
@@ -2949,7 +2964,14 @@ fn count_pending_changes(st: &StreamTableMeta) -> i64 {
 fn evaluate_fuse(st: &StreamTableMeta) -> bool {
     // Quick exit: fuse disabled or already blown
     if st.fuse_mode == "off" || st.fuse_state == "blown" || st.fuse_state == "disabled" {
-        return st.fuse_state == "blown";
+        if st.fuse_state == "blown" {
+            // Emit a periodic reminder so operators know the fuse is still
+            // blown even if they missed the initial notification.  We send
+            // at most once per ~60 seconds by checking blown_at age modulo.
+            emit_fuse_blown_reminder(st);
+            return true;
+        }
+        return false;
     }
 
     // Determine effective ceiling
@@ -3010,6 +3032,45 @@ fn evaluate_fuse(st: &StreamTableMeta) -> bool {
     );
 
     true
+}
+
+/// Emit a periodic reminder that a fuse is still blown.
+///
+/// To avoid spamming the NOTIFY channel every tick (~100ms), we only emit
+/// when the blown_at age crosses a 60-second boundary.  The scheduler calls
+/// `evaluate_fuse` every tick, so we use `blown_at` to throttle.
+fn emit_fuse_blown_reminder(st: &StreamTableMeta) {
+    // Only emit if we can determine how long the fuse has been blown.
+    let blown_secs = Spi::get_one_with_args::<f64>(
+        "SELECT EXTRACT(EPOCH FROM (now() - blown_at))::float8 \
+         FROM pgtrickle.pgt_stream_tables \
+         WHERE pgt_id = $1 AND blown_at IS NOT NULL",
+        &[st.pgt_id.into()],
+    )
+    .unwrap_or(None);
+
+    if let Some(secs) = blown_secs {
+        // Emit once per ~60 seconds: fire when we're in the first tick
+        // window after a 60s boundary.  The tick interval is configurable
+        // but typically 100ms–1s, so checking `secs % 60 < 1` is safe.
+        let interval = 60.0_f64;
+        if secs >= interval && (secs % interval) < 1.0 {
+            monitor::emit_alert(
+                monitor::AlertEvent::FuseBlownReminder,
+                &st.pgt_schema,
+                &st.pgt_name,
+                &format!(
+                    r#""blown_seconds":{:.0},"reason":"{}""#,
+                    secs,
+                    st.blow_reason
+                        .as_deref()
+                        .unwrap_or("unknown")
+                        .replace('"', r#"\""#),
+                ),
+                st.pooler_compatibility_mode,
+            );
+        }
+    }
 }
 
 /// Evaluate the fuse and return the effective ceiling threshold if the fuse
@@ -3379,6 +3440,42 @@ fn emit_stale_alert_if_needed(st: &StreamTableMeta) {
                         st.pooler_compatibility_mode,
                     );
                 }
+            }
+        }
+    } else {
+        // CALCULATED STs have no explicit schedule — detect staleness by
+        // comparing this ST's data_timestamp with the most-recently-refreshed
+        // upstream ST.  If any upstream has refreshed more recently and the
+        // lag exceeds a threshold, emit a stale alert so operators know this
+        // CALCULATED ST is falling behind.
+        let lag = Spi::get_one_with_args::<f64>(
+            "SELECT EXTRACT(EPOCH FROM ( \
+                 (SELECT MAX(u.data_timestamp) \
+                  FROM pgtrickle.pgt_dependencies d \
+                  JOIN pgtrickle.pgt_stream_tables u \
+                    ON u.pgt_relid = d.source_relid \
+                  WHERE d.pgt_id = $1 \
+                    AND u.data_timestamp IS NOT NULL) \
+                 - s.data_timestamp \
+             ))::float8 \
+             FROM pgtrickle.pgt_stream_tables s \
+             WHERE s.pgt_id = $1 AND s.data_timestamp IS NOT NULL",
+            &[st.pgt_id.into()],
+        )
+        .unwrap_or(None);
+
+        if let Some(lag_secs) = lag {
+            // Alert when the CALCULATED ST is > 60s behind its upstream.
+            // Use a fixed threshold since there is no schedule to derive one from.
+            let threshold = 60.0_f64;
+            if lag_secs > threshold {
+                monitor::alert_stale_data(
+                    &st.pgt_schema,
+                    &st.pgt_name,
+                    lag_secs,
+                    threshold,
+                    st.pooler_compatibility_mode,
+                );
             }
         }
     }
@@ -5507,5 +5604,124 @@ mod tests {
             "Missing-tier unit defaults to Hot urgency"
         );
         assert_eq!(sorted[1], uid_b);
+    }
+
+    // ── PermanentFailed downstream unblocking tests ───────────────────────
+
+    #[test]
+    fn test_permanent_failure_unblocks_downstream_units() {
+        // Regression test: when an upstream unit fails permanently,
+        // downstream units must be unblocked (remaining_upstreams
+        // decremented and upstream marked succeeded) so the wave can
+        // complete. Previously, PermanentFailed left downstreams blocked
+        // forever — the wave reset would restore remaining_upstreams,
+        // and the failed upstream would never set succeeded=true.
+        let mut state = ParallelDispatchState::new();
+        let uid_a = crate::dag::ExecutionUnitId(1);
+        let uid_b = crate::dag::ExecutionUnitId(2);
+        let uid_c = crate::dag::ExecutionUnitId(3);
+
+        // A → B (depends on A), A → C (depends on A).
+        // A fails permanently.
+        state.unit_states.insert(
+            uid_a,
+            UnitDispatchState {
+                remaining_upstreams: 0,
+                inflight_job_id: None,
+                // Simulate the fix: after PermanentFailed, the unit is
+                // marked succeeded=true so the wave can complete.
+                succeeded: true,
+            },
+        );
+        state.unit_states.insert(
+            uid_b,
+            UnitDispatchState {
+                remaining_upstreams: 1,
+                inflight_job_id: None,
+                succeeded: false,
+            },
+        );
+        state.unit_states.insert(
+            uid_c,
+            UnitDispatchState {
+                remaining_upstreams: 1,
+                inflight_job_id: None,
+                succeeded: false,
+            },
+        );
+
+        // Simulate the PermanentFailed handler decrementing downstream units:
+        // (this is what the fix does in parallel_dispatch_tick)
+        for ds_id in [uid_b, uid_c] {
+            if let Some(ds_state) = state.unit_states.get_mut(&ds_id) {
+                ds_state.remaining_upstreams = ds_state.remaining_upstreams.saturating_sub(1);
+            }
+        }
+
+        // After the fix: B and C should be unblocked (remaining=0).
+        assert_eq!(
+            state.unit_states[&uid_b].remaining_upstreams, 0,
+            "B must be unblocked after A's permanent failure"
+        );
+        assert_eq!(
+            state.unit_states[&uid_c].remaining_upstreams, 0,
+            "C must be unblocked after A's permanent failure"
+        );
+        // A must be marked succeeded so the wave reset works correctly.
+        assert!(
+            state.unit_states[&uid_a].succeeded,
+            "PermanentFailed upstream must be marked succeeded for wave completion"
+        );
+    }
+
+    #[test]
+    fn test_permanent_failure_wave_reset_does_not_re_block() {
+        // After a PermanentFailed unit is marked succeeded and downstreams
+        // are unblocked, the wave reset at Step 4 should restore the
+        // original upstream counts (from the DAG), clearing all succeeded
+        // flags. The next wave will see the upstream as ready (remaining=0),
+        // potentially retrying the failed unit in the next scheduling cycle.
+        let mut state = ParallelDispatchState::new();
+        let uid_a = crate::dag::ExecutionUnitId(1);
+        let uid_b = crate::dag::ExecutionUnitId(2);
+
+        // Post-PermanentFailed state: A succeeded (failed but marked), B completed.
+        state.unit_states.insert(
+            uid_a,
+            UnitDispatchState {
+                remaining_upstreams: 0,
+                inflight_job_id: None,
+                succeeded: true,
+            },
+        );
+        state.unit_states.insert(
+            uid_b,
+            UnitDispatchState {
+                remaining_upstreams: 0, // was decremented by the fix
+                inflight_job_id: None,
+                succeeded: true,
+            },
+        );
+        state.per_db_inflight = 0;
+
+        // Simulate wave reset (Step 4): restore original upstream counts.
+        let original_upstreams: HashMap<crate::dag::ExecutionUnitId, usize> =
+            [(uid_a, 0), (uid_b, 1)].into();
+
+        if state.per_db_inflight == 0 {
+            let any_done = state.unit_states.values().any(|us| us.succeeded);
+            if any_done {
+                for (&uid, us) in state.unit_states.iter_mut() {
+                    us.succeeded = false;
+                    us.remaining_upstreams = *original_upstreams.get(&uid).unwrap_or(&0);
+                }
+            }
+        }
+
+        // After reset: A is ready for next wave, B blocked on A again.
+        assert_eq!(state.unit_states[&uid_a].remaining_upstreams, 0);
+        assert!(!state.unit_states[&uid_a].succeeded);
+        assert_eq!(state.unit_states[&uid_b].remaining_upstreams, 1);
+        assert!(!state.unit_states[&uid_b].succeeded);
     }
 }

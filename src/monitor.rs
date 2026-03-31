@@ -53,6 +53,8 @@ pub enum AlertEvent {
     SchedulerFallingBehind,
     /// NS-2: append_only flag automatically reverted after DELETE/UPDATE detected.
     AppendOnlyReverted,
+    /// FUSE: Periodic reminder that a fuse is still blown.
+    FuseBlownReminder,
 }
 
 impl AlertEvent {
@@ -68,6 +70,7 @@ impl AlertEvent {
             AlertEvent::RefreshFailed => "refresh_failed",
             AlertEvent::SchedulerFallingBehind => "scheduler_falling_behind",
             AlertEvent::AppendOnlyReverted => "append_only_reverted",
+            AlertEvent::FuseBlownReminder => "fuse_blown_reminder",
         }
     }
 }
@@ -2168,6 +2171,10 @@ mod tests {
             AlertEvent::SchedulerFallingBehind.as_str(),
             "scheduler_falling_behind"
         );
+        assert_eq!(
+            AlertEvent::FuseBlownReminder.as_str(),
+            "fuse_blown_reminder"
+        );
     }
 
     #[test]
@@ -2188,6 +2195,8 @@ mod tests {
             AlertEvent::RefreshCompleted,
             AlertEvent::RefreshFailed,
             AlertEvent::SchedulerFallingBehind,
+            AlertEvent::AppendOnlyReverted,
+            AlertEvent::FuseBlownReminder,
         ];
         // All as_str() values should be distinct
         let strs: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
