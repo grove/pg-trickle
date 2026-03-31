@@ -366,3 +366,223 @@ async fn test_mixed_immediate_leaf() {
     db.refresh_st("mimm_l2").await;
     db.assert_st_matches_query("mimm_l2", l2_q).await;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helpers for scheduler-driven tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Configure the scheduler for fast testing (100 ms tick, 1 s min schedule).
+async fn configure_fast_scheduler(db: &E2eDb) {
+    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 100")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
+        .await;
+    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
+        .await;
+    db.reload_config_and_wait().await;
+    db.wait_for_setting("pg_trickle.scheduler_interval_ms", "100")
+        .await;
+    db.wait_for_setting("pg_trickle.min_schedule_seconds", "1")
+        .await;
+    db.wait_for_setting("pg_trickle.auto_backoff", "off").await;
+
+    let sched_running = db
+        .wait_for_scheduler(std::time::Duration::from_secs(90))
+        .await;
+    assert!(
+        sched_running,
+        "pg_trickle scheduler did not appear in pg_stat_activity within 90 s"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 2.6 — CALCULATED DIFFERENTIAL leaf auto-cascades from FULL upstream
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Regression (NS-8): source →[FULL 1s] L1 →[DIFFERENTIAL calculated] L2
+///
+/// When L1 is FULL-mode and refreshes with zero net row changes, it writes
+/// nothing to its ST change buffer.  Before the fix, L2 (CALCULATED) would
+/// never detect the "L1 refreshed" signal and would stall indefinitely —
+/// `effective_refresh_mode` stayed NULL.
+///
+/// After the fix, `has_stream_table_source_changes()` falls back to comparing
+/// `last_refresh_at` timestamps: if L1 refreshed more recently than L2, L2
+/// triggers.  A NoData run on L2 advances its own `last_refresh_at` past L1's,
+/// preventing runaway re-triggering.
+///
+/// This test verifies the fix via the **scheduler path** (auto-refresh), not
+/// manual refresh, because that is where the stall occurs.
+#[tokio::test]
+async fn test_calculated_diff_leaf_auto_cascades_from_full_upstream() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+
+    db.execute(
+        "CREATE TABLE ns8_src (
+            id  SERIAL PRIMARY KEY,
+            grp TEXT NOT NULL,
+            val INT NOT NULL
+        )",
+    )
+    .await;
+    db.execute("INSERT INTO ns8_src (grp, val) VALUES ('a', 10), ('b', 20)")
+        .await;
+
+    // L1: FULL mode with 1s schedule
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'ns8_l1',
+            $$SELECT grp, SUM(val) AS total FROM ns8_src GROUP BY grp$$,
+            '1s',
+            'FULL'
+        )",
+    )
+    .await;
+
+    // L2: DIFFERENTIAL + CALCULATED (no explicit schedule — depends on upstream signal)
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'ns8_l2',
+            $$SELECT grp, total * 2 AS doubled FROM ns8_l1$$,
+            'calculated',
+            'DIFFERENTIAL'
+        )",
+    )
+    .await;
+
+    // Wait for the scheduler to auto-populate both STs.
+    // L1 fires on its 1s schedule; L2 fires via the last_refresh_at
+    // fallback when L1's last_refresh_at is newer than L2's.
+    let refreshed = db
+        .wait_for_auto_refresh("ns8_l2", std::time::Duration::from_secs(60))
+        .await;
+    assert!(
+        refreshed,
+        "ns8_l2 (DIFFERENTIAL/CALCULATED from FULL upstream) never received \
+         a scheduler-driven refresh within 60s — last_refresh_at fallback may \
+         not be working"
+    );
+
+    // Verify correctness: doubled should reflect the source data
+    db.assert_st_matches_query(
+        "ns8_l2",
+        "SELECT grp, SUM(val) * 2 AS doubled FROM ns8_src GROUP BY grp",
+    )
+    .await;
+
+    // Now mutate the source and wait for the cascade to propagate again
+    db.execute("INSERT INTO ns8_src (grp, val) VALUES ('a', 5), ('c', 30)")
+        .await;
+
+    let refreshed2 = db
+        .wait_for_auto_refresh("ns8_l2", std::time::Duration::from_secs(60))
+        .await;
+    assert!(
+        refreshed2,
+        "ns8_l2 did not re-cascade after second INSERT within 60s"
+    );
+
+    db.assert_st_matches_query(
+        "ns8_l2",
+        "SELECT grp, SUM(val) * 2 AS doubled FROM ns8_src GROUP BY grp",
+    )
+    .await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Test 2.7 — Diamond convergence cascades when only one branch has CDC events
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Regression (NS-8 / diamond): source_left, source_right → left (FULL 1s),
+/// right (FULL 1s) → convergence (FULL calculated).
+///
+/// When only source_left gets new data, only left_branch produces a
+/// populated ST change buffer.  right_branch refreshes on its clock but
+/// produces an empty change buffer.  Before the fix, the convergence node
+/// saw no signal from right_branch and stalled.
+///
+/// After the fix, the convergence node detects that left_branch's
+/// `last_refresh_at` is newer than its own and cascades automatically.
+#[tokio::test]
+async fn test_diamond_convergence_cascades_with_one_active_branch() {
+    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
+    configure_fast_scheduler(&db).await;
+
+    // Two independent source tables
+    db.execute("CREATE TABLE dconv_left  (id SERIAL PRIMARY KEY, val INT NOT NULL)")
+        .await;
+    db.execute("CREATE TABLE dconv_right (id SERIAL PRIMARY KEY, val INT NOT NULL)")
+        .await;
+    db.execute("INSERT INTO dconv_left  (val) VALUES (10), (20)")
+        .await;
+    db.execute("INSERT INTO dconv_right (val) VALUES (100), (200)")
+        .await;
+
+    // Two intermediate FULL branches on 1s schedules
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'dconv_branch_left',
+            $$SELECT val FROM dconv_left$$,
+            '1s',
+            'FULL'
+        )",
+    )
+    .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'dconv_branch_right',
+            $$SELECT val FROM dconv_right$$,
+            '1s',
+            'FULL'
+        )",
+    )
+    .await;
+
+    // Convergence node reads from both branches
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+            'dconv_tip',
+            $$SELECT l.val AS lval, r.val AS rval
+              FROM dconv_branch_left l
+              CROSS JOIN dconv_branch_right r$$,
+            'calculated',
+            'FULL'
+        )",
+    )
+    .await;
+
+    // Wait for initial auto-cascade to populate dconv_tip
+    let initial = db
+        .wait_for_auto_refresh("dconv_tip", std::time::Duration::from_secs(60))
+        .await;
+    assert!(
+        initial,
+        "dconv_tip never received its first scheduler-driven refresh within 60s"
+    );
+
+    let initial_count: i64 = db.count("public.dconv_tip").await;
+    assert_eq!(
+        initial_count, 4,
+        "Expected 4 rows (2×2 cross join) in dconv_tip initially, got {initial_count}"
+    );
+
+    // Insert into LEFT only — RIGHT stays unchanged
+    db.execute("INSERT INTO dconv_left (val) VALUES (30)").await;
+
+    // dconv_tip must cascade because left_branch will refresh (via CDC),
+    // and its last_refresh_at will be newer than dconv_tip's.
+    let recascaded = db
+        .wait_for_condition(
+            "dconv_tip re-cascade after left INSERT",
+            "SELECT COUNT(*) = 6 FROM public.dconv_tip",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        recascaded,
+        "dconv_tip did not cascade after INSERT into left branch only (expected 6 rows from \
+         3×2 cross join) — last_refresh_at fallback for asymmetric diamond may not be working"
+    );
+}
