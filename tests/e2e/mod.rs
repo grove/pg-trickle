@@ -456,6 +456,27 @@ impl E2eDb {
         }
     }
 
+    /// Start a fresh database WITHOUT the extension pre-installed.
+    ///
+    /// Unlike [`Self::new`] (which clones from the pre-seeded template), this
+    /// creates a plain empty database.  Use this for upgrade tests that need
+    /// to run `CREATE EXTENSION pg_trickle VERSION '<old_version>'` themselves.
+    pub async fn new_without_extension() -> Self {
+        let shared = shared_container().await;
+        let db_name = shared_db_name("pgt_upgrade_e2e");
+        create_database(&shared.admin_connection_string, &db_name).await;
+        let pool = Self::connect_with_retry(&connection_string(shared.port, &db_name), 15).await;
+        let connection_string = connection_string(shared.port, &db_name);
+
+        E2eDb {
+            pool,
+            connection_string,
+            container_id: shared.container_id.clone(),
+            _shared_scheduler_test_guard: None,
+            _container: ContainerLease::Shared { _shared: shared },
+        }
+    }
+
     /// Historical compatibility helper for scheduler-focused tests.
     ///
     /// Dynamic scheduler workers now connect to the database name supplied in

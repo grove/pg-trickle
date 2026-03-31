@@ -344,6 +344,28 @@ impl E2eDb {
         }
     }
 
+    /// Start a fresh database WITHOUT the extension pre-installed.
+    ///
+    /// Unlike [`Self::new`] (which clones from the pre-seeded template), this
+    /// creates a plain empty database.  Use this for upgrade tests that need
+    /// to run `CREATE EXTENSION pg_trickle VERSION '<old_version>'` themselves.
+    pub async fn new_without_extension() -> Self {
+        let shared = shared_container().await;
+        let db_name = shared_db_name("pgt_upgrade_light_e2e");
+        create_database(&shared.admin_connection_string, &db_name).await;
+        let connection_string = connection_string(shared.port, &db_name);
+        let pool = Self::connect_with_retry(&connection_string, 15).await;
+
+        E2eDb {
+            pool,
+            connection_string,
+            admin_connection_string: shared.admin_connection_string.clone(),
+            db_name: db_name.clone(),
+            container_id: shared.container_id.clone(),
+            _container: ContainerLease::Shared { _shared: shared },
+        }
+    }
+
     /// Light harness does not support the background worker.
     /// Falls back to `new()` (connects to `pg_trickle_test` database).
     pub async fn new_on_postgres_db() -> Self {
@@ -568,6 +590,42 @@ impl E2eDb {
             .await
             .unwrap_or_else(|e| panic!("Scalar query failed: {}\nSQL: {}", e, sql))
             .flatten()
+    }
+
+    /// Poll a boolean SQL condition with exponential backoff.
+    ///
+    /// `condition_sql` must return a single `bool` column. Backoff
+    /// starts at `initial_backoff` and doubles on each iteration up to
+    /// `max_backoff` (default: 2 s).
+    ///
+    /// Returns `true` if the condition was met, `false` on timeout.
+    /// The `label` is used only in timeout log messages for diagnostics.
+    #[must_use]
+    pub async fn wait_for_condition(
+        &self,
+        label: &str,
+        condition_sql: &str,
+        timeout: std::time::Duration,
+        initial_backoff: std::time::Duration,
+    ) -> bool {
+        let max_backoff = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        let mut backoff = initial_backoff;
+        loop {
+            let met: bool = self.query_scalar(condition_sql).await;
+            if met {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                eprintln!(
+                    "wait_for_condition({label}): timed out after {:.1}s",
+                    timeout.as_secs_f64()
+                );
+                return false;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
     }
 
     /// Count rows in a table.

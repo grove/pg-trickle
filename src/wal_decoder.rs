@@ -1219,23 +1219,64 @@ pub fn advance_wal_transitions_phase1(change_schema: &str) -> Result<Phase1Resul
                 }
             }
             CdcMode::Transitioning => {
-                // Poll WAL changes (both trigger and WAL are active)
-                if let Err(e) = poll_source_changes(dep, change_schema) {
-                    log!(
-                        "pg_trickle: WAL poll error for transitioning source OID {}: {}",
-                        source_key,
-                        e
-                    );
-                }
-                // Check if transition is complete or timed out
-                if let Err(e) =
-                    check_and_complete_transition(dep.source_relid, dep.pgt_id, dep, change_schema)
-                {
-                    log!(
-                        "pg_trickle: transition check error for source OID {}: {}",
-                        source_key,
-                        e
-                    );
+                // Poll WAL changes (both trigger and WAL are active).
+                // Use catch_unwind for the same reason as the Wal branch:
+                // a missing/invalid slot causes a PG ERROR → Rust panic.
+                let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_source_changes(dep, change_schema)
+                }));
+                let poll_err = match poll_result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(e.to_string()),
+                    Err(_panic) => {
+                        Some("PG error during TRANSITIONING WAL poll (likely missing slot)".into())
+                    }
+                };
+
+                if let Some(err_msg) = poll_err {
+                    let count = bump_wal_error_count(source_key);
+                    if count >= MAX_CONSECUTIVE_WAL_ERRORS {
+                        warning!(
+                            "pg_trickle: TRANSITIONING WAL poll failed {} consecutive times \
+                             for source OID {} — aborting transition back to triggers. \
+                             Last error: {}",
+                            count,
+                            source_key,
+                            err_msg
+                        );
+                        reset_wal_error_count(source_key);
+                        // Defer abort to Phase 4 (separate transaction)
+                        // because the SPI connection may be broken after
+                        // catch_unwind of a PG ERROR.
+                        pending_aborts.push(PendingAbort {
+                            source_relid: dep.source_relid,
+                            pgt_id: dep.pgt_id,
+                        });
+                    } else {
+                        warning!(
+                            "pg_trickle: TRANSITIONING WAL poll error for source OID {} \
+                             ({}/{} before abort): {}",
+                            source_key,
+                            count,
+                            MAX_CONSECUTIVE_WAL_ERRORS,
+                            err_msg
+                        );
+                    }
+                } else {
+                    reset_wal_error_count(source_key);
+                    // Check if transition is complete or timed out
+                    if let Err(e) = check_and_complete_transition(
+                        dep.source_relid,
+                        dep.pgt_id,
+                        dep,
+                        change_schema,
+                    ) {
+                        log!(
+                            "pg_trickle: transition check error for source OID {}: {}",
+                            source_key,
+                            e
+                        );
+                    }
                 }
             }
             CdcMode::Wal => {

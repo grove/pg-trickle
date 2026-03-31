@@ -12,6 +12,7 @@
 mod e2e;
 
 use e2e::E2eDb;
+#[cfg(not(feature = "light-e2e"))]
 use std::time::Duration;
 
 // ── advance_watermark() tests (light E2E) ──────────────────────────────────

@@ -353,6 +353,23 @@ fn drain_pending_cleanups() {
                         oid,
                         msg
                     );
+                    // Emit NOTIFY alert on 3rd and every subsequent 10th failure
+                    // so operators know cleanup is persistently broken.
+                    if *count == 3 || *count % 10 == 0 {
+                        crate::monitor::emit_alert(
+                            crate::monitor::AlertEvent::CleanupFailure,
+                            "",
+                            &format!("changes_{}", oid),
+                            &format!(
+                                r#""source_oid":{},"consecutive_failures":{},"operation":"{}","error":"{}""#,
+                                oid,
+                                count,
+                                operation,
+                                msg.replace('"', r#"\""#),
+                            ),
+                            false,
+                        );
+                    }
                 } else {
                     pgrx::debug1!(
                         "[pg_trickle] Deferred cleanup {} failed (attempt {}): {}",
@@ -2412,16 +2429,35 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
     })?;
 
     // ST-ST-3: Capture the full-refresh diff into the change buffer.
+    // If diff capture fails, downstream DIFFERENTIAL STs would silently
+    // diverge because they expect delta rows in changes_pgt_{id}. To
+    // prevent that, mark all downstream STs for reinit so they do a FULL
+    // refresh next cycle and resync.
     if needs_diff_capture
         && !user_cols.is_empty()
         && let Err(e) = capture_full_refresh_diff_to_st_buffer(st, &user_cols)
     {
         pgrx::warning!(
-            "[pg_trickle] ST-ST: full-refresh diff capture failed for {}.{}: {}",
+            "[pg_trickle] ST-ST: full-refresh diff capture failed for {}.{}: {} \
+             — marking downstream STs for reinit to prevent silent divergence",
             schema,
             name,
             e,
         );
+        // Mark downstream STs for reinit so they resync via FULL refresh.
+        if let Ok(downstream_ids) =
+            crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+        {
+            for ds_id in &downstream_ids {
+                if let Err(e2) = StreamTableMeta::mark_for_reinitialize(*ds_id) {
+                    pgrx::warning!(
+                        "[pg_trickle] ST-ST: failed to mark downstream ST {} for reinit: {}",
+                        ds_id,
+                        e2,
+                    );
+                }
+            }
+        }
     }
 
     // Re-enable user triggers and emit NOTIFY so listeners know a FULL
@@ -3480,7 +3516,7 @@ pub fn execute_differential_refresh(
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
             let new_lsn = new_frontier.get_lsn(*oid);
-            Spi::get_one::<bool>(&format!(
+            match Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(\
                    SELECT 1 FROM \"{change_schema}\".changes_{oid} \
                    WHERE lsn > '{prev_lsn}'::pg_lsn \
@@ -3488,9 +3524,22 @@ pub fn execute_differential_refresh(
                    AND action IN ('D', 'U') \
                    LIMIT 1\
                  )",
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false)
+            )) {
+                Ok(Some(v)) => v,
+                Ok(None) => false,
+                Err(e) => {
+                    // SPI failure: treat as "found non-insert" (safe default).
+                    // Falling through to the MERGE path is always correct;
+                    // defaulting to "no deletes" risks silent data corruption.
+                    pgrx::warning!(
+                        "[pg_trickle] Append-only DELETE/UPDATE check failed for \
+                         changes_{} — falling back to MERGE path: {}",
+                        oid,
+                        e,
+                    );
+                    true
+                }
+            }
         });
 
         if has_non_insert {
@@ -4515,24 +4564,43 @@ pub fn execute_differential_refresh(
         // to produce accurate I/D pairs that include value-change DELETEs.
         // Otherwise, fall back to the delta-based capture.
         if needs_diff_capture {
+            let mut diff_capture_ok = true;
             if !diff_capture_cols.is_empty() {
                 if let Err(e) = capture_incremental_diff_to_st_buffer(st, &diff_capture_cols) {
                     pgrx::warning!(
-                        "[pg_trickle] ST-ST-10: incremental diff capture failed for {}.{}: {}",
+                        "[pg_trickle] ST-ST-10: incremental diff capture failed for {}.{}: {} \
+                         — marking downstream STs for reinit",
                         schema,
                         name,
                         e,
                     );
+                    diff_capture_ok = false;
                 }
             } else {
                 let user_cols = get_st_user_columns(st);
                 if let Err(e) = capture_delta_to_st_buffer(st, &user_cols) {
                     pgrx::warning!(
-                        "[pg_trickle] ST-ST: delta capture failed for {}.{}: {}",
+                        "[pg_trickle] ST-ST: delta capture failed for {}.{}: {} \
+                         — marking downstream STs for reinit",
                         schema,
                         name,
                         e,
                     );
+                    diff_capture_ok = false;
+                }
+            }
+            if !diff_capture_ok
+                && let Ok(downstream_ids) =
+                    crate::catalog::StDependency::get_downstream_pgt_ids(st.pgt_relid)
+            {
+                for ds_id in &downstream_ids {
+                    if let Err(e2) = StreamTableMeta::mark_for_reinitialize(*ds_id) {
+                        pgrx::warning!(
+                            "[pg_trickle] ST-ST: failed to mark downstream ST {} for reinit: {}",
+                            ds_id,
+                            e2,
+                        );
+                    }
                 }
             }
         }
