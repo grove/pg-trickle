@@ -54,7 +54,11 @@ This tutorial walks through a concrete org-chart example so you can see this flo
 - `max_worker_processes` raised to at least 32 (see [INSTALL.md](../INSTALL.md#postgresql-configuration)); the PostgreSQL default of 8 is often exhausted if you have several databases, causing stream tables to silently stop refreshing
 - `psql` or any SQL client
 
-> **Quick start with Docker:** If you don't have a local PostgreSQL 18 install, [INSTALL.md](../INSTALL.md) has a Docker-based setup that mounts the extension into a stock `postgres:18` container — no installation required.
+> **Quick start with Docker:** Pull the pre-built GHCR image — PostgreSQL 18.3 + pg_trickle ready to run, no configuration needed:
+> ```bash
+> docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 ghcr.io/grove/pg_trickle:latest
+> ```
+> All GUC defaults (`wal_level`, `shared_preload_libraries`, scheduler settings) are pre-configured. See [INSTALL.md](../INSTALL.md#4-ghcr-docker-image-recommended-for-local-dev) for tag details and volume mounting.
 
 Connect to the database you want to use and enable the extension:
 
