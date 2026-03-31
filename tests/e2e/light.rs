@@ -344,6 +344,28 @@ impl E2eDb {
         }
     }
 
+    /// Start a fresh database WITHOUT the extension pre-installed.
+    ///
+    /// Unlike [`Self::new`] (which clones from the pre-seeded template), this
+    /// creates a plain empty database.  Use this for upgrade tests that need
+    /// to run `CREATE EXTENSION pg_trickle VERSION '<old_version>'` themselves.
+    pub async fn new_without_extension() -> Self {
+        let shared = shared_container().await;
+        let db_name = shared_db_name("pgt_upgrade_light_e2e");
+        create_database(&shared.admin_connection_string, &db_name).await;
+        let connection_string = connection_string(shared.port, &db_name);
+        let pool = Self::connect_with_retry(&connection_string, 15).await;
+
+        E2eDb {
+            pool,
+            connection_string,
+            admin_connection_string: shared.admin_connection_string.clone(),
+            db_name: db_name.clone(),
+            container_id: shared.container_id.clone(),
+            _container: ContainerLease::Shared { _shared: shared },
+        }
+    }
+
     /// Light harness does not support the background worker.
     /// Falls back to `new()` (connects to `pg_trickle_test` database).
     pub async fn new_on_postgres_db() -> Self {

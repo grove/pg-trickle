@@ -471,7 +471,7 @@ async fn test_upgrade_chain_new_functions_exist() {
     }
 
     // Start container WITHOUT auto-extension, install old version manually
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
 
     // Install old version
     db.execute(&format!(
@@ -554,7 +554,7 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
         "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
     ))
@@ -619,7 +619,7 @@ async fn test_upgrade_chain_views_queryable() {
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
     let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.13.0".into());
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
         "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
     ))
@@ -662,7 +662,7 @@ async fn test_upgrade_chain_event_triggers_present() {
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
     let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.13.0".into());
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
         "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
     ))
@@ -716,7 +716,7 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
         "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
     ))
@@ -759,7 +759,7 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
     let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.13.0".into());
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
 
     // Install old version then upgrade
     db.execute(&format!(
@@ -827,7 +827,7 @@ async fn test_upgrade_schema_additions_from_sql() {
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
     let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.13.0".into());
 
-    let db = E2eDb::new().await;
+    let db = E2eDb::new_without_extension().await;
 
     db.execute(&format!(
         "CREATE EXTENSION pg_trickle VERSION '{from_version}' CASCADE"
