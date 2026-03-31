@@ -570,6 +570,42 @@ impl E2eDb {
             .flatten()
     }
 
+    /// Poll a boolean SQL condition with exponential backoff.
+    ///
+    /// `condition_sql` must return a single `bool` column. Backoff
+    /// starts at `initial_backoff` and doubles on each iteration up to
+    /// `max_backoff` (default: 2 s).
+    ///
+    /// Returns `true` if the condition was met, `false` on timeout.
+    /// The `label` is used only in timeout log messages for diagnostics.
+    #[must_use]
+    pub async fn wait_for_condition(
+        &self,
+        label: &str,
+        condition_sql: &str,
+        timeout: std::time::Duration,
+        initial_backoff: std::time::Duration,
+    ) -> bool {
+        let max_backoff = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        let mut backoff = initial_backoff;
+        loop {
+            let met: bool = self.query_scalar(condition_sql).await;
+            if met {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                eprintln!(
+                    "wait_for_condition({label}): timed out after {:.1}s",
+                    timeout.as_secs_f64()
+                );
+                return false;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
     /// Count rows in a table.
     pub async fn count(&self, table: &str) -> i64 {
         self.query_scalar::<i64>(&format!("SELECT count(*) FROM {}", table))
