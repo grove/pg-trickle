@@ -30,7 +30,7 @@ coverage, all in plain language.
 - [v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana Observability, Safety Hardening & Correctness](#v0110--partitioned-stream-tables-prometheus--grafana-observability-safety-hardening--correctness)
 - [v0.12.0 — Correctness, Reliability & Developer Tooling](#v0120--correctness-reliability--developer-tooling)
 - [v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling](#v0130--scalability-foundations-partitioning-enhancements-merge-profiling--multi-tenant-scheduling)
-- [v0.14.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers](#v0140--tiered-scheduling-pg-backward-compatibility--unlogged-buffers)
+- [v0.14.0 — Tiered Scheduling, PG Backward Compatibility, UNLOGGED Buffers & Diagnostics](#v0140--tiered-scheduling-pg-backward-compatibility-unlogged-buffers--diagnostics)
 - [v0.15.0 — Native DDL Syntax, External Test Suites & Integration](#v0150--native-ddl-syntax-external-test-suites--integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale & Ecosystem](#post-10--scale--ecosystem)
@@ -2600,7 +2600,7 @@ Target: reduce regression escape rate from ~15% to <5%.
 
 ---
 
-## v0.14.0 — Tiered Scheduling, PG Backward Compatibility & UNLOGGED Buffers
+## v0.14.0 — Tiered Scheduling, PG Backward Compatibility, UNLOGGED Buffers & Diagnostics
 
 **Goal:** Advance tiered refresh scheduling with manual tier assignment,
 widen the deployment target to PG 16–18, and deliver opt-in UNLOGGED change
@@ -2681,7 +2681,33 @@ buffers for reduced WAL amplification.
 
 > **Stability & multi-database testing subtotal: ~2–4 days**
 
-> **v0.14.0 total: ~9–18 weeks + ~1wk patterns guide + ~2–4 days stability tests**
+### Refresh Mode Diagnostics (DIAG-1)
+
+> **In plain terms:** Users currently have no structured way to know whether
+> their stream tables are using the most efficient refresh mode. This adds a
+> read-only advisory SQL function that analyses stream table characteristics
+> — change ratio history, empirical FULL vs DIFFERENTIAL timing, query
+> complexity, table size, and index coverage — and recommends whether to keep
+> the current mode or switch, with a confidence level and human-readable
+> explanation.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DIAG-1a | `src/diagnostics.rs` — pure signal-scoring functions (`score_change_ratio`, `score_empirical_timing`, `score_query_complexity`, `score_target_size`, `score_index_coverage`, `score_latency_variance`, `compute_recommendation`) + unit tests | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-1, D-4 |
+| DIAG-1b | SPI data-gathering layer — change buffer counts, `pgt_refresh_history` aggregates, query complexity from DVM parser, `pg_relation_size`, `pg_index` coverage check | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-2 |
+| DIAG-1c | `pgtrickle.recommend_refresh_mode(name)` and `pgtrickle.recommend_refresh_mode()` SQL functions (set-returning, read-only, no side effects); returns `recommended_mode`, `confidence`, `reason`, `signals` JSONB | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-3 |
+| DIAG-1d | `pgtrickle.refresh_efficiency` view — raw per-table FULL vs DIFF timing, change ratios, speedup factor; programmatic companion to the advisory function | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-6 |
+| DIAG-1e | E2E integration tests; upgrade migration (additive — no catalog changes) | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-5 |
+| DIAG-1f | Documentation: `docs/SQL_REFERENCE.md` additions, `docs/CONFIGURATION.md` tuning section, `docs/tutorials/tuning-refresh-mode.md` | 0.5d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-7 |
+
+> The function synthesises 7 weighted signals (historical change ratio 0.30,
+> empirical timing 0.35, current change ratio 0.25, query complexity 0.10,
+> target size 0.10, index coverage 0.05, P95/P50 variance 0.05) into a
+> composite score. Confidence degrades gracefully when history is sparse.
+
+> **Diagnostics subtotal: ~3.5–7 days**
+
+> **v0.14.0 total: ~9–18 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics**
 
 **Exit criteria:**
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
@@ -2692,6 +2718,7 @@ buffers for reduced WAL amplification.
 - [ ] G16-PAT: Patterns guide published in `docs/PATTERNS.md` covering at least 4 patterns (bronze/silver/gold, event sourcing, SCD type-1, SCD type-2)
 - [ ] G17-SOAK: 24h soak test passes with zero worker crashes, zero zombie stream tables, stable memory usage
 - [ ] G17-MDB: Multi-database scheduler isolation verified; no cross-database quota interference
+- [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
 - [ ] Extension upgrade path tested (`0.13.0 → 0.14.0`)
 
 ---
@@ -2916,7 +2943,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
 | v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
 | v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
-| v0.14.0 — Native DDL Syntax, External Test Suites & Integration | ~140–230h | — | |
+| v0.14.0 — Tiered Scheduling, PG Backward Compat, UNLOGGED Buffers & Diagnostics | ~9–18 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
 | Post-1.0 (scale) | 6+ months | — | |
