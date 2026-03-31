@@ -1987,6 +1987,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // doubles each consecutive cycle; resets to 1.0 on the first on-time cycle.
     let mut backoff_factors: HashMap<i64, f64> = HashMap::new();
 
+    // Timestamp for periodic CDC trigger health check (~every 60s).
+    let mut last_trigger_health_ms: u64 = 0;
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
@@ -2169,6 +2172,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             monitor::check_slot_health_and_alert();
         }));
+
+        // Periodic CDC trigger health check: detect disabled/missing triggers
+        // on source tables.  Runs every ~60s to avoid per-tick overhead.
+        let now_for_trigger_check = current_epoch_ms();
+        if now_for_trigger_check.saturating_sub(last_trigger_health_ms) >= 60_000 {
+            BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                monitor::check_cdc_trigger_health();
+            }));
+            last_trigger_health_ms = now_for_trigger_check;
+        }
 
         // Phase 2: Create each pending slot in its own pristine transaction.
         // No SPI calls — just the C replication API.

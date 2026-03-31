@@ -57,6 +57,10 @@ pub enum AlertEvent {
     FuseBlownReminder,
     /// G-7: Stream table skipped because its tier is Frozen.
     FrozenTierSkip,
+    /// CDC trigger missing or disabled on a source table.
+    CdcTriggerDisabled,
+    /// Change buffer cleanup persistently failing for a source OID.
+    CleanupFailure,
 }
 
 impl AlertEvent {
@@ -74,6 +78,8 @@ impl AlertEvent {
             AlertEvent::AppendOnlyReverted => "append_only_reverted",
             AlertEvent::FuseBlownReminder => "fuse_blown_reminder",
             AlertEvent::FrozenTierSkip => "frozen_tier_skip",
+            AlertEvent::CdcTriggerDisabled => "cdc_trigger_disabled",
+            AlertEvent::CleanupFailure => "cleanup_failure",
         }
     }
 }
@@ -1107,6 +1113,77 @@ fn check_wal_slot_existence() {
                     e,
                 );
             }
+        }
+    }
+}
+
+/// Periodic check for disabled or missing CDC triggers on source tables.
+///
+/// Called from the scheduler main loop every ~60s.  Detects source tables
+/// whose pg_trickle CDC trigger is either:
+///   - missing entirely (dropped without DDL hook firing)
+///   - explicitly disabled via `ALTER TABLE … DISABLE TRIGGER`
+///
+/// Emits a `cdc_trigger_disabled` NOTIFY alert for each affected source
+/// so operators are notified before data staleness goes undetected.
+pub fn check_cdc_trigger_health() {
+    use crate::catalog::StDependency;
+
+    let deps = match StDependency::get_all() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    // Collect unique source OIDs that use trigger-mode CDC.
+    let mut checked = std::collections::HashSet::new();
+    for dep in &deps {
+        if dep.cdc_mode != crate::catalog::CdcMode::Trigger {
+            continue;
+        }
+        let oid = dep.source_relid;
+        if !checked.insert(oid) {
+            continue; // already checked
+        }
+
+        let oid_u32 = oid.to_u32();
+
+        // Check if any DML CDC trigger exists AND is enabled for this source.
+        // tgenabled values: 'O' = origin (enabled), 'D' = disabled,
+        // 'R' = replica, 'A' = always.  Anything other than 'D' is enabled.
+        let trigger_ok = Spi::get_one::<bool>(&format!(
+            "SELECT EXISTS( \
+               SELECT 1 FROM pg_trigger \
+               WHERE tgrelid = {oid_u32}::oid \
+                 AND tgname IN ( \
+                     'pg_trickle_cdc_{oid_u32}', \
+                     'pg_trickle_cdc_ins_{oid_u32}', \
+                     'pg_trickle_cdc_upd_{oid_u32}', \
+                     'pg_trickle_cdc_del_{oid_u32}' \
+                 ) \
+                 AND tgenabled != 'D' \
+             )",
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+
+        if !trigger_ok {
+            // Look up the source table name for a useful alert message.
+            let source_name = Spi::get_one::<String>(&format!(
+                "SELECT n.nspname::text || '.' || c.relname::text \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = {oid_u32}::oid",
+            ))
+            .unwrap_or(None)
+            .unwrap_or_else(|| format!("oid={}", oid_u32));
+
+            emit_alert(
+                AlertEvent::CdcTriggerDisabled,
+                "", // no single ST schema — source-level alert
+                &source_name,
+                &format!(r#""source_oid":{}"#, oid_u32),
+                false, // always emit, even in pooler mode
+            );
         }
     }
 }
@@ -2179,6 +2256,11 @@ mod tests {
             "fuse_blown_reminder"
         );
         assert_eq!(AlertEvent::FrozenTierSkip.as_str(), "frozen_tier_skip");
+        assert_eq!(
+            AlertEvent::CdcTriggerDisabled.as_str(),
+            "cdc_trigger_disabled"
+        );
+        assert_eq!(AlertEvent::CleanupFailure.as_str(), "cleanup_failure");
     }
 
     #[test]
@@ -2202,6 +2284,8 @@ mod tests {
             AlertEvent::AppendOnlyReverted,
             AlertEvent::FuseBlownReminder,
             AlertEvent::FrozenTierSkip,
+            AlertEvent::CdcTriggerDisabled,
+            AlertEvent::CleanupFailure,
         ];
         // All as_str() values should be distinct
         let strs: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();

@@ -353,6 +353,23 @@ fn drain_pending_cleanups() {
                         oid,
                         msg
                     );
+                    // Emit NOTIFY alert on 3rd and every subsequent 10th failure
+                    // so operators know cleanup is persistently broken.
+                    if *count == 3 || *count % 10 == 0 {
+                        crate::monitor::emit_alert(
+                            crate::monitor::AlertEvent::CleanupFailure,
+                            "",
+                            &format!("changes_{}", oid),
+                            &format!(
+                                r#""source_oid":{},"consecutive_failures":{},"operation":"{}","error":"{}""#,
+                                oid,
+                                count,
+                                operation,
+                                msg.replace('"', r#"\""#),
+                            ),
+                            false,
+                        );
+                    }
                 } else {
                     pgrx::debug1!(
                         "[pg_trickle] Deferred cleanup {} failed (attempt {}): {}",
@@ -3480,7 +3497,7 @@ pub fn execute_differential_refresh(
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
             let new_lsn = new_frontier.get_lsn(*oid);
-            Spi::get_one::<bool>(&format!(
+            match Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(\
                    SELECT 1 FROM \"{change_schema}\".changes_{oid} \
                    WHERE lsn > '{prev_lsn}'::pg_lsn \
@@ -3488,9 +3505,22 @@ pub fn execute_differential_refresh(
                    AND action IN ('D', 'U') \
                    LIMIT 1\
                  )",
-            ))
-            .unwrap_or(Some(false))
-            .unwrap_or(false)
+            )) {
+                Ok(Some(v)) => v,
+                Ok(None) => false,
+                Err(e) => {
+                    // SPI failure: treat as "found non-insert" (safe default).
+                    // Falling through to the MERGE path is always correct;
+                    // defaulting to "no deletes" risks silent data corruption.
+                    pgrx::warning!(
+                        "[pg_trickle] Append-only DELETE/UPDATE check failed for \
+                         changes_{} — falling back to MERGE path: {}",
+                        oid,
+                        e,
+                    );
+                    true
+                }
+            }
         });
 
         if has_non_insert {
