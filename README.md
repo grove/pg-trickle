@@ -114,31 +114,15 @@ See [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) for the full differentiation 
 
 pg_trickle is designed for low-latency, high-throughput incremental view maintenance. Differential refresh processes only changed rows — not the entire base table — yielding significant speedups over full recomputation.
 
-### Differential vs Full Refresh
+### When Differential Wins
 
-Benchmarked at 1% change rate (10 cycles, Docker-hosted PostgreSQL 18.3):
+DIFFERENTIAL processes only changed rows; FULL re-executes the entire query. The gap between them grows with table size and shrinks with change rate — at 50% churn the two modes converge.
 
-| Query Type | Rows | FULL (ms) | DIFFERENTIAL (ms) | Speedup |
-|---|---|---|---|---|
-| Table scan | 100K | 461 | 40 | **11.6x** |
-| Filter (WHERE) | 10K | 26 | 9 | **2.9x** |
-| Aggregate — low cardinality ¹ | 100K | 31 | 52 | 0.6x |
-| Join (INNER JOIN) | 100K | 673 | 42 | **15.9x** |
-| Join + Aggregate — low cardinality ¹ | 100K | 52 | 63 | 0.8x |
+DIFFERENTIAL is the right default for **scans, joins, filtered projections, and high-cardinality aggregates** (`GROUP BY customer_id` with thousands of distinct groups): FULL must TRUNCATE and re-insert or re-aggregate the entire result set, while DIFFERENTIAL touches only the 1–2% of rows that changed. The TPC-H validation section below shows 15.9x measured speedup for joins at 1% change rate.
 
-¹ Low-output scenario: 5 distinct GROUP BY groups from 100K source rows. At
-this cardinality FULL re-aggregates all 100K rows into 5 output rows in a
-single cheap hash aggregate pass, and differential overhead dominates. With
-**high-cardinality GROUP BY** (e.g. `GROUP BY customer_id` with 10K+ distinct
-customers from 100K orders), FULL must re-scan and re-aggregate the entire
-source table while DIFFERENTIAL rescans only the ~1K affected groups — yielding
-substantial speedups comparable to the join case. The algebraic aggregate
-fast-path (roadmap item B-1) will further reduce apply time to sub-1ms for
-these scenarios by replacing MERGE with direct `UPDATE … SET col = col + Δ`.
+**Aggregate queries with few distinct groups** (e.g. `GROUP BY region` with 5 regions from 100K rows) are the exception: FULL re-aggregates into 5 output rows in a single cheap hash pass, so DIFFERENTIAL's delta overhead is not recovered. Use `refresh_mode = 'full'` explicitly for these cases, or rely on the adaptive fallback (`pg_trickle.adaptive_full_threshold`, default 50%) which switches to FULL automatically when the change ratio is high. Starting in v0.14.0, `create_stream_table` emits a WARNING when a low-cardinality aggregate pattern is detected.
 
-Differential shines on queries that produce many output rows (scans, joins, filtered projections) and on high-cardinality aggregates, where FULL must TRUNCATE + re-insert or re-aggregate the entire result set. Speedup scales with table size and inversely with change rate — at 50% churn, the two modes converge.
-
-**Tip:** For aggregate queries where FULL is consistently faster, set `refresh_mode = 'full'` explicitly (`ALTER STREAM TABLE ... SET refresh_mode = 'full'`). Alternatively, rely on the adaptive fallback — when the change ratio exceeds `pg_trickle.adaptive_full_threshold` (default: 50%), the engine switches to FULL automatically for that cycle. Starting in v0.14.0, `create_stream_table` emits a WARNING when a low-cardinality aggregate pattern is detected.
+For a detailed per-query breakdown across all 22 TPC-H queries see the [TPC-H Validation](#tpc-h-validation-22-queries-sf001) section below, and [docs/BENCHMARK.md](docs/BENCHMARK.md) for methodology and how to run your own benchmarks.
 
 ### Zero-Change Latency
 
