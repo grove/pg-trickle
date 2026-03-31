@@ -241,8 +241,12 @@ LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'alter_stream_table_wrapper';
 
 -- ── Stream table creation functions: add max_differential_joins / max_delta_fraction ──
--- These two parameters were added in 0.13.0 to all three create_stream_table
--- variants. Using CREATE OR REPLACE so the upgrade is idempotent.
+-- These two parameters were added in 0.13.0. The 0.12.0 versions had 11 params;
+-- PostgreSQL treats different param counts as different overloads, so we must
+-- explicitly drop the old 11-param signatures before creating the 13-param ones.
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT);
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT);
+DROP FUNCTION IF EXISTS pgtrickle."create_or_replace_stream_table"(TEXT, TEXT, TEXT, TEXT, bool, TEXT, TEXT, TEXT, bool, bool, TEXT);
 
 CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
         "name" TEXT,
