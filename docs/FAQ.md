@@ -2414,6 +2414,117 @@ listed here, check the [refresh history](#how-do-i-interpret-the-refresh-history
 for error messages and the [monitoring views](#what-monitoring-views-are-available)
 for status information.
 
+### How do I diagnose stalled data flow through stream tables?
+
+If data seems to have stopped flowing -- stream tables show stale results
+despite DML on the source tables -- follow this systematic diagnostic workflow.
+Each step narrows the problem from broad health checks down to specific root
+causes.
+
+**Step 1 -- Quick health overview:**
+
+```sql
+SELECT * FROM pgtrickle.health_check() WHERE severity != 'OK';
+```
+
+This single call checks scheduler status, error tables, stale tables, buffer
+growth, replication slot lag, and the worker pool. Any `WARN` or `ERROR` row
+tells you where to look next.
+
+**Step 2 -- Check stream table status and staleness:**
+
+```sql
+SELECT name, status, refresh_mode, consecutive_errors, staleness
+FROM pgtrickle.pgt_status()
+ORDER BY staleness DESC NULLS FIRST;
+```
+
+Look for `SUSPENDED` status (auto-suspended after repeated errors), high
+`consecutive_errors`, or unexpectedly large `staleness`.
+
+**Step 3 -- Check recent refresh activity:**
+
+```sql
+SELECT start_time, stream_table, action, status, duration_ms, error_message
+FROM pgtrickle.refresh_timeline(20);
+```
+
+If no recent rows appear, the scheduler may not be running. If rows show
+`ERROR`, the error messages explain why refreshes are failing.
+
+**Step 4 -- Inspect errors for a specific stream table:**
+
+```sql
+SELECT * FROM pgtrickle.diagnose_errors('my_stream_table');
+```
+
+Returns the last 5 `FAILED` refresh events with error classification and
+suggested remediation steps.
+
+**Step 5 -- Check the CDC pipeline (are changes being captured?):**
+
+```sql
+SELECT stream_table, source_table, cdc_mode, pending_rows, buffer_bytes
+FROM pgtrickle.change_buffer_sizes()
+ORDER BY pending_rows DESC;
+```
+
+- `pending_rows = 0` everywhere: either no DML is happening on the source
+  tables, or CDC triggers are missing.
+- `pending_rows` growing but stream tables are not refreshing: scheduler or
+  refresh problem (go back to Steps 1-3).
+
+**Step 6 -- Verify CDC triggers exist and are enabled:**
+
+```sql
+SELECT source_table, trigger_type, trigger_name
+FROM pgtrickle.trigger_inventory()
+WHERE NOT present OR NOT enabled;
+```
+
+Any rows returned here mean change capture is broken for that source table --
+DML changes are not being recorded.
+
+**Step 7 -- Check CDC slot health (WAL mode only):**
+
+```sql
+SELECT * FROM pgtrickle.check_cdc_health();
+```
+
+Look for `alert` values like `slot_lag_exceeds_threshold` or
+`replication_slot_missing`.
+
+**Step 8 -- Verify the dependency DAG:**
+
+```sql
+SELECT tree_line, status, refresh_mode
+FROM pgtrickle.dependency_tree();
+```
+
+Confirms the dependency graph is wired as expected. A missing edge means
+upstream changes will not propagate to downstream stream tables.
+
+**Step 9 -- Check the parallel worker pool (if using parallel mode):**
+
+```sql
+SELECT * FROM pgtrickle.worker_pool_status();
+
+SELECT job_id, unit_key, status, duration_ms
+FROM pgtrickle.parallel_job_status(300)
+WHERE status NOT IN ('SUCCEEDED');
+```
+
+**Common root causes at a glance:**
+
+| Symptom | Diagnostic function | Likely root cause |
+|---|---|---|
+| No refreshes happening at all | `health_check` -> `scheduler_running` | Background worker not running or `pg_trickle.enabled = off` |
+| Stream table in `SUSPENDED` status | `pgt_status` | Repeated errors hit `max_consecutive_errors` threshold |
+| Zero pending changes despite DML | `trigger_inventory` | CDC trigger was dropped or disabled by DDL |
+| WAL slot missing or lagging | `check_cdc_health`, `slot_health` | Replication slot dropped, or WAL retention exceeded |
+| Buffers growing but no refreshes | `change_buffer_sizes` + `refresh_timeline` | Scheduler stalled, refresh failing, or lock contention |
+| Upstream changes not propagating | `dependency_tree` | Upstream ST not connected in the DAG |
+
 ### Unit tests crash with `symbol not found in flat namespace` on macOS 26+
 
 macOS 26 (Tahoe) changed the dynamic linker (`dyld`) to eagerly resolve all
