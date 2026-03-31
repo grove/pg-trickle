@@ -15,6 +15,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.drop\_stream\_table](#pgtrickledrop_stream_table)
     - [pgtrickle.resume\_stream\_table](#pgtrickleresume_stream_table)
     - [pgtrickle.refresh\_stream\_table](#pgtricklerefresh_stream_table)
+    - [pgtrickle.repair\_stream\_table](#pgtricklerepair_stream_table)
   - [Status & Monitoring](#status--monitoring)
     - [pgtrickle.pgt\_status](#pgtricklepgt_status)
     - [pgtrickle.health\_check](#pgtricklehealth_check)
@@ -22,11 +23,16 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.st\_refresh\_stats](#pgtricklest_refresh_stats)
     - [pgtrickle.get\_refresh\_history](#pgtrickleget_refresh_history)
     - [pgtrickle.get\_staleness](#pgtrickleget_staleness)
+    - [pgtrickle.explain\_refresh\_mode](#pgtrickleexplain_refresh_mode)
   - [CDC Diagnostics](#cdc-diagnostics)
     - [pgtrickle.slot\_health](#pgtrickleslot_health)
     - [pgtrickle.check\_cdc\_health](#pgtricklecheck_cdc_health)
     - [pgtrickle.change\_buffer\_sizes](#pgtricklechange_buffer_sizes)
     - [pgtrickle.trigger\_inventory](#pgtrickletrigger_inventory)
+    - [pgtrickle.worker\_pool\_status](#pgtrickleworker_pool_status)
+    - [pgtrickle.parallel\_job\_status](#pgtrickleparallel_job_status)
+    - [pgtrickle.fuse\_status](#pgtricklefuse_status)
+    - [pgtrickle.reset\_fuse](#pgtricklereset_fuse)
   - [Dependency & Inspection](#dependency--inspection)
     - [pgtrickle.dependency\_tree](#pgtrickledependency_tree)
     - [pgtrickle.diamond\_groups](#pgtricklediamond_groups)
@@ -81,6 +87,8 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [pgtrickle.pgt\_refresh\_groups](#pgtricklepgt_refresh_groups)
 - [Delta SQL Profiling (v0.13.0)](#delta-sql-profiling-v0130)
   - [pgtrickle.explain\_delta](#pgtrickleexplain_delta)
+  - [pgtrickle.dedup\_stats](#pgtricklededup_stats)
+  - [pgtrickle.shared\_buffer\_stats](#pgtrickleshared_buffer_stats)
 - [dbt Integration (v0.13.0)](#dbt-integration-v0130)
   - [partition\_by config](#partition_by-config)
   - [fuse config](#fuse-config)
@@ -1166,6 +1174,40 @@ Returns `NULL` if the ST has never been refreshed.
 SELECT pgtrickle.get_staleness('order_totals');
 -- Returns: 12.345  (seconds since last refresh)
 ```
+
+---
+
+### pgtrickle.explain_refresh_mode
+
+> **Added in v0.11.0**
+
+Explain the configured vs. effective refresh mode for a stream table, including the reason for any downgrade (e.g., AUTO choosing FULL).
+
+```sql
+pgtrickle.explain_refresh_mode(name text) → TABLE(
+    configured_mode  text,
+    effective_mode   text,
+    downgrade_reason text
+)
+```
+
+**Columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `configured_mode` | `text` | The refresh mode set on the stream table (e.g., `DIFFERENTIAL`, `AUTO`, `FULL`, `IMMEDIATE`) |
+| `effective_mode` | `text` | The mode actually used on the most recent refresh. NULL for IMMEDIATE mode (handled by triggers) |
+| `downgrade_reason` | `text` | Human-readable explanation when `effective_mode` differs from `configured_mode`, or informational note for IMMEDIATE / APPEND_ONLY |
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.explain_refresh_mode('public.orders_summary');
+```
+
+| configured_mode | effective_mode | downgrade_reason |
+|---|---|---|
+| AUTO | FULL | The most recent refresh used FULL mode. Possible causes: defining query contains a CTE or unsupported operator, adaptive change-ratio threshold was exceeded, or aggregate saturation occurred. Check pgtrickle.pgt_refresh_history for details. |
 
 ---
 
