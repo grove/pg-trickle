@@ -228,6 +228,14 @@ async fn create_database_from_template(
 
         match sqlx::query(&create_sql).execute(&admin_pool).await {
             Ok(_) => {
+                // The cloned DB inherits the template's per-database
+                // pg_trickle.enabled = off setting.  Reset it so the
+                // extension is active in the test database.
+                let _ = sqlx::query(&format!(
+                    "ALTER DATABASE \"{db_name}\" RESET pg_trickle.enabled"
+                ))
+                .execute(&admin_pool)
+                .await;
                 admin_pool.close().await;
                 return;
             }
@@ -270,9 +278,35 @@ async fn create_extension_template(admin_connection_string: &str, port: u16) -> 
         .await
         .unwrap_or_else(|e| panic!("Failed to CREATE EXTENSION on template DB: {e}"));
 
+    // Disable the scheduler on the template DB so background workers don't
+    // connect to it.  Without this, `CREATE DATABASE … TEMPLATE` fails
+    // because PostgreSQL requires zero connections to the source database.
+    sqlx::query(&format!(
+        "ALTER DATABASE \"{template_name}\" SET pg_trickle.enabled = off"
+    ))
+    .execute(&template_pool)
+    .await
+    .unwrap_or_else(|e| panic!("Failed to disable pg_trickle on template DB: {e}"));
+
     // Close all connections before anyone can use this DB as a template.
     // `PgPool::close` waits until every acquired connection is returned.
     template_pool.close().await;
+
+    // Terminate any background workers that connected to the template DB
+    // between CREATE EXTENSION and ALTER DATABASE … SET enabled = off.
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_connection_string)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to connect for template cleanup: {e}"));
+    let _ = sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) \
+         FROM pg_stat_activity \
+         WHERE datname = '{template_name}' AND pid <> pg_backend_pid()"
+    ))
+    .execute(&admin_pool)
+    .await;
+    admin_pool.close().await;
 
     template_name.to_string()
 }

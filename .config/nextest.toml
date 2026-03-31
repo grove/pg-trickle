@@ -6,7 +6,7 @@ retries = 2
 junit = { path = "junit.xml" }
 
 [[profile.ci.overrides]]
-# e2e tests need to run sequentially to avoid port collision and db state issues
+# Each e2e test gets its own database, so moderate parallelism is safe.
 # filter matches both test function names (e2e_*) and binary names (e2e_*_tests)
 filter = 'test(/e2e_/) | binary(/^e2e_/)'
 test-group = "e2e-serial"
@@ -21,11 +21,11 @@ test-group = "integration-serial"
 # run_light_e2e_tests.sh).  Each test gets its own database, so tests
 # can run in parallel safely.  Limit to 4 threads to avoid PostgreSQL
 # connection saturation from many simultaneous property-test databases.
-e2e-serial = { max-threads = 1 }
+e2e-serial = { max-threads = 4 }
 integration-serial = { max-threads = 1 }
 
 [[profile.default.overrides]]
-# e2e tests need to run sequentially to avoid port collision and db state issues
+# Each e2e test gets its own database, so moderate parallelism is safe.
 # filter matches both test function names (e2e_*) and binary names (e2e_*_tests)
 filter = 'test(/e2e_/) | binary(/^e2e_/)'
 test-group = "e2e-serial"
