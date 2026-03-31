@@ -167,7 +167,7 @@ fn query_scenarios() -> Vec<QueryScenario> {
         QueryScenario {
             name: "window",
             query: "SELECT id, region, amount, \
-                    ROW_NUMBER() OVER (PARTITION BY region ORDER BY amount DESC) AS rn \
+                    ROW_NUMBER() OVER (PARTITION BY region ORDER BY amount DESC, id) AS rn \
                     FROM src",
             needs_dim: false,
         },
