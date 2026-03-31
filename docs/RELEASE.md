@@ -104,7 +104,7 @@ just check-upgrade-all
 #   sql/pg_trickle--<prev>--<new>.sql
 #
 # Then re-run until all checks pass:
-just check-upgrade-all  # Should print "All 14 upgrade step(s) passed completeness checks."
+just check-upgrade-all  # Should print "All 15 upgrade step(s) passed completeness checks."
 ```
 
 **Why this matters:** New SQL functions, views, tables, and columns added in any prior

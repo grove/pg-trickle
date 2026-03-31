@@ -376,7 +376,7 @@ reinitialise to add them.
 
 ### 0.12.0 → 0.13.0
 
-**Eight new catalog columns** added to `pgtrickle.pgt_stream_tables`:
+**Ten new catalog columns** added to `pgtrickle.pgt_stream_tables`:
 
 | Column | Type | Default | Purpose |
 |--------|------|---------|--------|
@@ -388,6 +388,8 @@ reinitialise to add them.
 | `blown_at` | `TIMESTAMPTZ` | `NULL` | Timestamp when the fuse last blew |
 | `blow_reason` | `TEXT` | `NULL` | Reason the fuse blew |
 | `st_partition_key` | `TEXT` | `NULL` | Partition key specification (RANGE, LIST, or HASH) |
+| `max_differential_joins` | `INT` | `NULL` | Maximum join count for differential mode (auto-fallback to FULL when exceeded) |
+| `max_delta_fraction` | `DOUBLE PRECISION` | `NULL` | Maximum delta-to-table ratio for differential mode (auto-fallback to FULL when exceeded) |
 
 All columns use `ADD COLUMN IF NOT EXISTS` for idempotent upgrades.
 
