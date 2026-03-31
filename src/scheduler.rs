@@ -1271,10 +1271,21 @@ impl ParallelDispatchState {
 
     /// Rebuild dispatch state from a fresh EU DAG.
     fn rebuild(&mut self, eu_dag: ExecutionUnitDag, dag_version: u64) {
+        // Count how many old units had in-flight jobs that will be orphaned
+        // by clearing unit_states.  Subtract these from per_db_inflight
+        // because the orphaned jobs will be reaped by the dead-worker scan
+        // (Step 0) or will complete and be found via catalog poll. Without
+        // this correction, per_db_inflight permanently drifts upward on
+        // each rebuild, eventually blocking all new dispatches.
+        let orphaned_inflight = self
+            .unit_states
+            .values()
+            .filter(|us| us.inflight_job_id.is_some())
+            .count() as u32;
+        self.per_db_inflight = self.per_db_inflight.saturating_sub(orphaned_inflight);
+
         self.unit_states.clear();
         self.dag_version = dag_version;
-        // Note: per_db_inflight is NOT reset — in-flight workers from the
-        // previous DAG version are still running.
 
         for unit in eu_dag.units() {
             let upstream_count = eu_dag.get_upstream_units(unit.id).len();
