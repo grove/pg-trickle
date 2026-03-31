@@ -122,13 +122,23 @@ Benchmarked at 1% change rate (10 cycles, Docker-hosted PostgreSQL 18.3):
 |---|---|---|---|---|
 | Table scan | 100K | 461 | 40 | **11.6x** |
 | Filter (WHERE) | 10K | 26 | 9 | **2.9x** |
-| Aggregate (GROUP BY) | 100K | 31 | 52 | 0.6x |
+| Aggregate — low cardinality ¹ | 100K | 31 | 52 | 0.6x |
 | Join (INNER JOIN) | 100K | 673 | 42 | **15.9x** |
-| Join + Aggregate | 100K | 52 | 63 | 0.8x |
+| Join + Aggregate — low cardinality ¹ | 100K | 52 | 63 | 0.8x |
 
-Aggregate queries with few output groups (5 regions from 100K rows) are faster with FULL refresh because the aggregate re-scan is cheap. Differential shines on queries that produce many output rows (scans, joins, filtered projections), where FULL must TRUNCATE + re-insert the entire result set. Speedup scales with table size and inversely with change rate — at 50% churn, the two modes converge.
+¹ Low-output scenario: 5 distinct GROUP BY groups from 100K source rows. At
+this cardinality FULL re-aggregates all 100K rows into 5 output rows in a
+single cheap hash aggregate pass, and differential overhead dominates. With
+**high-cardinality GROUP BY** (e.g. `GROUP BY customer_id` with 10K+ distinct
+customers from 100K orders), FULL must re-scan and re-aggregate the entire
+source table while DIFFERENTIAL rescans only the ~1K affected groups — yielding
+substantial speedups comparable to the join case. The algebraic aggregate
+fast-path (roadmap item B-1) will further reduce apply time to sub-1ms for
+these scenarios by replacing MERGE with direct `UPDATE … SET col = col + Δ`.
 
-**Tip:** For aggregate queries where FULL is consistently faster, set `refresh_mode = 'full'` explicitly (`ALTER STREAM TABLE ... SET refresh_mode = 'full'`). Alternatively, rely on the adaptive fallback — when the change ratio exceeds `pg_trickle.adaptive_full_threshold` (default: 50%), the engine switches to FULL automatically for that cycle.
+Differential shines on queries that produce many output rows (scans, joins, filtered projections) and on high-cardinality aggregates, where FULL must TRUNCATE + re-insert or re-aggregate the entire result set. Speedup scales with table size and inversely with change rate — at 50% churn, the two modes converge.
+
+**Tip:** For aggregate queries where FULL is consistently faster, set `refresh_mode = 'full'` explicitly (`ALTER STREAM TABLE ... SET refresh_mode = 'full'`). Alternatively, rely on the adaptive fallback — when the change ratio exceeds `pg_trickle.adaptive_full_threshold` (default: 50%), the engine switches to FULL automatically for that cycle. Starting in v0.14.0, `create_stream_table` emits a WARNING when a low-cardinality aggregate pattern is detected.
 
 ### Zero-Change Latency
 

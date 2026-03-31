@@ -2735,7 +2735,24 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 > **DOC-OPM subtotal: ~2–4 hours**
 
-> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~16–20h CLI + ~0.5d docs**
+### Aggregate Mode Warning at Creation Time (DIAG-2)
+
+> **In plain terms:** Queries with very few distinct GROUP BY groups (e.g. 5
+> regions from 100K rows) are always faster with FULL refresh — differential
+> overhead exceeds the cost of re-aggregating a tiny result set. Today users
+> discover this only after benchmarking. A creation-time WARNING with an
+> explicit recommendation prevents the surprise. The classification logic is
+> already present in the DVM parser (aggregate strategy classification from
+> `is_algebraically_invertible`, `is_group_rescan`); this item exposes it at
+> the SQL boundary.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DIAG-2 | **Aggregate mode warning at `create_stream_table` time.** After parsing the defining query, inspect the top-level operator: if it is an `Aggregate` node containing non-algebraic (group-rescan) functions such as `MIN`, `MAX`, `STRING_AGG`, `ARRAY_AGG`, `BOOL_AND/OR`, emit a `WARNING` recommending `refresh_mode='full'` or `'auto'` and citing the group-rescan cost. For algebraic aggregates (`SUM`/`COUNT`/`AVG`), emit the warning only when the estimated group cardinality (from `pg_stats.n_distinct` on the GROUP BY columns) is below `pg_trickle.agg_diff_cardinality_threshold` (default: 1000 distinct groups), since below this threshold FULL is reliably faster. No behavior change — warning only. | ~2–4h | [plans/performance/REPORT_OVERALL_STATUS.md §12.3](plans/performance/REPORT_OVERALL_STATUS.md) |
+
+> **DIAG-2 subtotal: ~2–4 hours**
+
+> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~16–20h CLI + ~0.5d docs + ~2–4h aggregate warning**
 
 **Exit criteria:**
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
@@ -2744,6 +2761,7 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 - [ ] G17-SOAK: 24h soak test passes with zero worker crashes, zero zombie stream tables, stable memory usage
 - [ ] G17-MDB: Multi-database scheduler isolation verified; no cross-database quota interference
 - [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
+- [ ] DIAG-2: WARNING emitted at `create_stream_table` time for group-rescan aggregates and for algebraic aggregates with estimated group cardinality below threshold; warning directs users to `refresh_mode='full'` or `'auto'`; threshold configurable via GUC
 - [ ] G15-EX: `pgtrickle.export_definition(name TEXT)` returns valid reproducible DDL; round-trip tested
 - [ ] E3: `pgtrickle` CLI installable and covers create/drop/refresh/status commands
 - [ ] C4: `merge_planner_hints` and `merge_work_mem_mb` consolidated into `planner_aggressive`; old GUCs emit deprecation notice
@@ -2908,8 +2926,9 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 |------|-------------|--------|-----|
 | PH-D1 | **DELETE+INSERT strategy.** For stream tables where delta is <1% of target, replace MERGE with `DELETE WHERE __pgt_row_id IN (delta_deletes)` + `INSERT ... SELECT FROM delta_inserts`. Benchmark against MERGE for 1K/10K/100K deltas against 1M/10M targets. Gate behind `pg_trickle.merge_strategy = 'auto'\|'merge'\|'delete_insert'` GUC. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase D](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
 | PH-D2 | **Hash-join planner hints.** Extend `SET LOCAL` injection to prefer hash joins over nested-loop joins for MERGE when delta exceeds 1K rows (nested-loop is optimal for tiny deltas, hash-join for medium). | 3–5d | [PLAN_PERFORMANCE_PART_9.md §Phase D](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+| B-1 | **Algebraic aggregate UPDATE fast-path.** For `GROUP BY` queries where all aggregates are algebraically invertible (`SUM`/`COUNT`/`AVG`), replace the MERGE with a direct `UPDATE target SET col = col + Δ WHERE group_key = ?` for existing groups, plus `INSERT` for newly-appearing groups and `DELETE` for groups whose count reaches zero. Eliminates the MERGE join overhead — the dominant cost for aggregate refresh when group cardinality is high. Requires adding `__pgt_aux_count` / `__pgt_aux_sum` auxiliary columns to the stream table. Fallback to existing MERGE path for non-algebraic aggregates (`MIN`, `MAX`, `STRING_AGG`, etc.). Gate behind `pg_trickle.aggregate_fast_path` GUC (default `true`). Expected impact: **5–20× apply-time reduction** for high-cardinality GROUP BY (10K+ distinct groups); aggregate scenarios at 100K/1% projected to drop from ~50ms to sub-1ms apply time. | 4–6 wk | [plans/performance/PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) · [plans/sql/PLAN_TRANSACTIONAL_IVM.md §Phase 4](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
 
-> **MERGE alternatives subtotal: ~2–3 weeks**
+> **MERGE alternatives subtotal: ~6–11 weeks**
 
 ### Memory & I/O Budget Management (Phase E)
 
@@ -2942,7 +2961,7 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 
 > **G14-SHC subtotal: ~2–3 weeks**
 
-> **v0.16.0 total: ~38–56 hours (PG compat) + ~13–21 days (Native DDL) + ~2–3 weeks (MERGE alternatives) + ~2–4 weeks (memory budget) + ~2–3 weeks (template caching)**
+> **v0.16.0 total: ~38–56 hours (PG compat) + ~13–21 days (Native DDL) + ~6–11 weeks (MERGE alternatives + aggregate fast-path) + ~2–4 weeks (memory budget) + ~2–3 weeks (template caching)**
 
 **Exit criteria:**
 - [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
@@ -2951,6 +2970,7 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 - [ ] `CREATE MATERIALIZED VIEW … WITH (pgtrickle.stream = true)` creates a stream table
 - [ ] Hook chaining verified with TimescaleDB; non-pgtrickle matviews pass through unchanged
 - [ ] PH-D: DELETE+INSERT strategy benchmarked and gated behind GUC; hash-join planner hints for medium deltas
+- [ ] B-1: Algebraic aggregate fast-path replaces MERGE for `SUM`/`COUNT`/`AVG` GROUP BY queries; `__pgt_aux_count`/`__pgt_aux_sum` aux columns present; benchmarked at 100/1K/10K group cardinalities; `aggregate_fast_path` GUC respected; existing tests pass
 - [ ] PH-E: Delta cost estimation prevents OOM on large deltas; spill-aware auto-adjustment tested
 - [ ] G14-SHC: Shared-memory template cache RFC written; prototype shows measurable cold-start elimination; implementation shipped or deferred with findings documented
 - [ ] Extension upgrade path tested (`0.15.0 → 0.16.0`)
