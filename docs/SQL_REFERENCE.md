@@ -959,6 +959,37 @@ SELECT pgtrickle.refresh_stream_table('order_totals');
 
 ---
 
+### pgtrickle.repair_stream_table
+
+Repair a stream table by reinstalling any missing CDC triggers, validating
+catalog entries, and reconciling change buffer state.
+
+```sql
+pgtrickle.repair_stream_table(name text) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table to repair. |
+
+**Example:**
+
+```sql
+-- Reinstall missing CDC triggers after a point-in-time recovery
+SELECT pgtrickle.repair_stream_table('order_totals');
+```
+
+**Notes:**
+- Inspects all source tables in the stream table's dependency graph and reinstalls any missing or disabled CDC triggers.
+- Validates that the stream table's catalog entry, storage table, and change buffer tables are consistent.
+- Useful after `pg_basebackup` or PITR restores where triggers may not have been captured in the backup.
+- Use `pgtrickle.trigger_inventory()` first to identify which triggers are missing.
+- Safe to call on a healthy stream table — it is a no-op if everything is intact.
+
+---
+
 ### Status & Monitoring
 
 Query the state of stream tables, view refresh statistics, and diagnose problems.
@@ -1328,6 +1359,88 @@ SELECT source_table, trigger_type, trigger_name
 FROM pgtrickle.trigger_inventory()
 WHERE NOT present OR NOT enabled;
 ```
+
+---
+
+### pgtrickle.fuse_status
+
+Return the circuit-breaker (fuse) state for every stream table that has a
+fuse configured.
+
+```sql
+pgtrickle.fuse_status() → SETOF record(
+    name           text,         -- stream table name
+    fuse_mode      text,         -- 'off', 'on', or 'auto'
+    fuse_state     text,         -- 'armed' or 'blown'
+    fuse_ceiling   bigint,       -- change-count threshold
+    fuse_sensitivity int,        -- consecutive over-ceiling cycles before blow
+    blown_at       timestamptz,  -- when the fuse last blew (NULL if armed)
+    blow_reason    text          -- reason the fuse blew (NULL if armed)
+)
+```
+
+**Example:**
+
+```sql
+-- Check all fuse-enabled stream tables
+SELECT name, fuse_mode, fuse_state, fuse_ceiling, blown_at
+FROM pgtrickle.fuse_status();
+
+-- Find blown fuses
+SELECT name, blow_reason, blown_at
+FROM pgtrickle.fuse_status()
+WHERE fuse_state = 'blown';
+```
+
+**Notes:**
+- Returns one row per stream table where `fuse_mode != 'off'`.
+- A blown fuse suspends differential refreshes until cleared with `pgtrickle.reset_fuse()`.
+- A `pgtrickle_alert` NOTIFY with event `fuse_blown` is emitted when the fuse trips.
+- See [Configuration — fuse_default_ceiling](CONFIGURATION.md#pg_tricklefuse_default_ceiling) for global defaults.
+
+---
+
+### pgtrickle.reset_fuse
+
+Clear a blown circuit-breaker fuse and resume scheduling for the stream table.
+
+```sql
+pgtrickle.reset_fuse(name text, action text DEFAULT 'apply') → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `text` | — | Name of the stream table whose fuse to reset. |
+| `action` | `text` | `'apply'` | How to handle the pending changes that caused the fuse to blow. |
+
+**Actions:**
+
+| Action | Behavior |
+|--------|----------|
+| `'apply'` | Process all pending changes normally and resume scheduling. |
+| `'reinitialize'` | Drop and repopulate the stream table from scratch (full refresh from defining query). |
+| `'skip_changes'` | Discard the pending changes that triggered the fuse and resume from the current frontier. |
+
+**Example:**
+
+```sql
+-- After investigating a bulk load, apply the changes:
+SELECT pgtrickle.reset_fuse('category_summary', action => 'apply');
+
+-- Or skip the oversized batch entirely:
+SELECT pgtrickle.reset_fuse('category_summary', action => 'skip_changes');
+
+-- Or rebuild from scratch:
+SELECT pgtrickle.reset_fuse('category_summary', action => 'reinitialize');
+```
+
+**Notes:**
+- Errors if the stream table's fuse is not in `'blown'` state.
+- After reset, the fuse returns to `'armed'` state and the scheduler resumes normal operation.
+- Use `pgtrickle.fuse_status()` to inspect the fuse state before resetting.
+- The `'skip_changes'` action advances the frontier past the pending changes without applying them — use only when you are certain the changes should be discarded.
 
 ---
 
