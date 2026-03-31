@@ -818,6 +818,15 @@ async fn bench_lateral_10k_1pct() {
 
 #[tokio::test]
 #[ignore]
+async fn bench_lateral_100k_1pct() {
+    let scenarios = query_scenarios();
+    let s = &scenarios[6]; // lateral
+    let results = run_benchmark(s, 100_000, 0.01).await;
+    print_results_table(&results);
+}
+
+#[tokio::test]
+#[ignore]
 async fn bench_cte_10k_1pct() {
     let scenarios = query_scenarios();
     let s = &scenarios[7]; // cte
