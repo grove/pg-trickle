@@ -58,17 +58,17 @@ pg_trickle is designed for low-latency, high-throughput incremental view mainten
 
 ### Differential vs Full Refresh
 
-Benchmarked at 100K rows with 1% change rate (a typical production workload):
+Benchmarked at 1% change rate (10 cycles, Docker-hosted PostgreSQL 18.3):
 
-| Query Type | FULL (ms) | DIFFERENTIAL (ms) | Speedup |
-|---|---|---|---|
-| Table scan | 326 | 47 | **7.0x** |
-| Filter (WHERE) | 267 | 34 | **7.9x** |
-| Aggregate (GROUP BY) | 28 | 11 | **2.6x** |
-| Join (INNER JOIN) | 384 | 64 | **6.0x** |
-| Join + Aggregate | 67 | 22 | **3.1x** |
+| Query Type | Rows | FULL (ms) | DIFFERENTIAL (ms) | Speedup |
+|---|---|---|---|---|
+| Table scan | 100K | 493 | 29 | **17.0x** |
+| Filter (WHERE) | 10K | 22 | 8 | **2.6x** |
+| Aggregate (GROUP BY) | 100K | 30 | 41 | 0.7x |
+| Join (INNER JOIN) | 100K | 643 | 43 | **14.9x** |
+| Join + Aggregate | 100K | 47 | 64 | 0.7x |
 
-Speedup scales with table size and inversely with change rate. At 1% churn on larger tables, speedups of **5–50x** are typical. At 50% churn, the two modes converge.
+Aggregate queries with few output groups (5 regions from 100K rows) are faster with FULL refresh because the aggregate re-scan is cheap. Differential shines on queries that produce many output rows (scans, joins, filtered projections), where FULL must TRUNCATE + re-insert the entire result set. Speedup scales with table size and inversely with change rate — at 50% churn, the two modes converge.
 
 ### Zero-Change Latency
 
