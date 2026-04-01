@@ -1,0 +1,233 @@
+# =============================================================================
+# GHCR Image Workflow — Build, smoke-test, and publish the pg_trickle image
+# to GitHub Container Registry.
+#
+# Published image: ghcr.io/grove/pg_trickle
+# Tags produced:
+#   <version>-pg18.3          — immutable, e.g. 0.13.0-pg18.3
+#   latest                    — moves to the most recent release
+#   pg18                      — floating alias for the latest 18.x build
+#
+# Multi-platform: linux/amd64 + linux/arm64 (via QEMU emulation for arm64).
+#
+# Smoke test runs on linux/amd64 only (no QEMU overhead).
+#
+# Triggers:
+#   - push tags v* (production releases)
+#   - workflow_dispatch (manual run)
+#   - schedule: weekly on Sundays (catch upstream base-image regressions)
+# =============================================================================
+name: GHCR image (build + publish)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 0'   # Every Sunday at 05:00 UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/pg_trickle
+  PG_MINOR: "18.3"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    name: Build + publish (multi-arch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      version:   ${{ steps.version.outputs.version }}
+      amd64_tag: ${{ steps.amd64_tag.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # ── Derive version ───────────────────────────────────────────────────
+      - name: Derive version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+            VERSION="${VERSION}-dev"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      # ── Docker metadata (tags + labels) ──────────────────────────────────
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Immutable version + PG minor tag (e.g. 0.13.0-pg18.3)
+            type=raw,value=${{ steps.version.outputs.version }}-pg${{ env.PG_MINOR }}
+            # Floating pg18 alias — always points at the latest pg18.x build
+            type=raw,value=pg18
+            # latest — only on real version tags, not on dev/schedule runs
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=pg_trickle
+            org.opencontainers.image.description=PostgreSQL ${{ env.PG_MINOR }} with pg_trickle streaming tables and incremental view maintenance
+            org.opencontainers.image.vendor=grove
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.documentation=https://github.com/grove/pg-trickle/blob/main/docs/GETTING_STARTED.md
+
+      # ── Build infrastructure ─────────────────────────────────────────────
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build amd64 only for smoke test ──────────────────────────────────
+      # We build amd64 first, load it locally for smoke testing, then push
+      # the full multi-arch manifest in the next step.  This avoids running
+      # the smoke test under slow QEMU arm64 emulation.
+      - name: Build amd64 image (for smoke test)
+        id: build_amd64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.ghcr
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: pg_trickle_smoke:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Smoke test (amd64) ────────────────────────────────────────────────
+      - name: Start smoke container
+        run: |
+          docker run -d \
+            --name pgtrickle-ghcr-smoke \
+            -e POSTGRES_PASSWORD=smoke \
+            pg_trickle_smoke:latest
+
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in $(seq 1 30); do
+            if docker exec pgtrickle-ghcr-smoke \
+                pg_isready -U postgres -q 2>/dev/null; then
+              echo "PostgreSQL ready after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Smoke test — extension loads and version is correct
+        run: |
+          docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -v ON_ERROR_STOP=1 -c "
+              CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;
+              SELECT pgtrickle.version() AS ext_version;
+            "
+
+      - name: Smoke test — stream table lifecycle
+        run: |
+          docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -v ON_ERROR_STOP=1 -c "
+              CREATE TABLE smoke_src (id INT PRIMARY KEY, v INT);
+              INSERT INTO smoke_src VALUES (1, 10), (2, 20);
+
+              SELECT pgtrickle.create_stream_table(
+                'smoke_mv',
+                'SELECT id, v * 2 AS doubled FROM smoke_src'
+              );
+
+              SELECT pgtrickle.refresh_stream_table('smoke_mv');
+
+              SELECT count(*) AS row_count FROM smoke_mv;
+              SELECT * FROM smoke_mv ORDER BY id;
+            "
+
+      - name: Smoke test — catalog tables present
+        run: |
+          docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -v ON_ERROR_STOP=1 -c "
+              SELECT count(*) FROM pgtrickle.pgt_stream_tables;
+              SELECT count(*) FROM pgtrickle.pgt_watermarks;
+              SELECT count(*) FROM pgtrickle.pgt_watermark_groups;
+            "
+
+      - name: Smoke test — GUC defaults are applied
+        run: |
+          docker exec pgtrickle-ghcr-smoke \
+            psql -U postgres -v ON_ERROR_STOP=1 -c "
+              SELECT name, setting, unit
+              FROM pg_settings
+              WHERE name IN (
+                'shared_preload_libraries',
+                'wal_level',
+                'max_replication_slots',
+                'max_worker_processes',
+                'shared_buffers',
+                'pg_trickle.enabled',
+                'pg_trickle.cdc_mode',
+                'pg_trickle.parallel_refresh_mode'
+              )
+              ORDER BY name;
+            "
+
+      - name: Tear down smoke container
+        if: always()
+        run: docker rm -f pgtrickle-ghcr-smoke 2>/dev/null || true
+
+      # ── Push multi-arch manifest to GHCR ─────────────────────────────────
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.ghcr
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          # Reuse the amd64 cache from the smoke-test build
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Summary ──────────────────────────────────────────────────────────
+      - name: Print summary
+        if: always()
+        run: |
+          echo "## GHCR publish summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${{ steps.version.outputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PostgreSQL | ${{ env.PG_MINOR }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platforms | linux/amd64 · linux/arm64 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Tags pushed:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

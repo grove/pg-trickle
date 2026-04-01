@@ -68,17 +68,62 @@ See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and
 [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete
 Cluster and Database deployment examples.
 
-### 4. Local Docker development (without Kubernetes)
+### 4. GHCR Docker image (recommended for local dev)
 
-For local development without Kubernetes, install the extension files manually
-into a standard PostgreSQL container from a release archive:
+pg_trickle is published as a ready-to-run Docker image on the GitHub Container
+Registry. PostgreSQL 18.3 and pg_trickle are pre-installed and all sensible GUC
+defaults (`wal_level`, `shared_preload_libraries`, memory, scheduler settings)
+are baked in — no configuration file editing needed.
 
 ```bash
-# Extract extension files from the release archive
+docker pull ghcr.io/grove/pg_trickle:latest
+
+docker run --rm \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  ghcr.io/grove/pg_trickle:latest
+```
+
+`CREATE EXTENSION pg_trickle;` runs automatically on the default `postgres`
+database at first startup.
+
+Available tags:
+
+| Tag | Meaning |
+|-----|---------|
+| `latest` | Most recent release |
+| `pg18` | Floating alias for the latest PostgreSQL 18 build |
+| `<version>-pg18.3` | Immutable tag, e.g. `0.13.0-pg18.3` |
+
+Override any GUC at runtime without rebuilding:
+
+```bash
+docker run --rm \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  ghcr.io/grove/pg_trickle:latest \
+  -c shared_buffers=2GB -c work_mem=64MB -c effective_cache_size=6GB
+```
+
+For persistent data, mount a volume:
+
+```bash
+docker run -d \
+  --name pg_trickle \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  -v pg_trickle_data:/var/lib/postgresql/data \
+  ghcr.io/grove/pg_trickle:latest
+```
+
+**Alternative — manual mount from a release archive:**
+If you prefer to use the stock `postgres:18.3` image rather than the pre-built
+image, extract the extension files from a release archive and mount them:
+
+```bash
 tar xzf pg_trickle-<ver>-pg18-linux-amd64.tar.gz
 cd pg_trickle-<ver>-pg18-linux-amd64
 
-# Run PostgreSQL with the extension mounted
 docker run --rm \
   -v $PWD/lib/pg_trickle.so:/usr/lib/postgresql/18/lib/pg_trickle.so:ro \
   -v $PWD/extension/:/tmp/ext/:ro \

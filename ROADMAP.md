@@ -2663,6 +2663,14 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 > **Stability & multi-database testing subtotal: ~2–4 days**
 
+### Container Infrastructure (INFRA-GHCR)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| INFRA-GHCR | **GHCR Docker image.** `Dockerfile.ghcr` (pinned to `postgres:18.3-bookworm`) + `.github/workflows/ghcr.yml` workflow that builds a multi-arch (`linux/amd64` + `linux/arm64`) PostgreSQL 18.3 server image with pg_trickle pre-installed and all sensible GUC defaults baked in. Smoke-tests on amd64 before push. Published to `ghcr.io/grove/pg_trickle` on every `v*` tag with immutable (`<version>-pg18.3`), floating (`pg18`), and `latest` tags. Uses `GITHUB_TOKEN` — no extra secrets. | 4h | — | ✅ Done |
+
+> **Container infrastructure subtotal: ✅ Done**
+
 ### Refresh Mode Diagnostics (DIAG-1)
 
 > **In plain terms:** Users currently have no structured way to know whether
@@ -2797,6 +2805,7 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 - [ ] DOC-PDC: Pre-deployment checklist published in `docs/PRE_DEPLOYMENT.md`; linked from GETTING_STARTED and INSTALL
 - [ ] DOC-OPM: Operator mode support matrix summary and link added to SQL_REFERENCE.md
 - [ ] FIX-STST-DIFF: Manual `refresh_stream_table()` on a `calculated` ST uses DIFFERENTIAL via `changes_pgt_` buffers when a frontier is present; `test_st_on_st_uses_differential_not_full` passes
+- [x] INFRA-GHCR: `ghcr.io/grove/pg_trickle` multi-arch image builds, smoke-tests, and pushes on `v*` tags ✅ Done
 - [ ] Extension upgrade path tested (`0.13.0 → 0.14.0`)
 
 ---
