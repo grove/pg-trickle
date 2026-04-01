@@ -26,6 +26,17 @@
 --   D-1c:   pgtrickle.convert_buffers_to_unlogged() function (Rust #[pg_extern]).
 --           No SQL DDL required — function is automatically available after
 --           extension update via ALTER EXTENSION pg_trickle UPDATE.
+--
+-- Phase 4 — Refresh Mode Diagnostics:
+--   DIAG-1a-b: Pure signal scoring + SPI data gathering (Rust-side).
+--   DIAG-1c: pgtrickle.recommend_refresh_mode() function (Rust #[pg_extern]).
+--   DIAG-1d: pgtrickle.refresh_efficiency() function (Rust #[pg_extern]).
+--            No catalog DDL required — functions are automatically available
+--            after extension update via ALTER EXTENSION pg_trickle UPDATE.
+--
+-- Phase 5 — Export API:
+--   G15-EX: pgtrickle.export_definition() function (Rust #[pg_extern]).
+--           No catalog DDL required.
 
 -- ── ERR-1a: Error state columns (idempotent) ─────────────────────────────
 

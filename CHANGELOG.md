@@ -88,6 +88,22 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   converted tables. Acquires `ACCESS EXCLUSIVE` lock per table — run during
   low-traffic windows.
 
+- **DIAG-1: `pgtrickle.recommend_refresh_mode()` function** — Analyzes stream
+  table workload characteristics and recommends the optimal refresh mode (FULL
+  vs DIFFERENTIAL). Evaluates seven weighted signals — change ratio, empirical
+  timing, query complexity, target size, index coverage, and latency variance
+  — and returns a composite recommendation with confidence level and detailed
+  signal breakdown in JSONB.
+
+- **DIAG-1d: `pgtrickle.refresh_efficiency()` function** — Per-table refresh
+  efficiency metrics: FULL vs DIFFERENTIAL counts, average timing, change ratios,
+  and speedup factor. Suitable for monitoring dashboards and Grafana alerts.
+
+- **G15-EX: `pgtrickle.export_definition()` function** — Exports a stream
+  table's full configuration as reproducible DDL (`DROP` + `CREATE` +
+  `ALTER` statements), including schedule, refresh mode, CDC mode, partition
+  key, fuse settings, and all other options.
+
 ### Changed
 
 - **ERR-1c: API calls clear error state** — `alter_stream_table`,

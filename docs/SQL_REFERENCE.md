@@ -3472,6 +3472,129 @@ SELECT pgtrickle.convert_buffers_to_unlogged();
 
 ---
 
+## Refresh Mode Diagnostics (v0.14.0)
+
+### `pgtrickle.recommend_refresh_mode(st_name TEXT DEFAULT NULL)`
+
+Analyze stream table workload characteristics and recommend the optimal
+refresh mode (FULL vs DIFFERENTIAL). When `st_name` is NULL, returns one
+row per stream table. When provided, returns a single row for the named
+stream table.
+
+The function evaluates seven weighted signals — change ratio, empirical
+timing, query complexity, target size, index coverage, and latency variance
+— and computes a composite score. Scores above +0.15 recommend DIFFERENTIAL;
+below −0.15 recommend FULL; in between, the function recommends KEEP
+(current mode is near-optimal).
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `st_name` | `text` | `NULL` | Optional stream table name. NULL = all stream tables. |
+
+**Return columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `pgt_schema` | `text` | Stream table schema |
+| `pgt_name` | `text` | Stream table name |
+| `current_mode` | `text` | Currently configured refresh mode |
+| `effective_mode` | `text` | Mode actually used in the last refresh |
+| `recommended_mode` | `text` | `DIFFERENTIAL`, `FULL`, or `KEEP` |
+| `confidence` | `text` | `high`, `medium`, or `low` |
+| `reason` | `text` | Human-readable explanation of the recommendation |
+| `signals` | `jsonb` | Detailed signal breakdown with scores and weights |
+
+**Example:**
+
+```sql
+-- Check all stream tables
+SELECT pgt_name, current_mode, recommended_mode, confidence, reason
+FROM pgtrickle.recommend_refresh_mode();
+
+-- Check a specific stream table
+SELECT recommended_mode, confidence, reason, signals
+FROM pgtrickle.recommend_refresh_mode('public.orders_summary');
+```
+
+**Signal weights:**
+
+| Signal | Base Weight | Description |
+|--------|-------------|-------------|
+| `change_ratio_current` | 0.25 | Current pending changes / source rows |
+| `change_ratio_avg` | 0.30 | Historical average change ratio |
+| `empirical_timing` | 0.35 | Observed DIFF vs FULL speed ratio |
+| `query_complexity` | 0.10 | JOIN/aggregate/window count |
+| `target_size` | 0.10 | Target relation + index size |
+| `index_coverage` | 0.05 | Whether `__pgt_row_id` index exists |
+| `latency_variance` | 0.05 | DIFF latency p95/p50 ratio |
+
+---
+
+### `pgtrickle.refresh_efficiency()`
+
+Per-table refresh efficiency metrics. Returns operational statistics for
+every stream table — useful for monitoring dashboards and Grafana alerts.
+
+**Return columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `pgt_schema` | `text` | Stream table schema |
+| `pgt_name` | `text` | Stream table name |
+| `refresh_mode` | `text` | Current refresh mode |
+| `total_refreshes` | `bigint` | Total completed refresh count |
+| `diff_count` | `bigint` | DIFFERENTIAL refresh count |
+| `full_count` | `bigint` | FULL refresh count |
+| `avg_diff_ms` | `float8` | Average DIFFERENTIAL duration (ms) |
+| `avg_full_ms` | `float8` | Average FULL duration (ms) |
+| `avg_change_ratio` | `float8` | Average change ratio from history |
+| `diff_speedup` | `text` | Speedup factor (e.g. `12.3x`) of FULL / DIFF timing |
+| `last_refresh_at` | `text` | Timestamp of last data refresh |
+
+**Example:**
+
+```sql
+SELECT pgt_name, refresh_mode, diff_count, full_count,
+       avg_diff_ms, avg_full_ms, diff_speedup
+FROM pgtrickle.refresh_efficiency()
+ORDER BY total_refreshes DESC;
+```
+
+---
+
+## Export API (v0.14.0)
+
+### `pgtrickle.export_definition(st_name TEXT)`
+
+Export a stream table's configuration as reproducible DDL. Returns a SQL
+script containing `DROP STREAM TABLE IF EXISTS` followed by
+`SELECT pgtrickle.create_stream_table(...)` with all configured options,
+plus any `ALTER STREAM TABLE` calls for post-creation settings (tier,
+fuse mode, etc.).
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `st_name` | `text` | Fully qualified or search-path-resolved stream table name. |
+
+**Returns:** `text` — SQL script that recreates the stream table.
+
+**Example:**
+
+```sql
+-- Export a single definition
+SELECT pgtrickle.export_definition('public.orders_summary');
+
+-- Export all definitions
+SELECT pgtrickle.export_definition(pgt_schema || '.' || pgt_name)
+FROM pgtrickle.pgt_stream_tables;
+```
+
+---
+
 ## dbt Integration (v0.13.0)
 
 The `dbt-pgtrickle` package exposes two new `config(...)` keys added in

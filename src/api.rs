@@ -7613,6 +7613,295 @@ fn convert_buffers_to_unlogged() -> Result<i64, PgTrickleError> {
     Ok(converted)
 }
 
+// ── DIAG-1c: recommend_refresh_mode() ─────────────────────────────────────
+
+/// DIAG-1c: Analyze stream table refresh characteristics and recommend the
+/// optimal refresh mode (FULL vs DIFFERENTIAL).
+///
+/// When `st_name` is NULL, returns one row per active stream table.
+/// When provided, returns a single row for the named stream table (schema-qualified
+/// or search-path resolved).
+///
+/// Read-only — no side effects.
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "recommend_refresh_mode")]
+fn recommend_refresh_mode(
+    st_name: default!(Option<String>, "NULL"),
+) -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(pgt_schema, String),
+            name!(pgt_name, String),
+            name!(current_mode, String),
+            name!(effective_mode, Option<String>),
+            name!(recommended_mode, String),
+            name!(confidence, String),
+            name!(reason, String),
+            name!(signals, pgrx::JsonB),
+        ),
+    >,
+    PgTrickleError,
+> {
+    use crate::diagnostics;
+
+    let stream_tables = match st_name {
+        Some(name) => {
+            let (schema, table) = parse_qualified_name(&name)?;
+            let st = StreamTableMeta::get_by_name(&schema, &table)?;
+            vec![st]
+        }
+        None => StreamTableMeta::get_all()?,
+    };
+
+    let mut rows = Vec::new();
+    for st in &stream_tables {
+        let input = diagnostics::gather_all_signals(st);
+        let signals = diagnostics::collect_signals(&input);
+
+        // Effective mode: what actually ran last time
+        let effective = Spi::get_one_with_args::<String>(
+            "SELECT action FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = $1 AND status = 'COMPLETED' \
+             ORDER BY start_time DESC LIMIT 1",
+            &[st.pgt_id.into()],
+        )
+        .unwrap_or(None);
+
+        let rec = diagnostics::compute_recommendation(&signals, effective.as_deref());
+
+        // Build signals JSONB
+        let signals_json = build_signals_json(&input, &rec);
+
+        rows.push((
+            st.pgt_schema.clone(),
+            st.pgt_name.clone(),
+            st.refresh_mode.as_str().to_string(),
+            effective,
+            rec.recommended_mode.to_string(),
+            rec.confidence.to_string(),
+            rec.reason,
+            pgrx::JsonB(signals_json),
+        ));
+    }
+
+    Ok(TableIterator::new(rows))
+}
+
+/// Build the JSONB signals payload for recommend_refresh_mode output.
+fn build_signals_json(
+    input: &crate::diagnostics::DiagnosticsInput,
+    rec: &crate::diagnostics::Recommendation,
+) -> serde_json::Value {
+    let signal_array: Vec<serde_json::Value> = rec
+        .signals
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "score": s.score,
+                "weight": s.weight,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "change_ratio_current": input.change_ratio_current,
+        "change_ratio_avg": input.change_ratio_avg,
+        "diff_avg_ms": input.diff_avg_ms,
+        "full_avg_ms": input.full_avg_ms,
+        "diff_p95_ms": input.diff_p95_ms,
+        "target_size_bytes": input.target_size_bytes,
+        "join_count": input.join_count,
+        "has_covering_index": input.has_covering_index,
+        "history_rows_diff": input.history_rows_diff,
+        "history_rows_full": input.history_rows_full,
+        "composite_score": rec.composite_score,
+        "signals": signal_array,
+    })
+}
+
+// ── DIAG-1d: refresh_efficiency ───────────────────────────────────────────
+
+/// DIAG-1d: Per-table refresh efficiency metrics.
+///
+/// Returns operational metrics for each stream table: FULL vs DIFFERENTIAL
+/// timing, change ratios, speedup factor, and refresh counts. Suitable for
+/// monitoring dashboards and Grafana alerts.
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "refresh_efficiency")]
+fn refresh_efficiency() -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(pgt_schema, String),
+            name!(pgt_name, String),
+            name!(refresh_mode, String),
+            name!(total_refreshes, i64),
+            name!(diff_count, i64),
+            name!(full_count, i64),
+            name!(avg_diff_ms, Option<f64>),
+            name!(avg_full_ms, Option<f64>),
+            name!(avg_change_ratio, Option<f64>),
+            name!(diff_speedup, Option<String>),
+            name!(last_refresh_at, Option<String>),
+        ),
+    >,
+    PgTrickleError,
+> {
+    use crate::diagnostics;
+
+    let stream_tables = StreamTableMeta::get_all()?;
+    let mut rows = Vec::new();
+
+    for st in &stream_tables {
+        let history = diagnostics::gather_history_stats(st.pgt_id);
+
+        let speedup = match (history.diff_avg_ms, history.full_avg_ms) {
+            (Some(diff), Some(full)) if diff > 0.0 => Some(format!("{:.1}x", full / diff)),
+            _ => None,
+        };
+
+        let last_refresh = st.data_timestamp.map(|ts| format!("{}", ts));
+
+        rows.push((
+            st.pgt_schema.clone(),
+            st.pgt_name.clone(),
+            st.refresh_mode.as_str().to_string(),
+            history.total_rows,
+            history.diff_count,
+            history.full_count,
+            history.diff_avg_ms,
+            history.full_avg_ms,
+            history.avg_change_ratio,
+            speedup,
+            last_refresh,
+        ));
+    }
+
+    Ok(TableIterator::new(rows))
+}
+
+// ── G15-EX: export_definition() ───────────────────────────────────────────
+
+/// G15-EX: Export a stream table's configuration as reproducible DDL.
+///
+/// Returns a `DROP STREAM TABLE IF EXISTS` + `CREATE STREAM TABLE ... WITH (...)`
+/// statement that can recreate the stream table from scratch.
+#[pg_extern(schema = "pgtrickle", name = "export_definition")]
+fn export_definition(st_name: &str) -> Result<String, PgTrickleError> {
+    let (schema, table) = parse_qualified_name(st_name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table)?;
+
+    let qualified = format!("{}.{}", quote_ident(&schema), quote_ident(&table));
+
+    let mut ddl = format!("DROP STREAM TABLE IF EXISTS {};\n", qualified);
+
+    ddl.push_str(&format!(
+        "SELECT pgtrickle.create_stream_table(\n  '{}'::text,\n  $pgt${}$pgt$::text",
+        qualified.replace('\'', "''"),
+        st.defining_query,
+    ));
+
+    // Optional parameters
+    if let Some(ref schedule) = st.schedule {
+        ddl.push_str(&format!(
+            ",\n  schedule => '{}'",
+            schedule.replace('\'', "''")
+        ));
+    }
+
+    ddl.push_str(&format!(
+        ",\n  refresh_mode => '{}'",
+        st.refresh_mode.as_str()
+    ));
+
+    if let Some(ref cdc) = st.requested_cdc_mode {
+        ddl.push_str(&format!(",\n  cdc_mode => '{}'", cdc));
+    }
+
+    if st.is_append_only {
+        ddl.push_str(",\n  append_only => true");
+    }
+
+    if st.pooler_compatibility_mode {
+        ddl.push_str(",\n  pooler_compatibility_mode => true");
+    }
+
+    if let Some(ref pk) = st.st_partition_key {
+        ddl.push_str(&format!(
+            ",\n  partition_by => '{}'",
+            pk.replace('\'', "''")
+        ));
+    }
+
+    if let Some(mdj) = st.max_differential_joins {
+        ddl.push_str(&format!(",\n  max_differential_joins => {}", mdj));
+    }
+
+    if let Some(mdf) = st.max_delta_fraction {
+        ddl.push_str(&format!(",\n  max_delta_fraction => {}", mdf));
+    }
+
+    let dc = st.diamond_consistency.as_str();
+    if dc != "none" {
+        ddl.push_str(&format!(",\n  diamond_consistency => '{}'", dc));
+    }
+
+    let dsp = st.diamond_schedule_policy.as_str();
+    if dsp != "fastest" {
+        ddl.push_str(&format!(",\n  diamond_schedule_policy => '{}'", dsp));
+    }
+
+    ddl.push_str("\n);\n");
+
+    // Post-creation settings via ALTER
+    let mut alters = Vec::new();
+
+    if st.refresh_tier != "hot" {
+        alters.push(format!("tier => '{}'", st.refresh_tier));
+    }
+
+    if st.fuse_mode != "off" {
+        alters.push(format!("fuse => '{}'", st.fuse_mode));
+    }
+
+    if let Some(ceiling) = st.fuse_ceiling {
+        alters.push(format!("fuse_ceiling => {}", ceiling));
+    }
+
+    if let Some(sensitivity) = st.fuse_sensitivity {
+        alters.push(format!("fuse_sensitivity => {}", sensitivity));
+    }
+
+    if !alters.is_empty() {
+        ddl.push_str(&format!(
+            "\nSELECT pgtrickle.alter_stream_table('{}', {});\n",
+            qualified.replace('\'', "''"),
+            alters.join(", "),
+        ));
+    }
+
+    Ok(ddl)
+}
+
+/// Quote an identifier for safe use in SQL.
+fn quote_ident(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
 /// During a `pg_restore`, `pg_dump` will restore the base storage tables and
 /// the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers
 /// and internal wiring will be missing. This function re-establishes them.

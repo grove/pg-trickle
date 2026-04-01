@@ -2657,24 +2657,21 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **Container infrastructure subtotal: ✅ Done**
 
-### Refresh Mode Diagnostics (DIAG-1)
+### Refresh Mode Diagnostics (DIAG-1) — ✅ Done
 
-> **In plain terms:** Users currently have no structured way to know whether
-> their stream tables are using the most efficient refresh mode. This adds a
-> read-only advisory SQL function that analyses stream table characteristics
-> — change ratio history, empirical FULL vs DIFFERENTIAL timing, query
-> complexity, table size, and index coverage — and recommends whether to keep
-> the current mode or switch, with a confidence level and human-readable
-> explanation.
+> Analyzes stream table workload characteristics and recommends the optimal
+> refresh mode. Seven weighted signals (change ratio, empirical timing, query
+> complexity, target size, index coverage, latency variance) produce a composite
+> score with confidence level and human-readable explanation.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| DIAG-1a | `src/diagnostics.rs` — pure signal-scoring functions (`score_change_ratio`, `score_empirical_timing`, `score_query_complexity`, `score_target_size`, `score_index_coverage`, `score_latency_variance`, `compute_recommendation`) + unit tests | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-1, D-4 |
-| DIAG-1b | SPI data-gathering layer — change buffer counts, `pgt_refresh_history` aggregates, query complexity from DVM parser, `pg_relation_size`, `pg_index` coverage check | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-2 |
-| DIAG-1c | `pgtrickle.recommend_refresh_mode(name)` and `pgtrickle.recommend_refresh_mode()` SQL functions (set-returning, read-only, no side effects); returns `recommended_mode`, `confidence`, `reason`, `signals` JSONB | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-3 |
-| DIAG-1d | `pgtrickle.refresh_efficiency` view — raw per-table FULL vs DIFF timing, change ratios, speedup factor; programmatic companion to the advisory function | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-6 |
-| DIAG-1e | E2E integration tests; upgrade migration (additive — no catalog changes) | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-5 |
-| DIAG-1f | Documentation: `docs/SQL_REFERENCE.md` additions, `docs/CONFIGURATION.md` tuning section, `docs/tutorials/tuning-refresh-mode.md` | 0.5d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-7 |
+| ~~DIAG-1a~~ | ~~`src/diagnostics.rs` — pure signal-scoring functions + unit tests~~ | — | ✅ Done |
+| ~~DIAG-1b~~ | ~~SPI data-gathering layer~~ | — | ✅ Done |
+| ~~DIAG-1c~~ | ~~`pgtrickle.recommend_refresh_mode()` SQL function~~ | — | ✅ Done |
+| ~~DIAG-1d~~ | ~~`pgtrickle.refresh_efficiency()` function~~ | — | ✅ Done |
+| DIAG-1e | E2E integration tests; upgrade migration | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-5 |
+| ~~DIAG-1f~~ | ~~Documentation: SQL_REFERENCE.md additions~~ | — | ✅ Done |
 
 > The function synthesises 7 weighted signals (historical change ratio 0.30,
 > empirical timing 0.35, current change ratio 0.25, query complexity 0.10,
@@ -2683,11 +2680,11 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **Diagnostics subtotal: ~3.5–7 days**
 
-### Export Definition API (G15-EX)
+### Export Definition API (G15-EX) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G15-EX | **`export_definition(name TEXT)`** — export a stream table configuration as reproducible `CREATE STREAM TABLE … WITH (…)` DDL. Useful for backup, versioning, and schema migrations. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G15-EX~~ | ~~**`export_definition(name TEXT)`** — export a stream table configuration as reproducible DDL~~ | — | ✅ Done |
 
 > **G15-EX subtotal: ~1–2 days**
 
