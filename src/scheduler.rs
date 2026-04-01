@@ -4027,6 +4027,49 @@ fn refresh_single_st(
         return;
     }
 
+    // ST-on-ST safety: skip this ST if any upstream STREAM_TABLE source is
+    // currently being refreshed by another session.  When the scheduler does
+    // a FULL refresh of a downstream calculated ST, it reads the current
+    // state of all upstream STs.  If an upstream is mid-refresh (row locked
+    // by a manual `refresh_stream_table` call), the FULL refresh may read a
+    // mix of pre-/post-update upstream data, producing incorrect results
+    // that cannot be reliably detected and corrected afterwards.
+    //
+    // The check is cheap (one FOR SHARE SKIP LOCKED per upstream ST) and
+    // only affects STs with STREAM_TABLE dependencies.
+    {
+        let deps = crate::catalog::StDependency::get_for_st(pgt_id).unwrap_or_default();
+        let has_st_source = deps.iter().any(|dep| dep.source_type == "STREAM_TABLE");
+        if has_st_source {
+            let any_upstream_locked = deps
+                .iter()
+                .filter(|dep| dep.source_type == "STREAM_TABLE")
+                .any(|dep| {
+                    let upstream_pgt_id =
+                        crate::catalog::StreamTableMeta::pgt_id_for_relid(dep.source_relid);
+                    match upstream_pgt_id {
+                        Some(up_id) => Spi::get_one_with_args::<i64>(
+                            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                                 WHERE pgt_id = $1 FOR SHARE SKIP LOCKED",
+                            &[up_id.into()],
+                        )
+                        .unwrap_or(None)
+                        .is_none(),
+                        None => false,
+                    }
+                });
+
+            if any_upstream_locked {
+                pgrx::debug1!(
+                    "[pg_trickle] skipping {}.{} — upstream ST is being refreshed by another session",
+                    st.pgt_schema,
+                    st.pgt_name,
+                );
+                return;
+            }
+        }
+    }
+
     // FUSE-5: Check fuse circuit breaker.
     if evaluate_fuse(&st) {
         log!(
