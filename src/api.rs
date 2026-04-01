@@ -3671,6 +3671,42 @@ fn execute_manual_full_refresh(
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     }
 
+    // ── Snapshot ST change buffer LSNs BEFORE TRUNCATE+INSERT ──────────
+    //
+    // Under READ COMMITTED, each SPI statement sees the latest committed
+    // data at statement start time.  If the frontier's ST-source LSNs are
+    // computed AFTER the INSERT, a concurrent upstream refresh might commit
+    // new change buffer rows between the INSERT and the MAX(lsn) query.
+    // The frontier would then advance past changes the INSERT never saw,
+    // causing subsequent manual refreshes to believe the data is current
+    // when it is actually stale.
+    //
+    // Capturing the LSNs before the INSERT ensures the frontier reflects
+    // at most the data that was visible to the INSERT.
+    let change_schema_for_snapshot =
+        crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let st_source_lsn_snapshot: Vec<(i64, String)> =
+        crate::catalog::StDependency::get_for_st(st.pgt_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|dep| dep.source_type == "STREAM_TABLE")
+            .filter_map(|dep| {
+                let upstream_pgt_id = StreamTableMeta::pgt_id_for_relid(dep.source_relid)?;
+                if !crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema_for_snapshot) {
+                    return None;
+                }
+                let lsn = Spi::get_one::<String>(&format!(
+                    "SELECT COALESCE(MAX(lsn)::text, pg_current_wal_lsn()::text) \
+             FROM \"{schema}\".changes_pgt_{id}",
+                    schema = change_schema_for_snapshot,
+                    id = upstream_pgt_id,
+                ))
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
+                Some((upstream_pgt_id, lsn))
+            })
+            .collect();
+
     let truncate_sql = format!("TRUNCATE {quoted_table}");
     Spi::run(&truncate_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
@@ -3780,26 +3816,12 @@ fn execute_manual_full_refresh(
     // scheduler's `prev_frontier.is_empty()` check doesn't trigger a
     // spurious FULL fallback on the first differential refresh.
     //
-    // ST-ST-7: Use MAX(lsn) from the actual change buffer rather than
-    // pg_current_wal_lsn(). This ensures the frontier records exactly
-    // the latest data point, preventing the next differential refresh
-    // from missing rows that sit AT the frontier LSN.
-    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-    for dep in crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default() {
-        if dep.source_type == "STREAM_TABLE"
-            && let Some(upstream_pgt_id) = StreamTableMeta::pgt_id_for_relid(dep.source_relid)
-            && crate::cdc::has_st_change_buffer(upstream_pgt_id, &change_schema)
-        {
-            let lsn = Spi::get_one::<String>(&format!(
-                "SELECT COALESCE(MAX(lsn)::text, pg_current_wal_lsn()::text) \
-                 FROM \"{schema}\".changes_pgt_{id}",
-                schema = change_schema,
-                id = upstream_pgt_id,
-            ))
-            .unwrap_or(None)
-            .unwrap_or_else(|| "0/0".to_string());
-            frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
-        }
+    // Uses the pre-INSERT LSN snapshot captured above to avoid the TOCTOU
+    // race where concurrent upstream refreshes commit new change buffer
+    // rows between the INSERT and this point, advancing the frontier past
+    // data the INSERT never saw.
+    for (upstream_pgt_id, lsn) in &st_source_lsn_snapshot {
+        frontier.set_st_source(*upstream_pgt_id, lsn.clone(), data_ts.clone());
     }
 
     StreamTableMeta::store_frontier_and_complete_refresh(st.pgt_id, &frontier, 0)?;
@@ -3838,62 +3860,31 @@ fn execute_manual_differential_refresh(
     let prev_frontier = st.frontier.clone().unwrap_or_default();
 
     // For STs whose sources are all STREAM_TABLEs (frontier.sources is empty
-    // because there are no WAL change buffers to track), use upstream
-    // data_timestamp comparison.  Only run a FULL refresh (and bump
-    // data_timestamp) if an upstream has newer data.  If no upstream is newer,
-    // skip the refresh entirely to avoid spurious data_timestamp drift.
+    // because there are no WAL change buffers to track), always do a FULL
+    // refresh so the data is guaranteed correct. The background scheduler
+    // may have done a partial FULL refresh (some upstream STs not yet
+    // refreshed) which cannot be detected reliably by comparing timestamps
+    // or change buffer LSNs alone.
     if prev_frontier.is_empty() {
-        let any_upstream_newer = has_upstream_stream_table_changes(st.pgt_id)?;
-        if any_upstream_newer {
-            return execute_manual_full_refresh(st, schema, table_name, source_oids);
-        } else {
-            pgrx::info!(
-                "Stream table {}.{} refreshed (no-op: upstream unchanged)",
-                schema,
-                table_name,
-            );
-            return Ok(());
-        }
+        return execute_manual_full_refresh(st, schema, table_name, source_oids);
     }
 
     refresh::poll_foreign_table_sources_for_st(st)?;
 
-    // Mixed-dependency guard: if ANY upstream is a STREAM_TABLE, the DVM
-    // delta SQL will reference change buffers that don't exist for stream
-    // tables (they have no CDC triggers). Fall back to FULL refresh,
-    // consistent with how the scheduler handles these (scheduler.rs:1077).
+    // Mixed-dependency guard: if ANY upstream is a STREAM_TABLE, always do
+    // a FULL refresh.  The background scheduler may race with manual
+    // refreshes of upstream STs, producing a FULL refresh of this ST from
+    // partially-updated upstream data. Because the scheduler's frontier
+    // captures the latest change buffer LSN at the time of its refresh,
+    // there is no reliable after-the-fact signal to distinguish "scheduler
+    // correctly consumed all changes" from "scheduler read stale upstream
+    // data."  Unconditionally re-running the FULL refresh guarantees that
+    // the manual refresh always returns correct data.
     {
         let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
         let has_st_source = deps.iter().any(|dep| dep.source_type == "STREAM_TABLE");
         if has_st_source {
-            let any_st_upstream_newer = has_upstream_stream_table_changes(st.pgt_id)?;
-
-            // Check TABLE source change buffers for pending rows.
-            let change_schema =
-                crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
-            let any_table_changes = deps
-                .iter()
-                .filter(|dep| dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE")
-                .any(|dep| {
-                    Spi::get_one::<bool>(&format!(
-                        "SELECT EXISTS(SELECT 1 FROM \"{}\".changes_{} LIMIT 1)",
-                        change_schema,
-                        dep.source_relid.to_u32(),
-                    ))
-                    .unwrap_or(Some(false))
-                    .unwrap_or(false)
-                });
-
-            if any_st_upstream_newer || any_table_changes {
-                return execute_manual_full_refresh(st, schema, table_name, source_oids);
-            } else {
-                pgrx::info!(
-                    "Stream table {}.{} refreshed (no-op: upstream unchanged)",
-                    schema,
-                    table_name,
-                );
-                return Ok(());
-            }
+            return execute_manual_full_refresh(st, schema, table_name, source_oids);
         }
     }
 
@@ -3932,39 +3923,6 @@ fn execute_manual_differential_refresh(
         rows_deleted,
     );
     Ok(())
-}
-
-/// Check if any STREAM_TABLE upstream has a `data_timestamp` more recent than
-/// the given ST's own `data_timestamp`.
-///
-/// Mirrors the scheduler's `has_stream_table_source_changes()` — used by the
-/// manual refresh path to avoid bumping `data_timestamp` on no-op refreshes
-/// for calculated (ST-on-ST) stream tables.
-fn has_upstream_stream_table_changes(pgt_id: i64) -> Result<bool, PgTrickleError> {
-    let deps = StDependency::get_for_st(pgt_id)?;
-    for dep in deps {
-        if dep.source_type != "STREAM_TABLE" {
-            continue;
-        }
-        let upstream_newer = Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS ( \
-               SELECT 1 \
-               FROM pgtrickle.pgt_stream_tables upstream \
-               JOIN pgtrickle.pgt_stream_tables us ON us.pgt_id = {pgt_id} \
-               WHERE upstream.pgt_relid = {relid}::oid \
-                 AND upstream.data_timestamp \
-                     > COALESCE(us.data_timestamp, '-infinity'::timestamptz) \
-             )",
-            relid = dep.source_relid.to_u32(),
-        ))
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-        .unwrap_or(false);
-
-        if upstream_newer {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Get source table OIDs for a stream table (used by manual refresh path).
