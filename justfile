@@ -212,6 +212,26 @@ bench-tpch-sf1: build-e2e-image
 
 # ── Correctness Gate (Phase 9) ────────────────────────────────────────────
 
+# G17-SOAK: Long-running stability soak test (default 10 min, rebuilds Docker image)
+[group: "test"]
+test-soak: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
+
+# G17-SOAK: Quick soak test (2 minutes, skip Docker rebuild)
+[group: "test"]
+test-soak-short:
+    SOAK_DURATION_SECS=120 ./scripts/run_e2e_tests.sh --test e2e_soak_tests --run-ignored all --no-capture
+
+# G17-MDB: Multi-database scheduler isolation test (rebuilds Docker image)
+[group: "test"]
+test-mdb: build-e2e-image
+    ./scripts/run_e2e_tests.sh --test e2e_mdb_tests --run-ignored all --no-capture
+
+# G17-MDB: Multi-database test, skip Docker image rebuild
+[group: "test"]
+test-mdb-fast:
+    ./scripts/run_e2e_tests.sh --test e2e_mdb_tests --run-ignored all --no-capture
+
 # Run Phase 9 external correctness gate (rebuilds Docker image, ~5-10 min)
 # Five TPC-H-derived queries in DIFFERENTIAL mode; zero tolerance for failures.
 [group: "test"]

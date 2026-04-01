@@ -2628,26 +2628,26 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 - **D-1c:** `pgtrickle.convert_buffers_to_unlogged()` utility function for converting existing logged buffers. Documents lock-window warning.
 - **D-1e:** Documentation in `CONFIGURATION.md` and `SQL_REFERENCE.md`.
 
-### Documentation: Best-Practice Patterns Guide (G16-PAT)
+### Documentation: Best-Practice Patterns Guide (G16-PAT) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G16-PAT | **Best-practice patterns guide.** Add `docs/PATTERNS.md`: bronze/silver/gold materialization strategies, event-sourcing pattern with ST as the projection layer, SCD type-1 and type-2, high-fan-out topology patterns. Each pattern includes worked SQL examples, anti-patterns, and a recommendation on which refresh mode to use. | ~1wk | [plans/performance/REPORT_OVERALL_STATUS.md §16](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G16-PAT~~ | ~~**Best-practice patterns guide.** `docs/PATTERNS.md`: 6 patterns (Bronze/Silver/Gold, event sourcing, SCD type-1/2, high-fan-out, real-time dashboards, tiered refresh) with SQL examples, anti-patterns, and refresh mode recommendations.~~ | — | ✅ Done |
 
-> **Patterns guide subtotal: ~1 week**
+> **Patterns guide subtotal: ✅ Done**
 
-### Long-Running Stability & Multi-Database Testing (G17-SOAK, G17-MDB)
+### Long-Running Stability & Multi-Database Testing (G17-SOAK, G17-MDB) — ✅ Done
 
-> **In plain terms:** By v0.14.0 the core engine is mature enough to warrant
-> a 24-hour continuous-integration soak test and a multi-database isolation
-> test. Both gaps were identified in the §17 testing analysis.
+> Soak test validates zero worker crashes, zero ERROR states, and stable RSS
+> under sustained mixed DML. Multi-database test validates catalog isolation,
+> shared-memory independence, and concurrent correctness.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G17-SOAK | **Long-running stability soak test.** 24h+ continuous mixed DML on 5+ source tables with `DIFFERENTIAL` refresh and Fuse enabled; assert zero worker crashes, zero zombie stream tables, and stable memory usage throughout. | ~1–2d setup | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
-| G17-MDB | **Multi-database scheduler isolation test.** Two separate databases in the same PG cluster each with independent pg_trickle background workers; assert that one database's scheduler activity does not interfere with the other's worker quotas or shared-memory state. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G17-SOAK~~ | ~~**Long-running stability soak test.** `tests/e2e_soak_tests.rs` with configurable duration, 5 source tables, mixed DML, health checks, RSS monitoring, correctness verification. `just test-soak` / `just test-soak-short`. CI job: schedule + manual dispatch.~~ | — | ✅ Done |
+| ~~G17-MDB~~ | ~~**Multi-database scheduler isolation test.** `tests/e2e_mdb_tests.rs` with two databases, catalog isolation assertion, concurrent mutation cycles, correctness verification per database. `just test-mdb`. CI job: schedule + manual dispatch.~~ | — | ✅ Done |
 
-> **Stability & multi-database testing subtotal: ~2–4 days**
+> **Stability & multi-database testing subtotal: ✅ Done**
 
 ### Container Infrastructure (INFRA-GHCR)
 
@@ -2704,19 +2704,13 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **C4 subtotal: ~1–2 hours**
 
-### Documentation: Pre-Deployment Checklist (DOC-PDC)
-
-> **In plain terms:** The requirements for running pg_trickle
-> (`shared_preload_libraries`, `wal_level = logical` for WAL CDC, PgBouncer
-> caveats, managed-PG restrictions) are currently scattered across FAQ,
-> SQL_REFERENCE, and CONFIGURATION. This consolidates them into a single
-> visible page that operators can follow before deploying.
+### Documentation: Pre-Deployment Checklist (DOC-PDC) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| DOC-PDC | **Pre-deployment checklist page.** Add `docs/PRE_DEPLOYMENT.md`: `shared_preload_libraries` requirement, `wal_level` guidance, PgBouncer transaction-mode caveats, managed PostgreSQL (RDS/Cloud SQL/Supabase) restrictions, minimum PG version, recommended GUC settings. Cross-link from GETTING_STARTED and INSTALL. | ~0.5d | [docs/FAQ.md](docs/FAQ.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| ~~DOC-PDC~~ | ~~**Pre-deployment checklist page.** `docs/PRE_DEPLOYMENT.md`: 10-point checklist covering PG version, `shared_preload_libraries`, WAL configuration, PgBouncer compatibility, recommended GUCs, resource planning, monitoring, validation script. Cross-linked from GETTING_STARTED.md and INSTALL.md.~~ | — | ✅ Done |
 
-> **DOC-PDC subtotal: ~0.5 days**
+> **DOC-PDC subtotal: ✅ Done**
 
 ### Documentation: Operator Mode Support Matrix Cross-Link (DOC-OPM)
 

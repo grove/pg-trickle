@@ -686,6 +686,65 @@ jobs:
           docker build -t pg_trickle-ext:ci \
             -f cnpg/Dockerfile.ext-build .
 
+  # ── G17-SOAK: Long-Running Stability Soak Test ───────────────────────
+
+  soak-test:
+    name: Stability soak test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build E2E Docker image
+        run: just build-e2e-image
+
+      - name: Run soak test (10 min)
+        run: SOAK_DURATION_SECS=600 just test-soak
+        timeout-minutes: 20
+
+  # ── G17-MDB: Multi-Database Scheduler Isolation Test ──────────────────
+
+  mdb-test:
+    name: Multi-database isolation test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build E2E Docker image
+        run: just build-e2e-image
+
+      - name: Run multi-database isolation test
+        run: just test-mdb
+
       - name: Verify extension image layout
         run: |
           ID=$(docker create pg_trickle-ext:ci true)

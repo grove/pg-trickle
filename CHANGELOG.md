@@ -104,6 +104,30 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `ALTER` statements), including schedule, refresh mode, CDC mode, partition
   key, fuse settings, and all other options.
 
+- **G17-SOAK: Long-running stability soak test** — Configurable soak test
+  (`tests/e2e_soak_tests.rs`) that validates zero worker crashes, zero
+  ERROR states, stable RSS memory, and correctness under sustained mixed
+  DML workload. Default 10 minutes; configurable via `SOAK_DURATION_SECS`.
+  Includes `just test-soak` and `just test-soak-short` justfile targets
+  and CI job (schedule + manual dispatch).
+
+- **G17-MDB: Multi-database isolation test** — Validates that two databases
+  in the same PostgreSQL cluster run pg_trickle independently: catalog
+  isolation, shared-memory independence, concurrent mutations with
+  correctness verification. `just test-mdb` justfile target and CI job.
+
+- **G16-PAT: Best-practice patterns guide** — New `docs/PATTERNS.md` with
+  6 patterns: Bronze/Silver/Gold materialization, event sourcing, SCD
+  type-1 and type-2, high-fan-out topology, real-time dashboards, and
+  tiered refresh strategies. Each pattern includes SQL examples,
+  anti-patterns, and refresh mode recommendations.
+
+- **DOC-PDC: Pre-deployment checklist** — New `docs/PRE_DEPLOYMENT.md` with
+  10-point checklist for production deployments: PostgreSQL version,
+  `shared_preload_libraries`, WAL configuration, PgBouncer compatibility,
+  recommended GUCs, resource planning, monitoring, and a validation script.
+  Cross-linked from GETTING_STARTED.md and INSTALL.md.
+
 ### Changed
 
 - **ERR-1c: API calls clear error state** — `alter_stream_table`,

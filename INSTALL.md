@@ -426,3 +426,12 @@ The extension logs at various levels. Enable debug logging for more detail:
 ```sql
 SET client_min_messages TO debug1;
 ```
+
+---
+
+## Next Steps
+
+- [Getting Started](docs/GETTING_STARTED.md) — Create your first stream table in 5 minutes
+- [Pre-Deployment Checklist](docs/PRE_DEPLOYMENT.md) — Complete checklist for production deployments
+- [Best-Practice Patterns](docs/PATTERNS.md) — Common data modeling patterns
+- [Configuration Reference](docs/CONFIGURATION.md) — All GUC variables and tuning
