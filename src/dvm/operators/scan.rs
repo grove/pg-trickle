@@ -471,9 +471,20 @@ fn diff_scan_change_buffer(
                 )
             })
             .collect();
+        // Use array_agg(col)[1] instead of MAX(col) so that types without a
+        // comparison operator (e.g. jsonb, json, arrays, composites) are handled
+        // correctly. All rows sharing a content_hash are identical by construction,
+        // so picking the first element is semantically equivalent to MAX/MIN for
+        // comparable types while being universally type-safe.
         let max_col_refs: Vec<String> = columns
             .iter()
-            .map(|c| format!("MAX({}) AS {}", quote_ident(&c.name), quote_ident(&c.name)))
+            .map(|c| {
+                format!(
+                    "(array_agg({}))[1] AS {}",
+                    quote_ident(&c.name),
+                    quote_ident(&c.name)
+                )
+            })
             .collect();
         let sub_col_refs: Vec<String> = columns
             .iter()
