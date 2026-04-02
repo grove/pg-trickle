@@ -22,6 +22,10 @@ pub struct WatchArgs {
     /// Append mode: don't clear screen between updates
     #[arg(long)]
     pub append: bool,
+
+    /// Filter tables by name (case-insensitive substring match)
+    #[arg(long, short = 'f')]
+    pub filter: Option<String>,
 }
 
 pub async fn execute(client: &Client, args: &WatchArgs) -> Result<(), CliError> {
@@ -59,6 +63,15 @@ pub async fn execute(client: &Client, args: &WatchArgs) -> Result<(), CliError> 
             for row in &rows {
                 let name: String = row.get(0);
                 let schema: String = row.get(1);
+
+                if let Some(ref f) = args.filter {
+                    let f_lower = f.to_lowercase();
+                    let full = format!("{schema}.{name}").to_lowercase();
+                    if !full.contains(&f_lower) && !name.to_lowercase().contains(&f_lower) {
+                        continue;
+                    }
+                }
+
                 let status: String = row.get(2);
                 let mode: String = row.get(3);
                 let stale: bool = row.get(4);
@@ -94,6 +107,15 @@ pub async fn execute(client: &Client, args: &WatchArgs) -> Result<(), CliError> 
             for row in &rows {
                 let name: String = row.get(0);
                 let schema: String = row.get(1);
+
+                if let Some(ref f) = args.filter {
+                    let f_lower = f.to_lowercase();
+                    let full = format!("{schema}.{name}").to_lowercase();
+                    if !full.contains(&f_lower) && !name.to_lowercase().contains(&f_lower) {
+                        continue;
+                    }
+                }
+
                 let status: String = row.get(2);
                 let mode: String = row.get(3);
                 let stale: bool = row.get(4);

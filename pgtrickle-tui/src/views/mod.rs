@@ -9,6 +9,7 @@ pub mod fuse;
 pub mod graph;
 pub mod health;
 pub mod help;
+pub mod issues;
 pub mod refresh_log;
 pub mod watermarks;
 pub mod workers;

@@ -21,6 +21,10 @@ pub async fn poll_all(client: &Client, state: &mut AppState) {
     poll_fuses(client, state).await;
     poll_watermarks(client, state).await;
     poll_triggers(client, state).await;
+
+    // Post-poll computations (client-side, no DB queries)
+    state.compute_cascade_staleness();
+    state.detect_issues();
 }
 
 async fn poll_stream_tables(client: &Client, state: &mut AppState) {
@@ -37,7 +41,11 @@ async fn poll_stream_tables(client: &Client, state: &mut AppState) {
                 s.avg_duration_ms,
                 s.last_refresh_at::text,
                 s.staleness_secs,
-                s.stale
+                s.stale,
+                COALESCE(s.consecutive_errors, 0)::bigint,
+                s.schedule::text,
+                s.tier::text,
+                s.last_error_message::text
              FROM pgtrickle.st_refresh_stats() s
              ORDER BY s.pgt_schema, s.pgt_name",
             &[],
@@ -64,16 +72,18 @@ async fn poll_stream_tables(client: &Client, state: &mut AppState) {
                 status: row.get(2),
                 refresh_mode: row.get(3),
                 is_populated: row.get(4),
-                consecutive_errors: 0,
-                schedule: None,
+                consecutive_errors: row.get(11),
+                schedule: row.get(12),
                 staleness: staleness_secs.map(|s| format!("{s:.0}s")),
-                tier: None,
+                tier: row.get(13),
                 last_refresh_at: row.get(8),
                 total_refreshes: row.get(5),
                 failed_refreshes: row.get(6),
                 avg_duration_ms: avg_ms,
                 stale: row.get(10),
-                last_error_message: None,
+                last_error_message: row.get(14),
+                defining_query: None,
+                cascade_stale: false,
             });
         }
         state.stream_tables = tables;

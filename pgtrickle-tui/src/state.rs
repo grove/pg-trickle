@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -28,6 +28,8 @@ pub struct AppState {
     pub fuses: Vec<FuseInfo>,
     pub watermark_groups: Vec<WatermarkGroup>,
     pub trigger_inventory: Vec<TriggerInfo>,
+    /// Detected issues for DAG health view (F20)
+    pub issues: Vec<Issue>,
 }
 
 #[derive(Clone, Serialize)]
@@ -47,6 +49,10 @@ pub struct StreamTableInfo {
     pub avg_duration_ms: Option<f64>,
     pub stale: bool,
     pub last_error_message: Option<String>,
+    /// Defining SQL query (from export_definition or pgt_stream_tables)
+    pub defining_query: Option<String>,
+    /// Cascade-stale: upstream has errors (F21)
+    pub cascade_stale: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -188,10 +194,189 @@ impl AppState {
         self.stream_tables.iter().filter(|st| st.stale).count()
     }
 
+    pub fn cascade_stale_count(&self) -> usize {
+        self.stream_tables
+            .iter()
+            .filter(|st| st.cascade_stale)
+            .count()
+    }
+
     pub fn critical_health_count(&self) -> usize {
         self.health_checks
             .iter()
             .filter(|h| h.severity == "critical")
             .count()
     }
+
+    pub fn issue_count(&self) -> usize {
+        self.issues.len()
+    }
+
+    /// Compute cascade staleness from DAG topology (F21).
+    /// A stream table is cascade-stale if any upstream node is ERROR/SUSPENDED.
+    pub fn compute_cascade_staleness(&mut self) {
+        // Build set of error nodes
+        let error_nodes: HashSet<&str> = self
+            .stream_tables
+            .iter()
+            .filter(|st| st.status == "ERROR" || st.status == "SUSPENDED")
+            .map(|st| st.name.as_str())
+            .collect();
+
+        if error_nodes.is_empty() {
+            for st in &mut self.stream_tables {
+                st.cascade_stale = false;
+            }
+            return;
+        }
+
+        // Build adjacency: parent -> children from dag_edges
+        let mut children_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        for edge in &self.dag_edges {
+            // In the dependency tree, a node at depth N+1 depends on depth N above it
+            // We mark nodes that have any upstream error as cascade-stale
+            if edge.node_type == "stream_table" || edge.node_type == "source" {
+                children_of.entry(edge.node.as_str()).or_default();
+            }
+        }
+
+        // Simple: mark all STs that have an error ST in their upstream chain
+        // Walk dag_edges: if a parent is error, all its subtree is cascade-stale
+        let mut cascade_set: HashSet<String> = HashSet::new();
+        let mut in_error_subtree = false;
+        let mut error_depth = i32::MAX;
+
+        for edge in &self.dag_edges {
+            if edge.depth <= error_depth {
+                in_error_subtree = false;
+                error_depth = i32::MAX;
+            }
+            if error_nodes.contains(edge.node.as_str()) {
+                in_error_subtree = true;
+                error_depth = edge.depth;
+            } else if in_error_subtree && edge.depth > error_depth {
+                cascade_set.insert(edge.node.clone());
+            }
+        }
+
+        for st in &mut self.stream_tables {
+            st.cascade_stale = cascade_set.contains(&st.name);
+        }
+    }
+
+    /// Detect issues from current state (F20).
+    pub fn detect_issues(&mut self) {
+        let mut issues = Vec::new();
+
+        // Broken chains: ERROR/SUSPENDED tables
+        for st in &self.stream_tables {
+            if st.status == "ERROR" || st.status == "SUSPENDED" {
+                let downstream: Vec<String> = self
+                    .stream_tables
+                    .iter()
+                    .filter(|other| other.cascade_stale)
+                    .map(|other| other.name.clone())
+                    .collect();
+                issues.push(Issue {
+                    severity: "error".to_string(),
+                    category: "Broken Chain".to_string(),
+                    summary: format!(
+                        "{} in {} — {} downstream affected",
+                        st.name,
+                        st.status,
+                        downstream.len()
+                    ),
+                    detail: st
+                        .last_error_message
+                        .clone()
+                        .unwrap_or_else(|| "No error message".to_string()),
+                    affected_table: Some(st.name.clone()),
+                    blast_radius: downstream.len() + 1,
+                });
+            }
+        }
+
+        // Buffer growth warnings
+        for buf in &self.cdc_buffers {
+            if buf.buffer_bytes > 1_000_000 {
+                issues.push(Issue {
+                    severity: "warning".to_string(),
+                    category: "Buffer Growth".to_string(),
+                    summary: format!(
+                        "{}: {:.1} MB ({} rows)",
+                        buf.source_table,
+                        buf.buffer_bytes as f64 / (1024.0 * 1024.0),
+                        buf.pending_rows
+                    ),
+                    detail: "Change buffer is growing faster than consumption".to_string(),
+                    affected_table: Some(buf.stream_table.clone()),
+                    blast_radius: 1,
+                });
+            }
+        }
+
+        // Blown fuses
+        for fuse in &self.fuses {
+            if fuse.fuse_state == "BLOWN" {
+                issues.push(Issue {
+                    severity: "error".to_string(),
+                    category: "Blown Fuse".to_string(),
+                    summary: format!(
+                        "{} — {} consecutive errors",
+                        fuse.stream_table, fuse.consecutive_errors
+                    ),
+                    detail: fuse
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "No error detail".to_string()),
+                    affected_table: Some(fuse.stream_table.clone()),
+                    blast_radius: 1,
+                });
+            }
+        }
+
+        // Stale data
+        for st in &self.stream_tables {
+            if st.stale && st.status == "ACTIVE" {
+                issues.push(Issue {
+                    severity: "warning".to_string(),
+                    category: "Stale Data".to_string(),
+                    summary: format!(
+                        "{} — staleness: {}",
+                        st.name,
+                        st.staleness.as_deref().unwrap_or("unknown")
+                    ),
+                    detail: "Data age exceeds schedule threshold".to_string(),
+                    affected_table: Some(st.name.clone()),
+                    blast_radius: 1,
+                });
+            }
+        }
+
+        // Sort: errors first, then by blast radius desc
+        issues.sort_by(|a, b| {
+            let sev_ord = |s: &str| match s {
+                "error" => 0,
+                "warning" => 1,
+                _ => 2,
+            };
+            sev_ord(&a.severity)
+                .cmp(&sev_ord(&b.severity))
+                .then(b.blast_radius.cmp(&a.blast_radius))
+        });
+
+        self.issues = issues;
+    }
+}
+
+/// A detected issue in the DAG (F20).
+#[derive(Clone)]
+pub struct Issue {
+    pub severity: String,
+    pub category: String,
+    pub summary: String,
+    #[allow(dead_code)]
+    pub detail: String,
+    pub affected_table: Option<String>,
+    pub blast_radius: usize,
 }

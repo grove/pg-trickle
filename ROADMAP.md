@@ -2704,7 +2704,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 |------|-------------|--------|-----|
 | E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 8–10d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 
-> **E3-TUI subtotal: ~8–10 days** (T1–T7 implemented: CLI skeleton with 18 subcommands, interactive dashboard with 13 views, watch mode, LISTEN/NOTIFY alerts, async polling, docs/TUI.md)
+> **E3-TUI subtotal: ~8–10 days** (T1–T8 implemented: CLI skeleton with 18 subcommands, interactive dashboard with 15 views, watch mode with `--filter`, LISTEN/NOTIFY alerts with JSON parsing, async polling with force-poll, cascade staleness detection, DAG issue detection, sparklines, fuse detail panel, trigger inventory, context-sensitive help, docs/TUI.md)
 
 ### GUC Surface Consolidation (C4)
 
@@ -2787,7 +2787,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 - [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
 - [ ] DIAG-2: WARNING emitted at `create_stream_table` time for group-rescan aggregates and for algebraic aggregates with estimated group cardinality below threshold; warning directs users to `refresh_mode='full'` or `'auto'`; threshold configurable via GUC
 - [ ] G15-EX: `pgtrickle.export_definition(name TEXT)` returns valid reproducible DDL; round-trip tested
-- [ ] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; all 21 TUI features operational; documented in `docs/TUI.md`
+- [x] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; 15 views with cascade staleness, issue detection, sparklines, force-poll, NOTIFY, and context-sensitive help; documented in `docs/TUI.md`
 - [ ] C4: `merge_planner_hints` and `merge_work_mem_mb` consolidated into `planner_aggressive`; old GUCs emit deprecation notice
 - [ ] DOC-PDC: Pre-deployment checklist published in `docs/PRE_DEPLOYMENT.md`; linked from GETTING_STARTED and INSTALL
 - [ ] DOC-OPM: Operator mode support matrix summary and link added to SQL_REFERENCE.md

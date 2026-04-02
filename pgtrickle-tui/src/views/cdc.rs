@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
@@ -7,6 +7,17 @@ use crate::state::AppState;
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, selected: usize) {
+    // Split into buffers table (top) and trigger inventory (bottom)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    render_buffers(frame, chunks[0], state, theme, selected);
+    render_triggers(frame, chunks[1], state, theme);
+}
+
+fn render_buffers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, selected: usize) {
     let header = Row::new(
         [
             "Stream Table",
@@ -62,7 +73,46 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, se
         .borders(Borders::ALL)
         .border_style(theme.border)
         .title(Span::styled(
-            format!(" CDC Health ({} buffers) ", state.cdc_buffers.len()),
+            format!(" Change Buffers ({}) ", state.cdc_buffers.len()),
+            theme.title,
+        ));
+
+    let table = Table::new(rows, widths).header(header).block(block);
+    frame.render_widget(table, area);
+}
+
+fn render_triggers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let header = Row::new(
+        ["Source Table", "Trigger Name", "Events"]
+            .iter()
+            .map(|h| Cell::from(*h).style(theme.header)),
+    )
+    .height(1);
+
+    let rows: Vec<Row> = state
+        .trigger_inventory
+        .iter()
+        .map(|t| {
+            Row::new(vec![
+                Cell::from(t.source_table.as_str()),
+                Cell::from(t.trigger_name.as_str()),
+                Cell::from(t.firing_events.as_str()),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(35),
+        Constraint::Percentage(40),
+        Constraint::Percentage(25),
+    ];
+
+    let ok_count = state.trigger_inventory.len();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Span::styled(
+            format!(" Trigger Inventory ({ok_count} triggers) "),
             theme.title,
         ));
 

@@ -2,23 +2,77 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 
 use crate::state::AppState;
 use crate::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, selected: usize) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    selected: usize,
+    filter: Option<&str>,
+) {
     let wide = area.width >= 140;
     let tall = area.height >= 35;
 
     if wide && tall {
-        render_wide(frame, area, state, theme, selected);
+        render_wide(frame, area, state, theme, selected, filter);
     } else {
-        render_standard(frame, area, state, theme, selected);
+        render_standard(frame, area, state, theme, selected, filter);
     }
 }
 
-fn render_wide(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, selected: usize) {
+/// Get filtered and sorted stream table indices.
+fn filtered_sorted_indices(state: &AppState, filter: Option<&str>) -> Vec<usize> {
+    let f = filter.unwrap_or("").to_lowercase();
+    let mut indices: Vec<usize> = state
+        .stream_tables
+        .iter()
+        .enumerate()
+        .filter(|(_, st)| {
+            if f.is_empty() {
+                return true;
+            }
+            st.name.to_lowercase().contains(&f)
+                || st.schema.to_lowercase().contains(&f)
+                || st.status.to_lowercase().contains(&f)
+                || st.refresh_mode.to_lowercase().contains(&f)
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Default sort: errors first, then cascade-stale, then stale, then by name
+    indices.sort_by(|&a, &b| {
+        let sa = &state.stream_tables[a];
+        let sb = &state.stream_tables[b];
+        let ord = |st: &crate::state::StreamTableInfo| -> u8 {
+            if st.status == "ERROR" || st.status == "SUSPENDED" {
+                0
+            } else if st.cascade_stale {
+                1
+            } else if st.stale {
+                2
+            } else {
+                3
+            }
+        };
+        ord(sa).cmp(&ord(sb)).then_with(|| sa.name.cmp(&sb.name))
+    });
+
+    indices
+}
+
+fn render_wide(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    selected: usize,
+    filter: Option<&str>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -36,7 +90,7 @@ fn render_wide(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, s
         .constraints([Constraint::Min(60), Constraint::Length(35)])
         .split(chunks[1]);
 
-    render_table(frame, main[0], state, theme, selected, true);
+    render_table(frame, main[0], state, theme, selected, true, filter);
     render_issues_sidebar(frame, main[1], state, theme);
     render_dag_minimap(frame, chunks[2], state, theme);
 }
@@ -47,6 +101,7 @@ fn render_standard(
     state: &AppState,
     theme: &Theme,
     selected: usize,
+    filter: Option<&str>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -54,7 +109,7 @@ fn render_standard(
         .split(area);
 
     render_status_ribbon(frame, chunks[0], state, theme);
-    render_table(frame, chunks[1], state, theme, selected, false);
+    render_table(frame, chunks[1], state, theme, selected, false, filter);
 }
 
 fn render_status_ribbon(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -62,6 +117,7 @@ fn render_status_ribbon(frame: &mut Frame, area: Rect, state: &AppState, theme: 
     let active = state.active_count();
     let errors = state.error_count();
     let stale = state.stale_count();
+    let cascade = state.cascade_stale_count();
     let critical = state.critical_health_count();
 
     let mut spans = vec![
@@ -73,6 +129,13 @@ fn render_status_ribbon(frame: &mut Frame, area: Rect, state: &AppState, theme: 
     if errors > 0 {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(format!("✗ {errors} error"), theme.error));
+    }
+    if cascade > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("⚠ {cascade} cascade-stale"),
+            theme.warning,
+        ));
     }
     if stale > 0 {
         spans.push(Span::raw("  "));
@@ -99,8 +162,19 @@ fn render_table(
     theme: &Theme,
     selected: usize,
     show_eff: bool,
+    filter: Option<&str>,
 ) {
-    let mut header_cells = vec!["Name", "Schema", "Status", "Mode", "Stale", "Last Refresh"];
+    let indices = filtered_sorted_indices(state, filter);
+
+    let mut header_cells = vec![
+        "Name",
+        "Schema",
+        "Status",
+        "Mode",
+        "EFF",
+        "Stale",
+        "Last Refresh",
+    ];
     if show_eff {
         header_cells.push("Avg ms");
         header_cells.push("Refreshes");
@@ -113,20 +187,30 @@ fn render_table(
     )
     .height(1);
 
-    let rows: Vec<Row> = state
-        .stream_tables
+    let rows: Vec<Row> = indices
         .iter()
         .enumerate()
-        .map(|(i, st)| {
+        .map(|(display_idx, &real_idx)| {
+            let st = &state.stream_tables[real_idx];
             let status_style = theme.status_style(&st.status);
             let stale_str = if st.stale { "yes" } else { "no" };
             let stale_style = if st.stale { theme.warning } else { theme.ok };
+
+            // EFF column (F21): effective staleness considering cascade
+            let (eff_str, eff_style) = if st.status == "ERROR" || st.status == "SUSPENDED" {
+                ("✗ err", theme.error)
+            } else if st.cascade_stale {
+                ("⚠ cascade", theme.warning)
+            } else {
+                ("✓ ok", theme.ok)
+            };
 
             let mut cells = vec![
                 Cell::from(st.name.as_str()),
                 Cell::from(st.schema.as_str()),
                 Cell::from(st.status.as_str()).style(status_style),
                 Cell::from(st.refresh_mode.as_str()),
+                Cell::from(eff_str).style(eff_style),
                 Cell::from(stale_str).style(stale_style),
                 Cell::from(st.last_refresh_at.as_deref().unwrap_or("-").to_string()),
             ];
@@ -140,7 +224,7 @@ fn render_table(
                 cells.push(Cell::from(st.total_refreshes.to_string()));
             }
 
-            let style = if i == selected {
+            let style = if display_idx == selected {
                 theme.selected
             } else {
                 Style::default()
@@ -155,6 +239,7 @@ fn render_table(
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(14),
+            Constraint::Length(10),
             Constraint::Length(6),
             Constraint::Length(22),
             Constraint::Length(8),
@@ -166,14 +251,26 @@ fn render_table(
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(14),
+            Constraint::Length(10),
             Constraint::Length(6),
             Constraint::Length(22),
         ]
     };
 
+    let filter_info = filter
+        .map(|f| format!(" (filter: {f})"))
+        .unwrap_or_default();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.border);
+        .border_style(theme.border)
+        .title(Span::styled(
+            format!(
+                " {} of {} tables{filter_info} ",
+                indices.len(),
+                state.stream_tables.len()
+            ),
+            theme.title,
+        ));
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -182,6 +279,45 @@ fn render_table(
         .highlight_symbol("▸ ");
 
     frame.render_widget(table, area);
+
+    // Render sparklines below the table if space permits and in wide mode
+    if show_eff && area.height > 20 {
+        render_sparklines(frame, area, state, theme, &indices, selected);
+    }
+}
+
+fn render_sparklines(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    indices: &[usize],
+    selected: usize,
+) {
+    // Show sparkline for the selected ST in a small area at the bottom
+    if let Some(&real_idx) = indices.get(selected) {
+        let st = &state.stream_tables[real_idx];
+        if let Some(data) = state.sparkline_data.get(&st.name)
+            && !data.is_empty()
+        {
+            let spark_data: Vec<u64> = data.iter().map(|&v| v.max(0.0) as u64).collect();
+            let max_val = spark_data.iter().copied().max().unwrap_or(1);
+            let sparkline = Sparkline::default()
+                .data(&spark_data)
+                .max(max_val)
+                .style(theme.active);
+            // Render in a tiny area overlaid at bottom-right
+            let spark_area = Rect {
+                x: area.x + area.width.saturating_sub(22),
+                y: area.y + area.height.saturating_sub(2),
+                width: 20.min(area.width),
+                height: 1,
+            };
+            if spark_area.y >= area.y + 3 {
+                frame.render_widget(sparkline, spark_area);
+            }
+        }
+    }
 }
 
 fn render_issues_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {

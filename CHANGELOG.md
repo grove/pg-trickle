@@ -136,32 +136,47 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `--format csv`, and human-readable table output. Connection via `--url`,
   libpq environment variables (`PGHOST`/`PGPORT`/etc.), or defaults.
 
-- **E3-TUI: Interactive TUI dashboard (Phase T2–T7)** —
+- **E3-TUI: Interactive TUI dashboard (Phase T2–T8)** —
   Running `pgtrickle` with no subcommand launches a full-screen interactive
   dashboard built with ratatui. Features implemented:
   - **Dashboard (F1):** Live-updating stream table list with status ribbon,
     wide-layout split-pane with issues sidebar and DAG mini-map, adaptive
-    layout at ≥140×35.
-  - **Detail view (F2):** Properties, refresh statistics, error details.
+    layout at ≥140×35. EFF column shows cascade staleness. Filter applied
+    with `/`. Errors sort to top. Sparklines for selected ST refresh duration.
+  - **Detail view (F2):** Properties, refresh statistics, efficiency data
+    (diff/full counts, speedup), recent refreshes panel, cascade staleness
+    indicator, upstream health section for cascade-stale tables.
   - **Dependency graph (F3):** ASCII tree visualization with status coloring.
   - **Refresh log (F4):** Color-coded scrollable timeline.
   - **Diagnostics (F5):** Mode recommendation table with confidence levels.
-  - **CDC health (F6):** Buffer sizes with color-coded warnings.
+  - **CDC health (F6):** Buffer sizes with color-coded warnings, trigger
+    inventory table showing source tables, trigger names, and events.
   - **Configuration (F7):** GUC parameter browser.
-  - **Health checks (F18):** Severity-colored check results.
+  - **Health checks (F18):** Overall system health summary (HEALTHY/DEGRADED/
+    WARNINGS) with severity-colored check results.
   - **Alert feed (F8):** Real-time severity-tagged alert display via
-    LISTEN/NOTIFY on `pg_trickle_alert` channel.
+    LISTEN/NOTIFY on `pg_trickle_alert` channel with JSON payload parsing.
   - **Workers view (F13):** Parallel worker pool status and job queue.
-  - **Fuse panel (F14):** Circuit breaker / fuse status per stream table.
+  - **Fuse panel (F14):** Circuit breaker / fuse status per stream table
+    with detail panel showing reset instructions for blown fuses.
   - **Watermarks view (F15):** Watermark groups and source gating status.
   - **Delta SQL inspector (F16):** Links to `pgtrickle explain` CLI.
-  - **Help overlay (F12):** Context-sensitive keybinding reference (`?`).
+  - **Issues view (F20):** DAG issue detection — broken dependency chains,
+    growing buffers, blown fuses, stale data. Severity summary and sorted
+    issue table with blast radius.
+  - **Cascade staleness (F21):** Automatic DAG traversal marks downstream
+    tables of ERROR nodes as cascade-stale. Visible in dashboard EFF column,
+    detail view, and issue badge.
+  - **Help overlay (F12):** Context-sensitive keybinding reference (`?`)
+    with per-view tips.
   - **Watch mode (F19):** `pgtrickle watch` non-interactive continuous output
-    with `--compact`, `--no-color`, `--append` flags.
-  - **Navigation:** Number keys (1–9) and letter keys (w/f/m/d) switch views;
-    `j`/`k`/arrows navigate; Enter drills into detail; Esc goes back;
-    `/` opens filter input; `q`/Ctrl+C quits.
-  - **Async polling:** Background 2-second polling with reconnection on failure.
+    with `--compact`, `--no-color`, `--append`, `--filter` flags.
+  - **Navigation:** Number keys (0–9) and letter keys (w/f/m/d/g/i) switch
+    views; `j`/`k`/arrows navigate; Enter drills into detail; Esc goes back;
+    `/` opens filter input; `Ctrl+R` force poll; `q`/Ctrl+C quits.
+  - **Issue badge:** Header bar shows `⚠ N` issue count visible from every view.
+  - **Async polling:** Background 2-second polling with reconnection on failure,
+    force-poll via Ctrl+R.
   - **Header/footer bars:** Connection status, poll timing, view tabs.
   - **New CLI subcommands:** `workers`, `fuse`, `watermarks`, `explain`
     (with `--analyze`, `--operators`, `--dedup`), and `watch`.

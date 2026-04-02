@@ -23,7 +23,7 @@ use crate::views;
 
 /// Views the user can switch between.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
+pub enum View {
     Dashboard,
     Detail,
     Graph,
@@ -37,10 +37,11 @@ enum View {
     Fuse,
     Watermarks,
     DeltaInspector,
+    Issues,
 }
 
 impl View {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
             Self::Detail => "Detail",
@@ -55,6 +56,7 @@ impl View {
             Self::Fuse => "Fuse",
             Self::Watermarks => "Watermarks",
             Self::DeltaInspector => "Delta SQL",
+            Self::Issues => "Issues",
         }
     }
 
@@ -73,11 +75,12 @@ impl View {
             Self::Fuse => "f",
             Self::Watermarks => "m",
             Self::DeltaInspector => "d",
+            Self::Issues => "i",
         }
     }
 }
 
-const ALL_VIEWS: [View; 13] = [
+const ALL_VIEWS: [View; 14] = [
     View::Dashboard,
     View::Detail,
     View::Graph,
@@ -91,6 +94,7 @@ const ALL_VIEWS: [View; 13] = [
     View::Fuse,
     View::Watermarks,
     View::DeltaInspector,
+    View::Issues,
 ];
 
 /// Messages from the background poller to the UI thread.
@@ -109,6 +113,8 @@ struct App {
     filter_input: String,
     entering_filter: bool,
     should_quit: bool,
+    /// Channel to request a force poll
+    force_poll_tx: Option<mpsc::Sender<()>>,
 }
 
 impl App {
@@ -123,13 +129,36 @@ impl App {
             filter_input: String::new(),
             entering_filter: false,
             should_quit: false,
+            force_poll_tx: None,
         }
+    }
+
+    /// Get the filtered stream tables for the current view.
+    fn filtered_stream_tables(&self) -> Vec<usize> {
+        let filter = self.filter.as_deref().unwrap_or("");
+        self.state
+            .stream_tables
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| {
+                if filter.is_empty() {
+                    return true;
+                }
+                let f = filter.to_lowercase();
+                st.name.to_lowercase().contains(&f)
+                    || st.schema.to_lowercase().contains(&f)
+                    || st.status.to_lowercase().contains(&f)
+                    || st.refresh_mode.to_lowercase().contains(&f)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn list_len(&self) -> usize {
         match self.current_view {
-            View::Dashboard => self.state.stream_tables.len(),
-            View::Detail => self.state.stream_tables.len(),
+            View::Dashboard | View::Detail | View::DeltaInspector => {
+                self.filtered_stream_tables().len()
+            }
             View::Graph => self.state.dag_edges.len(),
             View::RefreshLog => self.state.refresh_log.len(),
             View::Diagnostics => self.state.diagnostics.len(),
@@ -140,7 +169,7 @@ impl App {
             View::Workers => self.state.workers.len(),
             View::Fuse => self.state.fuses.len(),
             View::Watermarks => self.state.watermark_groups.len(),
-            View::DeltaInspector => self.state.stream_tables.len(),
+            View::Issues => self.state.issues.len(),
         }
     }
 
@@ -184,10 +213,14 @@ async fn run_app(
     // Channel for state updates from poller
     let (tx, mut rx) = mpsc::channel::<PollMsg>(4);
 
+    // Channel for force poll requests
+    let (force_tx, force_rx) = mpsc::channel::<()>(1);
+    app.force_poll_tx = Some(force_tx);
+
     // Spawn background poller
     let conn_args = connection.clone();
     tokio::spawn(async move {
-        poller_task(conn_args, tx).await;
+        poller_task(conn_args, tx, force_rx).await;
     });
 
     // Spawn LISTEN/NOTIFY listener for real-time alerts
@@ -239,7 +272,11 @@ async fn run_app(
     }
 }
 
-async fn poller_task(conn_args: ConnectionArgs, tx: mpsc::Sender<PollMsg>) {
+async fn poller_task(
+    conn_args: ConnectionArgs,
+    tx: mpsc::Sender<PollMsg>,
+    mut force_rx: mpsc::Receiver<()>,
+) {
     // Try to connect; retry on failure
     let client = loop {
         match crate::connection::connect(&conn_args).await {
@@ -257,7 +294,11 @@ async fn poller_task(conn_args: ConnectionArgs, tx: mpsc::Sender<PollMsg>) {
     let mut tick = interval(Duration::from_secs(2));
 
     loop {
-        tick.tick().await;
+        // Wait for either a tick or a force poll request
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = force_rx.recv() => {}
+        }
 
         if tx.is_closed() {
             return;
@@ -323,6 +364,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
         }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+R: force poll now
+            if let Some(ref tx) = app.force_poll_tx {
+                let _ = tx.try_send(());
+            }
+        }
         KeyCode::Char('q') => {
             app.should_quit = true;
         }
@@ -343,11 +390,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('7') => switch_view(app, View::Config),
         KeyCode::Char('8') => switch_view(app, View::Health),
         KeyCode::Char('9') => switch_view(app, View::Alerts),
+        KeyCode::Char('0') => switch_view(app, View::Health),
         // Extended view switching via letter keys
         KeyCode::Char('w') => switch_view(app, View::Workers),
         KeyCode::Char('f') => switch_view(app, View::Fuse),
         KeyCode::Char('m') => switch_view(app, View::Watermarks),
         KeyCode::Char('d') => switch_view(app, View::DeltaInspector),
+        KeyCode::Char('g') => switch_view(app, View::Graph),
+        KeyCode::Char('i') => switch_view(app, View::Issues),
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
@@ -403,7 +453,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &App) {
     if app.show_help {
         let overlay = centered_rect(70, 70, size);
         frame.render_widget(ratatui::widgets::Clear, overlay);
-        views::help::render(frame, overlay, &app.theme);
+        views::help::render(frame, overlay, &app.theme, app.current_view);
     }
 }
 
@@ -432,12 +482,22 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let right = Span::styled(format!(" {poll_info} "), app.theme.dim);
 
+    // Issue badge (visible from every view)
+    let issue_count = app.state.issue_count();
+    let issue_badge = if issue_count > 0 {
+        Span::styled(format!(" ⚠ {issue_count} "), app.theme.warning)
+    } else {
+        Span::raw("")
+    };
+
     let header = Line::from(vec![
         Span::styled(" pg_trickle ", app.theme.title),
         view_label,
         Span::raw(" "),
         conn_status,
-        Span::raw("  "),
+        Span::raw(" "),
+        issue_badge,
+        Span::raw(" "),
         right,
     ]);
 
@@ -469,9 +529,14 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
 fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     match app.current_view {
-        View::Dashboard => {
-            views::dashboard::render(frame, area, &app.state, &app.theme, app.selected)
-        }
+        View::Dashboard => views::dashboard::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected,
+            app.filter.as_deref(),
+        ),
         View::Detail => views::detail::render(frame, area, &app.state, &app.theme, app.selected),
         View::Graph => views::graph::render(frame, area, &app.state, &app.theme, app.selected),
         View::RefreshLog => {
@@ -492,6 +557,7 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::DeltaInspector => {
             views::delta_inspector::render(frame, area, &app.state, &app.theme, app.selected)
         }
+        View::Issues => views::issues::render(frame, area, &app.state, &app.theme, app.selected),
     }
 }
 
@@ -529,6 +595,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::AlertEvent>) {
+    use tokio_postgres::AsyncMessage;
     use tokio_postgres::NoTls;
 
     let conn_string = crate::connection::build_connection_string(&conn_args);
@@ -546,9 +613,26 @@ async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::A
         }
     };
 
-    // Drive the connection in a background task.
+    // Bridge notifications from the connection driver to our channel.
+    let (notify_tx, mut notify_rx) = mpsc::channel::<String>(64);
     tokio::spawn(async move {
-        connection.await.ok();
+        use futures_util::TryStreamExt;
+        use std::pin::pin;
+        let stream = futures_util::stream::try_unfold(connection, |mut conn| async {
+            match futures_util::future::poll_fn(|cx| conn.poll_message(cx)).await {
+                Some(Ok(msg)) => Ok(Some((msg, conn))),
+                Some(Err(e)) => Err(e),
+                None => Ok(None),
+            }
+        });
+        let mut stream = pin!(stream);
+        while let Ok(Some(msg)) = stream.try_next().await {
+            if let AsyncMessage::Notification(n) = msg
+                && notify_tx.send(n.payload().to_string()).await.is_err()
+            {
+                break;
+            }
+        }
     });
 
     // Subscribe to pg_trickle alerts.
@@ -560,20 +644,46 @@ async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::A
         return;
     }
 
-    // pg_trickle delivers alerts via NOTIFY. The notifications are surfaced
-    // through the client after a round-trip. We send a lightweight heartbeat
-    // query periodically to trigger delivery.
-    let mut tick = interval(Duration::from_secs(1));
+    // Process notifications as they arrive.
     loop {
-        tick.tick().await;
+        tokio::select! {
+            payload = notify_rx.recv() => {
+                match payload {
+                    Some(payload) => {
+                        // Parse severity from JSON payload if possible
+                        let (severity, message) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                            let sev = v.get("severity")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("info")
+                                .to_string();
+                            let msg = v.get("message")
+                                .and_then(|s| s.as_str())
+                                .or_else(|| v.get("detail").and_then(|s| s.as_str()))
+                                .unwrap_or(&payload)
+                                .to_string();
+                            (sev, msg)
+                        } else {
+                            ("info".to_string(), payload)
+                        };
 
-        if tx.is_closed() {
-            return;
-        }
-
-        // Heartbeat: drive the connection to receive any pending NOTIFYs.
-        if client.execute("", &[]).await.is_err() {
-            return;
+                        let alert = crate::state::AlertEvent {
+                            timestamp: chrono::Utc::now(),
+                            severity,
+                            message,
+                        };
+                        if tx.send(alert).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+            }
+            // Periodic check that the receiver is still alive
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                if tx.is_closed() {
+                    return;
+                }
+            }
         }
     }
 }
