@@ -1,7 +1,7 @@
 # PLAN_TUI.md — pg_trickle Terminal User Interface
 
 **Milestone:** v0.14.0 (replaces E3 CLI)
-**Status:** 🔄 In progress (Phase T1 done)
+**Status:** ✅ Implemented (T1–T7)
 **Effort:** ~8–10 days
 **Last updated:** 2026-04-02
 **Crate:** `pgtrickle-tui` (workspace member, separate binary)

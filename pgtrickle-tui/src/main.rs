@@ -1,8 +1,13 @@
+mod app;
 mod cli;
 mod commands;
 mod connection;
 mod error;
 mod output;
+mod poller;
+mod state;
+mod theme;
+mod views;
 
 use std::process::ExitCode;
 
@@ -28,12 +33,8 @@ async fn run(cli: Cli) -> Result<(), error::CliError> {
     let command = match cli.command {
         Some(cmd) => cmd,
         None => {
-            // No subcommand → launch interactive TUI (future)
-            eprintln!("Interactive TUI mode is not yet implemented.");
-            eprintln!(
-                "Use a subcommand (e.g., `pgtrickle list`). Run `pgtrickle --help` for usage."
-            );
-            return Ok(());
+            // No subcommand → launch interactive TUI
+            return app::run(&cli.connection).await;
         }
     };
 

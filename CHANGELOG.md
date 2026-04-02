@@ -135,7 +135,27 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   and `completions` (bash/zsh/fish/PowerShell). Supports `--format json`,
   `--format csv`, and human-readable table output. Connection via `--url`,
   libpq environment variables (`PGHOST`/`PGPORT`/etc.), or defaults.
-  Interactive TUI mode (no subcommand) is planned for Phase T2+.
+
+- **E3-TUI: Interactive TUI dashboard (Phase T2–T7)** —
+  Running `pgtrickle` with no subcommand launches a full-screen interactive
+  dashboard built with ratatui. Features implemented:
+  - **Dashboard (F1):** Live-updating stream table list with status ribbon,
+    wide-layout split-pane with issues sidebar and DAG mini-map, adaptive
+    layout at ≥140×35.
+  - **Detail view (F2):** Properties, refresh statistics, error details.
+  - **Dependency graph (F3):** ASCII tree visualization with status coloring.
+  - **Refresh log (F4):** Color-coded scrollable timeline.
+  - **Diagnostics (F5):** Mode recommendation table with confidence levels.
+  - **CDC health (F6):** Buffer sizes with color-coded warnings.
+  - **Configuration (F7):** GUC parameter browser.
+  - **Health checks (F8):** Severity-colored check results.
+  - **Alert feed (F9):** Real-time severity-tagged alert display.
+  - **Help overlay:** Context-sensitive keybinding reference (`?` to toggle).
+  - **Navigation:** Number keys (1–9) switch views; `j`/`k`/arrows navigate;
+    Enter drills into detail; Esc goes back; `/` opens filter input;
+    `q`/Ctrl+C quits.
+  - **Async polling:** Background 2-second polling with reconnection on failure.
+  - **Header/footer bars:** Connection status, poll timing, view tabs.
 
 ### Changed
 

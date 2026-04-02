@@ -29,9 +29,8 @@ pub async fn execute(client: &Client, args: &CreateArgs) -> Result<(), CliError>
     let initialize = !args.no_initialize;
 
     // Build the SQL call with named parameters.
-    let mut sql =
-        "SELECT pgtrickle.create_stream_table(name := $1, query := $2, initialize := $3"
-            .to_string();
+    let mut sql = "SELECT pgtrickle.create_stream_table(name := $1, query := $2, initialize := $3"
+        .to_string();
     let mut param_idx = 4u32;
 
     let schedule_placeholder = if args.schedule.is_some() {

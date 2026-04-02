@@ -2704,7 +2704,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 |------|-------------|--------|-----|
 | E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 8–10d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 
-> **E3-TUI subtotal: ~8–10 days** (Phase T1 skeleton & CLI done; T2–T7 remaining)
+> **E3-TUI subtotal: ~8–10 days** (T1–T7 implemented: CLI skeleton, interactive dashboard, 9 views, async polling, keybindings, theming)
 
 ### GUC Surface Consolidation (C4)
 
