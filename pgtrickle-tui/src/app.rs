@@ -574,16 +574,16 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             if *view == app.current_view {
                 spans.push(Span::styled(
                     format!(" [{}]{} ", view.key_hint(), view.label()),
-                    app.theme.title,
+                    app.theme.footer_active,
                 ));
             } else {
                 spans.push(Span::styled(
                     format!(" {}-{} ", view.key_hint(), view.label()),
-                    app.theme.dim,
+                    app.theme.footer,
                 ));
             }
         }
-        spans.push(Span::styled(" ?-Help q-Quit ", app.theme.dim));
+        spans.push(Span::styled(" ?-Help q-Quit ", app.theme.footer));
 
         if let Some(ref f) = app.filter {
             spans.push(Span::styled(format!(" /{f}"), app.theme.warning));

@@ -15,6 +15,7 @@ pub struct Theme {
     pub ok: Style,
     pub title: Style,
     pub footer: Style,
+    pub footer_active: Style,
     pub dim: Style,
 }
 
@@ -39,6 +40,10 @@ impl Theme {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
             footer: Style::default().fg(Color::DarkGray),
+            footer_active: Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
             dim: Style::default().fg(Color::DarkGray),
         }
     }
