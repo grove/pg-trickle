@@ -3993,38 +3993,26 @@ fn execute_manual_differential_refresh(
 
     refresh::poll_foreign_table_sources_for_st(st)?;
 
+    // ST-source guard: if ANY upstream dependency is a STREAM_TABLE, always
+    // fall back to a FULL refresh.  The manual FULL refresh path
+    // (`execute_manual_full_refresh`) does not populate ST change buffers
+    // (`changes_pgt_`), so a downstream DIFFERENTIAL refresh would see an
+    // empty change buffer and silently skip real changes.
+    // The background scheduler handles this correctly (via
+    // `capture_full_refresh_diff_to_st_buffer`), but the manual path
+    // does not, so we must force FULL here.
+    {
+        let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+        let has_st_source = deps.iter().any(|dep| dep.source_type == "STREAM_TABLE");
+        if has_st_source {
+            return execute_manual_full_refresh(st, schema, table_name, source_oids);
+        }
+    }
+
     // Get current WAL positions for non-ST sources (reuses source_oids — G-N3)
     let slot_positions = cdc::get_slot_positions(source_oids)?;
     let data_ts = get_data_timestamp_str();
-    let mut new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
-
-    // FIX-STST-DIFF: Collect ST source LSN positions from their change
-    // buffers, matching the scheduler's approach. This enables DIFFERENTIAL
-    // refresh for manual calls on STs that read from other stream tables.
-    let change_schema = crate::config::pg_trickle_change_buffer_schema();
-    let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
-    for dep in &deps {
-        if dep.source_type != "STREAM_TABLE" {
-            continue;
-        }
-        let upstream_pgt_id = match StreamTableMeta::pgt_id_for_relid(dep.source_relid) {
-            Some(id) => id,
-            None => continue,
-        };
-        if !cdc::has_st_change_buffer(upstream_pgt_id, &change_schema) {
-            continue;
-        }
-        // Read max LSN from the upstream ST change buffer (same as scheduler).
-        let lsn = Spi::get_one::<String>(&format!(
-            "SELECT COALESCE(MAX(lsn)::text, pg_current_wal_lsn()::text) \
-             FROM \"{schema}\".changes_pgt_{id}",
-            schema = change_schema,
-            id = upstream_pgt_id,
-        ))
-        .unwrap_or(None)
-        .unwrap_or_else(|| "0/0".to_string());
-        new_frontier.set_st_source(upstream_pgt_id, lsn, data_ts.clone());
-    }
+    let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
 
     // Execute the differential refresh via the DVM engine
     let (rows_inserted, rows_deleted) =

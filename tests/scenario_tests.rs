@@ -442,8 +442,8 @@ async fn test_scenario_st_info_view() {
 
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_stream_tables \
-         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp) \
-         VALUES ({oid}, 'st_test', 'public', 'SELECT id FROM base', '1m', 'FULL', 'ACTIVE', now() - interval '2 minutes')"
+         (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp, last_refresh_at) \
+         VALUES ({oid}, 'st_test', 'public', 'SELECT id FROM base', '1m', 'FULL', 'ACTIVE', now() - interval '2 minutes', now() - interval '2 minutes')"
     )).await;
 
     // Check info view shows stale flag
