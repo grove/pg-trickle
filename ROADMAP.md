@@ -2688,13 +2688,23 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **G15-EX subtotal: ~1–2 days**
 
-### CLI Tool (E3)
+### TUI Tool (E3-TUI)
+
+> **In plain terms:** A full-featured terminal user interface (TUI) for
+> managing, monitoring, and diagnosing pg_trickle stream tables without
+> touching SQL. Built with ratatui in Rust, it provides a real-time
+> dashboard (think `htop` for stream tables), interactive dependency graph
+> visualization, live refresh log, diagnostics with signal breakdown charts,
+> CDC health monitoring, a GUC configuration editor, and a real-time alert
+> feed — all navigable with keyboard shortcuts and a command palette.
+> It also supports every original CLI command as one-shot subcommands for
+> scripting and CI.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| E3 | CLI tool (`pgtrickle`) for management outside SQL | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
+| E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 4–6d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 
-> **E3 subtotal: ~16–20 hours**
+> **E3-TUI subtotal: ~4–6 days**
 
 ### GUC Surface Consolidation (C4)
 
@@ -2766,7 +2776,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **FIX-STST-DIFF subtotal: ~1–2 days**
 
-> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~16–20h CLI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
+> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~4–6d TUI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
 
 **Exit criteria:**
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
@@ -2777,7 +2787,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 - [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
 - [ ] DIAG-2: WARNING emitted at `create_stream_table` time for group-rescan aggregates and for algebraic aggregates with estimated group cardinality below threshold; warning directs users to `refresh_mode='full'` or `'auto'`; threshold configurable via GUC
 - [ ] G15-EX: `pgtrickle.export_definition(name TEXT)` returns valid reproducible DDL; round-trip tested
-- [ ] E3: `pgtrickle` CLI installable and covers create/drop/refresh/status commands
+- [ ] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; all 12 TUI features operational; documented in `docs/TUI.md`
 - [ ] C4: `merge_planner_hints` and `merge_work_mem_mb` consolidated into `planner_aggressive`; old GUCs emit deprecation notice
 - [ ] DOC-PDC: Pre-deployment checklist published in `docs/PRE_DEPLOYMENT.md`; linked from GETTING_STARTED and INSTALL
 - [ ] DOC-OPM: Operator mode support matrix summary and link added to SQL_REFERENCE.md
@@ -3037,16 +3047,16 @@ These are not gated on 1.0 but represent the longer-term horizon.
 > **In plain terms:** Building first-class integrations with the tools most
 > data teams already use — a proper dbt adapter (beyond just a
 > materialization macro), an Airflow provider so you can trigger stream
-> table refreshes from Airflow DAGs, a `pgtrickle` command-line tool for
-> managing stream tables without writing SQL, and integration guides for
-> popular ORMs and migration frameworks like Django, SQLAlchemy, Flyway, and
-> Liquibase.
+> table refreshes from Airflow DAGs, a `pgtrickle` TUI for
+> managing and monitoring stream tables without writing SQL (shipped in
+> v0.14.0), and integration guides for popular ORMs and migration
+> frameworks like Django, SQLAlchemy, Flyway, and Liquibase.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | E1 | dbt full adapter (`dbt-pgtrickle` extending `dbt-postgres`) | 20–30h | [PLAN_DBT_ADAPTER.md](plans/dbt/PLAN_DBT_ADAPTER.md) |
 | E2 | Airflow provider (`apache-airflow-providers-pgtrickle`) | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
-| ~~E3~~ | ~~CLI tool (`pgtrickle`) for management outside SQL~~ ➡️ Pulled to v0.14.0 | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
+| ~~E3~~ | ~~CLI tool (`pgtrickle`) for management outside SQL~~ ➡️ Pulled to v0.14.0 as TUI (E3-TUI) | 4–6d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 | E4 | Flyway / Liquibase migration support | 8–12h | [PLAN_ECO_SYSTEM.md §5](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
 | E5 | ORM integrations guide (SQLAlchemy, Django, etc.) | 8–12h | [PLAN_ECO_SYSTEM.md §5](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
 
@@ -3132,7 +3142,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
 | v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
 | v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
-| v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~16–20h CLI + ~0.5d docs | — | |
+| v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~4–6d TUI + ~0.5d docs | — | |
 | v0.15.0 — External Test Suites & Integration | ~14–25h + ~2–3d bulk create + ~3–4wk parser + ~1–2wk watermark | — | |
 | v0.16.0 — PG Backward Compatibility & Native DDL Syntax | ~38–56h (PG compat) + ~13–21d (Native DDL) + ~2–3wk MERGE alts + ~2–4wk memory budget + ~2–3wk template cache | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
