@@ -8,6 +8,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [Unreleased](#unreleased)
 - [0.14.0 — 2026-04-02](#0140--2026-04-02)
 - [0.13.0 — 2026-03-31](#0130--2026-03-31)
 - [0.12.0 — 2026-03-28](#0120--2026-03-28)
@@ -29,6 +30,12 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — 2026-02-26](#011--2026-02-26)
 - [0.1.0 — 2026-02-26](#010--2026-02-26)
 <!-- TOC end -->
+
+---
+
+## [Unreleased]
+
+<!-- Next release notes go here -->
 
 ---
 
