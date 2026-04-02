@@ -2470,6 +2470,7 @@ dependencies = [
  "clap_complete",
  "comfy-table",
  "crossterm 0.28.1",
+ "futures-util",
  "ratatui",
  "serde",
  "serde_json",

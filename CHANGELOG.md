@@ -148,14 +148,24 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   - **Diagnostics (F5):** Mode recommendation table with confidence levels.
   - **CDC health (F6):** Buffer sizes with color-coded warnings.
   - **Configuration (F7):** GUC parameter browser.
-  - **Health checks (F8):** Severity-colored check results.
-  - **Alert feed (F9):** Real-time severity-tagged alert display.
-  - **Help overlay:** Context-sensitive keybinding reference (`?` to toggle).
-  - **Navigation:** Number keys (1–9) switch views; `j`/`k`/arrows navigate;
-    Enter drills into detail; Esc goes back; `/` opens filter input;
-    `q`/Ctrl+C quits.
+  - **Health checks (F18):** Severity-colored check results.
+  - **Alert feed (F8):** Real-time severity-tagged alert display via
+    LISTEN/NOTIFY on `pg_trickle_alert` channel.
+  - **Workers view (F13):** Parallel worker pool status and job queue.
+  - **Fuse panel (F14):** Circuit breaker / fuse status per stream table.
+  - **Watermarks view (F15):** Watermark groups and source gating status.
+  - **Delta SQL inspector (F16):** Links to `pgtrickle explain` CLI.
+  - **Help overlay (F12):** Context-sensitive keybinding reference (`?`).
+  - **Watch mode (F19):** `pgtrickle watch` non-interactive continuous output
+    with `--compact`, `--no-color`, `--append` flags.
+  - **Navigation:** Number keys (1–9) and letter keys (w/f/m/d) switch views;
+    `j`/`k`/arrows navigate; Enter drills into detail; Esc goes back;
+    `/` opens filter input; `q`/Ctrl+C quits.
   - **Async polling:** Background 2-second polling with reconnection on failure.
   - **Header/footer bars:** Connection status, poll timing, view tabs.
+  - **New CLI subcommands:** `workers`, `fuse`, `watermarks`, `explain`
+    (with `--analyze`, `--operators`, `--dedup`), and `watch`.
+  - **Documentation:** `docs/TUI.md` user guide.
 
 ### Changed
 

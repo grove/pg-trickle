@@ -53,6 +53,11 @@ async fn run(cli: Cli) -> Result<(), error::CliError> {
         Commands::Graph(args) => commands::graph::execute(&client, &args).await,
         Commands::Config(args) => commands::config::execute(&client, &args).await,
         Commands::Health(args) => commands::health::execute(&client, &args).await,
+        Commands::Workers(args) => commands::workers::execute(&client, &args).await,
+        Commands::Fuse(args) => commands::fuse::execute(&client, &args).await,
+        Commands::Watermarks(args) => commands::watermarks::execute(&client, &args).await,
+        Commands::Explain(args) => commands::explain::execute(&client, &args).await,
+        Commands::Watch(args) => commands::watch::execute(&client, &args).await,
         Commands::Completions(args) => {
             commands::completions::execute(&args);
             Ok(())

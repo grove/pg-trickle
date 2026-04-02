@@ -14,6 +14,7 @@
 - [Installation](installation.md)
 - [Upgrading](UPGRADING.md)
 - [Backup and Restore](BACKUP_AND_RESTORE.md)
+- [TUI Tool](TUI.md)
 - [Contributing](contributing.md)
 
 ---

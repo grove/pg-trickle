@@ -81,6 +81,21 @@ pub enum Commands {
     /// Run health checks
     Health(commands::health::HealthArgs),
 
+    /// Show worker pool and job queue status
+    Workers(commands::workers::WorkersArgs),
+
+    /// Show fuse and circuit breaker status
+    Fuse(commands::fuse::FuseArgs),
+
+    /// Show watermark groups and source gating
+    Watermarks(commands::watermarks::WatermarksArgs),
+
+    /// Inspect delta SQL, operator tree, or dedup stats
+    Explain(commands::explain::ExplainArgs),
+
+    /// Watch stream table status (non-interactive, continuous output)
+    Watch(commands::watch::WatchArgs),
+
     /// Generate shell completion scripts
     Completions(commands::completions::CompletionsArgs),
 }

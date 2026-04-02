@@ -23,6 +23,11 @@ pub struct AppState {
     pub error_message: Option<String>,
     /// Sparkline data: st_name -> last N refresh durations
     pub sparkline_data: HashMap<String, Vec<f64>>,
+    pub workers: Vec<WorkerInfo>,
+    pub job_queue: Vec<JobQueueEntry>,
+    pub fuses: Vec<FuseInfo>,
+    pub watermark_groups: Vec<WatermarkGroup>,
+    pub trigger_inventory: Vec<TriggerInfo>,
 }
 
 #[derive(Clone, Serialize)]
@@ -119,6 +124,49 @@ pub struct RefreshLogEntry {
     pub duration_ms: Option<f64>,
     #[allow(dead_code)]
     pub rows_affected: Option<i64>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct WorkerInfo {
+    pub worker_id: i32,
+    pub state: String,
+    pub table_name: Option<String>,
+    pub started_at: Option<String>,
+    pub duration_ms: Option<f64>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct JobQueueEntry {
+    pub position: i32,
+    pub table_name: String,
+    pub priority: i32,
+    pub queued_at: String,
+    pub wait_ms: Option<f64>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct FuseInfo {
+    pub stream_table: String,
+    pub fuse_state: String,
+    pub consecutive_errors: i64,
+    pub last_error: Option<String>,
+    pub blown_at: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct WatermarkGroup {
+    pub group_name: String,
+    pub member_count: i64,
+    pub min_watermark: Option<String>,
+    pub max_watermark: Option<String>,
+    pub gated: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct TriggerInfo {
+    pub source_table: String,
+    pub trigger_name: String,
+    pub firing_events: String,
 }
 
 impl AppState {

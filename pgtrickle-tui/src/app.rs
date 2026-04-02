@@ -33,6 +33,10 @@ enum View {
     Config,
     Health,
     Alerts,
+    Workers,
+    Fuse,
+    Watermarks,
+    DeltaInspector,
 }
 
 impl View {
@@ -47,6 +51,10 @@ impl View {
             Self::Config => "Configuration",
             Self::Health => "Health Checks",
             Self::Alerts => "Alerts",
+            Self::Workers => "Workers",
+            Self::Fuse => "Fuse",
+            Self::Watermarks => "Watermarks",
+            Self::DeltaInspector => "Delta SQL",
         }
     }
 
@@ -61,11 +69,15 @@ impl View {
             Self::Config => "7",
             Self::Health => "8",
             Self::Alerts => "9",
+            Self::Workers => "w",
+            Self::Fuse => "f",
+            Self::Watermarks => "m",
+            Self::DeltaInspector => "d",
         }
     }
 }
 
-const ALL_VIEWS: [View; 9] = [
+const ALL_VIEWS: [View; 13] = [
     View::Dashboard,
     View::Detail,
     View::Graph,
@@ -75,6 +87,10 @@ const ALL_VIEWS: [View; 9] = [
     View::Config,
     View::Health,
     View::Alerts,
+    View::Workers,
+    View::Fuse,
+    View::Watermarks,
+    View::DeltaInspector,
 ];
 
 /// Messages from the background poller to the UI thread.
@@ -121,6 +137,10 @@ impl App {
             View::Config => self.state.guc_params.len(),
             View::Health => self.state.health_checks.len(),
             View::Alerts => self.state.alerts.len(),
+            View::Workers => self.state.workers.len(),
+            View::Fuse => self.state.fuses.len(),
+            View::Watermarks => self.state.watermark_groups.len(),
+            View::DeltaInspector => self.state.stream_tables.len(),
         }
     }
 
@@ -170,6 +190,13 @@ async fn run_app(
         poller_task(conn_args, tx).await;
     });
 
+    // Spawn LISTEN/NOTIFY listener for real-time alerts
+    let (alert_tx, mut alert_rx) = mpsc::channel::<crate::state::AlertEvent>(32);
+    let alert_conn_args = connection.clone();
+    tokio::spawn(async move {
+        listen_task(alert_conn_args, alert_tx).await;
+    });
+
     loop {
         // Draw
         terminal.draw(|frame| draw_ui(frame, &app))?;
@@ -185,12 +212,24 @@ async fn run_app(
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 PollMsg::StateUpdate(new_state) => {
+                    // Preserve alerts from LISTEN/NOTIFY (state polls don't include them)
+                    let alerts = std::mem::take(&mut app.state.alerts);
                     app.state = *new_state;
+                    app.state.alerts = alerts;
                 }
                 PollMsg::Error(e) => {
                     app.state.error_message = Some(e);
                     app.state.connected = false;
                 }
+            }
+        }
+
+        // Drain real-time LISTEN/NOTIFY alerts
+        while let Ok(alert) = alert_rx.try_recv() {
+            app.state.alerts.push(alert);
+            // Keep last 200 alerts
+            if app.state.alerts.len() > 200 {
+                app.state.alerts.remove(0);
             }
         }
 
@@ -304,6 +343,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('7') => switch_view(app, View::Config),
         KeyCode::Char('8') => switch_view(app, View::Health),
         KeyCode::Char('9') => switch_view(app, View::Alerts),
+        // Extended view switching via letter keys
+        KeyCode::Char('w') => switch_view(app, View::Workers),
+        KeyCode::Char('f') => switch_view(app, View::Fuse),
+        KeyCode::Char('m') => switch_view(app, View::Watermarks),
+        KeyCode::Char('d') => switch_view(app, View::DeltaInspector),
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => app.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
@@ -440,6 +484,14 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::Config => views::config::render(frame, area, &app.state, &app.theme, app.selected),
         View::Health => views::health::render(frame, area, &app.state, &app.theme, app.selected),
         View::Alerts => views::alert::render(frame, area, &app.state, &app.theme),
+        View::Workers => views::workers::render(frame, area, &app.state, &app.theme, app.selected),
+        View::Fuse => views::fuse::render(frame, area, &app.state, &app.theme, app.selected),
+        View::Watermarks => {
+            views::watermarks::render(frame, area, &app.state, &app.theme, app.selected)
+        }
+        View::DeltaInspector => {
+            views::delta_inspector::render(frame, area, &app.state, &app.theme, app.selected)
+        }
     }
 }
 
@@ -474,6 +526,56 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let footer = Line::from(spans);
     frame.render_widget(Paragraph::new(footer), area);
+}
+
+async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::AlertEvent>) {
+    use tokio_postgres::NoTls;
+
+    let conn_string = crate::connection::build_connection_string(&conn_args);
+
+    // Establish a dedicated connection for LISTEN/NOTIFY.
+    let (client, connection) = loop {
+        match tokio_postgres::connect(&conn_string, NoTls).await {
+            Ok(pair) => break pair,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if tx.is_closed() {
+                    return;
+                }
+            }
+        }
+    };
+
+    // Drive the connection in a background task.
+    tokio::spawn(async move {
+        connection.await.ok();
+    });
+
+    // Subscribe to pg_trickle alerts.
+    if client
+        .execute("LISTEN pg_trickle_alert", &[])
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // pg_trickle delivers alerts via NOTIFY. The notifications are surfaced
+    // through the client after a round-trip. We send a lightweight heartbeat
+    // query periodically to trigger delivery.
+    let mut tick = interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+
+        if tx.is_closed() {
+            return;
+        }
+
+        // Heartbeat: drive the connection to receive any pending NOTIFYs.
+        if client.execute("", &[]).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Centered overlay rectangle.

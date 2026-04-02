@@ -26,7 +26,7 @@ pub async fn connect(args: &ConnectionArgs) -> Result<Client, CliError> {
     Ok(client)
 }
 
-fn build_connection_string(args: &ConnectionArgs) -> String {
+pub fn build_connection_string(args: &ConnectionArgs) -> String {
     if let Some(url) = &args.url {
         return url.clone();
     }

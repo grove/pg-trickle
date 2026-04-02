@@ -17,6 +17,10 @@ pub async fn poll_all(client: &Client, state: &mut AppState) {
     poll_efficiency(client, state).await;
     poll_gucs(client, state).await;
     poll_refresh_log(client, state).await;
+    poll_workers(client, state).await;
+    poll_fuses(client, state).await;
+    poll_watermarks(client, state).await;
+    poll_triggers(client, state).await;
 }
 
 async fn poll_stream_tables(client: &Client, state: &mut AppState) {
@@ -249,6 +253,126 @@ async fn poll_refresh_log(client: &Client, state: &mut AppState) {
                 status: row.get(3),
                 duration_ms: row.get(4),
                 rows_affected: row.get(5),
+            })
+            .collect();
+    }
+}
+
+async fn poll_workers(client: &Client, state: &mut AppState) {
+    let result = client
+        .query(
+            "SELECT worker_id, state::text, table_name::text,
+                    started_at::text, duration_ms
+             FROM pgtrickle.worker_pool_status()
+             ORDER BY worker_id",
+            &[],
+        )
+        .await;
+
+    if let Ok(rows) = result {
+        state.workers = rows
+            .iter()
+            .map(|row| WorkerInfo {
+                worker_id: row.get(0),
+                state: row.get(1),
+                table_name: row.get(2),
+                started_at: row.get(3),
+                duration_ms: row.get(4),
+            })
+            .collect();
+    }
+
+    let queue_result = client
+        .query(
+            "SELECT position, table_name::text, priority, queued_at::text, wait_ms
+             FROM pgtrickle.parallel_job_status()
+             ORDER BY position",
+            &[],
+        )
+        .await;
+
+    if let Ok(rows) = queue_result {
+        state.job_queue = rows
+            .iter()
+            .map(|row| JobQueueEntry {
+                position: row.get(0),
+                table_name: row.get(1),
+                priority: row.get(2),
+                queued_at: row.get(3),
+                wait_ms: row.get(4),
+            })
+            .collect();
+    }
+}
+
+async fn poll_fuses(client: &Client, state: &mut AppState) {
+    let result = client
+        .query(
+            "SELECT pgt_name::text, fuse_state::text,
+                    consecutive_errors, last_error_message::text,
+                    blown_at::text
+             FROM pgtrickle.fuse_status()
+             ORDER BY CASE fuse_state WHEN 'BLOWN' THEN 1 WHEN 'TRIPPED' THEN 2 ELSE 3 END",
+            &[],
+        )
+        .await;
+
+    if let Ok(rows) = result {
+        state.fuses = rows
+            .iter()
+            .map(|row| FuseInfo {
+                stream_table: row.get(0),
+                fuse_state: row.get(1),
+                consecutive_errors: row.get(2),
+                last_error: row.get(3),
+                blown_at: row.get(4),
+            })
+            .collect();
+    }
+}
+
+async fn poll_watermarks(client: &Client, state: &mut AppState) {
+    let result = client
+        .query(
+            "SELECT group_name::text, member_count, min_watermark::text,
+                    max_watermark::text, gated
+             FROM pgtrickle.watermark_groups()
+             ORDER BY group_name",
+            &[],
+        )
+        .await;
+
+    if let Ok(rows) = result {
+        state.watermark_groups = rows
+            .iter()
+            .map(|row| WatermarkGroup {
+                group_name: row.get(0),
+                member_count: row.get(1),
+                min_watermark: row.get(2),
+                max_watermark: row.get(3),
+                gated: row.get(4),
+            })
+            .collect();
+    }
+}
+
+async fn poll_triggers(client: &Client, state: &mut AppState) {
+    let result = client
+        .query(
+            "SELECT source_table::text, trigger_name::text, firing_events::text
+             FROM pgtrickle.trigger_inventory()
+             ORDER BY source_table, trigger_name",
+            &[],
+        )
+        .await;
+
+    if let Ok(rows) = result {
+        state.trigger_inventory = rows
+            .iter()
+            .map(|row| TriggerInfo {
+                source_table: row.get(0),
+                trigger_name: row.get(1),
+                firing_events: row.get(2),
             })
             .collect();
     }
