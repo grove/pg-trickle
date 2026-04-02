@@ -2,7 +2,7 @@
 
 **Milestone:** v0.14.0 (replaces E3 CLI)
 **Status:** ⬜ Not started
-**Effort:** ~4–6 days
+**Effort:** ~8–10 days
 **Last updated:** 2026-04-02
 **Crate:** `pgtrickle-tui` (workspace member, separate binary)
 
@@ -56,8 +56,24 @@ dashboard.
   - [F10 — One-Shot CLI Mode](#f10--one-shot-cli-mode)
   - [F11 — Sparklines & Micro-Charts](#f11--sparklines--micro-charts)
   - [F12 — Help System](#f12--help-system)
-- [UI Layout](#ui-layout)
+  - [F13 — Scheduler & Worker Pool View](#f13--scheduler--worker-pool-view)
+  - [F14 — Fuse & Circuit Breaker Panel](#f14--fuse--circuit-breaker-panel)
+  - [F15 — Watermark & Source Gating View](#f15--watermark--source-gating-view)
+  - [F16 — Delta SQL Inspector](#f16--delta-sql-inspector)
+  - [F17 — Batch Operations](#f17--batch-operations)
+  - [F18 — System Health Overview](#f18--system-health-overview)
+  - [F19 — Watch Mode (Lite Dashboard)](#f19--watch-mode-lite-dashboard)
+  - [F20 — DAG Health & Impact Analysis](#f20--dag-health--impact-analysis)
+  - [F21 — Cascade Staleness Tracker](#f21--cascade-staleness-tracker)
+- [Dashboard Improvements](#dashboard-improvements)
+- [Detail View Improvements](#detail-view-improvements)
+- [Graph View Improvements](#graph-view-improvements)
+- [Refresh Log Improvements](#refresh-log-improvements)
+- [Command Palette Improvements](#command-palette-improvements)
+- [CLI Mode Improvements](#cli-mode-improvements)
+- [Adaptive Polling](#adaptive-polling)
 - [Navigation & Keybindings](#navigation--keybindings)
+- [UI Layout](#ui-layout)
 - [Theming & Aesthetics](#theming--aesthetics)
 - [Connection Management](#connection-management)
 - [Implementation Phases](#implementation-phases)
@@ -137,52 +153,127 @@ dashboard.
 
 ### F1 — Dashboard (Home)
 
-The default view when launching `pgtrickle` with no subcommand. Shows a
-real-time overview of all stream tables in a sortable, filterable table.
+The default view when launching `pgtrickle` with no subcommand. A DAG-aware
+overview designed to surface problems immediately — not just a flat list but
+a layered display that shows issues in context. The dashboard has three
+layout modes that adapt to terminal size.
+
+**Wide layout (≥ 140 cols, ≥ 35 rows) — split-pane with issue sidebar:**
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — dashboard                                    mydb@localhost:5432  ⏱ 2s   ⚠ 3     ║
+╠══════════════════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                                ║
+║  ┌─ Stream Tables (12 total) ────────────────────────────────┐ ┌─ Issues (3) ────────────────┐ ║
+║  │                                                           │ │                              │ ║
+║  │  NAME           STATUS  MODE         STALE  EFF  LAST     │ │ ✗ Broken chain (3 affected)  │ ║
+║  │  ────────────── ─────── ──────────── ────── ─── ──────── │ │   daily_revenue → 2 downstream║
+║  │▸ order_totals   ACTIVE  DIFFERENTIAL ✓ ok   ✓   4s ago   │ │   ERROR 1h 5m ago            │ ║
+║  │  big_customers  ACTIVE  DIFFERENTIAL ✓ ok   ✓   4s ago   │ │                              │ ║
+║  │  daily_revenue  ERROR   FULL         ✗ yes  ✗   1h ago   │ │ ⚠ Buffer growth              │ ║
+║  │  exec_dashboard ACTIVE  DIFFERENTIAL ✓ ok   ⚠   4s ago   │ │   events: 4.2 MB (1,247 rows)│ ║
+║  │  monthly_rollup ACTIVE  DIFFERENTIAL ✓ ok   ⚠   4s ago   │ │                              │ ║
+║  │  product_stats  ACTIVE  AUTO         ✓ ok   ✓   12s ago  │ │ ⚠ Diamond gap increasing     │ ║
+║  │  user_activity  ACTIVE  IMMEDIATE    ✓ ok   ✓   0s ago   │ │   group_1: 340ms (trending ▅)│ ║
+║  │  region_summary ACTIVE  DIFFERENTIAL ✓ ok   ✓   2m ago   │ │                              │ ║
+║  │  inv_snapshot   ACTIVE  DIFFERENTIAL ✓ ok   ✓   6s ago   │ │                              │ ║
+║  │  ...                                                      │ │                              │ ║
+║  └───────────────────────────────────────────────────────────┘ └──────────────────────────────┘ ║
+║                                                                                                ║
+║  ┌─ DAG Mini-Map ────────────────────────────────────────────────────────────────────────────┐  ║
+║  │  orders ─┬─▸ daily_revenue ✗ ─┬─▸ exec_dashboard ⚠   events ─▸ user_activity ─▸ daily.. │  ║
+║  │  products┘                    └─▸ monthly_rollup ⚠   inventory ─▸ inv_snapshot           │  ║
+║  └───────────────────────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                                                ║
+╠══════════════════════════════════════════════════════════════════════════════════════════════════╣
+║  ▴▾ Navigate  Enter Detail  r Refresh  / Filter  i Issues  g Graph  d Diag  ? Help             ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Standard layout (80–139 cols) — table with status ribbon:**
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  pg_trickle — dashboard                          mydb@localhost:5432  ⏱ 2s ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                            ║
-║  Stream Tables (12 total, 1 error, 11 active)            Filter: ____      ║
+║  ✗ 1 error  ⚠ 2 cascade-stale  ● 9 healthy           ⚠ 3 issues  [i]     ║
 ║                                                                            ║
-║  NAME             SCHEMA  STATUS  MODE           TIER  STALE  LAST REFRESH ║
-║  ──────────────── ─────── ─────── ────────────── ───── ────── ──────────── ║
-║▸ order_totals     public  ACTIVE  DIFFERENTIAL   hot   ✓ no   4s ago       ║
-║  big_customers    public  ACTIVE  DIFFERENTIAL   hot   ✓ no   4s ago       ║
-║  daily_revenue    public  ERROR   FULL           warm  ✗ yes  1h ago       ║
-║  product_stats    sales   ACTIVE  AUTO           hot   ✓ no   12s ago      ║
-║  region_summary   public  ACTIVE  DIFFERENTIAL   cold  ✓ no   2m ago       ║
-║  user_activity    public  ACTIVE  IMMEDIATE      hot   ✓ no   0s ago       ║
-║  inv_snapshot     ops     ACTIVE  DIFFERENTIAL   hot   ✓ no   6s ago       ║
+║  Stream Tables (12 total, 1 error, 2 cascade-stale)      Filter: ____     ║
+║                                                                            ║
+║  NAME             SCHEMA  STATUS  MODE           STALE  EFF  LAST REFRESH  ║
+║  ──────────────── ─────── ─────── ────────────── ────── ─── ────────────── ║
+║▸ order_totals     public  ACTIVE  DIFFERENTIAL   ✓ ok   ✓   4s ago         ║
+║  big_customers    public  ACTIVE  DIFFERENTIAL   ✓ ok   ✓   4s ago         ║
+║  daily_revenue    public  ERROR   FULL           ✗ yes  ✗   1h ago         ║
+║  exec_dashboard   public  ACTIVE  DIFFERENTIAL   ✓ ok   ⚠   4s ago         ║
+║  monthly_rollup   public  ACTIVE  DIFFERENTIAL   ✓ ok   ⚠   4s ago         ║
+║  product_stats    sales   ACTIVE  AUTO           ✓ ok   ✓   12s ago        ║
+║  region_summary   public  ACTIVE  DIFFERENTIAL   ✓ ok   ✓   2m ago         ║
+║  user_activity    public  ACTIVE  IMMEDIATE      ✓ ok   ✓   0s ago         ║
+║  inv_snapshot     ops     ACTIVE  DIFFERENTIAL   ✓ ok   ✓   6s ago         ║
 ║  ...                                                                       ║
 ║                                                                            ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  ▴▾ Navigate  Enter Detail  r Refresh  / Filter  g Graph  d Diag  ? Help   ║
+║  ▴▾ Navigate  Enter Detail  r Refresh  / Filter  i Issues  g Graph  ? Help ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
+**Key dashboard elements:**
+
+1. **Status ribbon** (always visible): One-line summary showing error count,
+   cascade-stale count, healthy count, and total issue count with `[i]`
+   shortcut to the DAG Issues view (F20). Color-coded: red for errors,
+   yellow for cascade-stale, green for healthy.
+
+2. **EFF (Effective Staleness) column** (from F21): Shows cascade staleness.
+   `✓` = data is fresh end-to-end, `⚠` = data is cascade-stale (upstream
+   has issues), `✗` = table itself is in error. This is the most important
+   column for DAG health — it's what distinguishes "this table refreshed
+   recently" from "this table's data is actually correct."
+
+3. **Issues sidebar** (wide layout only): Shows the top issues from F20
+   inline on the dashboard. Each issue is a clickable card — `Enter` on an
+   issue navigates to the relevant view. Shows severity icon, brief
+   description, and affected table count.
+
+4. **DAG mini-map** (wide + tall layout): A single-line compressed DAG
+   at the bottom of the dashboard showing all chains. Error nodes marked
+   with `✗`, cascade-stale nodes with `⚠`. Nodes are abbreviated to fit.
+   Clicking a node selects it in the table above.
+
+5. **Issue badge in header**: `⚠ 3` badge in the header bar is visible
+   from **every view**, not just the dashboard. Provides constant awareness
+   of outstanding issues.
+
 **Columns:** Name, Schema, Status (color-coded: green=ACTIVE, red=ERROR,
-yellow=SUSPENDED, grey=PAUSED), Refresh Mode, Tier, Staleness indicator,
-Last Refresh (relative time).
+yellow=SUSPENDED, grey=PAUSED/FROZEN), Refresh Mode, Staleness (per-table),
+Effective Staleness (cascade-aware), Last Refresh (relative time).
+Additional columns available via column picker (Tier, Buffer, Size, etc.).
 
 **Features:**
-- **Sortable:** Press column letter (n/s/S/m/t/l) to sort by that column.
-  Active sort indicated by `▴`/`▾` in header.
+- **Sortable:** Press column letter to sort. Active sort indicated by `▴`/`▾`.
+  Default sort: errors first, then cascade-stale, then by name.
 - **Filterable:** `/` opens a filter bar. Matches name, schema, status, mode.
-  `Esc` clears the filter.
-- **Status summary bar:** Total count, error count, active count displayed
-  above the table. Updates in real-time.
+  Special filters: `/stale` shows only stale/cascade-stale, `/error` shows
+  errors, `/issues` shows tables involved in any issue.
+- **Status summary ribbon:** Total count, error count, cascade-stale count,
+  healthy count. Updates in real-time.
 - **Auto-refresh:** Table refreshes every poll interval. Manual refresh with
   `Ctrl+R`.
 - **Color indicators:** Status column uses ANSI colors: green (ACTIVE),
-  red (ERROR), yellow (SUSPENDED), dim (PAUSED/FROZEN).
-- **Stale highlight:** Rows with stale data get a subtle background tint.
+  red (ERROR), yellow (SUSPENDED), dim (PAUSED/FROZEN). EFF column: green
+  (✓), yellow (⚠ cascade-stale), red (✗ error).
+- **Cascade-stale highlight:** Rows with cascade staleness (upstream error)
+  get a subtle yellow background tint — visually distinct from direct errors
+  (red tint) and direct staleness.
 - **Quick actions from dashboard:** `r` triggers refresh on selected ST,
-  `Enter` opens detail view, `d` opens diagnostics, `g` opens DAG graph.
+  `Enter` opens detail view, `d` opens diagnostics, `g` opens DAG graph,
+  `i` opens DAG Issues view.
 
-**Data source:** `SELECT * FROM pgtrickle.pgt_status()` polled every 2s.
+**Data source:** `pgtrickle.pgt_status()` polled every 2s,
+`pgtrickle.dependency_tree()` polled every 10s (for cascade computation).
 
 ---
 
@@ -233,10 +324,15 @@ dashboard row or via `pgtrickle status <name>`.
    `pgtrickle.refresh_efficiency()`.
 3. **Defining Query** — Syntax-highlighted SQL (keyword highlighting via
    simple regex, not a full parser).
-4. **Recent Refreshes** — Scrollable list from `pgtrickle.refresh_timeline()`.
-5. **Error Details** — Only shown when `status = 'ERROR'`. Displays
-   `last_error_message` prominently in red.
-6. **Sources** — Source tables with CDC status from `pgtrickle.list_sources()`.
+4. **Upstream Health** — Mini dependency chain showing status of all upstream
+   tables. If any upstream is in ERROR/SUSPENDED, shows the root cause, how
+   long data has been cascade-stale, and the full path from root cause to
+   this table. Green checkmark when all upstream is healthy.
+5. **Recent Refreshes** — Scrollable list from `pgtrickle.refresh_timeline()`.
+6. **Error Details** — Only shown when `status = 'ERROR'`. Displays
+   `last_error_message` prominently in red. Also shows blast radius
+   (downstream tables affected by this error).
+7. **Sources** — Source tables with CDC status from `pgtrickle.list_sources()`.
 
 **Actions:**
 - `r` — Trigger manual refresh (`pgtrickle.refresh_stream_table()`).
@@ -253,7 +349,9 @@ dashboard row or via `pgtrickle status <name>`.
 
 ### F3 — Dependency Graph View
 
-ASCII-art visualization of the stream table DAG. Opened with `g` from the
+ASCII-art visualization of the stream table DAG with integrated issue
+overlays. The primary tool for understanding the shape of your data
+pipelines and spotting structural problems. Opened with `g` from the
 dashboard or `pgtrickle graph`.
 
 ```
@@ -267,17 +365,22 @@ dashboard or `pgtrickle graph`.
 ║                                      ├──▸ executive_dashboard ◆            ║
 ║     customers ───▸ big_customers ────┘                                     ║
 ║                                                                            ║
+║     orders ──────▸ daily_revenue ✗ ─ ─▸ exec_dashboard ⚠                  ║
+║                                 │                                          ║
+║                                 └─ ─▸ monthly_rollup ⚠                    ║
+║                                                                            ║
 ║     events ──────▸ user_activity ──▸ daily_metrics                         ║
 ║                                                                            ║
 ║     inventory ───▸ inv_snapshot (standalone)                               ║
 ║                                                                            ║
-║  Legend: ─▸ dependency  ● ACTIVE  ✗ ERROR  ◆ diamond group                 ║
+║  Legend: ──▸ healthy  ─ ─▸ broken/stale  ✗ ERROR  ⚠ cascade-stale         ║
+║          ◆ diamond group  ○ cycle member                                   ║
 ║                                                                            ║
-║  Selected: order_totals                                                    ║
-║  Depth: 2  Sources: 2  Dependents: 1  Diamond: group_1                     ║
+║  Selected: daily_revenue ✗                                                 ║
+║  Depth: 2  Sources: 1  Dependents: 2  Blast radius: 3 tables              ║
 ║                                                                            ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  ←→ Navigate  Enter Detail  h/l Expand/Collapse  f Fit  ? Help             ║
+║  ←→ Navigate  Enter Detail  S Staleness map  h/l Collapse  f Fit  ? Help   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -287,16 +390,28 @@ dashboard or `pgtrickle graph`.
 - **Interactive navigation:** Arrow keys move between nodes. Selected node
   is highlighted. `Enter` opens the detail view.
 - **Color coding:** Node color matches status (green/red/yellow). Diamond
-  group members share a border style (e.g., double-line `║`).
-- **Metadata strip:** Shows depth, source count, dependent count, and diamond
-  group for the selected node.
+  group members share a border style (e.g., double-line `║`). Cycle members
+  get ○ marker.
+- **Broken edge rendering:** Edges downstream of an ERROR node are rendered
+  as dashed lines (`─ ─▸`) in red. Cascade-stale nodes show `⚠` marker.
+  This makes it immediately obvious which parts of the DAG are affected by
+  a single failure.
+- **Blast radius in metadata:** When an ERROR or stale node is selected,
+  the metadata strip shows the total blast radius (number of downstream
+  tables affected). `B` key toggles highlighting of just the blast radius
+  nodes.
+- **Staleness heatmap overlay:** `S` key toggles a heatmap mode where
+  each node is colored by effective staleness age (green = fresh,
+  yellow = approaching schedule, orange = overdue, red = stale or error).
+  Useful for spotting patterns in large DAGs.
 - **Zoom/pan:** `+`/`-` to zoom, `f` to fit entire graph in viewport.
   For large DAGs (50+ nodes), nodes collapse by schema with `h`/`l`.
 - **Layout engine:** Simple Sugiyama-style layered layout (nodes assigned to
   layers by topological depth, edges routed with minimal crossings). Uses
   data from `pgtrickle.dependency_tree()`.
 
-**Data source:** `pgtrickle.dependency_tree()`, `pgtrickle.diamond_groups()`.
+**Data source:** `pgtrickle.dependency_tree()`, `pgtrickle.diamond_groups()`,
+`pgtrickle.pgt_scc_status()`.
 
 ---
 
@@ -716,6 +831,845 @@ Context-sensitive help accessible from any view with `?`.
 
 ---
 
+### F13 — Scheduler & Worker Pool View
+
+Real-time view of the background scheduler and parallel worker pool.
+Opened with `w` from the dashboard or `pgtrickle workers`.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — scheduler & workers                mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  ┌─ Scheduler ──────────────────────────────────────────────────────────┐  ║
+║  │ Status: RUNNING ●   Uptime: 4d 12h 37m   Interval: 1000ms          │  ║
+║  │ Enabled: true       Tick count: 389,412   Last tick: 0.3s ago       │  ║
+║  │ Stream tables: 12   Pending: 2            Skipped (frozen): 1       │  ║
+║  └──────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ Worker Pool ────────────────────────────────────────────────────────┐  ║
+║  │ Active workers: 3/4    Budget: 4    Mode: parallel                  │  ║
+║  │                                                                     │  ║
+║  │  WORKER  STATE     TABLE            STARTED    DURATION             │  ║
+║  │  ─────── ───────── ──────────────── ────────── ────────             │  ║
+║  │  w-1     RUNNING   order_totals     09:42:18   12ms                 │  ║
+║  │  w-2     RUNNING   big_customers    09:42:18   8ms                  │  ║
+║  │  w-3     RUNNING   product_stats    09:42:18   45ms                 │  ║
+║  │  w-4     IDLE      —                —          —                    │  ║
+║  └──────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ Job Queue ──────────────────────────────────────────────────────────┐  ║
+║  │  POSITION  TABLE              PRIORITY  QUEUED AT    WAIT           │  ║
+║  │  ────────  ─────────────────  ────────  ─────────    ────           │  ║
+║  │  1         daily_revenue      hot       09:42:18     0.3s           │  ║
+║  │  2         region_summary     cold      09:42:15     3.3s           │  ║
+║  └──────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  ▴▾ Navigate  Enter Detail  p Pause Scheduler  Esc Back  ? Help            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Features:**
+- **Scheduler heartbeat:** Shows scheduler status, uptime, tick count, and
+  how recently the last tick fired. Red indicator if scheduler appears stalled
+  (last tick > 5× interval).
+- **Worker pool:** Real-time display of all parallel workers — which tables
+  they're refreshing, how long each job has been running. Useful for
+  diagnosing stuck refreshes.
+- **Job queue:** Pending refresh jobs ordered by priority. Shows wait time.
+- **Pause/resume:** `p` toggles `pg_trickle.enabled` GUC (with confirmation
+  dialog). Useful for maintenance windows.
+- **Worker sparklines:** When width permits, shows per-worker utilization
+  over the last 60 seconds as a mini chart.
+
+**Data sources:** `pgtrickle.worker_pool_status()`,
+`pgtrickle.parallel_job_status()`, `pgtrickle.pgt_status()`.
+
+---
+
+### F14 — Fuse & Circuit Breaker Panel
+
+View and manage the error circuit breaker (fuse) for all stream tables.
+Opened with `F` from the dashboard or `pgtrickle fuse`.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — fuse status                        mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  Fuse Circuit Breakers (12 stream tables)                                  ║
+║                                                                            ║
+║  NAME             FUSE     ERRORS  MAX  LAST ERROR                         ║
+║  ──────────────── ──────── ─────── ──── ──────────────────────────────     ║
+║  order_totals     ARMED ●  0       3    —                                  ║
+║  big_customers    ARMED ●  0       3    —                                  ║
+║▸ daily_revenue    BLOWN ✗  1       3    function max(jsonb) does not exist ║
+║  product_stats    ARMED ●  0       3    —                                  ║
+║  region_summary   ARMED ●  0       3    —                                  ║
+║  user_activity    ARMED ●  1       3    timeout during IMMEDIATE trigger   ║
+║  ...                                                                       ║
+║                                                                            ║
+║  ┌─ daily_revenue — Fuse Detail ─────────────────────────────────────────┐ ║
+║  │ Status:    BLOWN (ERROR state)                                        │ ║
+║  │ Errors:    1 / 3 max                                                  │ ║
+║  │ Blown at:  2026-04-02 09:37:15 UTC                                    │ ║
+║  │ Error:     function max(jsonb) does not exist                         │ ║
+║  │                                                                       │ ║
+║  │ Reset options:                                                        │ ║
+║  │   [A] Apply — Re-arm fuse, keep data, retry on next tick             │ ║
+║  │   [R] Reinitialize — Re-arm fuse, full refresh from scratch          │ ║
+║  │   [S] Skip changes — Re-arm fuse, discard pending changes            │ ║
+║  └───────────────────────────────────────────────────────────────────────┘ ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  ▴▾ Navigate  A/R/S Reset  Enter Detail  Esc Back  ? Help                  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Features:**
+- **Fuse overview table:** Every ST's fuse state at a glance. ARMED (green),
+  pre-armed with errors (yellow), BLOWN (red).
+- **Error detail:** Full error message displayed for the selected ST.
+- **Inline reset:** `A`/`R`/`S` keys trigger `pgtrickle.reset_fuse()` with
+  the corresponding strategy — no need to remember SQL syntax.
+- **Error history sparkline:** For STs with recurring errors, shows a mini
+  pattern of error frequency over time.
+- **Batch reset:** When multi-select is active (F17), reset all selected
+  blown fuses at once.
+
+**Data sources:** `pgtrickle.fuse_status()`, `pgtrickle.reset_fuse()`.
+
+---
+
+### F15 — Watermark & Source Gating View
+
+Manage ETL coordination primitives: watermarks for external load progress
+tracking and source gates for blocking/unblocking refresh triggers.
+Opened with `W` from the dashboard or `pgtrickle watermarks`.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — watermarks & source gates          mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  [Tab: Watermarks]  [Source Gates]                                         ║
+║                                                                            ║
+║  Watermark Groups                                                          ║
+║  GROUP          SOURCES           TOLERANCE  ALIGNED  STATUS               ║
+║  ────────────── ───────────────── ────────── ──────── ────────             ║
+║  etl_batch_1    orders, products  30s        ✓ yes    ready                ║
+║  etl_batch_2    events, logs      1m         ✗ no     waiting (events)     ║
+║                                                                            ║
+║  Per-Source Watermarks                                                      ║
+║  SOURCE           WATERMARK            LAST ADVANCE     LAG               ║
+║  ──────────────── ──────────────────── ──────────────── ─────             ║
+║  orders           2026-04-02 09:40:00  2m ago           OK                ║
+║  products         2026-04-02 09:40:00  2m ago           OK                ║
+║  events           2026-04-02 09:30:00  12m ago          ⚠ stale           ║
+║  logs             2026-04-02 09:38:00  4m ago           OK                ║
+║                                                                            ║
+║  ─────────────────────────────────────────────────────────────             ║
+║                                                                            ║
+║  Source Gates                                                              ║
+║  SOURCE           GATED    REASON              AFFECTED STs               ║
+║  ──────────────── ──────── ─────────────────── ─────────────              ║
+║  events           ✓ GATED  maintenance window  user_activity, daily_met.. ║
+║  orders           ✗ open   —                   order_totals, big_cust..   ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  ▴▾ Navigate  a Advance  g Gate/Ungate  Tab Switch  Esc Back  ? Help       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Features:**
+- **Watermark groups:** Group alignment status — are all sources in the group
+  at the same watermark? Warns when a source falls behind.
+- **Per-source watermarks:** Current watermark value, last advance time,
+  and lag indicator. Stale watermarks (no advance in 2× expected interval)
+  highlighted in yellow.
+- **Advance watermark:** `a` opens inline input to advance a source's
+  watermark (for manual ETL coordination).
+- **Source gates:** Shows which sources are gated (blocked from triggering
+  refreshes), by whom, and which stream tables are affected.
+- **Gate/ungate toggle:** `g` gates or ungates the selected source with a
+  reason prompt. Useful for maintenance windows or data loading pauses.
+- **Tab switching:** Toggle between watermark and gate sub-views.
+
+**Data sources:** `pgtrickle.watermarks()`, `pgtrickle.watermark_groups()`,
+`pgtrickle.watermark_status()`, `pgtrickle.advance_watermark()`,
+`pgtrickle.source_gates()`, `pgtrickle.bootstrap_gate_status()`,
+`pgtrickle.gate_source()`, `pgtrickle.ungate_source()`.
+
+---
+
+### F16 — Delta SQL Inspector
+
+View and analyze the generated DVM delta SQL for any stream table. Critical
+for performance debugging — when a differential refresh is slow, this shows
+exactly what SQL the engine is executing. Opened with `x` from the detail
+view or `pgtrickle explain <name>`.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  order_totals — delta SQL inspector              mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  ┌─ DVM Delta SQL ──────────────────────────────────────────────────────┐  ║
+║  │ WITH delta_orders AS (                                                │  ║
+║  │   SELECT customer_id, amount, _pgt_op                                │  ║
+║  │   FROM pgtrickle_changes.changes_16384                               │  ║
+║  │   WHERE _pgt_change_seq > $1                                         │  ║
+║  │ ),                                                                    │  ║
+║  │ agg_delta AS (                                                        │  ║
+║  │   SELECT customer_id,                                                 │  ║
+║  │          SUM(CASE WHEN _pgt_op = 'I' THEN amount                     │  ║
+║  │                   WHEN _pgt_op = 'D' THEN -amount END) AS d_total,   │  ║
+║  │          SUM(CASE WHEN _pgt_op = 'I' THEN 1                          │  ║
+║  │                   WHEN _pgt_op = 'D' THEN -1 END) AS d_cnt           │  ║
+║  │   FROM delta_orders                                                   │  ║
+║  │   GROUP BY customer_id                                                │  ║
+║  │ )                                                                     │  ║
+║  │ MERGE INTO order_totals t USING agg_delta d ON ...                    │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ EXPLAIN ANALYZE (last refresh) ─────────────────────────────────────┐  ║
+║  │ Merge on order_totals (cost=0.42..89.12 rows=42 actual time=38ms)   │  ║
+║  │   -> Hash Join (cost=12.50..45.00 rows=42)                           │  ║
+║  │        -> Seq Scan on changes_16384 (rows=42)                        │  ║
+║  │        -> Hash (rows=1000)                                            │  ║
+║  │             -> Seq Scan on order_totals (rows=1000)                   │  ║
+║  │ Planning Time: 0.5ms  Execution Time: 38.2ms                         │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ DVM Operator Tree ──────────────────────────────────────────────────┐  ║
+║  │ Aggregate(SUM, COUNT)                                                 │  ║
+║  │  └─ InnerJoin(orders.product_id = products.id)                       │  ║
+║  │       ├─ Scan(orders) [CDC: trigger]                                  │  ║
+║  │       └─ Scan(products) [CDC: trigger]                                │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Tab Pane  y Copy SQL  E Run EXPLAIN  Esc Back  ? Help                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Panes (navigable with Tab):**
+1. **DVM Delta SQL** — The actual generated SQL with syntax highlighting.
+   Scrollable. `y` copies to clipboard.
+2. **EXPLAIN ANALYZE** — Query plan from the last differential refresh
+   execution. Highlights sequential scans on large tables (potential
+   missing index). Color-codes by cost.
+3. **DVM Operator Tree** — The abstract operator tree from `explain_st()`,
+   showing how the defining query was decomposed into differential operators.
+   Useful for understanding *why* the delta SQL looks the way it does.
+4. **Dedup Stats** — From `pgtrickle.dedup_stats()`. Shows deduplication
+   ratio for each source buffer — high dedup ratios indicate write-heavy
+   sources where change coalescence is working well.
+
+**Actions:**
+- `y` — Copy displayed SQL to clipboard.
+- `E` — Run EXPLAIN ANALYZE interactively on the delta SQL (confirmation
+  dialog, since it actually executes the query).
+
+**Data sources:** `pgtrickle.explain_delta()`, `pgtrickle.explain_st()`,
+`pgtrickle.dedup_stats()`.
+
+---
+
+### F17 — Batch Operations
+
+Multi-select stream tables for bulk actions. Available in Dashboard (F1),
+Diagnostics (F5), and Fuse (F14) views.
+
+**Activation:** `Space` toggles selection on the current row. `Ctrl+A`
+selects all visible (filtered) rows. `Ctrl+D` deselects all.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — dashboard                          mydb@localhost:5432  ⏱ 2s ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  Stream Tables (12 total, 3 selected)                    Filter: ____      ║
+║                                                                            ║
+║  ☑ order_totals     public  ACTIVE  DIFFERENTIAL   hot   ✓ no   4s ago     ║
+║  ☑ big_customers    public  ACTIVE  DIFFERENTIAL   hot   ✓ no   4s ago     ║
+║  ☐ daily_revenue    public  ERROR   FULL           warm  ✗ yes  1h ago     ║
+║  ☑ product_stats    sales   ACTIVE  AUTO           hot   ✓ no   12s ago    ║
+║  ☐ region_summary   public  ACTIVE  DIFFERENTIAL   cold  ✓ no   2m ago     ║
+║  ...                                                                       ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Space Select  Ctrl+A All  r Refresh Selected  t Tier  Esc Clear  ? Help   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Batch actions on selected STs:**
+- `r` — Refresh all selected stream tables.
+- `t` — Set tier on all selected (opens tier picker: hot/warm/cold/frozen).
+- `m` — Set refresh mode on all selected.
+- `s` — Set schedule interval on all selected.
+- `p` — Pause all selected (set status = PAUSED).
+- `R` — Resume all selected.
+- `e` — Export DDL for all selected (to file).
+- `A` (in Fuse view) — Reset fuses on all selected blown STs.
+- `D` — Drop all selected (double confirmation: "Type 'yes' to confirm").
+
+**Selection indicators:** Checkbox column (☑/☐) appears when any row is
+selected. Selected count shown in the status summary bar.
+
+**Safety:** Destructive batch operations (drop, fuse reset with skip_changes)
+require explicit typed confirmation, not just `y/n`.
+
+---
+
+### F18 — System Health Overview
+
+A single-screen "at a glance" system health check combining all critical
+metrics. Shown at startup or opened with `H` from the dashboard or
+`pgtrickle health`.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — system health                      mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  Overall: HEALTHY ●                                 Version: 0.14.0        ║
+║                                                                            ║
+║  ┌─ Checks ─────────────────────────────────────────────────────────────┐  ║
+║  │                                                                       │  ║
+║  │  ● Extension loaded          pg_trickle in shared_preload_libraries  │  ║
+║  │  ● Scheduler running         Last tick 0.3s ago (interval 1000ms)    │  ║
+║  │  ● Extension version match   .so = 0.14.0, SQL = 0.14.0             │  ║
+║  │  ● WAL level                 wal_level = logical ✓                   │  ║
+║  │  ● Stream tables healthy     11/12 ACTIVE, 1 ERROR                   │  ║
+║  │  ✗ Error tables              daily_revenue in ERROR state             │  ║
+║  │  ● CDC triggers present      24/24 triggers installed                 │  ║
+║  │  ● No stale data             0 tables beyond 2× schedule              │  ║
+║  │  ⚠ Buffer growth             events buffer at 4.2 MB (> 1 MB)        │  ║
+║  │  ● WAL slot lag              0 MB retained (< 100 MB threshold)       │  ║
+║  │  ● Fuses                     11/12 armed, 1 blown                     │  ║
+║  │  ● Disk usage                Stream tables: 2.4 GB total              │  ║
+║  │                                                                       │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ Quick Stats ────────────────────────────────────────────────────────┐  ║
+║  │ Total STs: 12   Refreshes today: 8,421   Errors today: 3             │  ║
+║  │ Avg latency: 42ms   P95: 128ms   Diff ratio: 99.2%                  │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Enter Jump to issue  r Refresh  Esc Back  ? Help                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Features:**
+- **Traffic light checks:** Green ●, yellow ⚠, red ✗ for each health
+  dimension. Modeled after `pgtrickle doctor` pre-flight.
+- **Actionable navigation:** `Enter` on a warning/error row jumps to the
+  relevant view (e.g., error table → detail view, buffer growth → CDC view,
+  blown fuse → fuse panel).
+- **Quick stats:** Aggregate performance metrics for the entire system.
+- **Pre-flight mode:** `pgtrickle health` as a one-shot CLI command outputs
+  the same checks in text/JSON format — useful for CI, monitoring probes,
+  and deployment pipelines.
+- **Exit code semantics (CLI mode):** 0 = all green, 1 = warnings present,
+  2 = errors present. Integrates with alerting tools and deployment gates.
+
+**Data sources:** `pgtrickle.health_check()`, `pgtrickle.pgt_status()`,
+`pgtrickle.fuse_status()`, `pgtrickle.change_buffer_sizes()`,
+`pgtrickle.slot_health()`, `pgtrickle.version()`, `pg_settings`.
+
+---
+
+### F19 — Watch Mode (Lite Dashboard)
+
+A simplified non-interactive auto-refreshing display for terminals that
+don't support full TUI (e.g., dumb terminals, CI log output, tmux status
+bars). Launched with `pgtrickle watch`.
+
+```bash
+$ pgtrickle watch --interval 5
+
+pg_trickle status — mydb@localhost:5432 — 2026-04-02 09:42:18 — 12 tables
+┌──────────────┬────────┬──────────────┬──────┬───────┬──────────┐
+│ NAME         │ STATUS │ MODE         │ TIER │ STALE │ LAST     │
+├──────────────┼────────┼──────────────┼──────┼───────┼──────────┤
+│ order_totals │ ACTIVE │ DIFFERENTIAL │ hot  │ no    │ 4s ago   │
+│ big_customers│ ACTIVE │ DIFFERENTIAL │ hot  │ no    │ 4s ago   │
+│ daily_revenue│ ERROR  │ FULL         │ warm │ yes   │ 1h ago   │
+│ ...          │        │              │      │       │          │
+└──────────────┴────────┴──────────────┴──────┴───────┴──────────┘
+Refreshing every 5s... (Ctrl+C to exit)
+```
+
+**Features:**
+- **No alternate screen:** Outputs to stdout without entering ratatui's
+  alternate screen mode. Works in CI logs, piped output, and limited
+  terminals.
+- **ANSI colors:** Uses standard ANSI colors for status (disable with
+  `--no-color` or `NO_COLOR=1`).
+- **Configurable interval:** `--interval <seconds>` (default: 5s).
+- **Filter:** `--filter <pattern>` to show only matching STs.
+- **Continuous mode:** Clears and redraws the table on each tick.
+  With `--append` flag, appends new output without clearing (for log files).
+- **Compact format:** `--compact` shows one line per ST with abbreviated
+  columns for narrow terminals.
+
+---
+
+### F20 — DAG Health & Impact Analysis
+
+The single most important view for operators managing complex DAGs. Shows
+every active problem grouped by the DAG chain it affects, with blast-radius
+analysis and one-click remediation. Opened with `i` from the dashboard or
+`pgtrickle issues`.
+
+The key insight: a single ERROR table in the middle of a chain makes every
+downstream table **effectively stale** even if those downstream STs report
+`ACTIVE` status individually. This view makes those invisible cascading
+problems visible.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  pg_trickle — DAG issues                         mydb@localhost:5432       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║  3 issues across 2 DAG chains            Affected: 5/12 stream tables      ║
+║                                                                            ║
+║  ┌─ Issue #1 — Broken Chain ─────────────────────────────── severity: ✗ ─┐ ║
+║  │                                                                       │ ║
+║  │  orders ──▸ daily_revenue ✗ ──▸ executive_dashboard ⚠                │ ║
+║  │                                  └──▸ monthly_rollup ⚠               │ ║
+║  │                                                                       │ ║
+║  │  Root cause: daily_revenue — ERROR since 09:37                        │ ║
+║  │    function max(jsonb) does not exist                                  │ ║
+║  │  Blast radius: 3 tables (daily_revenue + 2 downstream)                │ ║
+║  │  Stale since: 1h 5m (executive_dashboard, monthly_rollup)             │ ║
+║  │                                                                       │ ║
+║  │  Actions: [r] Refresh  [a] Alter query  [R] Resume  [x] Explain      │ ║
+║  └───────────────────────────────────────────────────────────────────────┘ ║
+║                                                                            ║
+║  ┌─ Issue #2 — Buffer Growth Warning ──────────────────── severity: ⚠ ─┐  ║
+║  │                                                                       │  ║
+║  │  events ──▸ user_activity ──▸ daily_metrics                           │  ║
+║  │  ▲ buffer: 4.2 MB (1,247 rows)                                       │  ║
+║  │                                                                       │  ║
+║  │  The events buffer is growing faster than it is being consumed.        │  ║
+║  │  Possible causes: slow DIFFERENTIAL refresh, gated source, cold tier. │  ║
+║  │  Actions: [Enter] Detail  [r] Refresh  [c] CDC health                 │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+║  ┌─ Issue #3 — Diamond Inconsistency Window ───────────── severity: ⚠ ─┐  ║
+║  │                                                                       │  ║
+║  │  Diamond group: group_1 (order_totals, big_customers)                 │  ║
+║  │  Last refresh gap: 340ms (order_totals 09:42:18, big_customers        │  ║
+║  │  09:42:17.660) — below 1s threshold but increasing.                   │  ║
+║  │  Trend: 120ms → 210ms → 340ms (last 3 cycles) ▁▃▅                    │  ║
+║  │  Actions: [Enter] Graph view  [d] Diamond group detail                │  ║
+║  └───────────────────────────────────────────────────────────────────────┘  ║
+║                                                                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  ▴▾ Navigate issues  Enter Action  Esc Back  ? Help                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Issue categories detected automatically:**
+
+| Category | Severity | Detection logic |
+|----------|----------|-----------------|
+| Broken chain | ✗ Error | Any ST in ERROR/SUSPENDED status; traces all downstream dependents |
+| Cascade staleness | ✗ Error | ST is ACTIVE but all upstream sources include an ERROR ST |
+| Blown fuse | ✗ Error | Fuse state = BLOWN; shows error message and reset options |
+| Stale data | ⚠ Warning | Data age > 2× schedule interval; checks both explicit staleness and cascade staleness |
+| Buffer growth | ⚠ Warning | Change buffer > configurable threshold (default 1 MB or 10K rows) |
+| Diamond inconsistency | ⚠ Warning | Refresh time gap between diamond group members increasing or > threshold |
+| Scheduler stall | ⚠ Warning | Last scheduler tick > 5× interval ago |
+| CDC gap | ⚠ Warning | Missing triggers, WAL slot lag above threshold |
+| Orphaned ST | ● Info | Stream table with no downstream dependents and no recent reads (cold candidate) |
+| Mode mismatch | ● Info | Current refresh mode ≠ recommended mode (from DIAG-1) with high confidence |
+| Cycle detected | ● Info | ST participates in a strongly-connected component |
+
+**Features:**
+- **Inline mini-graph:** Each issue card shows a small DAG fragment
+  illustrating the affected chain. Nodes use status colors. Broken edges
+  shown with `✗` markers. Downstream tables affected by cascade staleness
+  shown with `⚠`.
+- **Blast radius count:** For error/staleness issues, shows the total
+  number of tables affected (direct + transitive downstream).
+- **Root cause tracing:** For cascade staleness, traces back to the
+  original root cause (the ERROR table at the top of the chain).
+- **Trend indicator:** For growing problems (buffer size, inconsistency
+  windows), shows a sparkline trend so operators can see if it's getting
+  worse.
+- **Inline actions:** Each issue card has context-specific action keys
+  (refresh, alter, resume, explain, navigate to detail/graph/CDC).
+- **Priority ordering:** Issues sorted by severity (errors first), then
+  by blast radius (more affected tables first), then by age.
+- **Auto-refresh:** Issues list updates in real time via polling + NOTIFY.
+  New issues get a brief highlight animation.
+- **Badge count:** The dashboard footer and header bar show an issue badge
+  (`⚠ 3`) that's visible from any view — click or press `i` to jump here.
+
+**Data sources:** `pgtrickle.pgt_status()`, `pgtrickle.dependency_tree()`,
+`pgtrickle.diamond_groups()`, `pgtrickle.fuse_status()`,
+`pgtrickle.change_buffer_sizes()`, `pgtrickle.health_check()`,
+`pgtrickle.recommend_refresh_mode()`, `pgtrickle.pgt_scc_status()`.
+
+---
+
+### F21 — Cascade Staleness Tracker
+
+Cross-cutting feature that adds cascade-awareness to the dashboard, detail
+view, graph view, and health overview. This is not a standalone view but an
+intelligence layer that enhances existing views with DAG propagation logic.
+
+**The problem it solves:** Today, `pgt_status()` reports per-table staleness
+based on each table's own schedule. But a table can be "on time" locally
+while its data is meaningless because an upstream table is broken. The
+cascade staleness tracker computes **effective staleness** by traversing the
+DAG from each leaf back to its sources.
+
+**Effective staleness rules:**
+1. A table's effective staleness is the **maximum** of its own staleness
+   and the effective staleness of all its upstream dependencies.
+2. If any upstream table is in ERROR/SUSPENDED status, all downstream
+   tables are **effectively stale** regardless of their own refresh timing.
+3. If an upstream source is gated, downstream tables are marked as
+   **gated-stale** (not an error, but data is frozen).
+
+**Dashboard integration (F1):**
+- New column: `EFF. STALE` — shows effective staleness considering upstream.
+  Value is `✓ ok`, `⚠ 1h` (cascade stale), or `✗ err` (upstream broken).
+- Rows with cascade staleness get a distinctive background tint (different
+  from direct staleness).
+- Status summary bar shows: "11 active, 1 error, **2 cascade-stale**".
+
+**Detail view integration (F2):**
+- New section: **Upstream Health** — shows a mini dependency chain with
+  status indicators. If any upstream is unhealthy, shows the root cause
+  and how long data has been cascade-stale.
+
+```
+  ┌─ Upstream Health ─────────────────────────────────────────────────────┐
+  │ orders ● → daily_revenue ✗ → executive_dashboard (this table)        │
+  │                                                                       │
+  │ ⚠ Cascade stale since 09:37 (1h 5m) — root cause: daily_revenue     │
+  │   ERROR: function max(jsonb) does not exist                           │
+  └───────────────────────────────────────────────────────────────────────┘
+```
+
+**Graph view integration (F3):**
+- Edges from an ERROR node to its downstream dependents are rendered in
+  red dashed style (`- -▸` instead of `──▸`).
+- Cascade-stale nodes get a yellow border even if their per-table status
+  is ACTIVE.
+- New overlay mode (`S` key): **Staleness heatmap** — colors each node by
+  effective staleness age (green → yellow → orange → red gradient).
+
+**Health overview integration (F18):**
+- New check: "● Cascade health — 0 tables with cascade staleness" or
+  "✗ Cascade health — 3 tables effectively stale due to upstream errors".
+- `Enter` on the cascade health check jumps to the DAG Issues view (F20)
+  filtered to staleness issues.
+
+**Computation:** The cascade staleness computation runs client-side in the
+TUI state store after each poll cycle. It uses the dependency tree
+(already polled for F3) and per-table status (already polled for F1) to
+compute effective staleness without additional database queries. The
+computation is O(V+E) on the DAG — trivial for typical deployments
+(< 1000 STs).
+
+---
+
+## Dashboard Improvements
+
+These detail the dashboard capabilities listed in F1 (core spec):
+
+### Pinned / Bookmarked Stream Tables
+
+- `b` bookmarks the selected ST. Bookmarked STs sort to the top of the
+  dashboard with a `★` indicator.
+- Bookmarks persist in `~/.config/pgtrickle/config.toml` per database.
+- Useful when managing 50+ stream tables and only a handful are critical.
+
+### Additional Dashboard Columns
+
+Available columns (toggle visibility with `v` → column picker):
+
+| Column | Description |
+|--------|-------------|
+| Buffer | Pending change buffer row count |
+| Size | Target stream table disk size (`pg_relation_size`) |
+| Rows | Approximate row count (`pg_stat_user_tables.n_live_tup`) |
+| Refresh# | Total refresh count |
+| Err# | Total error count |
+| Avg ms | Average refresh duration |
+| P95 ms | P95 refresh duration |
+| Sources | Number of source tables |
+| Duration | Sparkline of last 20 refresh durations |
+| CDC | CDC mode (trigger/wal/auto) |
+| Fuse | Fuse state (armed/blown) |
+| Schedule | Refresh interval |
+
+Default visible: Name, Schema, Status, Mode, Tier, Stale, Last Refresh.
+Column selection persists in config file.
+
+### Grouping
+
+- `G` cycles grouping mode: none → by schema → by tier → by status → by
+  refresh mode → none.
+- Groups are collapsible. Collapsed groups show a summary row with count
+  and aggregate status.
+
+### Row Preview Pane
+
+When terminal height ≥ 40 rows, a preview pane appears below the table
+showing a mini detail view of the selected ST without needing to press Enter.
+Shows: status, mode, last refresh time, last error (if any), and a 3-point
+sparkline.
+
+---
+
+## Detail View Improvements
+
+### Table Size & Row Metrics
+
+Add to the Properties pane:
+- **Table size:** `pg_total_relation_size()` formatted (e.g., "2.4 GB").
+- **Row count:** `n_live_tup` from `pg_stat_user_tables`.
+- **Source sizes:** Each source table's size and row count.
+- **Change ratio:** Current buffer rows / target table rows (as percentage).
+
+### Refresh Group Membership
+
+If the ST belongs to a refresh group, show:
+- Group name, other members, and whether the last refresh was atomic.
+
+### Cycle / SCC Indicator
+
+If the ST participates in a strongly-connected component (circular DAG),
+show the SCC group from `pgtrickle.pgt_scc_status()`.
+
+---
+
+## Graph View Improvements
+
+These detail the graph view capabilities listed in F3 (core spec) and F20
+(DAG Health):
+
+### Path Highlighting
+
+When a node is selected, highlight:
+- **Upstream path:** All ancestor nodes and edges in blue.
+- **Downstream path:** All descendant nodes and edges in orange.
+- **Affected by change:** If a source table is selected, highlight all
+  STs that would be refreshed (the "blast radius").
+
+### Schema Filtering
+
+`/` opens a filter that hides nodes not matching the pattern. Useful for
+large DAGs where you only care about one schema's STs.
+
+### Refresh Animation
+
+During a refresh cycle, animate edges with a flowing marker (`───▸` becomes
+`━━━▸`) for STs currently being refreshed. Provides a visual "pulse" of
+the system's activity.
+
+---
+
+## Refresh Log Improvements
+
+### Duration Distribution
+
+At the top of the log view, show a small histogram of refresh durations
+for the last 100 events:
+
+```
+Duration distribution (last 100):
+<10ms ██████████████████████ 45
+<50ms ██████████████████ 38
+<100ms ████████ 12
+<500ms ███ 5
+≥500ms  0
+```
+
+### Diff Viewer for Errors
+
+When viewing a failed refresh entry, `d` shows a diff-like view comparing
+the error against the last successful refresh of the same ST — useful for
+diagnosing intermittent failures.
+
+---
+
+## Command Palette Improvements
+
+### Refresh Group Commands
+
+Add to the command palette:
+- `refresh-group <name>` — Refresh an entire group atomically.
+- `create-refresh-group <name> <st1> <st2> ...` — Create a refresh group.
+- `drop-refresh-group <name>` — Drop a refresh group.
+
+### Maintenance Commands
+
+- `rebuild-triggers` — Run `pgtrickle.rebuild_cdc_triggers()`.
+- `convert-unlogged` — Run `pgtrickle.convert_buffers_to_unlogged()`.
+- `restore` — Run `pgtrickle.restore_stream_tables()` after pg_restore.
+
+### Diagnostic Commands
+
+- `explain <name>` — Open delta SQL inspector (F16) for named ST.
+- `auto-threshold <name>` — Show AUTO mode change ratio threshold.
+
+---
+
+## CLI Mode Improvements
+
+### Additional One-Shot Commands
+
+```bash
+# System health check (CI-friendly exit codes)
+pgtrickle health
+pgtrickle health --format json
+
+# Worker pool status
+pgtrickle workers
+pgtrickle workers --format json
+
+# Fuse status and management
+pgtrickle fuse
+pgtrickle fuse reset daily_revenue --strategy reinitialize
+
+# Watermark management
+pgtrickle watermarks
+pgtrickle watermarks advance orders "2026-04-02 09:45:00"
+
+# Source gating
+pgtrickle gate events --reason "maintenance window"
+pgtrickle ungate events
+
+# Delta SQL inspection
+pgtrickle explain order_totals
+
+# Watch mode (non-interactive continuous output)
+pgtrickle watch
+pgtrickle watch --interval 10 --filter "schema=public"
+pgtrickle watch --compact --no-color >> /var/log/pgtrickle.log
+
+# Refresh groups
+pgtrickle groups
+pgtrickle groups create my_group order_totals big_customers
+pgtrickle groups refresh my_group
+
+# Batch operations via stdin (pipe-friendly)
+echo "order_totals\nbig_customers" | pgtrickle refresh --stdin
+pgtrickle list --format json | jq -r '.[].name' | pgtrickle refresh --stdin
+```
+
+### Shell Completions
+
+Generate shell completion scripts for bash, zsh, fish, and PowerShell:
+
+```bash
+pgtrickle completions bash > /etc/bash_completion.d/pgtrickle
+pgtrickle completions zsh > ~/.zfunc/_pgtrickle
+pgtrickle completions fish > ~/.config/fish/completions/pgtrickle.fish
+```
+
+Uses `clap_complete` crate. Completes subcommands, flags, and **stream
+table names** (via a cached list that refreshes every 60s in the background).
+
+---
+
+## Adaptive Polling
+
+The TUI uses adaptive polling rates to balance responsiveness with database
+load:
+
+| Condition | Poll interval |
+|-----------|--------------|
+| Dashboard active, changes detected recently | 2s |
+| Dashboard active, idle (no changes for 30s) | 5s |
+| Non-dashboard view active | 10s (dashboard data) |
+| Diagnostics/heavy queries | On-demand only (Ctrl+R) |
+| TUI in background (terminal not focused) | 30s |
+| Reconnecting after connection loss | Exponential backoff |
+
+The poll interval is shown in the header bar (e.g., `⏱ 2s`) and can be
+overridden with `--poll-interval <ms>` or in the config file.
+
+---
+
+## Navigation & Keybindings
+
+### Global Keys (work in every view)
+
+| Key | Action |
+|-----|--------|
+| `q` / `Ctrl+C` | Quit |
+| `?` | Toggle help overlay |
+| `:` | Open command palette |
+| `Esc` | Go back / close dialog / clear filter |
+| `1` | Dashboard |
+| `2` | Detail (last viewed, or first ST) |
+| `3` | Dependency graph |
+| `4` | Refresh log |
+| `5` | Diagnostics |
+| `6` | CDC health |
+| `7` | Configuration |
+| `8` | Alerts |
+| `9` | Scheduler & workers |
+| `0` | System health |
+| `i` | DAG issues (F20) |
+| `Ctrl+R` | Force data refresh |
+
+### Table Navigation (Dashboard, Diagnostics, CDC, Config, Fuse)
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move selection down |
+| `k` / `↑` | Move selection up |
+| `g` / `Home` | Jump to first row |
+| `G` / `End` | Jump to last row |
+| `Enter` | Open detail/expand |
+| `/` | Open filter bar |
+| `n` / `s` / etc. | Sort by column |
+| `Tab` | Next pane (in detail view) |
+| `Space` | Toggle selection (batch mode) |
+| `Ctrl+A` | Select all visible |
+| `Ctrl+D` | Deselect all |
+| `v` | Column visibility picker |
+| `b` | Toggle bookmark on selected row |
+
+### Graph View Keys
+
+| Key | Action |
+|-----|--------|
+| `S` | Toggle staleness heatmap overlay |
+| `B` | Toggle blast radius for selected node |
+| `h` / `←` | Move to parent node |
+| `l` / `→` | Move to child node |
+| `x` | Expand/collapse subtree |
+| `/` | Schema filter |
+
+### Dashboard-Specific Keys
+
+| Key | Action |
+|-----|--------|
+| `I` | Toggle issues sidebar |
+| `M` | Toggle DAG mini-map |
+
+### Mouse Support (Optional)
+
+- Click to select rows.
+- Scroll wheel to navigate tables.
+- Click footer buttons.
+- Disabled by default; enabled via `--mouse` flag or config file.
+
+---
+
 ## UI Layout
 
 ### Responsive Layout
@@ -754,48 +1708,6 @@ Transient overlays (3-second duration) for:
 - Alert received (critical only).
 - Command executed successfully.
 - Errors.
-
----
-
-## Navigation & Keybindings
-
-### Global Keys (work in every view)
-
-| Key | Action |
-|-----|--------|
-| `q` / `Ctrl+C` | Quit |
-| `?` | Toggle help overlay |
-| `:` | Open command palette |
-| `Esc` | Go back / close dialog / clear filter |
-| `1` | Dashboard |
-| `2` | Detail (last viewed, or first ST) |
-| `3` | Dependency graph |
-| `4` | Refresh log |
-| `5` | Diagnostics |
-| `6` | CDC health |
-| `7` | Configuration |
-| `8` | Alerts |
-| `Ctrl+R` | Force data refresh |
-
-### Table Navigation (Dashboard, Diagnostics, CDC, Config)
-
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Move selection down |
-| `k` / `↑` | Move selection up |
-| `g` / `Home` | Jump to first row |
-| `G` / `End` | Jump to last row |
-| `Enter` | Open detail/expand |
-| `/` | Open filter bar |
-| `n` / `s` / etc. | Sort by column |
-| `Tab` | Next pane (in detail view) |
-
-### Mouse Support (Optional)
-
-- Click to select rows.
-- Scroll wheel to navigate tables.
-- Click footer buttons.
-- Disabled by default; enabled via `--mouse` flag or config file.
 
 ---
 
@@ -914,8 +1826,8 @@ sortable/filterable stream table list.
 | Item | Description | Effort |
 |------|-------------|--------|
 | T2a | ratatui + crossterm app loop with event handling, adaptive frame rate | 2h |
-| T2b | State store (in-memory model updated by async poller) | 2h |
-| T2c | Dashboard view (F1): stream table list with status colors, sorting, filtering | 4h |
+| T2b | State store (in-memory model updated by async poller), including DAG topology and cascade staleness computation (F21) | 3h |
+| T2c | Dashboard view (F1): stream table list with status colors, sorting, filtering, EFF column, status ribbon, issues sidebar | 5h |
 | T2d | Header bar and footer bar with keybinding hints | 1h |
 | T2e | LISTEN/NOTIFY background task for `pg_trickle_alert` | 2h |
 
@@ -929,7 +1841,7 @@ navigation between views.
 
 | Item | Description | Effort |
 |------|-------------|--------|
-| T3a | Detail view (F2): properties, refresh stats, defining query, recent refreshes | 4h |
+| T3a | Detail view (F2): properties, refresh stats, defining query, upstream health (F21), recent refreshes, blast radius | 5h |
 | T3b | Refresh log view (F4): scrollable, filterable, auto-tailing | 3h |
 | T3c | View navigation (number keys, Esc to go back, breadcrumb state) | 2h |
 | T3d | Quick actions: refresh, alter tier, export DDL from detail view | 2h |
@@ -944,55 +1856,101 @@ breakdown, CDC health view.
 
 | Item | Description | Effort |
 |------|-------------|--------|
-| T4a | Dependency graph view (F3): topological layout, node coloring, navigation | 4h |
-| T4b | Diagnostics panel (F5): recommendation table, signal bar charts | 3h |
-| T4c | CDC health view (F6): buffer sizes, trigger inventory, overall health | 2h |
-| T4d | Sparklines (F11) in dashboard and detail view | 2h |
+| T4a | Dependency graph view (F3): topological layout, node coloring, navigation, path highlighting, broken edge rendering, staleness heatmap overlay | 5h |
+| T4b | DAG Health & Impact Analysis view (F20): issue categories, blast radius, mini-graphs | 4h |
+| T4c | Diagnostics panel (F5): recommendation table, signal bar charts | 3h |
+| T4d | CDC health view (F6): buffer sizes, trigger inventory, overall health | 2h |
+| T4e | Sparklines (F11) in dashboard and detail view | 2h |
 
-**Exit:** Graph renders the full DAG with interactive navigation. Diagnostics
-show signal breakdown with bar charts. CDC health shows buffer sizes.
+**Exit:** Graph renders the full DAG with interactive navigation, broken
+edges and staleness heatmap. DAG Health view surfaces issues by category.
+Diagnostics show signal breakdown with bar charts. CDC health shows buffer
+sizes.
 
-### Phase T5 — Config, Alerts, Command Palette, Polish (Day 5–6)
+### Phase T5 — Workers, Fuse, Watermarks & Delta Inspector (Day 5)
 
-**Goal:** Configuration editor, alert feed, command palette, theming,
-help system, responsive layout, testing.
+**Goal:** Ship the operational views that surface the remaining SQL API:
+worker pool, fuse management, watermark/gating, and delta SQL inspection.
 
 | Item | Description | Effort |
 |------|-------------|--------|
-| T5a | Configuration editor (F7): browse GUCs, inline docs, edit + apply | 3h |
-| T5b | Alert feed (F8): real-time NOTIFY rendering, severity icons, toast popups | 2h |
-| T5c | Command palette (F9): fuzzy search, ST name autocomplete, recent commands | 3h |
-| T5d | Help system (F12): context-sensitive overlay, keybinding reference | 2h |
-| T5e | Theming: 6 built-in themes, custom theme config file, `--theme` flag | 2h |
-| T5f | Responsive layout: width/height adaptation, compact mode | 2h |
-| T5g | Connection recovery: auto-reconnect, status indicator, overlay | 1h |
-| T5h | Mouse support (optional, `--mouse` flag) | 1h |
-| T5i | Integration tests: snapshot tests for view rendering, CI binary build | 2h |
-| T5j | Documentation: `docs/TUI.md` user guide, README update, GETTING_STARTED link | 2h |
+| T5a | Scheduler & worker pool view (F13): scheduler status, worker table, job queue | 3h |
+| T5b | Fuse & circuit breaker panel (F14): fuse table, inline reset (A/R/S) | 2h |
+| T5c | Watermark & source gating view (F15): watermark groups, per-source watermarks, gate toggle | 3h |
+| T5d | Delta SQL inspector (F16): delta SQL, EXPLAIN ANALYZE, DVM operator tree, dedup stats | 3h |
 
-**Exit:** All 12 features functional. Help works in every view. Themes
-switch cleanly. CI builds and tests the binary.
+**Exit:** All operational views functional. Fuse reset works. Watermark
+advance and source gating work. Delta SQL is copyable and inspectable.
+
+### Phase T6 — Batch Ops, Health, Command Palette, Polish (Day 6–7)
+
+**Goal:** Batch operations, system health overview, command palette, theming,
+help system, responsive layout, testing, watch mode.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| T6a | Batch operations (F17): multi-select, batch refresh/tier/mode/pause/resume | 3h |
+| T6b | System health overview (F18): traffic light checks, quick stats, actionable nav | 2h |
+| T6c | Watch mode (F19): non-interactive continuous output, `--compact`, `--no-color` | 2h |
+| T6d | Command palette (F9): fuzzy search, ST autocomplete, recent commands, maintenance cmds | 3h |
+| T6e | Configuration editor (F7): browse GUCs, inline docs, edit + apply, grouping by category | 3h |
+| T6f | Alert feed (F8): real-time NOTIFY rendering, severity icons, toast popups | 2h |
+
+**Exit:** Batch operations work across dashboard, diagnostics, and fuse views.
+Health overview shows actionable system status. Watch mode outputs to stdout.
+
+### Phase T7 — UX Polish, Theming, Testing & Documentation (Day 8)
+
+**Goal:** Polish all views, add theming, shell completions, adaptive polling,
+responsive layout, help system, integration tests, documentation.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| T7a | Help system (F12): context-sensitive overlay for all 21 features | 2h |
+| T7b | Theming: 6 built-in themes, custom theme config file, `--theme` flag | 2h |
+| T7c | Responsive layout: width/height adaptation, compact mode, preview pane | 2h |
+| T7d | Adaptive polling: rate adjustment based on activity and view | 1h |
+| T7e | Shell completions: bash, zsh, fish, PowerShell via `clap_complete` | 1h |
+| T7f | Dashboard enhancements: bookmarks, column picker, grouping, row preview | 3h |
+| T7g | Connection recovery: auto-reconnect, status indicator, overlay | 1h |
+| T7h | Mouse support (optional, `--mouse` flag) | 1h |
+| T7i | Integration tests: snapshot tests for view rendering, CI binary build | 2h |
+| T7j | Documentation: `docs/TUI.md` user guide, README update, GETTING_STARTED link | 2h |
+
+**Exit:** All 21 features functional. Help works in every view. Themes
+switch cleanly. Shell completions installable. CI builds and tests the binary.
 
 ---
 
 ## Exit Criteria
 
 - [ ] `pgtrickle` binary builds as a workspace member via `cargo build -p pgtrickle-tui`
-- [ ] One-shot CLI mode: `list`, `status`, `refresh`, `create`, `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config` subcommands all functional
+- [ ] One-shot CLI mode: `list`, `status`, `refresh`, `create`, `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config`, `health`, `workers`, `fuse`, `watermarks`, `watch`, `explain`, `groups`, `gate`, `ungate` subcommands all functional
 - [ ] `--format json` and `--format csv` produce valid output for all one-shot commands
+- [ ] Shell completions for bash, zsh, fish, PowerShell
 - [ ] Interactive TUI launches when no subcommand is given
-- [ ] Dashboard (F1): live-updating sortable, filterable stream table list with status colors
-- [ ] Detail view (F2): properties, refresh stats, defining query, recent refreshes, error details
-- [ ] Dependency graph (F3): ASCII DAG layout with interactive node navigation
-- [ ] Refresh log (F4): scrollable, filterable, auto-tailing with real-time NOTIFY events
+- [ ] Dashboard (F1): live-updating sortable, filterable stream table list with status colors, DAG status ribbon, EFF column, issues sidebar, DAG mini-map, bookmarks, column picker, grouping, row preview pane
+- [ ] Detail view (F2): properties, refresh stats, defining query, upstream health, recent refreshes, error details with blast radius, table size/row count, refresh group and SCC indicators
+- [ ] Dependency graph (F3): ASCII DAG layout with interactive node navigation, path highlighting, schema filter, refresh animation, broken edge rendering, staleness heatmap overlay, blast radius metadata
+- [ ] Refresh log (F4): scrollable, filterable, auto-tailing with real-time NOTIFY events, duration distribution histogram
 - [ ] Diagnostics (F5): recommendation table with signal breakdown bar charts; apply action
 - [ ] CDC health (F6): buffer sizes, trigger inventory, overall health indicator
-- [ ] Configuration (F7): browse/edit GUCs with inline docs and apply via ALTER SYSTEM
+- [ ] Configuration (F7): browse/edit GUCs with inline docs, grouped by category, apply via ALTER SYSTEM
 - [ ] Alert feed (F8): real-time NOTIFY alerts with toast popups for critical events
-- [ ] Command palette (F9): fuzzy-search command execution with ST autocomplete
+- [ ] Command palette (F9): fuzzy-search command execution with ST autocomplete, maintenance commands, refresh group commands
 - [ ] Sparklines (F11): refresh duration trends in dashboard (when terminal width ≥ 120)
 - [ ] Help system (F12): context-sensitive help overlay in every view
+- [ ] Scheduler & workers (F13): scheduler heartbeat, worker pool status, job queue
+- [ ] Fuse panel (F14): fuse overview, inline reset with A/R/S strategies, batch reset
+- [ ] Watermark & gating (F15): watermark groups, per-source watermarks, advance, gate/ungate
+- [ ] Delta SQL inspector (F16): delta SQL display, EXPLAIN ANALYZE, DVM operator tree, dedup stats
+- [ ] Batch operations (F17): multi-select with Space, batch refresh/tier/mode/pause/resume/drop
+- [ ] System health (F18): traffic light checks, actionable navigation, CI-friendly exit codes
+- [ ] Watch mode (F19): non-interactive continuous output with `--compact` and `--no-color`
+- [ ] DAG Health & Impact Analysis (F20): issue categories (error chains, cascade stale, diamond sync gaps, orphans), blast radius, inline mini-graphs, issue priority ranking
+- [ ] Cascade Staleness Tracker (F21): effective freshness computed from DAG topology, upstream health pane in detail view, staleness heatmap overlay in graph view
 - [ ] 6 built-in themes + custom theme support via config file
+- [ ] Adaptive polling adjusts rate based on activity level
 - [ ] Connection recovery with auto-reconnect and status indicator
 - [ ] Responsive layout adapts to terminal size (80-col minimum)
 - [ ] Documented in `docs/TUI.md` and linked from `docs/GETTING_STARTED.md`
