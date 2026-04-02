@@ -26,7 +26,7 @@ build-release:
 # Build the Docker Hub image (PostgreSQL 18 with pg_trickle pre-installed)
 [group: "build"]
 build-hub:
-    docker build -t pgtrickle/pg_trickle:0.14.0-pg18 -f Dockerfile.hub .
+    docker build -t pgtrickle/pg_trickle:0.13.0-pg18 -f Dockerfile.hub .
 
 # Build the Docker Hub image with 'latest' tag
 [group: "build"]
@@ -86,6 +86,12 @@ test-integration:
         --test trigger_detection_tests \
         --test workflow_tests \
         --test property_tests
+    just test-tui-commands
+
+# Run TUI command contract tests against stub functions (requires Docker)
+[group: "test"]
+test-tui-commands:
+    cargo test -p pgtrickle-tui --bin pgtrickle test_cmd_ -- --test-threads=4
 
 # Build the pre-compiled builder base image (Rust + cargo-pgrx + pgrx init).
 # Only needed once, or when upgrading the Rust toolchain or pgrx version.

@@ -26,40 +26,56 @@ pub struct DiagRow {
     pub reason: String,
 }
 
-pub async fn execute(client: &Client, args: &DiagArgs) -> Result<(), CliError> {
-    let query = if args.name.is_some() {
-        "SELECT
-            pgt_schema::text,
-            pgt_name::text,
-            current_mode::text,
-            recommended_mode::text,
-            confidence::text,
-            reason::text
-         FROM pgtrickle.recommend_refresh_mode()
-         WHERE pgt_name = $1
-         ORDER BY pgt_schema, pgt_name"
+fn db_err_msg(e: &tokio_postgres::Error) -> CliError {
+    if let Some(db) = e.as_db_error() {
+        if db.code().code() == "42883" {
+            // UNDEFINED_FUNCTION — function doesn't exist in this DB version
+            return CliError::Query(format!(
+                "{} — this feature requires pg_trickle >= 0.14.0",
+                db.message()
+            ));
+        }
+        CliError::Query(format!("{} ({})", db.message(), db.code().code()))
     } else {
-        "SELECT
-            pgt_schema::text,
-            pgt_name::text,
-            current_mode::text,
-            recommended_mode::text,
-            confidence::text,
-            reason::text
-         FROM pgtrickle.recommend_refresh_mode()
-         ORDER BY pgt_schema, pgt_name"
-    };
+        CliError::Query(e.to_string())
+    }
+}
 
+pub async fn execute(client: &Client, args: &DiagArgs) -> Result<(), CliError> {
+    // recommend_refresh_mode() was added in pg_trickle 0.14.0.
+    // It accepts an optional name filter as its argument.
     let rows = if let Some(ref name) = args.name {
         client
-            .query(query, &[name])
+            .query(
+                "SELECT
+                    pgt_schema::text,
+                    pgt_name::text,
+                    current_mode::text,
+                    recommended_mode::text,
+                    confidence::text,
+                    reason::text
+                 FROM pgtrickle.recommend_refresh_mode($1)
+                 ORDER BY pgt_schema, pgt_name",
+                &[name],
+            )
             .await
-            .map_err(|e| CliError::Query(e.to_string()))?
+            .map_err(|e| db_err_msg(&e))?
     } else {
         client
-            .query(query, &[])
+            .query(
+                "SELECT
+                    pgt_schema::text,
+                    pgt_name::text,
+                    current_mode::text,
+                    recommended_mode::text,
+                    confidence::text,
+                    reason::text
+                 FROM pgtrickle.recommend_refresh_mode()
+                 ORDER BY pgt_schema, pgt_name",
+                &[],
+            )
             .await
-            .map_err(|e| CliError::Query(e.to_string()))?
+            .map_err(|e| db_err_msg(&e))?
     };
 
     let items: Vec<DiagRow> = rows

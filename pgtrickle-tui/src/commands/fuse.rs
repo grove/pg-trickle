@@ -13,23 +13,25 @@ pub struct FuseArgs {
     pub format: OutputFormat,
 }
 
+// fuse_status() columns: stream_table, fuse_mode, fuse_state, fuse_ceiling,
+//   effective_ceiling, fuse_sensitivity, blown_at, blow_reason
 #[derive(Serialize)]
 struct FuseRow {
     stream_table: String,
+    fuse_mode: String,
     fuse_state: String,
-    consecutive_errors: i64,
-    last_error: String,
     blown_at: String,
+    blow_reason: String,
 }
 
 pub async fn execute(client: &Client, args: &FuseArgs) -> Result<(), CliError> {
     let rows = client
         .query(
-            "SELECT pgt_name::text, fuse_state::text,
-                    consecutive_errors, last_error_message::text,
-                    blown_at::text
+            "SELECT stream_table::text, fuse_mode::text, fuse_state::text,
+                    blown_at::text, blow_reason::text
              FROM pgtrickle.fuse_status()
-             ORDER BY CASE fuse_state WHEN 'BLOWN' THEN 1 WHEN 'TRIPPED' THEN 2 ELSE 3 END",
+             ORDER BY CASE fuse_state WHEN 'BLOWN' THEN 1 WHEN 'TRIPPED' THEN 2 ELSE 3 END,
+                      stream_table",
             &[],
         )
         .await
@@ -39,12 +41,12 @@ pub async fn execute(client: &Client, args: &FuseArgs) -> Result<(), CliError> {
         .iter()
         .map(|row| FuseRow {
             stream_table: row.get(0),
-            fuse_state: row.get(1),
-            consecutive_errors: row.get(2),
-            last_error: row
+            fuse_mode: row.get(1),
+            fuse_state: row.get(2),
+            blown_at: row
                 .get::<_, Option<String>>(3)
                 .unwrap_or_else(|| "-".into()),
-            blown_at: row
+            blow_reason: row
                 .get::<_, Option<String>>(4)
                 .unwrap_or_else(|| "-".into()),
         })
@@ -53,20 +55,14 @@ pub async fn execute(client: &Client, args: &FuseArgs) -> Result<(), CliError> {
     output::print_output(
         args.format,
         &items,
-        &[
-            "Stream Table",
-            "Fuse State",
-            "Errors",
-            "Last Error",
-            "Blown At",
-        ],
+        &["Stream Table", "Mode", "State", "Blown At", "Reason"],
         |r| {
             vec![
                 r.stream_table.clone(),
+                r.fuse_mode.clone(),
                 r.fuse_state.clone(),
-                format!("{}", r.consecutive_errors),
-                r.last_error.clone(),
                 r.blown_at.clone(),
+                r.blow_reason.clone(),
             ]
         },
     )?;
