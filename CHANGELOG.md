@@ -128,6 +128,15 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   recommended GUCs, resource planning, monitoring, and a validation script.
   Cross-linked from GETTING_STARTED.md and INSTALL.md.
 
+- **E3-TUI: `pgtrickle` TUI binary (Phase T1 — skeleton & CLI mode)** —
+  New `pgtrickle-tui` workspace member crate with a `pgtrickle` binary.
+  Implements one-shot CLI subcommands: `list`, `status`, `refresh`, `create`,
+  `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config`, `health`,
+  and `completions` (bash/zsh/fish/PowerShell). Supports `--format json`,
+  `--format csv`, and human-readable table output. Connection via `--url`,
+  libpq environment variables (`PGHOST`/`PGPORT`/etc.), or defaults.
+  Interactive TUI mode (no subcommand) is planned for Phase T2+.
+
 ### Changed
 
 - **ERR-1c: API calls clear error state** — `alter_stream_table`,

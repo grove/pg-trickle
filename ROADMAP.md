@@ -2702,9 +2702,9 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 4–6d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
+| E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 8–10d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 
-> **E3-TUI subtotal: ~4–6 days**
+> **E3-TUI subtotal: ~8–10 days** (Phase T1 skeleton & CLI done; T2–T7 remaining)
 
 ### GUC Surface Consolidation (C4)
 
@@ -2776,7 +2776,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 
 > **FIX-STST-DIFF subtotal: ~1–2 days**
 
-> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~4–6d TUI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
+> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~8–10d TUI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
 
 **Exit criteria:**
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
@@ -2787,7 +2787,7 @@ Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refres
 - [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
 - [ ] DIAG-2: WARNING emitted at `create_stream_table` time for group-rescan aggregates and for algebraic aggregates with estimated group cardinality below threshold; warning directs users to `refresh_mode='full'` or `'auto'`; threshold configurable via GUC
 - [ ] G15-EX: `pgtrickle.export_definition(name TEXT)` returns valid reproducible DDL; round-trip tested
-- [ ] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; all 12 TUI features operational; documented in `docs/TUI.md`
+- [ ] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; all 21 TUI features operational; documented in `docs/TUI.md`
 - [ ] C4: `merge_planner_hints` and `merge_work_mem_mb` consolidated into `planner_aggressive`; old GUCs emit deprecation notice
 - [ ] DOC-PDC: Pre-deployment checklist published in `docs/PRE_DEPLOYMENT.md`; linked from GETTING_STARTED and INSTALL
 - [ ] DOC-OPM: Operator mode support matrix summary and link added to SQL_REFERENCE.md
