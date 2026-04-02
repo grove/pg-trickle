@@ -1815,8 +1815,7 @@ without restarting. Not in initial scope.
 | T1e | One-shot `status <name>` command | 1h |
 | T1f | One-shot `refresh`, `create`, `drop`, `alter`, `export` commands | 3h |
 
-**Exit:** `pgtrickle list` and `pgtrickle status my_st` work against a live
-database. `--format json` produces valid JSON. CI builds the binary.
+**Exit:** ✅ Done — `pgtrickle list` and `pgtrickle status my_st` work against a live database. `--format json` and `--format csv` produce valid output. 18 one-shot subcommands implemented. Shell completions for bash/zsh/fish/PowerShell. CI builds the binary.
 
 ### Phase T2 — TUI Core & Dashboard (Day 2)
 
@@ -1831,8 +1830,7 @@ sortable/filterable stream table list.
 | T2d | Header bar and footer bar with keybinding hints | 1h |
 | T2e | LISTEN/NOTIFY background task for `pg_trickle_alert` | 2h |
 
-**Exit:** Dashboard shows live-updating stream table list. Filter and sort
-work. Alerts arrive in real-time.
+**Exit:** ✅ Done — Dashboard shows live-updating stream table list with EFF column, errors-first sort, filter, cascade-stale count in status ribbon, sparklines for selected ST, and issues sidebar. Alerts arrive in real-time via LISTEN/NOTIFY with JSON payload parsing. Force poll via Ctrl+R.
 
 ### Phase T3 — Detail View & Drill-Down (Day 3)
 
@@ -1846,8 +1844,7 @@ navigation between views.
 | T3c | View navigation (number keys, Esc to go back, breadcrumb state) | 2h |
 | T3d | Quick actions: refresh, alter tier, export DDL from detail view | 2h |
 
-**Exit:** Full detail view with all panes. Navigate between dashboard and
-detail. Refresh log scrolls and filters.
+**Exit:** ✅ Done — Detail view has 4 panels: properties (with cascade staleness indicator), refresh stats (with efficiency data), recent refreshes, and error details + upstream health. Navigate between dashboard and detail. Refresh log scrolls. Deferred: defining query pane, blast radius in detail, refresh log filter.
 
 ### Phase T4 — Graph, Diagnostics & CDC (Day 4)
 
@@ -1862,10 +1859,7 @@ breakdown, CDC health view.
 | T4d | CDC health view (F6): buffer sizes, trigger inventory, overall health | 2h |
 | T4e | Sparklines (F11) in dashboard and detail view | 2h |
 
-**Exit:** Graph renders the full DAG with interactive navigation, broken
-edges and staleness heatmap. DAG Health view surfaces issues by category.
-Diagnostics show signal breakdown with bar charts. CDC health shows buffer
-sizes.
+**Exit:** ✅ Partial — ASCII dependency graph renders with status coloring and node navigation. DAG Health / Issues view (F20) surfaces issues by category with blast radius. Diagnostics show recommendation table. CDC health shows buffer sizes and trigger inventory. Deferred: graph path highlighting, staleness heatmap overlay, signal breakdown bar charts.
 
 ### Phase T5 — Workers, Fuse, Watermarks & Delta Inspector (Day 5)
 
@@ -1879,8 +1873,7 @@ worker pool, fuse management, watermark/gating, and delta SQL inspection.
 | T5c | Watermark & source gating view (F15): watermark groups, per-source watermarks, gate toggle | 3h |
 | T5d | Delta SQL inspector (F16): delta SQL, EXPLAIN ANALYZE, DVM operator tree, dedup stats | 3h |
 
-**Exit:** All operational views functional. Fuse reset works. Watermark
-advance and source gating work. Delta SQL is copyable and inspectable.
+**Exit:** ✅ Partial — Workers, fuse, watermark views all functional with live data. Fuse detail panel shows reset instructions. Delta SQL inspector links to `pgtrickle explain`. Deferred: inline fuse reset execution from TUI, gate/ungate from TUI, inline EXPLAIN ANALYZE and DVM operator tree.
 
 ### Phase T6 — Batch Ops, Health, Command Palette, Polish (Day 6–7)
 
@@ -1896,8 +1889,7 @@ help system, responsive layout, testing, watch mode.
 | T6e | Configuration editor (F7): browse GUCs, inline docs, edit + apply, grouping by category | 3h |
 | T6f | Alert feed (F8): real-time NOTIFY rendering, severity icons, toast popups | 2h |
 
-**Exit:** Batch operations work across dashboard, diagnostics, and fuse views.
-Health overview shows actionable system status. Watch mode outputs to stdout.
+**Exit:** ✅ Partial — System health overview (F18) shows HEALTHY/DEGRADED/WARNINGS summary with check table. Watch mode (F19) outputs to stdout with `--compact`, `--no-color`, `--append`, `--filter` flags. Alert feed (F8) receives NOTIFY with severity icons. Deferred: batch operations (F17), command palette (F9), GUC inline editing.
 
 ### Phase T7 — UX Polish, Theming, Testing & Documentation (Day 8)
 
@@ -1917,45 +1909,44 @@ responsive layout, help system, integration tests, documentation.
 | T7i | Integration tests: snapshot tests for view rendering, CI binary build | 2h |
 | T7j | Documentation: `docs/TUI.md` user guide, README update, GETTING_STARTED link | 2h |
 
-**Exit:** All 21 features functional. Help works in every view. Themes
-switch cleanly. Shell completions installable. CI builds and tests the binary.
+**Exit:** ✅ Partial — Context-sensitive help overlay (F12) works in every view showing per-view tips. Shell completions installable. CI builds binary. Connection recovery with auto-reconnect. Cascade staleness (F21) computed from DAG traversal; upstream health pane in detail view. Deferred: multiple themes, adaptive polling, dashboard bookmarks/column picker/grouping, toast popups.
 
 ---
 
 ## Exit Criteria
 
-- [ ] `pgtrickle` binary builds as a workspace member via `cargo build -p pgtrickle-tui`
-- [ ] One-shot CLI mode: `list`, `status`, `refresh`, `create`, `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config`, `health`, `workers`, `fuse`, `watermarks`, `watch`, `explain`, `groups`, `gate`, `ungate` subcommands all functional
-- [ ] `--format json` and `--format csv` produce valid output for all one-shot commands
-- [ ] Shell completions for bash, zsh, fish, PowerShell
-- [ ] Interactive TUI launches when no subcommand is given
-- [ ] Dashboard (F1): live-updating sortable, filterable stream table list with status colors, DAG status ribbon, EFF column, issues sidebar, DAG mini-map, bookmarks, column picker, grouping, row preview pane
-- [ ] Detail view (F2): properties, refresh stats, defining query, upstream health, recent refreshes, error details with blast radius, table size/row count, refresh group and SCC indicators
-- [ ] Dependency graph (F3): ASCII DAG layout with interactive node navigation, path highlighting, schema filter, refresh animation, broken edge rendering, staleness heatmap overlay, blast radius metadata
-- [ ] Refresh log (F4): scrollable, filterable, auto-tailing with real-time NOTIFY events, duration distribution histogram
-- [ ] Diagnostics (F5): recommendation table with signal breakdown bar charts; apply action
-- [ ] CDC health (F6): buffer sizes, trigger inventory, overall health indicator
-- [ ] Configuration (F7): browse/edit GUCs with inline docs, grouped by category, apply via ALTER SYSTEM
-- [ ] Alert feed (F8): real-time NOTIFY alerts with toast popups for critical events
-- [ ] Command palette (F9): fuzzy-search command execution with ST autocomplete, maintenance commands, refresh group commands
-- [ ] Sparklines (F11): refresh duration trends in dashboard (when terminal width ≥ 120)
-- [ ] Help system (F12): context-sensitive help overlay in every view
-- [ ] Scheduler & workers (F13): scheduler heartbeat, worker pool status, job queue
-- [ ] Fuse panel (F14): fuse overview, inline reset with A/R/S strategies, batch reset
-- [ ] Watermark & gating (F15): watermark groups, per-source watermarks, advance, gate/ungate
-- [ ] Delta SQL inspector (F16): delta SQL display, EXPLAIN ANALYZE, DVM operator tree, dedup stats
-- [ ] Batch operations (F17): multi-select with Space, batch refresh/tier/mode/pause/resume/drop
-- [ ] System health (F18): traffic light checks, actionable navigation, CI-friendly exit codes
-- [ ] Watch mode (F19): non-interactive continuous output with `--compact` and `--no-color`
-- [ ] DAG Health & Impact Analysis (F20): issue categories (error chains, cascade stale, diamond sync gaps, orphans), blast radius, inline mini-graphs, issue priority ranking
-- [ ] Cascade Staleness Tracker (F21): effective freshness computed from DAG topology, upstream health pane in detail view, staleness heatmap overlay in graph view
-- [ ] 6 built-in themes + custom theme support via config file
-- [ ] Adaptive polling adjusts rate based on activity level
-- [ ] Connection recovery with auto-reconnect and status indicator
-- [ ] Responsive layout adapts to terminal size (80-col minimum)
-- [ ] Documented in `docs/TUI.md` and linked from `docs/GETTING_STARTED.md`
-- [ ] `just fmt` clean; `just lint` zero warnings
-- [ ] CI builds the binary on Linux/macOS
+- [x] `pgtrickle` binary builds as a workspace member via `cargo build -p pgtrickle-tui`
+- [x] One-shot CLI mode: `list`, `status`, `refresh`, `create`, `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config`, `health`, `workers`, `fuse`, `watermarks`, `watch`, `explain`, `completions` subcommands all functional (`groups`, `gate`, `ungate` deferred)
+- [x] `--format json` and `--format csv` produce valid output for all one-shot commands
+- [x] Shell completions for bash, zsh, fish, PowerShell
+- [x] Interactive TUI launches when no subcommand is given
+- [~] Dashboard (F1): live-updating, filterable, EFF column, errors-first sort, cascade-stale count, sparklines, issues sidebar ✅ — bookmarks, column picker, grouping, row preview pane deferred
+- [~] Detail view (F2): properties, refresh stats, upstream health, recent refreshes, error details ✅ — defining query pane, table size/row count, SCC indicators deferred
+- [~] Dependency graph (F3): ASCII DAG layout, status coloring, node navigation ✅ — path highlighting, broken edge rendering, staleness heatmap overlay deferred
+- [~] Refresh log (F4): scrollable ✅ — filter, auto-tailing, NOTIFY events, histogram deferred
+- [~] Diagnostics (F5): recommendation table with confidence levels ✅ — signal breakdown bar charts, apply action deferred
+- [x] CDC health (F6): buffer sizes, trigger inventory, overall health indicator
+- [~] Configuration (F7): browse GUCs grouped by category ✅ — inline edit and apply via ALTER SYSTEM deferred
+- [~] Alert feed (F8): real-time NOTIFY alerts with severity icons ✅ — toast popups for critical events deferred
+- [ ] Command palette (F9): fuzzy-search command execution with ST autocomplete — not implemented
+- [x] Sparklines (F11): refresh duration trends in dashboard (when terminal width allows)
+- [x] Help system (F12): context-sensitive help overlay in every view with per-view tips
+- [x] Scheduler & workers (F13): scheduler heartbeat, worker pool status, job queue
+- [~] Fuse panel (F14): fuse overview, detail panel, reset instructions ✅ — inline TUI reset execution, batch reset deferred
+- [~] Watermark & gating (F15): watermark groups and per-source watermarks ✅ — gate/ungate from TUI deferred
+- [~] Delta SQL inspector (F16): links to `pgtrickle explain` CLI ✅ — inline EXPLAIN ANALYZE and DVM operator tree deferred
+- [ ] Batch operations (F17): multi-select with Space, batch refresh/tier/mode/pause/resume/drop — not implemented
+- [x] System health (F18): HEALTHY/DEGRADED/WARNINGS summary, severity-colored check table
+- [x] Watch mode (F19): non-interactive continuous output with `--compact`, `--no-color`, `--append`, `--filter`
+- [~] DAG Health & Impact Analysis (F20): issue categories (error chains, cascade stale, buffer growth, blown fuses), severity summary, blast radius ranking ✅ — inline mini-graphs deferred
+- [~] Cascade Staleness Tracker (F21): DAG traversal, EFF column, upstream health pane in detail view, issue badge in header ✅ — staleness heatmap overlay in graph deferred
+- [ ] 6 built-in themes + custom theme support — not implemented (single dark theme only)
+- [ ] Adaptive polling adjusts rate based on activity level — not implemented
+- [x] Connection recovery with auto-reconnect and status indicator
+- [~] Responsive layout adapts to terminal size — basic adaptation ✅; 80-col minimum mode not fully tested
+- [x] Documented in `docs/TUI.md` and linked from `docs/GETTING_STARTED.md`
+- [x] `just fmt` clean; `just lint` zero warnings
+- [x] CI builds the binary on Linux/macOS
 
 ---
 
