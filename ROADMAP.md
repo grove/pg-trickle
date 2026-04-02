@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-03-31
-> **Latest release:** 0.13.0 (2026-03-31)
-> **Current milestone:** v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics
+> **Last updated:** 2026-04-02
+> **Latest release:** 0.14.0 (2026-04-02)
+> **Current milestone:** v0.15.0 — External Test Suites & Integration
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -57,19 +57,19 @@ from the v0.1.x series to 1.0 and beyond.
                                                                    │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │
                                                                    └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
                                                                      │
-                                                                     └─ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-                                                                        │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │ │ 0.13.0  │
-                                                                        │Released│─│Released│─│Released │─│Released │─│Released │─│Released │
-                                                                        │ ✅      │ │ ✅      │ │ ✅       │ │ ✅       │ │ ✅       │ │ ✅       │
-                                                                        └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
+                                                                     └─ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+                                                                        │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │ │ 0.13.0  │ │ 0.14.0  │
+                                                                        │Released│─│Released│─│Released │─│Released │─│Released │─│Released │─│Released │
+                                                                        │ ✅      │ │ ✅      │ │ ✅       │ │ ✅       │ │ ✅       │ │ ✅       │ │ ✅       │
+                                                                        └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
          We are here
               │
               ▼
-              └─ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐
-                 │ 0.14.0  │ │ 0.15.0  │ │ 0.16.0  │ │ 1.0.0  │ │ 1.x+   │
-                 │Tiered   │─│Test,    │─│PGCompat │─│Stable  │─│Scale & │
-                 │Sched    │ │Integ.   │ │+DDL     │ │Release │ │Ecosys. │
-                 └─────────┘ └─────────┘ └─────────┘ └────────┘ └────────┘
+              └─ ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐
+                 │ 0.15.0  │ │ 0.16.0  │ │ 1.0.0  │ │ 1.x+   │
+                 │Test,    │─│PGCompat │─│Stable  │─│Scale & │
+                 │Integ.   │ │+DDL     │ │Release │ │Ecosys. │
+                 └─────────┘ └─────────┘ └────────┘ └────────┘
 ```
 
 ---
@@ -2604,8 +2604,14 @@ Target: reduce regression escape rate from ~15% to <5%.
 
 ## v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics
 
-**Goal:** Advance tiered refresh scheduling with manual tier assignment
-and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
+**Status: Released (2026-04-02).**
+
+Tiered refresh scheduling, UNLOGGED change buffers, refresh mode diagnostics,
+error-state circuit breaker, a full-featured TUI dashboard, security
+hardening (SECURITY DEFINER triggers with explicit search_path), GHCR Docker
+image, pre-deployment checklist, best-practice patterns guide, and
+comprehensive E2E test coverage. See [CHANGELOG.md](CHANGELOG.md) for the
+full feature list.
 
 ### Quick Polish & Error State Circuit Breaker (Phase 1 + 1b) — ✅ Done
 
