@@ -182,6 +182,28 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
     (with `--analyze`, `--operators`, `--dedup`), and `watch`.
   - **Documentation:** `docs/TUI.md` user guide.
 
+- **C-1d: E2E tests for tiered scheduling** — Comprehensive test coverage
+  for tier assignment SQL surface (default hot, alter to warm/cold/frozen,
+  promote back, invalid tier rejected, case-insensitive, visible in view)
+  and scheduler-dependent behaviour (frozen ST skips refresh until promoted,
+  cold ST refreshes less frequently than hot).
+
+- **D-1d: E2E tests for UNLOGGED change buffers** — Tests for GUC default,
+  logged buffer creation when GUC is off, UNLOGGED buffer creation when GUC
+  is on, `convert_buffers_to_unlogged()` conversion and idempotency.
+
+- **ERR-1e: E2E test for error-state circuit breaker** — Full-cycle test:
+  permanent schema error sets ERROR status with `last_error_message` and
+  `last_error_at`, scheduler skips ERROR tables, `resume_stream_table` +
+  `alter_stream_table` clears error and returns to ACTIVE. Also tests
+  error columns in `stream_tables_info` view and refresh rejection for
+  ERROR status.
+
+- **DIAG-1f: Tuning refresh mode tutorial** — New
+  `docs/tutorials/tuning-refresh-mode.md` with step-by-step guide: check
+  efficiency, get recommendations, understand signals, apply changes, and
+  monitor results. Covers common scenarios and TUI integration.
+
 ### Changed
 
 - **ERR-1c: API calls clear error state** — `alter_stream_table`,
