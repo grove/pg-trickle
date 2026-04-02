@@ -1,11 +1,15 @@
 mod app;
 mod cli;
+#[cfg(test)]
+mod command_tests;
 mod commands;
 mod connection;
 mod error;
 mod output;
 mod poller;
 mod state;
+#[cfg(test)]
+mod test_db;
 #[cfg(test)]
 mod test_fixtures;
 mod theme;

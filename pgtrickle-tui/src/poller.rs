@@ -179,7 +179,7 @@ async fn poll_diagnostics(client: &Client, state: &mut AppState) {
         .query(
             "SELECT pgt_schema::text, pgt_name::text, current_mode::text,
                     recommended_mode::text, confidence::text, reason::text
-             FROM pgtrickle.recommend_refresh_mode()
+             FROM pgtrickle.recommend_refresh_mode(NULL)
              ORDER BY pgt_schema, pgt_name",
             &[],
         )
