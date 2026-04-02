@@ -1233,6 +1233,7 @@ so deployments are always idempotent.
 
 ## What's Next?
 
+- **[TUI.md](TUI.md)** — Terminal UI & CLI tool for managing and monitoring stream tables from outside SQL
 - **[SQL_REFERENCE.md](SQL_REFERENCE.md)** — Full API reference for all functions, views, and configuration
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Deep dive into the system architecture and data flow
 - **[DVM_OPERATORS.md](DVM_OPERATORS.md)** — How each SQL operator is differentiated for incremental maintenance
