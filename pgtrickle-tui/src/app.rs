@@ -177,7 +177,9 @@ impl App {
     }
 
     fn selected_stream_table_index(&self) -> Option<usize> {
-        self.filtered_sorted_stream_tables().get(self.selected).copied()
+        self.filtered_sorted_stream_tables()
+            .get(self.selected)
+            .copied()
     }
 
     fn clamp_selection(&mut self) {
@@ -464,8 +466,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
 fn switch_view(app: &mut App, view: View) {
     if app.current_view != view {
-        let preserve_selection = matches!(app.current_view, View::Dashboard | View::Detail | View::DeltaInspector)
-            && matches!(view, View::Dashboard | View::Detail | View::DeltaInspector);
+        let preserve_selection =
+            matches!(
+                app.current_view,
+                View::Dashboard | View::Detail | View::DeltaInspector
+            ) && matches!(view, View::Dashboard | View::Detail | View::DeltaInspector);
         app.current_view = view;
         if !preserve_selection {
             app.selected = 0;
@@ -602,15 +607,13 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::Watermarks => {
             views::watermarks::render(frame, area, &app.state, &app.theme, app.selected)
         }
-        View::DeltaInspector => {
-            views::delta_inspector::render(
-                frame,
-                area,
-                &app.state,
-                &app.theme,
-                app.selected_stream_table_index(),
-            )
-        }
+        View::DeltaInspector => views::delta_inspector::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected_stream_table_index(),
+        ),
         View::Issues => views::issues::render(frame, area, &app.state, &app.theme, app.selected),
     }
 }

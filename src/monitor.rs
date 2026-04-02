@@ -504,7 +504,10 @@ fn st_refresh_stats() -> TableIterator<
             let stale = row.get::<bool>(16).unwrap_or(None).unwrap_or(false);
             let consecutive_errors = row.get::<i32>(17).unwrap_or(None).unwrap_or(0);
             let schedule = row.get::<String>(18).unwrap_or(None);
-            let refresh_tier = row.get::<String>(19).unwrap_or(None).unwrap_or_else(|| "hot".to_string());
+            let refresh_tier = row
+                .get::<String>(19)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "hot".to_string());
             let last_error_message = row.get::<String>(20).unwrap_or(None);
 
             out.push((

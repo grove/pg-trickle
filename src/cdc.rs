@@ -83,9 +83,8 @@ pub fn create_change_trigger(
     let trigger_name = format!("pg_trickle_cdc_{}", oid_u32);
 
     // Get the fully-qualified source table name
-    let source_table = resolve_relation_name(source_oid)?.ok_or_else(|| {
-        PgTrickleError::NotFound(format!("Table with OID {} not found", oid_u32))
-    })?;
+    let source_table = resolve_relation_name(source_oid)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("Table with OID {} not found", oid_u32)))?;
 
     // Create trigger function(s) and DML trigger(s) for the current mode.
     //
