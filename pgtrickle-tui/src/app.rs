@@ -22,7 +22,7 @@ use crate::theme::Theme;
 use crate::views;
 
 /// Views the user can switch between.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Dashboard,
     Detail,
@@ -154,6 +154,43 @@ impl App {
             .collect()
     }
 
+    /// Get filtered stream tables in the same sorted order the Dashboard uses.
+    fn filtered_sorted_stream_tables(&self) -> Vec<usize> {
+        let mut indices = self.filtered_stream_tables();
+        indices.sort_by(|&a, &b| {
+            let sa = &self.state.stream_tables[a];
+            let sb = &self.state.stream_tables[b];
+            let ord = |st: &crate::state::StreamTableInfo| -> u8 {
+                if st.status == "ERROR" || st.status == "SUSPENDED" {
+                    0
+                } else if st.cascade_stale {
+                    1
+                } else if st.stale {
+                    2
+                } else {
+                    3
+                }
+            };
+            ord(sa).cmp(&ord(sb)).then_with(|| sa.name.cmp(&sb.name))
+        });
+        indices
+    }
+
+    fn selected_stream_table_index(&self) -> Option<usize> {
+        self.filtered_sorted_stream_tables()
+            .get(self.selected)
+            .copied()
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self.list_len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
     fn list_len(&self) -> usize {
         match self.current_view {
             View::Dashboard | View::Detail | View::DeltaInspector => {
@@ -249,6 +286,7 @@ async fn run_app(
                     let alerts = std::mem::take(&mut app.state.alerts);
                     app.state = *new_state;
                     app.state.alerts = alerts;
+                    app.clamp_selection();
                 }
                 PollMsg::Error(e) => {
                     app.state.error_message = Some(e);
@@ -336,6 +374,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                     app.filter = Some(app.filter_input.clone());
                 }
                 app.filter_input.clear();
+                app.clamp_selection();
             }
             KeyCode::Backspace => {
                 app.filter_input.pop();
@@ -427,8 +466,16 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
 fn switch_view(app: &mut App, view: View) {
     if app.current_view != view {
+        let preserve_selection =
+            matches!(
+                app.current_view,
+                View::Dashboard | View::Detail | View::DeltaInspector
+            ) && matches!(view, View::Dashboard | View::Detail | View::DeltaInspector);
         app.current_view = view;
-        app.selected = 0;
+        if !preserve_selection {
+            app.selected = 0;
+        }
+        app.clamp_selection();
     }
 }
 
@@ -537,7 +584,13 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             app.selected,
             app.filter.as_deref(),
         ),
-        View::Detail => views::detail::render(frame, area, &app.state, &app.theme, app.selected),
+        View::Detail => views::detail::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected_stream_table_index(),
+        ),
         View::Graph => views::graph::render(frame, area, &app.state, &app.theme, app.selected),
         View::RefreshLog => {
             views::refresh_log::render(frame, area, &app.state, &app.theme, app.selected)
@@ -554,9 +607,13 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::Watermarks => {
             views::watermarks::render(frame, area, &app.state, &app.theme, app.selected)
         }
-        View::DeltaInspector => {
-            views::delta_inspector::render(frame, area, &app.state, &app.theme, app.selected)
-        }
+        View::DeltaInspector => views::delta_inspector::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected_stream_table_index(),
+        ),
         View::Issues => views::issues::render(frame, area, &app.state, &app.theme, app.selected),
     }
 }
@@ -574,16 +631,16 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             if *view == app.current_view {
                 spans.push(Span::styled(
                     format!(" [{}]{} ", view.key_hint(), view.label()),
-                    app.theme.title,
+                    app.theme.footer_active,
                 ));
             } else {
                 spans.push(Span::styled(
                     format!(" {}-{} ", view.key_hint(), view.label()),
-                    app.theme.dim,
+                    app.theme.footer,
                 ));
             }
         }
-        spans.push(Span::styled(" ?-Help q-Quit ", app.theme.dim));
+        spans.push(Span::styled(" ?-Help q-Quit ", app.theme.footer));
 
         if let Some(ref f) = app.filter {
             spans.push(Span::styled(format!(" /{f}"), app.theme.warning));
@@ -707,4 +764,504 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn app_with_data() -> App {
+        let mut app = App::new();
+        app.state = test_fixtures::sample_state();
+        app
+    }
+
+    // ── View switching ───────────────────────────────────────────────
+
+    #[test]
+    fn test_initial_view_is_dashboard() {
+        let app = App::new();
+        assert_eq!(app.current_view, View::Dashboard);
+    }
+
+    #[test]
+    fn test_switch_to_detail_via_key_2() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('2')));
+        assert_eq!(app.current_view, View::Detail);
+    }
+
+    #[test]
+    fn test_switch_to_graph_via_key_3() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('3')));
+        assert_eq!(app.current_view, View::Graph);
+    }
+
+    #[test]
+    fn test_switch_to_refresh_log_via_key_4() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('4')));
+        assert_eq!(app.current_view, View::RefreshLog);
+    }
+
+    #[test]
+    fn test_switch_to_diagnostics_via_key_5() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('5')));
+        assert_eq!(app.current_view, View::Diagnostics);
+    }
+
+    #[test]
+    fn test_switch_to_cdc_via_key_6() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('6')));
+        assert_eq!(app.current_view, View::Cdc);
+    }
+
+    #[test]
+    fn test_switch_to_config_via_key_7() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('7')));
+        assert_eq!(app.current_view, View::Config);
+    }
+
+    #[test]
+    fn test_switch_to_health_via_key_8() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('8')));
+        assert_eq!(app.current_view, View::Health);
+    }
+
+    #[test]
+    fn test_switch_to_alerts_via_key_9() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('9')));
+        assert_eq!(app.current_view, View::Alerts);
+    }
+
+    #[test]
+    fn test_switch_to_workers_via_w() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('w')));
+        assert_eq!(app.current_view, View::Workers);
+    }
+
+    #[test]
+    fn test_switch_to_fuse_via_f() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('f')));
+        assert_eq!(app.current_view, View::Fuse);
+    }
+
+    #[test]
+    fn test_switch_to_watermarks_via_m() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(app.current_view, View::Watermarks);
+    }
+
+    #[test]
+    fn test_switch_to_delta_inspector_via_d() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.current_view, View::DeltaInspector);
+    }
+
+    #[test]
+    fn test_switch_to_graph_via_g() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.current_view, View::Graph);
+    }
+
+    #[test]
+    fn test_switch_to_issues_via_i() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('i')));
+        assert_eq!(app.current_view, View::Issues);
+    }
+
+    // ── Escape goes back to dashboard ────────────────────────────────
+
+    #[test]
+    fn test_esc_returns_to_dashboard() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('5')));
+        assert_eq!(app.current_view, View::Diagnostics);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.current_view, View::Dashboard);
+    }
+
+    #[test]
+    fn test_esc_clears_filter() {
+        let mut app = App::new();
+        app.filter = Some("test".to_string());
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(app.filter.is_none());
+    }
+
+    // ── Enter drills from dashboard to detail ────────────────────────
+
+    #[test]
+    fn test_enter_drills_to_detail() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Detail);
+    }
+
+    #[test]
+    fn test_enter_does_nothing_on_detail() {
+        let mut app = App::new();
+        app.current_view = View::Detail;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Detail);
+    }
+
+    // ── Navigation (j/k/arrows) ──────────────────────────────────────
+
+    #[test]
+    fn test_move_down_j() {
+        let mut app = app_with_data();
+        assert_eq!(app.selected, 0);
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_move_down_arrow() {
+        let mut app = app_with_data();
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_move_up_k() {
+        let mut app = app_with_data();
+        app.selected = 2;
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_move_up_arrow() {
+        let mut app = app_with_data();
+        app.selected = 2;
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_move_up_at_zero_stays() {
+        let mut app = app_with_data();
+        assert_eq!(app.selected, 0);
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_move_down_at_end_stays() {
+        let mut app = app_with_data();
+        let max = app.list_len() - 1;
+        app.selected = max;
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.selected, max);
+    }
+
+    #[test]
+    fn test_home_key() {
+        let mut app = app_with_data();
+        app.selected = 3;
+        handle_key(&mut app, key(KeyCode::Home));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_end_key() {
+        let mut app = app_with_data();
+        let expected = app.list_len() - 1;
+        handle_key(&mut app, key(KeyCode::End));
+        assert_eq!(app.selected, expected);
+    }
+
+    // ── Quit ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_quit_via_q() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_quit_via_ctrl_c() {
+        let mut app = App::new();
+        handle_key(&mut app, ctrl_key(KeyCode::Char('c')));
+        assert!(app.should_quit);
+    }
+
+    // ── Filter mode ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_slash_enters_filter_mode() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        assert!(app.entering_filter);
+    }
+
+    #[test]
+    fn test_filter_input_accepts_chars() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('o')));
+        handle_key(&mut app, key(KeyCode::Char('r')));
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.filter_input, "ord");
+    }
+
+    #[test]
+    fn test_filter_backspace() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('a')));
+        handle_key(&mut app, key(KeyCode::Char('b')));
+        handle_key(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.filter_input, "a");
+    }
+
+    #[test]
+    fn test_filter_enter_applies_filter() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('t')));
+        handle_key(&mut app, key(KeyCode::Char('e')));
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(!app.entering_filter);
+        assert_eq!(app.filter, Some("te".to_string()));
+    }
+
+    #[test]
+    fn test_filter_enter_empty_clears_filter() {
+        let mut app = App::new();
+        app.filter = Some("old".to_string());
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert!(!app.entering_filter);
+        assert!(app.filter.is_none());
+    }
+
+    #[test]
+    fn test_filter_esc_cancels() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(!app.entering_filter);
+        assert!(app.filter.is_none());
+        assert!(app.filter_input.is_empty());
+    }
+
+    #[test]
+    fn test_filter_mode_ignores_view_keys() {
+        let mut app = App::new();
+        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('5')));
+        // Should type '5' into filter, not switch to diagnostics
+        assert!(app.entering_filter);
+        assert_eq!(app.current_view, View::Dashboard);
+        assert_eq!(app.filter_input, "5");
+    }
+
+    // ── Help overlay ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_help_toggle() {
+        let mut app = App::new();
+        assert!(!app.show_help);
+        handle_key(&mut app, key(KeyCode::Char('?')));
+        assert!(app.show_help);
+    }
+
+    #[test]
+    fn test_help_dismiss_via_question_mark() {
+        let mut app = App::new();
+        app.show_help = true;
+        handle_key(&mut app, key(KeyCode::Char('?')));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_help_dismiss_via_esc() {
+        let mut app = App::new();
+        app.show_help = true;
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_help_dismiss_via_q() {
+        let mut app = App::new();
+        app.show_help = true;
+        handle_key(&mut app, key(KeyCode::Char('q')));
+        assert!(!app.show_help);
+        // q in help mode should close help, not quit the app
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_help_mode_ignores_view_keys() {
+        let mut app = App::new();
+        app.show_help = true;
+        handle_key(&mut app, key(KeyCode::Char('5')));
+        assert_eq!(app.current_view, View::Dashboard);
+        assert!(app.show_help);
+    }
+
+    // ── Selection preservation ────────────────────────────────────────
+
+    #[test]
+    fn test_selection_preserved_between_dashboard_and_detail() {
+        let mut app = app_with_data();
+        app.selected = 2;
+        handle_key(&mut app, key(KeyCode::Char('2'))); // -> Detail
+        assert_eq!(app.selected, 2, "selection should be preserved");
+    }
+
+    #[test]
+    fn test_selection_reset_on_different_view() {
+        let mut app = app_with_data();
+        app.selected = 2;
+        handle_key(&mut app, key(KeyCode::Char('4'))); // -> RefreshLog
+        assert_eq!(app.selected, 0, "selection should reset on RefreshLog");
+    }
+
+    // ── View labels ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_views_have_labels() {
+        for view in &ALL_VIEWS {
+            assert!(!view.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_all_views_have_key_hints() {
+        for view in &ALL_VIEWS {
+            assert!(!view.key_hint().is_empty());
+        }
+    }
+
+    // ── Filtered stream tables ───────────────────────────────────────
+
+    #[test]
+    fn test_filtered_stream_tables_no_filter() {
+        let app = app_with_data();
+        let indices = app.filtered_stream_tables();
+        assert_eq!(indices.len(), app.state.stream_tables.len());
+    }
+
+    #[test]
+    fn test_filtered_stream_tables_with_filter() {
+        let mut app = app_with_data();
+        app.filter = Some("orders".to_string());
+        let indices = app.filtered_stream_tables();
+        assert_eq!(indices.len(), 1);
+        assert_eq!(app.state.stream_tables[indices[0]].name, "orders_live");
+    }
+
+    #[test]
+    fn test_filtered_stream_tables_case_insensitive() {
+        let mut app = app_with_data();
+        app.filter = Some("ORDERS".to_string());
+        let indices = app.filtered_stream_tables();
+        assert_eq!(indices.len(), 1);
+    }
+
+    #[test]
+    fn test_filtered_stream_tables_by_status() {
+        let mut app = app_with_data();
+        app.filter = Some("ERROR".to_string());
+        let indices = app.filtered_stream_tables();
+        assert!(indices.len() >= 1);
+    }
+
+    #[test]
+    fn test_filtered_sorted_stream_tables_errors_first() {
+        let app = app_with_data();
+        let sorted = app.filtered_sorted_stream_tables();
+        // First entries should be ERROR/SUSPENDED
+        let first = &app.state.stream_tables[sorted[0]];
+        assert!(
+            first.status == "ERROR" || first.status == "SUSPENDED",
+            "first sorted entry should be error/suspended, got: {}",
+            first.status
+        );
+    }
+
+    // ── Clamp selection ──────────────────────────────────────────────
+
+    #[test]
+    fn test_clamp_selection_empty() {
+        let mut app = App::new();
+        app.selected = 5;
+        app.clamp_selection();
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_clamp_selection_over_length() {
+        let mut app = app_with_data();
+        app.selected = 100;
+        app.clamp_selection();
+        assert_eq!(app.selected, app.list_len() - 1);
+    }
+
+    // ── List length varies by view ───────────────────────────────────
+
+    #[test]
+    fn test_list_len_dashboard() {
+        let app = app_with_data();
+        assert_eq!(app.list_len(), app.state.stream_tables.len());
+    }
+
+    #[test]
+    fn test_list_len_graph() {
+        let mut app = app_with_data();
+        app.current_view = View::Graph;
+        assert_eq!(app.list_len(), app.state.dag_edges.len());
+    }
+
+    #[test]
+    fn test_list_len_health() {
+        let mut app = app_with_data();
+        app.current_view = View::Health;
+        assert_eq!(app.list_len(), app.state.health_checks.len());
+    }
+
+    #[test]
+    fn test_list_len_issues() {
+        let mut app = app_with_data();
+        app.current_view = View::Issues;
+        assert_eq!(app.list_len(), app.state.issues.len());
+    }
 }

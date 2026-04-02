@@ -49,6 +49,17 @@ use std::collections::HashMap;
 use crate::config;
 use crate::error::PgTrickleError;
 
+fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTrickleError> {
+    Spi::get_one_with_args::<String>(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[source_oid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
 /// Create a CDC trigger on a source table.
 ///
 /// Dispatches to statement-level (`FOR EACH STATEMENT … REFERENCING NEW TABLE
@@ -72,12 +83,8 @@ pub fn create_change_trigger(
     let trigger_name = format!("pg_trickle_cdc_{}", oid_u32);
 
     // Get the fully-qualified source table name
-    let source_table =
-        Spi::get_one_with_args::<String>("SELECT $1::oid::regclass::text", &[source_oid.into()])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
-            .ok_or_else(|| {
-                PgTrickleError::NotFound(format!("Table with OID {} not found", oid_u32))
-            })?;
+    let source_table = resolve_relation_name(source_oid)?
+        .ok_or_else(|| PgTrickleError::NotFound(format!("Table with OID {} not found", oid_u32)))?;
 
     // Create trigger function(s) and DML trigger(s) for the current mode.
     //
@@ -247,9 +254,7 @@ pub fn drop_change_trigger(
     let oid_u32 = source_oid.to_u32();
 
     // Get the source table name for the trigger drop.
-    let source_table =
-        Spi::get_one_with_args::<String>("SELECT $1::oid::regclass::text", &[source_oid.into()])
-            .unwrap_or(None);
+    let source_table = resolve_relation_name(source_oid).unwrap_or(None);
 
     // Drop all trigger variants using IF EXISTS — handles both row-level
     // (combined) and statement-level (per-event) triggers safely.
@@ -1945,12 +1950,9 @@ pub fn rebuild_cdc_trigger(
     let oid_u32 = source_oid.to_u32();
 
     // Resolve source table name; skip gracefully if the table no longer exists.
-    let source_table = match Spi::get_one_with_args::<String>(
-        "SELECT $1::oid::regclass::text",
-        &[source_oid.into()],
-    ) {
-        Ok(Some(t)) => t,
-        _ => return Ok(String::new()),
+    let source_table = match resolve_relation_name(source_oid)? {
+        Some(t) => t,
+        None => return Ok(String::new()),
     };
 
     let mode = config::pg_trickle_cdc_trigger_mode();

@@ -44,7 +44,7 @@ async fn poll_stream_tables(client: &Client, state: &mut AppState) {
                 s.stale,
                 COALESCE(s.consecutive_errors, 0)::bigint,
                 s.schedule::text,
-                s.tier::text,
+                s.refresh_tier::text,
                 s.last_error_message::text
              FROM pgtrickle.st_refresh_stats() s
              ORDER BY s.pgt_schema, s.pgt_name",
@@ -52,41 +52,53 @@ async fn poll_stream_tables(client: &Client, state: &mut AppState) {
         )
         .await;
 
-    if let Ok(rows) = result {
-        let mut tables = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let staleness_secs: Option<f64> = row.get(9);
-            let avg_ms: Option<f64> = row.get(7);
-            // Build sparkline entry
-            let name: String = row.get(0);
-            if let Some(ms) = avg_ms {
-                let entry = state.sparkline_data.entry(name.clone()).or_default();
-                entry.push(ms);
-                if entry.len() > 20 {
-                    entry.remove(0);
-                }
-            }
-            tables.push(StreamTableInfo {
-                name,
-                schema: row.get(1),
-                status: row.get(2),
-                refresh_mode: row.get(3),
-                is_populated: row.get(4),
-                consecutive_errors: row.get(11),
-                schedule: row.get(12),
-                staleness: staleness_secs.map(|s| format!("{s:.0}s")),
-                tier: row.get(13),
-                last_refresh_at: row.get(8),
-                total_refreshes: row.get(5),
-                failed_refreshes: row.get(6),
-                avg_duration_ms: avg_ms,
-                stale: row.get(10),
-                last_error_message: row.get(14),
-                defining_query: None,
-                cascade_stale: false,
-            });
+    match result {
+        Err(e) => {
+            state.error_message = Some(format!("poll_stream_tables: {e}"));
         }
-        state.stream_tables = tables;
+        Ok(rows) => {
+            if state
+                .error_message
+                .as_deref()
+                .map(|m| m.starts_with("poll_stream_tables:"))
+                .unwrap_or(false)
+            {
+                state.error_message = None;
+            }
+            let mut tables = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let staleness_secs: Option<f64> = row.get(9);
+                let avg_ms: Option<f64> = row.get(7);
+                let name: String = row.get(0);
+                if let Some(ms) = avg_ms {
+                    let entry = state.sparkline_data.entry(name.clone()).or_default();
+                    entry.push(ms);
+                    if entry.len() > 20 {
+                        entry.remove(0);
+                    }
+                }
+                tables.push(StreamTableInfo {
+                    name,
+                    schema: row.get(1),
+                    status: row.get(2),
+                    refresh_mode: row.get(3),
+                    is_populated: row.get(4),
+                    consecutive_errors: row.get(11),
+                    schedule: row.get(12),
+                    staleness: staleness_secs.map(|s| format!("{s:.0}s")),
+                    tier: row.get(13),
+                    last_refresh_at: row.get(8),
+                    total_refreshes: row.get(5),
+                    failed_refreshes: row.get(6),
+                    avg_duration_ms: avg_ms,
+                    stale: row.get(10),
+                    last_error_message: row.get(14),
+                    defining_query: None,
+                    cascade_stale: false,
+                });
+            }
+            state.stream_tables = tables;
+        }
     }
 }
 

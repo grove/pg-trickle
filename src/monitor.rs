@@ -417,6 +417,10 @@ fn st_refresh_stats() -> TableIterator<
         name!(last_refresh_at, Option<TimestampWithTimeZone>),
         name!(staleness_secs, Option<f64>),
         name!(stale, bool),
+        name!(consecutive_errors, i32),
+        name!(schedule, Option<String>),
+        name!(refresh_tier, String),
+        name!(last_error_message, Option<String>),
     ),
 > {
     let rows: Vec<_> = Spi::connect(|client| {
@@ -445,7 +449,11 @@ fn st_refresh_stats() -> TableIterator<
                              THEN EXTRACT(EPOCH FROM (now() - st.data_timestamp)) >
                                   pgtrickle.parse_duration_seconds(st.schedule)
                         END,
-                    false)
+                    false),
+                    st.consecutive_errors::integer,
+                    st.schedule::text,
+                    COALESCE(st.refresh_tier, 'hot')::text,
+                    st.last_error_message::text
                 FROM pgtrickle.pgt_stream_tables st
                 LEFT JOIN LATERAL (
                     SELECT
@@ -494,6 +502,13 @@ fn st_refresh_stats() -> TableIterator<
             let last_refresh_at = row.get::<TimestampWithTimeZone>(14).unwrap_or(None);
             let staleness = row.get::<f64>(15).unwrap_or(None);
             let stale = row.get::<bool>(16).unwrap_or(None).unwrap_or(false);
+            let consecutive_errors = row.get::<i32>(17).unwrap_or(None).unwrap_or(0);
+            let schedule = row.get::<String>(18).unwrap_or(None);
+            let refresh_tier = row
+                .get::<String>(19)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "hot".to_string());
+            let last_error_message = row.get::<String>(20).unwrap_or(None);
 
             out.push((
                 pgt_name,
@@ -512,6 +527,10 @@ fn st_refresh_stats() -> TableIterator<
                 last_refresh_at,
                 staleness,
                 stale,
+                consecutive_errors,
+                schedule,
+                refresh_tier,
+                last_error_message,
             ));
         }
         out
