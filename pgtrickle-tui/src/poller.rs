@@ -44,7 +44,7 @@ async fn poll_stream_tables(client: &Client, state: &mut AppState) {
                 s.stale,
                 COALESCE(s.consecutive_errors, 0)::bigint,
                 s.schedule::text,
-                s.tier::text,
+                s.refresh_tier::text,
                 s.last_error_message::text
              FROM pgtrickle.st_refresh_stats() s
              ORDER BY s.pgt_schema, s.pgt_name",
