@@ -2607,61 +2607,47 @@ Target: reduce regression escape rate from ~15% to <5%.
 **Goal:** Advance tiered refresh scheduling with manual tier assignment
 and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
-### Tiered Refresh Scheduling (C-1)
+### Quick Polish & Error State Circuit Breaker (Phase 1 + 1b) — ✅ Done
 
-> Items from [PLAN_NEW_STUFF.md](plans/performance/PLAN_NEW_STUFF.md) Wave 3. Read risk
-> analyses before implementing — particularly C-1's read-tracking pitfall.
+- **C4:** `pg_trickle.planner_aggressive` GUC consolidates `merge_planner_hints` + `merge_work_mem_mb`. Old GUCs deprecated.
+- **DIAG-2:** Creation-time WARNING for group-rescan and low-cardinality algebraic aggregates. `agg_diff_cardinality_threshold` GUC added.
+- **DOC-OPM:** Operator support matrix summary table linked from `SQL_REFERENCE.md`.
+- **ERR-1:** Permanent failures immediately set `ERROR` status with `last_error_message`/`last_error_at`. API calls clear error state. E2E test pending.
 
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| C-1 | Tiered Refresh Scheduling — Hot/Warm/Cold/Frozen tier classification; lazy refresh for Cold/Frozen STs; configurable per-ST tier override; 80% scheduler-CPU reduction in large deployments | 3–4 wk | [PLAN_NEW_STUFF.md §C-1](plans/performance/PLAN_NEW_STUFF.md) |
+### Manual Tiered Scheduling (Phase 2 — C-1) — ✅ Done
 
-> ⚠️ C-1: Do **not** use raw `pg_stat_user_tables` `seq_scan`/`idx_scan` counters for tier
-> classification — pg_trickle's own internal refresh reads inflate these counters, causing
-> actively-refreshed-but-unread STs to appear Warm. Use delta-based read tracking or
-> expose explicit per-ST tier overrides only. See PLAN_NEW_STUFF.md §C-1 risk analysis.
+Tiered scheduling infrastructure was already in place since v0.11/v0.12 (`refresh_tier` column, `RefreshTier` enum, `ALTER ... SET (tier=...)`, scheduler multipliers). Phase 2 verified completeness and added:
 
-> **Retraction consideration (C-1):** The auto-classification goal (80% scheduler-CPU
-> reduction) cannot be achieved with `pg_stat_user_tables` as the signal. Scope v0.14.0
-> to **manual-only tier assignment** (`ALTER STREAM TABLE … SET (tier = 'hot')`) only;
-> drop the Hot/Warm/Cold/Frozen auto-classification and the lazy-refresh trigger path.
-> Auto-classification requiring a custom `ExecutorStart/End` hook can be revisited
-> post-1.0. The effort estimate should drop from 3–4 wk to ~1 wk for the manual-only scope.
+- **C-1b:** NOTICE on tier demotion from Hot to Cold/Frozen, alerting operators to the effective interval change.
+- **C-1c:** Scheduler tier-aware multipliers confirmed: Hot ×1, Warm ×2, Cold ×10, Frozen = skip. Gated by `pg_trickle.tiered_scheduling` (default `true` since v0.12.0).
 
-> **Tiered scheduling subtotal: ~1–4 weeks**
+### UNLOGGED Change Buffers (Phase 3 — D-1) — ✅ Done
 
-### UNLOGGED Change Buffers — Opt-In (D-1)
+- **D-1a:** `pg_trickle.unlogged_buffers` GUC (default `false`). New change buffer tables created as `UNLOGGED` when enabled, reducing WAL amplification by ~30%.
+- **D-1b:** Crash recovery detection — scheduler detects UNLOGGED buffers emptied by crash (postmaster restart after last refresh) and auto-enqueues FULL refresh.
+- **D-1c:** `pgtrickle.convert_buffers_to_unlogged()` utility function for converting existing logged buffers. Documents lock-window warning.
+- **D-1e:** Documentation in `CONFIGURATION.md` and `SQL_REFERENCE.md`.
+
+### Documentation: Best-Practice Patterns Guide (G16-PAT) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| D-1 | UNLOGGED Change Buffers — create change buffers as `UNLOGGED` to reduce CDC WAL amplification; `pg_trickle.unlogged_buffers` GUC (default `false`, opt-in); crash recovery and standby promotion trigger FULL refresh | 1–2 wk | [PLAN_NEW_STUFF.md §D-1](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~G16-PAT~~ | ~~**Best-practice patterns guide.** `docs/PATTERNS.md`: 6 patterns (Bronze/Silver/Gold, event sourcing, SCD type-1/2, high-fan-out, real-time dashboards, tiered refresh) with SQL examples, anti-patterns, and refresh mode recommendations.~~ | — | ✅ Done |
 
-> Default flipped to `false` (opt-in only) to avoid forced FULL
-> refreshes on all stream tables for users who have not explicitly accepted the
-> crash/standby tradeoff.
+> **Patterns guide subtotal: ✅ Done**
 
-> **D-1 subtotal: ~1–2 weeks**
+### Long-Running Stability & Multi-Database Testing (G17-SOAK, G17-MDB) — ✅ Done
 
-### Documentation: Best-Practice Patterns Guide (G16-PAT)
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| G16-PAT | **Best-practice patterns guide.** Add `docs/PATTERNS.md`: bronze/silver/gold materialization strategies, event-sourcing pattern with ST as the projection layer, SCD type-1 and type-2, high-fan-out topology patterns. Each pattern includes worked SQL examples, anti-patterns, and a recommendation on which refresh mode to use. | ~1wk | [plans/performance/REPORT_OVERALL_STATUS.md §16](plans/performance/REPORT_OVERALL_STATUS.md) |
-
-> **Patterns guide subtotal: ~1 week**
-
-### Long-Running Stability & Multi-Database Testing (G17-SOAK, G17-MDB)
-
-> **In plain terms:** By v0.14.0 the core engine is mature enough to warrant
-> a 24-hour continuous-integration soak test and a multi-database isolation
-> test. Both gaps were identified in the §17 testing analysis.
+> Soak test validates zero worker crashes, zero ERROR states, and stable RSS
+> under sustained mixed DML. Multi-database test validates catalog isolation,
+> shared-memory independence, and concurrent correctness.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G17-SOAK | **Long-running stability soak test.** 24h+ continuous mixed DML on 5+ source tables with `DIFFERENTIAL` refresh and Fuse enabled; assert zero worker crashes, zero zombie stream tables, and stable memory usage throughout. | ~1–2d setup | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
-| G17-MDB | **Multi-database scheduler isolation test.** Two separate databases in the same PG cluster each with independent pg_trickle background workers; assert that one database's scheduler activity does not interfere with the other's worker quotas or shared-memory state. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §17](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G17-SOAK~~ | ~~**Long-running stability soak test.** `tests/e2e_soak_tests.rs` with configurable duration, 5 source tables, mixed DML, health checks, RSS monitoring, correctness verification. `just test-soak` / `just test-soak-short`. CI job: schedule + manual dispatch.~~ | — | ✅ Done |
+| ~~G17-MDB~~ | ~~**Multi-database scheduler isolation test.** `tests/e2e_mdb_tests.rs` with two databases, catalog isolation assertion, concurrent mutation cycles, correctness verification per database. `just test-mdb`. CI job: schedule + manual dispatch.~~ | — | ✅ Done |
 
-> **Stability & multi-database testing subtotal: ~2–4 days**
+> **Stability & multi-database testing subtotal: ✅ Done**
 
 ### Container Infrastructure (INFRA-GHCR)
 
@@ -2671,24 +2657,21 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 > **Container infrastructure subtotal: ✅ Done**
 
-### Refresh Mode Diagnostics (DIAG-1)
+### Refresh Mode Diagnostics (DIAG-1) — ✅ Done
 
-> **In plain terms:** Users currently have no structured way to know whether
-> their stream tables are using the most efficient refresh mode. This adds a
-> read-only advisory SQL function that analyses stream table characteristics
-> — change ratio history, empirical FULL vs DIFFERENTIAL timing, query
-> complexity, table size, and index coverage — and recommends whether to keep
-> the current mode or switch, with a confidence level and human-readable
-> explanation.
+> Analyzes stream table workload characteristics and recommends the optimal
+> refresh mode. Seven weighted signals (change ratio, empirical timing, query
+> complexity, target size, index coverage, latency variance) produce a composite
+> score with confidence level and human-readable explanation.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| DIAG-1a | `src/diagnostics.rs` — pure signal-scoring functions (`score_change_ratio`, `score_empirical_timing`, `score_query_complexity`, `score_target_size`, `score_index_coverage`, `score_latency_variance`, `compute_recommendation`) + unit tests | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-1, D-4 |
-| DIAG-1b | SPI data-gathering layer — change buffer counts, `pgt_refresh_history` aggregates, query complexity from DVM parser, `pg_relation_size`, `pg_index` coverage check | 1–2d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-2 |
-| DIAG-1c | `pgtrickle.recommend_refresh_mode(name)` and `pgtrickle.recommend_refresh_mode()` SQL functions (set-returning, read-only, no side effects); returns `recommended_mode`, `confidence`, `reason`, `signals` JSONB | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-3 |
-| DIAG-1d | `pgtrickle.refresh_efficiency` view — raw per-table FULL vs DIFF timing, change ratios, speedup factor; programmatic companion to the advisory function | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-6 |
-| DIAG-1e | E2E integration tests; upgrade migration (additive — no catalog changes) | 0.5–1d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-5 |
-| DIAG-1f | Documentation: `docs/SQL_REFERENCE.md` additions, `docs/CONFIGURATION.md` tuning section, `docs/tutorials/tuning-refresh-mode.md` | 0.5d | [PLAN_DIAGNOSTICS_FUNCTION.md](plans/performance/PLAN_DIAGNOSTICS_FUNCTION.md) §6 D-7 |
+| ~~DIAG-1a~~ | ~~`src/diagnostics.rs` — pure signal-scoring functions + unit tests~~ | — | ✅ Done |
+| ~~DIAG-1b~~ | ~~SPI data-gathering layer~~ | — | ✅ Done |
+| ~~DIAG-1c~~ | ~~`pgtrickle.recommend_refresh_mode()` SQL function~~ | — | ✅ Done |
+| ~~DIAG-1d~~ | ~~`pgtrickle.refresh_efficiency()` function~~ | — | ✅ Done |
+| ~~DIAG-1e~~ | ~~E2E integration tests; upgrade migration~~ | — | ✅ Done |
+| ~~DIAG-1f~~ | ~~Documentation: SQL_REFERENCE.md additions~~ | — | ✅ Done |
 
 > The function synthesises 7 weighted signals (historical change ratio 0.30,
 > empirical timing 0.35, current change ratio 0.25, query complexity 0.10,
@@ -2697,21 +2680,31 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 > **Diagnostics subtotal: ~3.5–7 days**
 
-### Export Definition API (G15-EX)
+### Export Definition API (G15-EX) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G15-EX | **`export_definition(name TEXT)`** — export a stream table configuration as reproducible `CREATE STREAM TABLE … WITH (…)` DDL. Useful for backup, versioning, and schema migrations. | ~1–2d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G15-EX~~ | ~~**`export_definition(name TEXT)`** — export a stream table configuration as reproducible DDL~~ | — | ✅ Done |
 
 > **G15-EX subtotal: ~1–2 days**
 
-### CLI Tool (E3)
+### TUI Tool (E3-TUI)
+
+> **In plain terms:** A full-featured terminal user interface (TUI) for
+> managing, monitoring, and diagnosing pg_trickle stream tables without
+> touching SQL. Built with ratatui in Rust, it provides a real-time
+> dashboard (think `htop` for stream tables), interactive dependency graph
+> visualization, live refresh log, diagnostics with signal breakdown charts,
+> CDC health monitoring, a GUC configuration editor, and a real-time alert
+> feed — all navigable with keyboard shortcuts and a command palette.
+> It also supports every original CLI command as one-shot subcommands for
+> scripting and CI.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| E3 | CLI tool (`pgtrickle`) for management outside SQL | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
+| E3-TUI | TUI tool (`pgtrickle`) for interactive management and monitoring | 8–10d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 
-> **E3 subtotal: ~16–20 hours**
+> **E3-TUI subtotal: ~8–10 days** (T1–T8 implemented: CLI skeleton with 18 subcommands, interactive dashboard with 15 views, watch mode with `--filter`, LISTEN/NOTIFY alerts with JSON parsing, async polling with force-poll, cascade staleness detection, DAG issue detection, sparklines, fuse detail panel, trigger inventory, context-sensitive help, docs/TUI.md)
 
 ### GUC Surface Consolidation (C4)
 
@@ -2721,19 +2714,13 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 > **C4 subtotal: ~1–2 hours**
 
-### Documentation: Pre-Deployment Checklist (DOC-PDC)
-
-> **In plain terms:** The requirements for running pg_trickle
-> (`shared_preload_libraries`, `wal_level = logical` for WAL CDC, PgBouncer
-> caveats, managed-PG restrictions) are currently scattered across FAQ,
-> SQL_REFERENCE, and CONFIGURATION. This consolidates them into a single
-> visible page that operators can follow before deploying.
+### Documentation: Pre-Deployment Checklist (DOC-PDC) — ✅ Done
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| DOC-PDC | **Pre-deployment checklist page.** Add `docs/PRE_DEPLOYMENT.md`: `shared_preload_libraries` requirement, `wal_level` guidance, PgBouncer transaction-mode caveats, managed PostgreSQL (RDS/Cloud SQL/Supabase) restrictions, minimum PG version, recommended GUC settings. Cross-link from GETTING_STARTED and INSTALL. | ~0.5d | [docs/FAQ.md](docs/FAQ.md) · [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| ~~DOC-PDC~~ | ~~**Pre-deployment checklist page.** `docs/PRE_DEPLOYMENT.md`: 10-point checklist covering PG version, `shared_preload_libraries`, WAL configuration, PgBouncer compatibility, recommended GUCs, resource planning, monitoring, validation script. Cross-linked from GETTING_STARTED.md and INSTALL.md.~~ | — | ✅ Done |
 
-> **DOC-PDC subtotal: ~0.5 days**
+> **DOC-PDC subtotal: ✅ Done**
 
 ### Documentation: Operator Mode Support Matrix Cross-Link (DOC-OPM)
 
@@ -2785,11 +2772,11 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| FIX-STST-DIFF | **DIFFERENTIAL manual refresh for ST-on-ST.** In `execute_manual_differential_refresh` (`src/api.rs`), replace the unconditional FULL fallback for `has_st_source` with a proper change-buffer delta path: read rows from `changes_pgt_{upstream_pgt_id}` beyond the stored frontier LSN, run DVM differential SQL, advance the frontier. Matches the scheduler path exactly. Fixes `test_st_on_st_uses_differential_not_full`. | ~1–2d | — |
+| ~~FIX-STST-DIFF~~ | ~~**DIFFERENTIAL manual refresh for ST-on-ST.** In `execute_manual_differential_refresh` (`src/api.rs`), replace the unconditional FULL fallback for `has_st_source` with a proper change-buffer delta path: read rows from `changes_pgt_{upstream_pgt_id}` beyond the stored frontier LSN, run DVM differential SQL, advance the frontier. Matches the scheduler path exactly. Fixes `test_st_on_st_uses_differential_not_full`.~~ | — | ✅ Done |
 
 > **FIX-STST-DIFF subtotal: ~1–2 days**
 
-> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~16–20h CLI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
+> **v0.14.0 total: ~2–6 weeks + ~1wk patterns guide + ~2–4 days stability tests + ~3.5–7 days diagnostics + ~1–2d export API + ~8–10d TUI + ~0.5d docs + ~2–4h aggregate warning + ~1–2d ST-on-ST diff manual path**
 
 **Exit criteria:**
 - [ ] C-1: Tier classification uses delta-based read tracking; Cold STs skip refresh correctly
@@ -2800,7 +2787,7 @@ and deliver opt-in UNLOGGED change buffers for reduced WAL amplification.
 - [ ] DIAG-1: `pgtrickle.recommend_refresh_mode()` returns `recommended_mode`, `confidence`, `reason`, and `signals` JSONB; `pgtrickle.refresh_efficiency` view published; all 7 signals implemented; unit tests pass; upgrade migration clean
 - [ ] DIAG-2: WARNING emitted at `create_stream_table` time for group-rescan aggregates and for algebraic aggregates with estimated group cardinality below threshold; warning directs users to `refresh_mode='full'` or `'auto'`; threshold configurable via GUC
 - [ ] G15-EX: `pgtrickle.export_definition(name TEXT)` returns valid reproducible DDL; round-trip tested
-- [ ] E3: `pgtrickle` CLI installable and covers create/drop/refresh/status commands
+- [x] E3-TUI: `pgtrickle` TUI binary builds as workspace member; one-shot CLI commands functional with `--format json`; interactive dashboard launches with no subcommand; 15 views with cascade staleness, issue detection, sparklines, force-poll, NOTIFY, and context-sensitive help; documented in `docs/TUI.md`
 - [ ] C4: `merge_planner_hints` and `merge_work_mem_mb` consolidated into `planner_aggressive`; old GUCs emit deprecation notice
 - [ ] DOC-PDC: Pre-deployment checklist published in `docs/PRE_DEPLOYMENT.md`; linked from GETTING_STARTED and INSTALL
 - [ ] DOC-OPM: Operator mode support matrix summary and link added to SQL_REFERENCE.md
@@ -3060,16 +3047,16 @@ These are not gated on 1.0 but represent the longer-term horizon.
 > **In plain terms:** Building first-class integrations with the tools most
 > data teams already use — a proper dbt adapter (beyond just a
 > materialization macro), an Airflow provider so you can trigger stream
-> table refreshes from Airflow DAGs, a `pgtrickle` command-line tool for
-> managing stream tables without writing SQL, and integration guides for
-> popular ORMs and migration frameworks like Django, SQLAlchemy, Flyway, and
-> Liquibase.
+> table refreshes from Airflow DAGs, a `pgtrickle` TUI for
+> managing and monitoring stream tables without writing SQL (shipped in
+> v0.14.0), and integration guides for popular ORMs and migration
+> frameworks like Django, SQLAlchemy, Flyway, and Liquibase.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | E1 | dbt full adapter (`dbt-pgtrickle` extending `dbt-postgres`) | 20–30h | [PLAN_DBT_ADAPTER.md](plans/dbt/PLAN_DBT_ADAPTER.md) |
 | E2 | Airflow provider (`apache-airflow-providers-pgtrickle`) | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
-| ~~E3~~ | ~~CLI tool (`pgtrickle`) for management outside SQL~~ ➡️ Pulled to v0.14.0 | 16–20h | [PLAN_ECO_SYSTEM.md §4](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
+| ~~E3~~ | ~~CLI tool (`pgtrickle`) for management outside SQL~~ ➡️ Pulled to v0.14.0 as TUI (E3-TUI) | 4–6d | [PLAN_TUI.md](plans/ui/PLAN_TUI.md) |
 | E4 | Flyway / Liquibase migration support | 8–12h | [PLAN_ECO_SYSTEM.md §5](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
 | E5 | ORM integrations guide (SQLAlchemy, Django, etc.) | 8–12h | [PLAN_ECO_SYSTEM.md §5](plans/ecosystem/PLAN_ECO_SYSTEM.md) |
 
@@ -3155,7 +3142,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
 | v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
 | v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
-| v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~16–20h CLI + ~0.5d docs | — | |
+| v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~4–6d TUI + ~0.5d docs | — | |
 | v0.15.0 — External Test Suites & Integration | ~14–25h + ~2–3d bulk create + ~3–4wk parser + ~1–2wk watermark | — | |
 | v0.16.0 — PG Backward Compatibility & Native DDL Syntax | ~38–56h (PG compat) + ~13–21d (Native DDL) + ~2–3wk MERGE alts + ~2–4wk memory budget + ~2–3wk template cache | — | |
 | v1.0.0 — Stable release | 18–27h | — | |

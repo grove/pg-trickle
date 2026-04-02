@@ -7,11 +7,14 @@
 # User Guide
 
 - [Getting Started](GETTING_STARTED.md)
+- [Best-Practice Patterns](PATTERNS.md)
+- [Pre-Deployment Checklist](PRE_DEPLOYMENT.md)
 - [SQL Reference](SQL_REFERENCE.md)
 - [Configuration](CONFIGURATION.md)
 - [Installation](installation.md)
 - [Upgrading](UPGRADING.md)
 - [Backup and Restore](BACKUP_AND_RESTORE.md)
+- [TUI Tool](TUI.md)
 - [Contributing](contributing.md)
 
 ---

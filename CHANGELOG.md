@@ -8,7 +8,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [Unreleased](#unreleased)
+- [Unreleased (0.14.0)](#unreleased-0140)
 - [0.13.0 — 2026-03-31](#0130--2026-03-31)
 - [0.12.0 — 2026-03-28](#0120--2026-03-28)
 - [0.11.0 — 2026-03-26](#0110--2026-03-26)
@@ -32,7 +32,180 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [Unreleased]
+## [Unreleased] — 0.14.0
+
+### Added
+
+- **C4: `pg_trickle.planner_aggressive` GUC** — Consolidated boolean switch
+  that replaces the separate `merge_planner_hints` and `merge_work_mem_mb`
+  GUCs. When `true` (default), all planner hints for MERGE execution are
+  enabled. The old GUCs are still accepted but deprecated; they are ignored
+  at runtime in favor of `planner_aggressive`.
+
+- **DIAG-2: Aggregate cardinality warning at creation time** — When creating
+  a stream table with algebraic aggregates (SUM, COUNT, AVG) in DIFFERENTIAL
+  mode, a WARNING is emitted if the estimated GROUP BY cardinality (from
+  `pg_stats.n_distinct`) is below the configurable threshold
+  `pg_trickle.agg_diff_cardinality_threshold` (default: 1000). This helps
+  users identify cases where FULL or AUTO mode may be more efficient.
+
+- **DIAG-2: `pg_trickle.agg_diff_cardinality_threshold` GUC** — Configurable
+  threshold for the algebraic aggregate cardinality warning. Set to 0 to
+  disable the warning.
+
+- **DOC-OPM: Operator support matrix summary in SQL_REFERENCE.md** — Added
+  a summary table of the 60+ operator support matrix with a prominent link
+  to the full `DVM_OPERATORS.md` matrix, improving discoverability.
+
+- **ERR-1: Error state circuit breaker** — Permanent refresh failures now
+  immediately set the stream table status to `ERROR` with `last_error_message`
+  and `last_error_at` stored in the catalog. Previously, permanent errors
+  would cycle through multiple retries before reaching SUSPENDED. Now a single
+  permanent failure (e.g. `function max(jsonb) does not exist`) stops the
+  retry loop immediately.
+
+- **ERR-1: `last_error_message` and `last_error_at` catalog columns** — New
+  nullable columns on `pgt_stream_tables` that store the error message and
+  timestamp of the last permanent failure. Visible in the
+  `pgtrickle.stream_tables_info` view via `st.*`.
+
+- **C-1b: Tier demotion NOTICE** — `ALTER STREAM TABLE ... SET (tier = 'cold')`
+  and `SET (tier = 'frozen')` now emit a NOTICE when demoting from Hot tier,
+  alerting operators that the effective refresh interval has changed (10×
+  multiplier for Cold, suspended for Frozen).
+
+- **D-1a: `pg_trickle.unlogged_buffers` GUC** — When `true`, newly created
+  change buffer tables are `UNLOGGED`, eliminating WAL writes for CDC trigger
+  inserts and reducing WAL amplification by ~30%. Default `false` (crash-safe).
+
+- **D-1b: Crash recovery detection for UNLOGGED buffers** — The scheduler
+  detects when an UNLOGGED buffer was truncated by crash recovery (empty
+  buffer + postmaster restart after last refresh) and automatically enqueues
+  a FULL refresh to resynchronize the stream table.
+
+- **D-1c: `pgtrickle.convert_buffers_to_unlogged()` utility** — Converts all
+  existing logged change buffer tables to `UNLOGGED`. Returns the count of
+  converted tables. Acquires `ACCESS EXCLUSIVE` lock per table — run during
+  low-traffic windows.
+
+- **DIAG-1: `pgtrickle.recommend_refresh_mode()` function** — Analyzes stream
+  table workload characteristics and recommends the optimal refresh mode (FULL
+  vs DIFFERENTIAL). Evaluates seven weighted signals — change ratio, empirical
+  timing, query complexity, target size, index coverage, and latency variance
+  — and returns a composite recommendation with confidence level and detailed
+  signal breakdown in JSONB.
+
+- **DIAG-1d: `pgtrickle.refresh_efficiency()` function** — Per-table refresh
+  efficiency metrics: FULL vs DIFFERENTIAL counts, average timing, change ratios,
+  and speedup factor. Suitable for monitoring dashboards and Grafana alerts.
+
+- **G15-EX: `pgtrickle.export_definition()` function** — Exports a stream
+  table's full configuration as reproducible DDL (`DROP` + `CREATE` +
+  `ALTER` statements), including schedule, refresh mode, CDC mode, partition
+  key, fuse settings, and all other options.
+
+- **G17-SOAK: Long-running stability soak test** — Configurable soak test
+  (`tests/e2e_soak_tests.rs`) that validates zero worker crashes, zero
+  ERROR states, stable RSS memory, and correctness under sustained mixed
+  DML workload. Default 10 minutes; configurable via `SOAK_DURATION_SECS`.
+  Includes `just test-soak` and `just test-soak-short` justfile targets
+  and CI job (schedule + manual dispatch).
+
+- **G17-MDB: Multi-database isolation test** — Validates that two databases
+  in the same PostgreSQL cluster run pg_trickle independently: catalog
+  isolation, shared-memory independence, concurrent mutations with
+  correctness verification. `just test-mdb` justfile target and CI job.
+
+- **G16-PAT: Best-practice patterns guide** — New `docs/PATTERNS.md` with
+  6 patterns: Bronze/Silver/Gold materialization, event sourcing, SCD
+  type-1 and type-2, high-fan-out topology, real-time dashboards, and
+  tiered refresh strategies. Each pattern includes SQL examples,
+  anti-patterns, and refresh mode recommendations.
+
+- **DOC-PDC: Pre-deployment checklist** — New `docs/PRE_DEPLOYMENT.md` with
+  10-point checklist for production deployments: PostgreSQL version,
+  `shared_preload_libraries`, WAL configuration, PgBouncer compatibility,
+  recommended GUCs, resource planning, monitoring, and a validation script.
+  Cross-linked from GETTING_STARTED.md and INSTALL.md.
+
+- **E3-TUI: `pgtrickle` TUI binary (Phase T1 — skeleton & CLI mode)** —
+  New `pgtrickle-tui` workspace member crate with a `pgtrickle` binary.
+  Implements one-shot CLI subcommands: `list`, `status`, `refresh`, `create`,
+  `drop`, `alter`, `export`, `diag`, `cdc`, `graph`, `config`, `health`,
+  and `completions` (bash/zsh/fish/PowerShell). Supports `--format json`,
+  `--format csv`, and human-readable table output. Connection via `--url`,
+  libpq environment variables (`PGHOST`/`PGPORT`/etc.), or defaults.
+
+- **E3-TUI: Interactive TUI dashboard (Phase T2–T8)** —
+  Running `pgtrickle` with no subcommand launches a full-screen interactive
+  dashboard built with ratatui. Features implemented:
+  - **Dashboard (F1):** Live-updating stream table list with status ribbon,
+    wide-layout split-pane with issues sidebar and DAG mini-map, adaptive
+    layout at ≥140×35. EFF column shows cascade staleness. Filter applied
+    with `/`. Errors sort to top. Sparklines for selected ST refresh duration.
+  - **Detail view (F2):** Properties, refresh statistics, efficiency data
+    (diff/full counts, speedup), recent refreshes panel, cascade staleness
+    indicator, upstream health section for cascade-stale tables.
+  - **Dependency graph (F3):** ASCII tree visualization with status coloring.
+  - **Refresh log (F4):** Color-coded scrollable timeline.
+  - **Diagnostics (F5):** Mode recommendation table with confidence levels.
+  - **CDC health (F6):** Buffer sizes with color-coded warnings, trigger
+    inventory table showing source tables, trigger names, and events.
+  - **Configuration (F7):** GUC parameter browser.
+  - **Health checks (F18):** Overall system health summary (HEALTHY/DEGRADED/
+    WARNINGS) with severity-colored check results.
+  - **Alert feed (F8):** Real-time severity-tagged alert display via
+    LISTEN/NOTIFY on `pg_trickle_alert` channel with JSON payload parsing.
+  - **Workers view (F13):** Parallel worker pool status and job queue.
+  - **Fuse panel (F14):** Circuit breaker / fuse status per stream table
+    with detail panel showing reset instructions for blown fuses.
+  - **Watermarks view (F15):** Watermark groups and source gating status.
+  - **Delta SQL inspector (F16):** Links to `pgtrickle explain` CLI.
+  - **Issues view (F20):** DAG issue detection — broken dependency chains,
+    growing buffers, blown fuses, stale data. Severity summary and sorted
+    issue table with blast radius.
+  - **Cascade staleness (F21):** Automatic DAG traversal marks downstream
+    tables of ERROR nodes as cascade-stale. Visible in dashboard EFF column,
+    detail view, and issue badge.
+  - **Help overlay (F12):** Context-sensitive keybinding reference (`?`)
+    with per-view tips.
+  - **Watch mode (F19):** `pgtrickle watch` non-interactive continuous output
+    with `--compact`, `--no-color`, `--append`, `--filter` flags.
+  - **Navigation:** Number keys (0–9) and letter keys (w/f/m/d/g/i) switch
+    views; `j`/`k`/arrows navigate; Enter drills into detail; Esc goes back;
+    `/` opens filter input; `Ctrl+R` force poll; `q`/Ctrl+C quits.
+  - **Issue badge:** Header bar shows `⚠ N` issue count visible from every view.
+  - **Async polling:** Background 2-second polling with reconnection on failure,
+    force-poll via Ctrl+R.
+  - **Header/footer bars:** Connection status, poll timing, view tabs.
+  - **New CLI subcommands:** `workers`, `fuse`, `watermarks`, `explain`
+    (with `--analyze`, `--operators`, `--dedup`), and `watch`.
+  - **Documentation:** `docs/TUI.md` user guide.
+
+### Changed
+
+- **ERR-1c: API calls clear error state** — `alter_stream_table`,
+  `create_or_replace_stream_table`, `resume_stream_table`, and successful
+  refresh completions now clear `last_error_message` and `last_error_at`,
+  allowing recovery from ERROR state.
+
+- **ERR-1: `refresh_stream_table` rejects ERROR status** — Manual refresh
+  now rejects stream tables in ERROR state (same as SUSPENDED). Use
+  `resume_stream_table` to clear the error first.
+
+### Fixed
+
+- **FIX-STST-DIFF: DIFFERENTIAL manual refresh for ST-on-ST path** — Manual
+  `refresh_stream_table()` calls on calculated stream tables (reading from
+  another stream table) now use true DIFFERENTIAL refresh via the
+  `changes_pgt_` change buffers, matching the scheduler path. Previously,
+  manual refresh unconditionally fell back to FULL refresh for any stream
+  table with ST sources.
+
+### Deprecated
+
+- **`pg_trickle.merge_planner_hints`** — Use `pg_trickle.planner_aggressive`
+  instead. The GUC is still accepted but ignored at runtime.
 
 ---
 

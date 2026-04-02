@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["postgresql", "streaming", "materialized-view", "incremental", "pgrx"]
 categories = ["database"]
 
+[workspace]
+members = [".", "pgtrickle-tui"]
+
 # Allow pgrx internal cfg values used by pg_shmem_init! macro
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pg13", "pg14", "pg15", "pg16", "pg17"))'] }

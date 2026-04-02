@@ -54,6 +54,9 @@ This tutorial walks through a concrete org-chart example so you can see this flo
 - `max_worker_processes` raised to at least 32 (see [INSTALL.md](../INSTALL.md#postgresql-configuration)); the PostgreSQL default of 8 is often exhausted if you have several databases, causing stream tables to silently stop refreshing
 - `psql` or any SQL client
 
+> **Deploying to production?** See the [Pre-Deployment Checklist](PRE_DEPLOYMENT.md)
+> for a complete list of requirements, pooler compatibility, and recommended GUC values.
+
 > **Quick start with Docker:** Pull the pre-built GHCR image — PostgreSQL 18.3 + pg_trickle ready to run, no configuration needed:
 > ```bash
 > docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 ghcr.io/grove/pg_trickle:latest
@@ -1230,6 +1233,7 @@ so deployments are always idempotent.
 
 ## What's Next?
 
+- **[TUI.md](TUI.md)** — Terminal UI & CLI tool for managing and monitoring stream tables from outside SQL
 - **[SQL_REFERENCE.md](SQL_REFERENCE.md)** — Full API reference for all functions, views, and configuration
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Deep dive into the system architecture and data flow
 - **[DVM_OPERATORS.md](DVM_OPERATORS.md)** — How each SQL operator is differentiated for incremental maintenance

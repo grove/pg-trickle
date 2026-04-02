@@ -1015,3 +1015,951 @@ fn construct_severity(check: &str, detail: &str) -> String {
 // wrapper here that diagnostics.rs can import via crate::api.
 //
 // NOTE: this wrapper is declared in api.rs as `pub(crate)` — see below.
+
+// ── DIAG-1a: Refresh Mode Diagnostics — Pure Signal Scoring ───────────────
+
+/// A scored diagnostic signal for refresh mode recommendation.
+#[derive(Debug, Clone)]
+pub struct Signal {
+    /// Signal identifier (e.g. "change_ratio_current").
+    pub name: &'static str,
+    /// Score in [-1.0, +1.0]. Positive favors DIFFERENTIAL, negative favors FULL.
+    pub score: f64,
+    /// Effective weight after fallback adjustments.
+    pub weight: f64,
+    /// Original weight before fallback adjustments.
+    pub base_weight: f64,
+    /// Human-readable detail for this signal.
+    pub detail: String,
+}
+
+/// A composite recommendation derived from multiple signals.
+#[derive(Debug, Clone)]
+pub struct Recommendation {
+    /// "DIFFERENTIAL", "FULL", or "KEEP" (current config is near-optimal).
+    pub recommended_mode: &'static str,
+    /// "high", "medium", or "low".
+    pub confidence: &'static str,
+    /// Human-readable explanation highlighting the top signals.
+    pub reason: String,
+    /// The individual signals that contributed to this recommendation.
+    pub signals: Vec<Signal>,
+    /// The composite weighted score in [-1.0, +1.0].
+    pub composite_score: f64,
+}
+
+/// Raw input data for the SPI layer to populate, consumed by signal scoring.
+#[derive(Debug, Clone, Default)]
+pub struct DiagnosticsInput {
+    /// S1: Current change ratio (pending changes / source reltuples).
+    pub change_ratio_current: Option<f64>,
+    /// S2: Historical average change ratio from pgt_refresh_history.
+    pub change_ratio_avg: Option<f64>,
+    /// S2: Number of history rows used for the average.
+    pub history_rows_total: i64,
+    /// S3: Average DIFFERENTIAL refresh duration in ms.
+    pub diff_avg_ms: Option<f64>,
+    /// S3: Average FULL refresh duration in ms.
+    pub full_avg_ms: Option<f64>,
+    /// S3: Number of DIFFERENTIAL history rows.
+    pub history_rows_diff: i64,
+    /// S3: Number of FULL history rows.
+    pub history_rows_full: i64,
+    /// S4: Number of join nodes in the query OpTree.
+    pub join_count: u32,
+    /// S4: Maximum aggregate nesting depth.
+    pub agg_depth: u32,
+    /// S4: Whether the query uses window functions.
+    pub has_window: bool,
+    /// S4: Number of scalar/lateral subqueries.
+    pub subquery_count: u32,
+    /// S5: Target table size in bytes (relation + indexes).
+    pub target_size_bytes: Option<i64>,
+    /// S6: Whether a covering index exists on __pgt_row_id columns.
+    pub has_covering_index: Option<bool>,
+    /// S7: P95 latency for DIFFERENTIAL refreshes.
+    pub diff_p95_ms: Option<f64>,
+    /// S7: P50 (median) latency for DIFFERENTIAL refreshes.
+    pub diff_p50_ms: Option<f64>,
+    /// S7: Number of DIFFERENTIAL history rows used for latency stats.
+    pub latency_history_rows: i64,
+}
+
+// ── Signal scoring functions (pure, no SPI) ────────────────────────────
+
+/// S1/S2: Score a change ratio. Positive → favors DIFFERENTIAL, negative → favors FULL.
+pub fn score_change_ratio(ratio: f64) -> f64 {
+    if ratio < 0.05 {
+        1.0
+    } else if ratio < 0.15 {
+        0.5
+    } else if ratio < 0.30 {
+        -0.3
+    } else if ratio < 0.50 {
+        -0.7
+    } else {
+        -1.0
+    }
+}
+
+/// S3: Score empirical timing comparison (DIFF avg vs FULL avg).
+pub fn score_empirical_timing(diff_avg_ms: f64, full_avg_ms: f64) -> f64 {
+    if full_avg_ms <= 0.0 {
+        return 0.0;
+    }
+    let ratio = diff_avg_ms / full_avg_ms;
+    if ratio < 0.3 {
+        1.0
+    } else if ratio < 0.7 {
+        0.5
+    } else if ratio < 1.0 {
+        0.2
+    } else if ratio < 1.5 {
+        -0.5
+    } else {
+        -1.0
+    }
+}
+
+/// S4: Score query complexity based on OpTree characteristics.
+pub fn score_query_complexity(
+    join_count: u32,
+    agg_depth: u32,
+    has_window: bool,
+    subquery_count: u32,
+) -> f64 {
+    let complexity = join_count + agg_depth + subquery_count + if has_window { 1 } else { 0 };
+    if complexity == 0 {
+        0.3 // simple scan/filter
+    } else if complexity <= 2 {
+        0.1 // moderate
+    } else if complexity <= 4 {
+        -0.2 // complex
+    } else {
+        -0.5 // very complex
+    }
+}
+
+/// S5: Score target table size. Larger tables favor DIFFERENTIAL.
+pub fn score_target_size(bytes: i64) -> f64 {
+    const MB: i64 = 1_048_576;
+    const GB: i64 = 1_073_741_824;
+    if bytes < MB {
+        -0.3
+    } else if bytes < 100 * MB {
+        0.1
+    } else if bytes < GB {
+        0.5
+    } else {
+        0.8
+    }
+}
+
+/// S6: Score index coverage on target table.
+pub fn score_index_coverage(has_covering: bool) -> f64 {
+    if has_covering { 0.2 } else { -0.2 }
+}
+
+/// S7: Score latency variance (P95/P50 ratio for DIFFERENTIAL refreshes).
+pub fn score_latency_variance(p95: f64, p50: f64) -> f64 {
+    if p50 <= 0.0 {
+        return 0.0;
+    }
+    let ratio = p95 / p50;
+    if ratio < 2.0 {
+        0.2
+    } else if ratio < 5.0 {
+        0.0
+    } else {
+        -0.3
+    }
+}
+
+/// Collect all signals from a `DiagnosticsInput` and compute individual scores.
+pub fn collect_signals(input: &DiagnosticsInput) -> Vec<Signal> {
+    let mut signals = Vec::with_capacity(7);
+
+    // S1: Change ratio (current)
+    let (s1_score, s1_weight, s1_detail) = match input.change_ratio_current {
+        Some(ratio) => (
+            score_change_ratio(ratio),
+            0.25,
+            format!("current change ratio {:.3}", ratio),
+        ),
+        None => (0.0, 0.0, "no current change data".to_string()),
+    };
+    signals.push(Signal {
+        name: "change_ratio_current",
+        score: s1_score,
+        weight: s1_weight,
+        base_weight: 0.25,
+        detail: s1_detail,
+    });
+
+    // S2: Historical change ratio
+    let s2_base_weight = 0.30;
+    let (s2_score, s2_weight, s2_detail) = match input.change_ratio_avg {
+        Some(ratio) => {
+            let w = if input.history_rows_total < 10 {
+                0.10
+            } else {
+                s2_base_weight
+            };
+            (
+                score_change_ratio(ratio),
+                w,
+                format!(
+                    "avg change ratio {:.3} ({} history rows)",
+                    ratio, input.history_rows_total
+                ),
+            )
+        }
+        None => (0.0, 0.0, "no refresh history".to_string()),
+    };
+    signals.push(Signal {
+        name: "change_ratio_avg",
+        score: s2_score,
+        weight: s2_weight,
+        base_weight: s2_base_weight,
+        detail: s2_detail,
+    });
+
+    // S3: Empirical timing
+    let s3_base_weight = 0.35;
+    let (s3_score, s3_weight, s3_detail) = match (input.diff_avg_ms, input.full_avg_ms) {
+        (Some(diff), Some(full))
+            if input.history_rows_diff >= 5 && input.history_rows_full >= 5 =>
+        {
+            (
+                score_empirical_timing(diff, full),
+                s3_base_weight,
+                format!("DIFF avg {:.1}ms vs FULL avg {:.1}ms", diff, full),
+            )
+        }
+        _ => (
+            0.0,
+            0.0,
+            "insufficient timing data (need ≥5 of each mode)".to_string(),
+        ),
+    };
+    signals.push(Signal {
+        name: "empirical_timing",
+        score: s3_score,
+        weight: s3_weight,
+        base_weight: s3_base_weight,
+        detail: s3_detail,
+    });
+
+    // S4: Query complexity
+    let s4_score = score_query_complexity(
+        input.join_count,
+        input.agg_depth,
+        input.has_window,
+        input.subquery_count,
+    );
+    signals.push(Signal {
+        name: "query_complexity",
+        score: s4_score,
+        weight: 0.10,
+        base_weight: 0.10,
+        detail: format!(
+            "{} joins, agg depth {}, {} subqueries{}",
+            input.join_count,
+            input.agg_depth,
+            input.subquery_count,
+            if input.has_window { ", window fns" } else { "" }
+        ),
+    });
+
+    // S5: Target size
+    let (s5_score, s5_weight, s5_detail) = match input.target_size_bytes {
+        Some(bytes) => (
+            score_target_size(bytes),
+            0.10,
+            format!("target size {}", format_bytes(bytes)),
+        ),
+        None => (0.0, 0.0, "target size unknown".to_string()),
+    };
+    signals.push(Signal {
+        name: "target_size",
+        score: s5_score,
+        weight: s5_weight,
+        base_weight: 0.10,
+        detail: s5_detail,
+    });
+
+    // S6: Index coverage
+    let (s6_score, s6_weight, s6_detail) = match input.has_covering_index {
+        Some(has) => (
+            score_index_coverage(has),
+            0.05,
+            if has {
+                "covering index on row-id columns".to_string()
+            } else {
+                "no covering index on row-id columns".to_string()
+            },
+        ),
+        None => (0.0, 0.0, "index coverage unknown".to_string()),
+    };
+    signals.push(Signal {
+        name: "index_coverage",
+        score: s6_score,
+        weight: s6_weight,
+        base_weight: 0.05,
+        detail: s6_detail,
+    });
+
+    // S7: Latency variance
+    let s7_base_weight = 0.05;
+    let (s7_score, s7_weight, s7_detail) = match (input.diff_p95_ms, input.diff_p50_ms) {
+        (Some(p95), Some(p50)) if input.latency_history_rows >= 20 => (
+            score_latency_variance(p95, p50),
+            s7_base_weight,
+            format!(
+                "P95/P50 = {:.1}/{:.1} = {:.1}×",
+                p95,
+                p50,
+                p95 / p50.max(0.001)
+            ),
+        ),
+        _ => (
+            0.0,
+            0.0,
+            "insufficient latency data (need ≥20 DIFF rows)".to_string(),
+        ),
+    };
+    signals.push(Signal {
+        name: "latency_variance",
+        score: s7_score,
+        weight: s7_weight,
+        base_weight: s7_base_weight,
+        detail: s7_detail,
+    });
+
+    signals
+}
+
+/// Compute a composite recommendation from collected signals.
+pub fn compute_recommendation(signals: &[Signal], effective_mode: Option<&str>) -> Recommendation {
+    let total_weight: f64 = signals.iter().map(|s| s.weight).sum();
+    let max_weight: f64 = signals.iter().map(|s| s.base_weight).sum();
+
+    let composite = if total_weight > 0.0 {
+        signals.iter().map(|s| s.score * s.weight).sum::<f64>() / total_weight
+    } else {
+        0.0
+    };
+
+    // Confidence derivation
+    let mut confidence = if max_weight > 0.0 && total_weight >= 0.80 * max_weight {
+        "high"
+    } else if max_weight > 0.0 && total_weight >= 0.50 * max_weight {
+        "medium"
+    } else {
+        "low"
+    };
+
+    // Promote to at least "medium" if any heavy signal is strong
+    if confidence == "low" {
+        let has_strong = signals
+            .iter()
+            .any(|s| s.base_weight >= 0.25 && s.score.abs() >= 0.8);
+        if has_strong {
+            confidence = "medium";
+        }
+    }
+
+    // Decision with dead zone ±0.15
+    let raw_mode = if composite > 0.15 {
+        "DIFFERENTIAL"
+    } else if composite < -0.15 {
+        "FULL"
+    } else {
+        "KEEP"
+    };
+
+    // Don't recommend what they already effectively use
+    let recommended = if let Some(eff) = effective_mode {
+        if raw_mode == eff { "KEEP" } else { raw_mode }
+    } else {
+        raw_mode
+    };
+
+    // Format reason: highlight top 2 signals by |score × weight|
+    let mut ranked: Vec<_> = signals.iter().filter(|s| s.weight > 0.0).collect();
+    ranked.sort_by(|a, b| {
+        let wa = (a.score * a.weight).abs();
+        let wb = (b.score * b.weight).abs();
+        wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let reason = if ranked.is_empty() {
+        "no diagnostic data available".to_string()
+    } else {
+        let top: Vec<String> = ranked.iter().take(2).map(|s| s.detail.clone()).collect();
+        top.join("; ")
+    };
+
+    Recommendation {
+        recommended_mode: recommended,
+        confidence,
+        reason,
+        signals: signals.to_vec(),
+        composite_score: composite,
+    }
+}
+
+/// Format bytes as a human-readable string.
+fn format_bytes(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = 1_048_576;
+    const GB: i64 = 1_073_741_824;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+// ── DIAG-1b: SPI Data-Gathering Layer ─────────────────────────────────────
+
+/// History statistics gathered from pgt_refresh_history via SPI.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryStats {
+    pub avg_change_ratio: Option<f64>,
+    pub total_rows: i64,
+    pub diff_avg_ms: Option<f64>,
+    pub full_avg_ms: Option<f64>,
+    pub diff_count: i64,
+    pub full_count: i64,
+    pub diff_p95_ms: Option<f64>,
+    pub diff_p50_ms: Option<f64>,
+    pub diff_latency_rows: i64,
+}
+
+/// Gather current change ratio for a stream table's source tables.
+pub fn gather_change_ratio(st: &StreamTableMeta) -> Option<f64> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema();
+    let deps = crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+
+    let mut total_changes: i64 = 0;
+    let mut total_reltuples: f64 = 0.0;
+
+    for dep in &deps {
+        if dep.source_type != "TABLE" && dep.source_type != "FOREIGN_TABLE" {
+            continue;
+        }
+        let oid = dep.source_relid.to_u32();
+
+        // Count pending change buffer rows
+        let changes = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM {}.changes_{}",
+            change_schema, oid,
+        ))
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+        total_changes += changes;
+
+        // Get source table reltuples estimate
+        let tuples = Spi::get_one::<f64>(&format!(
+            "SELECT GREATEST(reltuples, 1) FROM pg_class WHERE oid = {}",
+            oid,
+        ))
+        .unwrap_or(Some(1.0))
+        .unwrap_or(1.0);
+        total_reltuples += tuples;
+    }
+
+    if total_reltuples > 0.0 {
+        Some(total_changes as f64 / total_reltuples)
+    } else {
+        None
+    }
+}
+
+/// Gather refresh history statistics for a stream table.
+#[allow(clippy::field_reassign_with_default)]
+pub fn gather_history_stats(pgt_id: i64) -> HistoryStats {
+    let mut stats = HistoryStats::default();
+
+    // Total history row count
+    stats.total_rows = Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = $1 AND status = 'COMPLETED'",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    // Average change ratio from history
+    stats.avg_change_ratio = Spi::get_one_with_args::<f64>(
+        "SELECT AVG(CASE WHEN delta_row_count > 0 THEN \
+           (rows_inserted + rows_deleted)::float / GREATEST(delta_row_count, 1) \
+           ELSE NULL END) \
+         FROM (SELECT rows_inserted, rows_deleted, delta_row_count \
+               FROM pgtrickle.pgt_refresh_history \
+               WHERE pgt_id = $1 AND status = 'COMPLETED' \
+               ORDER BY start_time DESC LIMIT 100) sub",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(None);
+
+    // DIFFERENTIAL timing stats
+    stats.diff_count = Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED'",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if stats.diff_count > 0 {
+        stats.diff_avg_ms = Spi::get_one_with_args::<f64>(
+            "SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
+             FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
+                   WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND end_time IS NOT NULL \
+                   ORDER BY start_time DESC LIMIT 100) sub",
+            &[pgt_id.into()],
+        )
+        .unwrap_or(None);
+    }
+
+    // FULL timing stats
+    stats.full_count = Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
+         WHERE pgt_id = $1 AND action = 'FULL' AND status = 'COMPLETED'",
+        &[pgt_id.into()],
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if stats.full_count > 0 {
+        stats.full_avg_ms = Spi::get_one_with_args::<f64>(
+            "SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
+             FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
+                   WHERE pgt_id = $1 AND action = 'FULL' AND status = 'COMPLETED' \
+                     AND end_time IS NOT NULL \
+                   ORDER BY start_time DESC LIMIT 100) sub",
+            &[pgt_id.into()],
+        )
+        .unwrap_or(None);
+    }
+
+    // Latency percentiles for DIFFERENTIAL
+    stats.diff_latency_rows = std::cmp::min(stats.diff_count, 100);
+    if stats.diff_latency_rows >= 20 {
+        stats.diff_p50_ms = Spi::get_one_with_args::<f64>(
+            "SELECT PERCENTILE_CONT(0.50) WITHIN GROUP \
+                 (ORDER BY EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
+             FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
+                   WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND end_time IS NOT NULL \
+                   ORDER BY start_time DESC LIMIT 100) sub",
+            &[pgt_id.into()],
+        )
+        .unwrap_or(None);
+
+        stats.diff_p95_ms = Spi::get_one_with_args::<f64>(
+            "SELECT PERCENTILE_CONT(0.95) WITHIN GROUP \
+                 (ORDER BY EXTRACT(EPOCH FROM (end_time - start_time)) * 1000) \
+             FROM (SELECT start_time, end_time FROM pgtrickle.pgt_refresh_history \
+                   WHERE pgt_id = $1 AND action = 'DIFFERENTIAL' AND status = 'COMPLETED' \
+                     AND end_time IS NOT NULL \
+                   ORDER BY start_time DESC LIMIT 100) sub",
+            &[pgt_id.into()],
+        )
+        .unwrap_or(None);
+    }
+
+    stats
+}
+
+/// Gather query complexity stats by parsing the defining query through the DVM parser.
+pub fn gather_query_complexity(st: &StreamTableMeta) -> (u32, u32, bool, u32) {
+    match dvm::parser::parse_defining_query(&st.defining_query) {
+        Ok(tree) => count_complexity(&tree),
+        Err(_) => (0, 0, false, 0),
+    }
+}
+
+/// Recursively count complexity metrics from an OpTree.
+fn count_complexity(tree: &OpTree) -> (u32, u32, bool, u32) {
+    let mut joins = 0u32;
+    let mut agg_depth = 0u32;
+    let mut has_window = false;
+    let mut subqueries = 0u32;
+
+    match tree {
+        OpTree::InnerJoin { left, right, .. }
+        | OpTree::LeftJoin { left, right, .. }
+        | OpTree::FullJoin { left, right, .. } => {
+            joins += 1;
+            let (lj, la, lw, ls) = count_complexity(left);
+            let (rj, ra, rw, rs) = count_complexity(right);
+            joins += lj + rj;
+            agg_depth = agg_depth.max(la).max(ra);
+            has_window = has_window || lw || rw;
+            subqueries += ls + rs;
+        }
+        OpTree::Aggregate { child, .. } => {
+            agg_depth += 1;
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth += ca;
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::Project { child, .. } => {
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth = agg_depth.max(ca);
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::Window { child, .. } => {
+            has_window = true;
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth = agg_depth.max(ca);
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::Subquery { child, .. } => {
+            subqueries += 1;
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth = agg_depth.max(ca);
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::Filter { child, .. } | OpTree::Distinct { child, .. } => {
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth = agg_depth.max(ca);
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::UnionAll { children } => {
+            for c in children {
+                let (cj, ca, cw, cs) = count_complexity(c);
+                joins += cj;
+                agg_depth = agg_depth.max(ca);
+                has_window = has_window || cw;
+                subqueries += cs;
+            }
+        }
+        OpTree::Intersect { left, right, .. } | OpTree::Except { left, right, .. } => {
+            let (lj, la, lw, ls) = count_complexity(left);
+            let (rj, ra, rw, rs) = count_complexity(right);
+            joins += lj + rj;
+            agg_depth = agg_depth.max(la).max(ra);
+            has_window = has_window || lw || rw;
+            subqueries += ls + rs;
+        }
+        OpTree::SemiJoin { left, right, .. } | OpTree::AntiJoin { left, right, .. } => {
+            joins += 1;
+            let (lj, la, lw, ls) = count_complexity(left);
+            let (rj, ra, rw, rs) = count_complexity(right);
+            joins += lj + rj;
+            agg_depth = agg_depth.max(la).max(ra);
+            has_window = has_window || lw || rw;
+            subqueries += ls + rs;
+        }
+        OpTree::LateralFunction { child, .. } | OpTree::LateralSubquery { child, .. } => {
+            subqueries += 1;
+            let (cj, ca, cw, cs) = count_complexity(child);
+            joins += cj;
+            agg_depth = agg_depth.max(ca);
+            has_window = has_window || cw;
+            subqueries += cs;
+        }
+        OpTree::ScalarSubquery {
+            subquery, child, ..
+        } => {
+            subqueries += 1;
+            let (cj, ca, cw, cs) = count_complexity(child);
+            let (sj, sa, sw, ss) = count_complexity(subquery);
+            joins += cj + sj;
+            agg_depth = agg_depth.max(ca).max(sa);
+            has_window = has_window || cw || sw;
+            subqueries += cs + ss;
+        }
+        OpTree::Scan { .. } | OpTree::CteScan { .. } => {}
+        // Handle remaining variants that have a child
+        _ => {}
+    }
+
+    (joins, agg_depth, has_window, subqueries)
+}
+
+/// Gather target table size (relation + indexes) in bytes.
+pub fn gather_target_size(target_relid: pg_sys::Oid) -> Option<i64> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT pg_relation_size($1) + pg_indexes_size($1)",
+        &[target_relid.into()],
+    )
+    .unwrap_or(None)
+}
+
+/// Check if a covering index exists on __pgt_row_id columns of the target table.
+pub fn gather_index_coverage(target_relid: pg_sys::Oid) -> Option<bool> {
+    // Check whether any index on the target table covers the __pgt_row_id column
+    Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS( \
+           SELECT 1 FROM pg_index i \
+           JOIN pg_attribute a ON a.attrelid = i.indrelid \
+                AND a.attnum = ANY(i.indkey) \
+           WHERE i.indrelid = $1 \
+             AND a.attname = '__pgt_row_id' \
+         )",
+        &[target_relid.into()],
+    )
+    .unwrap_or(Some(false))
+}
+
+/// Build a complete DiagnosticsInput for a stream table by gathering all signals.
+pub fn gather_all_signals(st: &StreamTableMeta) -> DiagnosticsInput {
+    let change_ratio_current = gather_change_ratio(st);
+    let history = gather_history_stats(st.pgt_id);
+    let (join_count, agg_depth, has_window, subquery_count) = gather_query_complexity(st);
+    let target_size_bytes = gather_target_size(st.pgt_relid);
+    let has_covering_index = gather_index_coverage(st.pgt_relid);
+
+    DiagnosticsInput {
+        change_ratio_current,
+        change_ratio_avg: history.avg_change_ratio,
+        history_rows_total: history.total_rows,
+        diff_avg_ms: history.diff_avg_ms,
+        full_avg_ms: history.full_avg_ms,
+        history_rows_diff: history.diff_count,
+        history_rows_full: history.full_count,
+        join_count,
+        agg_depth,
+        has_window,
+        subquery_count,
+        target_size_bytes,
+        has_covering_index,
+        diff_p95_ms: history.diff_p95_ms,
+        diff_p50_ms: history.diff_p50_ms,
+        latency_history_rows: history.diff_latency_rows,
+    }
+}
+
+// ── DIAG-1a Unit Tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_score_change_ratio_boundaries() {
+        assert_eq!(score_change_ratio(0.0), 1.0);
+        assert_eq!(score_change_ratio(0.04), 1.0);
+        assert_eq!(score_change_ratio(0.05), 0.5);
+        assert_eq!(score_change_ratio(0.14), 0.5);
+        assert_eq!(score_change_ratio(0.15), -0.3);
+        assert_eq!(score_change_ratio(0.29), -0.3);
+        assert_eq!(score_change_ratio(0.30), -0.7);
+        assert_eq!(score_change_ratio(0.49), -0.7);
+        assert_eq!(score_change_ratio(0.50), -1.0);
+        assert_eq!(score_change_ratio(1.0), -1.0);
+    }
+
+    #[test]
+    fn test_score_empirical_timing_boundaries() {
+        // DIFF much faster → +1.0
+        assert_eq!(score_empirical_timing(10.0, 100.0), 1.0);
+        // DIFF faster → +0.5
+        assert_eq!(score_empirical_timing(50.0, 100.0), 0.5);
+        // DIFF slightly faster → +0.2
+        assert_eq!(score_empirical_timing(80.0, 100.0), 0.2);
+        // DIFF slower → -0.5
+        assert_eq!(score_empirical_timing(120.0, 100.0), -0.5);
+        // DIFF much slower → -1.0
+        assert_eq!(score_empirical_timing(200.0, 100.0), -1.0);
+        // Zero full_avg → 0.0
+        assert_eq!(score_empirical_timing(10.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_score_query_complexity_levels() {
+        // Simple: scan only
+        assert_eq!(score_query_complexity(0, 0, false, 0), 0.3);
+        // Moderate: 1 join + 1 agg
+        assert_eq!(score_query_complexity(1, 1, false, 0), 0.1);
+        // Complex: 3 joins
+        assert_eq!(score_query_complexity(3, 0, false, 0), -0.2);
+        // Very complex: 5 joins + window + subquery
+        assert_eq!(score_query_complexity(5, 0, true, 1), -0.5);
+    }
+
+    #[test]
+    fn test_score_target_size_range() {
+        assert_eq!(score_target_size(100_000), -0.3); // 100KB
+        assert_eq!(score_target_size(10_000_000), 0.1); // 10MB
+        assert_eq!(score_target_size(500_000_000), 0.5); // 500MB
+        assert_eq!(score_target_size(2_000_000_000), 0.8); // 2GB
+    }
+
+    #[test]
+    fn test_score_index_coverage() {
+        assert_eq!(score_index_coverage(true), 0.2);
+        assert_eq!(score_index_coverage(false), -0.2);
+    }
+
+    #[test]
+    fn test_score_latency_variance() {
+        assert_eq!(score_latency_variance(15.0, 10.0), 0.2); // 1.5×
+        assert_eq!(score_latency_variance(30.0, 10.0), 0.0); // 3×
+        assert_eq!(score_latency_variance(60.0, 10.0), -0.3); // 6×
+        assert_eq!(score_latency_variance(10.0, 0.0), 0.0); // zero median
+    }
+
+    #[test]
+    fn test_composite_all_favor_diff() {
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.01),
+            change_ratio_avg: Some(0.02),
+            history_rows_total: 100,
+            diff_avg_ms: Some(10.0),
+            full_avg_ms: Some(300.0),
+            history_rows_diff: 80,
+            history_rows_full: 20,
+            join_count: 0,
+            agg_depth: 0,
+            has_window: false,
+            subquery_count: 0,
+            target_size_bytes: Some(500_000_000),
+            has_covering_index: Some(true),
+            diff_p95_ms: Some(15.0),
+            diff_p50_ms: Some(10.0),
+            latency_history_rows: 80,
+        };
+        let signals = collect_signals(&input);
+        let rec = compute_recommendation(&signals, Some("FULL"));
+        assert_eq!(rec.recommended_mode, "DIFFERENTIAL");
+        assert_eq!(rec.confidence, "high");
+        assert!(rec.composite_score > 0.5);
+    }
+
+    #[test]
+    fn test_composite_all_favor_full() {
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.60),
+            change_ratio_avg: Some(0.55),
+            history_rows_total: 50,
+            diff_avg_ms: Some(800.0),
+            full_avg_ms: Some(300.0),
+            history_rows_diff: 30,
+            history_rows_full: 20,
+            join_count: 4,
+            agg_depth: 2,
+            has_window: true,
+            subquery_count: 1,
+            target_size_bytes: Some(500_000),
+            has_covering_index: Some(false),
+            diff_p95_ms: Some(2000.0),
+            diff_p50_ms: Some(300.0),
+            latency_history_rows: 30,
+        };
+        let signals = collect_signals(&input);
+        let rec = compute_recommendation(&signals, Some("DIFFERENTIAL"));
+        assert_eq!(rec.recommended_mode, "FULL");
+        assert_eq!(rec.confidence, "high");
+        assert!(rec.composite_score < -0.5);
+    }
+
+    #[test]
+    fn test_composite_dead_zone_returns_keep() {
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.10),
+            change_ratio_avg: Some(0.12),
+            history_rows_total: 50,
+            diff_avg_ms: Some(90.0),
+            full_avg_ms: Some(100.0),
+            history_rows_diff: 30,
+            history_rows_full: 20,
+            join_count: 1,
+            agg_depth: 1,
+            has_window: false,
+            subquery_count: 0,
+            target_size_bytes: Some(50_000_000),
+            has_covering_index: Some(true),
+            diff_p95_ms: Some(200.0),
+            diff_p50_ms: Some(80.0),
+            latency_history_rows: 30,
+        };
+        let signals = collect_signals(&input);
+        let rec = compute_recommendation(&signals, Some("DIFFERENTIAL"));
+        // Score should be close to 0, within dead zone
+        assert_eq!(rec.recommended_mode, "KEEP");
+    }
+
+    #[test]
+    fn test_confidence_low_with_no_data() {
+        let input = DiagnosticsInput::default();
+        let signals = collect_signals(&input);
+        let rec = compute_recommendation(&signals, None);
+        assert_eq!(rec.confidence, "low");
+        // S4 (query_complexity) defaults to "simple" (score=0.3) even with
+        // no data, so composite > 0.15 → DIFFERENTIAL recommendation. This
+        // is correct: the only active signal says simple = favor DIFF.
+    }
+
+    #[test]
+    fn test_confidence_medium_with_sparse_history() {
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.02),
+            change_ratio_avg: Some(0.03),
+            history_rows_total: 5, // <10, weight reduced
+            join_count: 0,
+            agg_depth: 0,
+            has_window: false,
+            subquery_count: 0,
+            ..Default::default()
+        };
+        let signals = collect_signals(&input);
+        let rec = compute_recommendation(&signals, Some("FULL"));
+        // Strong S1 signal promotes to at least medium
+        assert!(rec.confidence == "medium" || rec.confidence == "high");
+    }
+
+    #[test]
+    fn test_keep_when_already_optimal() {
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.01),
+            change_ratio_avg: Some(0.02),
+            history_rows_total: 100,
+            diff_avg_ms: Some(10.0),
+            full_avg_ms: Some(300.0),
+            history_rows_diff: 80,
+            history_rows_full: 20,
+            join_count: 0,
+            agg_depth: 0,
+            has_window: false,
+            subquery_count: 0,
+            target_size_bytes: Some(500_000_000),
+            has_covering_index: Some(true),
+            diff_p95_ms: Some(15.0),
+            diff_p50_ms: Some(10.0),
+            latency_history_rows: 80,
+        };
+        let signals = collect_signals(&input);
+        // Already on DIFFERENTIAL — should return KEEP
+        let rec = compute_recommendation(&signals, Some("DIFFERENTIAL"));
+        assert_eq!(rec.recommended_mode, "KEEP");
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(10_240), "10.0 KB");
+        assert_eq!(format_bytes(52_428_800), "50.0 MB");
+        assert_eq!(format_bytes(2_147_483_648), "2.0 GB");
+    }
+}

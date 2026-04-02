@@ -3216,7 +3216,14 @@ fn is_group_due(
         .iter()
         .filter_map(|m| {
             if let NodeId::StreamTable(id) = m {
-                load_st_by_id(*id).map(|st| check_schedule(&st, dag) || st.needs_reinit)
+                load_st_by_id(*id).map(|st| {
+                    // D-1b: Check for UNLOGGED buffer crash recovery before
+                    // evaluating schedule. This may set needs_reinit=true.
+                    check_unlogged_buffer_crash_recovery(&st);
+                    // Reload in case needs_reinit was set.
+                    let st = load_st_by_id(*id).unwrap_or(st);
+                    check_schedule(&st, dag) || st.needs_reinit
+                })
             } else {
                 None
             }
@@ -4013,6 +4020,16 @@ fn refresh_single_st(
         return;
     }
 
+    // D-1b: Check for UNLOGGED buffer data loss after crash recovery.
+    // If detected, mark_for_reinitialize is called (sets needs_reinit=true),
+    // so the refresh path below will pick up the Reinitialize action.
+    check_unlogged_buffer_crash_recovery(&st);
+    // Reload ST in case needs_reinit was just set.
+    let st = match load_st_by_id(pgt_id) {
+        Some(st) => st,
+        None => return,
+    };
+
     let needs_refresh = check_schedule(&st, dag_ref);
     if !needs_refresh && !st.needs_reinit {
         return;
@@ -4642,7 +4659,25 @@ fn execute_scheduled_refresh(
                 );
             }
 
-            // Increment error count only for errors that should count
+            // ERR-1b: On permanent failure, immediately set ERROR status with
+            // the error message. One permanent failure is enough — it will not
+            // self-heal. Skip the consecutive_errors increment path.
+            if !is_retryable {
+                let error_msg = e.to_string();
+                let _ = StreamTableMeta::set_error_state(st.pgt_id, &error_msg);
+
+                log!(
+                    "pg_trickle: permanent error for {}.{} ({}): {} — set status to ERROR",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    action.as_str(),
+                    error_msg,
+                );
+
+                return RefreshOutcome::PermanentFailure;
+            }
+
+            // Increment error count only for retryable errors that should count
             if counts {
                 match StreamTableMeta::increment_errors(st.pgt_id) {
                     Ok(count) if count >= config::pg_trickle_max_consecutive_errors() => {
@@ -4664,16 +4699,11 @@ fn execute_scheduled_refresh(
                     }
                     _ => {
                         log!(
-                            "pg_trickle: refresh failed for {}.{} ({}): {} [{}]",
+                            "pg_trickle: refresh failed for {}.{} ({}): {} [will retry]",
                             st.pgt_schema,
                             st.pgt_name,
                             action.as_str(),
                             e,
-                            if is_retryable {
-                                "will retry"
-                            } else {
-                                "permanent"
-                            },
                         );
                     }
                 }
@@ -4686,11 +4716,7 @@ fn execute_scheduled_refresh(
                 );
             }
 
-            if is_retryable {
-                RefreshOutcome::RetryableFailure
-            } else {
-                RefreshOutcome::PermanentFailure
-            }
+            RefreshOutcome::RetryableFailure
         }
     }
 }
@@ -4825,6 +4851,112 @@ fn log_watermark_skip(st: &StreamTableMeta, reason: &str) {
             e
         );
     }
+}
+
+/// D-1b: Check whether any UNLOGGED source buffer for this ST was
+/// emptied by crash recovery and needs a FULL refresh to resynchronize.
+///
+/// After a PostgreSQL crash, UNLOGGED tables are truncated. If a buffer
+/// table has `relpersistence = 'u'` AND is empty AND the postmaster was
+/// restarted after the ST's last refresh, the buffer contents were lost
+/// and we must force a FULL refresh.
+///
+/// Returns `true` if crash-recovery data loss was detected (and the ST
+/// was marked for reinit).
+fn check_unlogged_buffer_crash_recovery(st: &StreamTableMeta) -> bool {
+    if !st.is_populated || st.needs_reinit {
+        return false;
+    }
+
+    let change_schema = config::pg_trickle_change_buffer_schema();
+
+    // Check base-table source buffers (changes_{oid})
+    let source_oids = get_source_oids_for_st(st.pgt_id);
+    for oid in &source_oids {
+        let lost = Spi::get_one::<bool>(&format!(
+            "SELECT c.relpersistence = 'u' \
+               AND NOT EXISTS(SELECT 1 FROM {schema}.changes_{oid} LIMIT 1) \
+               AND pg_postmaster_start_time() > \
+                   COALESCE((SELECT last_refresh_at FROM pgtrickle.pgt_stream_tables \
+                             WHERE pgt_id = {pgt_id}), '-infinity'::timestamptz) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = '{schema}' AND c.relname = 'changes_{oid}'",
+            schema = change_schema,
+            oid = oid.to_u32(),
+            pgt_id = st.pgt_id,
+        ))
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+
+        if lost {
+            pgrx::warning!(
+                "pg_trickle: UNLOGGED change buffer for {}.{} source OID {} was \
+                 emptied by crash recovery — scheduling FULL refresh",
+                st.pgt_schema,
+                st.pgt_name,
+                oid.to_u32(),
+            );
+            if let Err(e) = StreamTableMeta::mark_for_reinitialize(st.pgt_id) {
+                pgrx::warning!(
+                    "pg_trickle: failed to mark {}.{} for reinit after crash recovery: {}",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    e,
+                );
+            }
+            return true;
+        }
+    }
+
+    // Check ST-to-ST source buffers (changes_pgt_{id})
+    let deps = crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default();
+    for dep in &deps {
+        if dep.source_type != "STREAM_TABLE" {
+            continue;
+        }
+        let upstream_pgt_id = crate::catalog::StreamTableMeta::pgt_id_for_relid(dep.source_relid);
+        if let Some(up_id) = upstream_pgt_id
+            && cdc::has_st_change_buffer(up_id, &change_schema)
+        {
+            let lost = Spi::get_one::<bool>(&format!(
+                "SELECT c.relpersistence = 'u' \
+                   AND NOT EXISTS(SELECT 1 FROM {schema}.changes_pgt_{id} LIMIT 1) \
+                   AND pg_postmaster_start_time() > \
+                       COALESCE((SELECT last_refresh_at FROM pgtrickle.pgt_stream_tables \
+                                 WHERE pgt_id = {pgt_id}), '-infinity'::timestamptz) \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = '{schema}' AND c.relname = 'changes_pgt_{id}'",
+                schema = change_schema,
+                id = up_id,
+                pgt_id = st.pgt_id,
+            ))
+            .unwrap_or(Some(false))
+            .unwrap_or(false);
+
+            if lost {
+                pgrx::warning!(
+                    "pg_trickle: UNLOGGED ST change buffer for {}.{} upstream pgt_id={} \
+                     was emptied by crash recovery — scheduling FULL refresh",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    up_id,
+                );
+                if let Err(e) = StreamTableMeta::mark_for_reinitialize(st.pgt_id) {
+                    pgrx::warning!(
+                        "pg_trickle: failed to mark {}.{} for reinit after crash recovery: {}",
+                        st.pgt_schema,
+                        st.pgt_name,
+                        e,
+                    );
+                }
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Get the source OIDs (base table OIDs) for a given ST.

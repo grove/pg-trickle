@@ -49,14 +49,19 @@ pub static PGS_DIFFERENTIAL_MAX_CHANGE_RATIO: GucSetting<f64> = GucSetting::<f64
 /// is problematic for concurrent DML on the source table.
 pub static PGS_CLEANUP_USE_TRUNCATE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// Whether to inject `SET LOCAL` planner hints before MERGE execution.
+/// C4: Consolidated planner aggressiveness switch.
 ///
-/// When enabled, the refresh executor estimates the delta size and applies:
+/// When enabled (default), the refresh executor estimates the delta size and
+/// applies `SET LOCAL` planner hints before MERGE execution:
 /// - delta >= 100 rows: `SET LOCAL enable_nestloop = off` (favour hash joins)
 /// - delta >= 10 000 rows: additionally `SET LOCAL work_mem = '<N>MB'`
 ///
-/// This reduces P95 latency spikes caused by PostgreSQL choosing nested-loop
-/// plans for medium/large delta sizes.
+/// Replaces the old `merge_planner_hints` and `merge_work_mem_mb` GUCs
+/// (both still accepted but emit deprecation warnings).
+pub static PGS_PLANNER_AGGRESSIVE: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Deprecated — use `pg_trickle.planner_aggressive` instead.
+/// Kept for backward compatibility; emits a deprecation warning when read.
 pub static PGS_MERGE_PLANNER_HINTS: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// `work_mem` (in MB) applied via `SET LOCAL` when the estimated delta
@@ -405,6 +410,20 @@ pub static PGS_FUSE_DEFAULT_CEILING: GucSetting<i32> = GucSetting::<i32>::new(0)
 /// Set to 0.0 to disable amplification detection.
 pub static PGS_DELTA_AMPLIFICATION_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new(100.0);
 
+/// DIAG-2: Estimated GROUP BY cardinality threshold for algebraic aggregate
+/// DIFFERENTIAL mode warning.
+///
+/// At `create_stream_table` time, if the defining query uses algebraic
+/// aggregates (SUM, COUNT, AVG) in DIFFERENTIAL mode and the estimated
+/// group cardinality (from `pg_stats.n_distinct`) is below this threshold,
+/// a WARNING is emitted suggesting FULL or AUTO mode instead.
+///
+/// Low-cardinality GROUP BY columns make DIFFERENTIAL aggregates maintain
+/// auxiliary columns for very few groups, which may not justify the overhead.
+///
+/// Set to 0 to disable the cardinality warning.
+pub static PGS_AGG_DIFF_CARDINALITY_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(1000);
+
 /// C3-1: Per-database dynamic refresh worker quota.
 ///
 /// When > 0, each per-database scheduler limits itself to this many
@@ -426,6 +445,24 @@ pub static PGS_DELTA_AMPLIFICATION_THRESHOLD: GucSetting<f64> = GucSetting::<f64
 /// `max_dynamic_refresh_workers` on a first-come-first-served basis,
 /// bounded per coordinator by `max_concurrent_refreshes`.
 pub static PGS_PER_DATABASE_WORKER_QUOTA: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// D-1a: Create new change buffer tables as UNLOGGED.
+///
+/// When `true`, newly created change buffer tables (`pgtrickle_changes.changes_*`)
+/// are created with `CREATE UNLOGGED TABLE` instead of `CREATE TABLE`. This
+/// eliminates WAL writes for trigger-inserted CDC rows, reducing WAL
+/// amplification by ~30%.
+///
+/// **Trade-off:** UNLOGGED tables are truncated on crash recovery and are
+/// not replicated to standbys. After a crash or standby restart, affected
+/// stream tables will automatically receive a FULL refresh on the next
+/// scheduler cycle to resynchronize.
+///
+/// Existing change buffer tables are not retroactively altered. Use
+/// `pgtrickle.convert_buffers_to_unlogged()` to convert existing buffers.
+///
+/// Default `false` — change buffers remain WAL-logged and crash-safe.
+pub static PGS_UNLOGGED_BUFFERS: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
@@ -527,10 +564,24 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // C4: Consolidated planner aggressiveness switch (v0.14.0).
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.planner_aggressive",
+        c"Enable all planner hints for MERGE execution (consolidates merge_planner_hints + merge_work_mem_mb).",
+        c"When true (default), disables nested-loop joins and raises work_mem for medium/large \
+           delta sizes to stabilise P95 latency. Replaces the deprecated merge_planner_hints \
+           and merge_work_mem_mb GUCs.",
+        &PGS_PLANNER_AGGRESSIVE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // Deprecated: kept for backward compatibility.
     GucRegistry::define_bool_guc(
         c"pg_trickle.merge_planner_hints",
-        c"Inject SET LOCAL planner hints before MERGE execution.",
-        c"When true, disables nested-loop joins and optionally raises work_mem for medium/large delta sizes to stabilise P95 latency.",
+        c"Deprecated — use pg_trickle.planner_aggressive instead.",
+        c"Deprecated in v0.14.0. When explicitly set, emits a deprecation warning. \
+           Use pg_trickle.planner_aggressive instead.",
         &PGS_MERGE_PLANNER_HINTS,
         GucContext::Suset,
         GucFlags::default(),
@@ -539,7 +590,7 @@ pub fn register_gucs() {
     GucRegistry::define_int_guc(
         c"pg_trickle.merge_work_mem_mb",
         c"work_mem (MB) for large-delta MERGE execution.",
-        c"Applied via SET LOCAL when planner hints are enabled and the delta exceeds 10 000 rows.",
+        c"Applied via SET LOCAL when planner_aggressive is enabled and the delta exceeds 10 000 rows.",
         &PGS_MERGE_WORK_MEM_MB,
         8,    // min
         4096, // max (4 GB)
@@ -930,6 +981,21 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // DIAG-2: Aggregate cardinality warning threshold.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.agg_diff_cardinality_threshold",
+        c"Estimated GROUP BY cardinality threshold for algebraic aggregate warnings.",
+        c"At create_stream_table time, if the defining query uses algebraic aggregates \
+           (SUM, COUNT, AVG) in DIFFERENTIAL mode and the estimated group cardinality \
+           is below this threshold, a WARNING is emitted suggesting FULL or AUTO mode. \
+           Set to 0 to disable.",
+        &PGS_AGG_DIFF_CARDINALITY_THRESHOLD,
+        0,           // min (disabled)
+        100_000_000, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_trickle.per_database_worker_quota",
         c"Per-database dynamic refresh worker quota for multi-tenant isolation.",
@@ -942,6 +1008,20 @@ pub fn register_gucs() {
         &PGS_PER_DATABASE_WORKER_QUOTA,
         0,  // min: 0 (disabled)
         64, // max: matches max_dynamic_refresh_workers ceiling
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // D-1a: UNLOGGED change buffers.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.unlogged_buffers",
+        c"Create new change buffer tables as UNLOGGED to reduce WAL amplification.",
+        c"When true, new change buffer tables are UNLOGGED (no WAL writes). \
+           Reduces CDC WAL amplification by ~30% but buffers are lost on crash. \
+           After crash, affected stream tables receive an automatic FULL refresh. \
+           Existing buffers are not changed; use pgtrickle.convert_buffers_to_unlogged() \
+           to convert them. Default: false (crash-safe, WAL-logged).",
+        &PGS_UNLOGGED_BUFFERS,
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1014,8 +1094,11 @@ pub fn pg_trickle_cleanup_use_truncate() -> bool {
 }
 
 /// Returns whether MERGE planner hints are enabled.
+///
+/// C4: Returns the value of `planner_aggressive`. The legacy
+/// `merge_planner_hints` GUC is ignored at runtime.
 pub fn pg_trickle_merge_planner_hints() -> bool {
-    PGS_MERGE_PLANNER_HINTS.get()
+    PGS_PLANNER_AGGRESSIVE.get()
 }
 
 /// Returns the work_mem value (in MB) for large-delta MERGE.
@@ -1208,6 +1291,12 @@ pub fn pg_trickle_delta_amplification_threshold() -> f64 {
     PGS_DELTA_AMPLIFICATION_THRESHOLD.get()
 }
 
+/// DIAG-2: Returns the algebraic aggregate cardinality warning threshold.
+/// Returns 0 when the warning is disabled.
+pub fn pg_trickle_agg_diff_cardinality_threshold() -> i32 {
+    PGS_AGG_DIFF_CARDINALITY_THRESHOLD.get()
+}
+
 /// G13-SD: Returns the maximum recursion depth for query parser visitors.
 pub fn pg_trickle_max_parse_depth() -> usize {
     PGS_MAX_PARSE_DEPTH.get() as usize
@@ -1221,6 +1310,11 @@ pub fn pg_trickle_event_driven_wake() -> bool {
 /// WAKE-1: Returns the debounce interval in milliseconds.
 pub fn pg_trickle_wake_debounce_ms() -> i32 {
     PGS_WAKE_DEBOUNCE_MS.get()
+}
+
+/// D-1a: Returns whether new change buffer tables should be created UNLOGGED.
+pub fn pg_trickle_unlogged_buffers() -> bool {
+    PGS_UNLOGGED_BUFFERS.get()
 }
 
 #[cfg(test)]

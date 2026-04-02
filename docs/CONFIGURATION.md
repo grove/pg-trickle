@@ -23,7 +23,8 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.slot\_lag\_critical\_threshold\_mb](#pg_trickleslot_lag_critical_threshold_mb)
   - [Refresh Performance](#refresh-performance)
     - [pg\_trickle.differential\_max\_change\_ratio](#pg_trickledifferential_max_change_ratio)
-    - [pg\_trickle.merge\_planner\_hints](#pg_tricklemerge_planner_hints)
+    - [pg\_trickle.planner\_aggressive](#pg_trickleplanner_aggressive)
+    - [pg\_trickle.merge\_planner\_hints](#pg_tricklemerge_planner_hints) *(deprecated)*
     - [pg\_trickle.merge\_work\_mem\_mb](#pg_tricklemerge_work_mem_mb)
     - [pg\_trickle.merge\_seqscan\_threshold](#pg_tricklemerge_seqscan_threshold)
     - [pg\_trickle.auto\_backoff](#pg_trickleauto_backoff)
@@ -432,7 +433,35 @@ SET pg_trickle.cleanup_use_truncate = false;
 
 ---
 
+### pg_trickle.planner_aggressive
+
+*Added in v0.14.0.* Consolidated switch for all MERGE planner hints. Replaces the deprecated `merge_planner_hints` and `merge_work_mem_mb` GUCs.
+
+| Property | Value |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+When enabled, the refresh executor estimates the delta size and applies optimizer hints within the transaction:
+- **Delta ≥ 100 rows**: `SET LOCAL enable_nestloop = off` — forces hash joins instead of nested-loop joins.
+- **Delta ≥ 10,000 rows**: additionally `SET LOCAL work_mem = '<N>MB'` (see [pg_trickle.merge_work_mem_mb](#pg_tricklemerge_work_mem_mb)).
+
+**Tuning Guidance:**
+- **Most workloads**: Leave at `true` — the hints improve tail latency without affecting small deltas.
+- **Custom plan overrides**: Set to `false` if you manage planner settings yourself or if the hints conflict with your `pg_hint_plan` configuration.
+
+```sql
+-- Disable all planner hints
+SET pg_trickle.planner_aggressive = false;
+```
+
+---
+
 ### pg_trickle.merge_planner_hints
+
+> **Deprecated in v0.14.0.** Use [`pg_trickle.planner_aggressive`](#pg_trickleplanner_aggressive) instead. This GUC is still accepted for backward compatibility but is ignored at runtime.
 
 Inject `SET LOCAL` planner hints before MERGE execution during differential refresh.
 
@@ -847,6 +876,44 @@ memory exhaustion during parsing. Users who genuinely need more than
 -- Allow up to 128 grouping set branches
 SET pg_trickle.max_grouping_set_branches = 128;
 ```
+
+---
+
+### pg_trickle.unlogged_buffers
+
+Create new change buffer tables as `UNLOGGED` to reduce WAL amplification
+from CDC trigger inserts.
+
+| Value | Behaviour |
+|-------|----------|
+| `false` | **(Default)** Change buffers are WAL-logged. Crash-safe — no data loss on crash recovery. |
+| `true` | New change buffers are created as `UNLOGGED`. Eliminates WAL writes for trigger-inserted rows, reducing WAL amplification by ~30%. **Trade-off:** buffers are truncated on crash recovery; affected stream tables automatically receive a FULL refresh on the next scheduler cycle. |
+
+**Default:** `false`
+**Context:** `SUSET` (superuser session-level)
+
+```sql
+-- Enable UNLOGGED buffers for new stream tables
+SET pg_trickle.unlogged_buffers = true;
+```
+
+> **Crash recovery:** After a PostgreSQL crash or standby restart, UNLOGGED
+> buffer tables are automatically truncated by PostgreSQL. The pg_trickle
+> scheduler detects this condition and enqueues a FULL refresh for each
+> affected stream table on the next tick. During the window between crash
+> recovery and FULL refresh completion, stream table data may be stale.
+
+> **Standby replicas:** UNLOGGED tables are not replicated to standbys.
+> Stream tables on read replicas will be stale after any standby restart
+> until the next FULL refresh completes on the primary.
+
+> **Converting existing buffers:** This GUC only affects *newly created*
+> change buffer tables. To convert existing logged buffers, use:
+> ```sql
+> SELECT pgtrickle.convert_buffers_to_unlogged();
+> ```
+> This function acquires `ACCESS EXCLUSIVE` lock on each buffer table.
+> Run it during a low-traffic maintenance window.
 
 ---
 

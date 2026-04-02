@@ -250,7 +250,7 @@ async fn test_staleness_reflects_last_refresh_at_after_refresh() {
     // even though data_timestamp was artificially set 2 hours in the past before the refresh.
     let staleness_secs: f64 = db
         .query_scalar(
-            "SELECT EXTRACT(EPOCH FROM staleness) \
+            "SELECT EXTRACT(EPOCH FROM staleness)::float8 \
              FROM pgtrickle.stream_tables_info WHERE pgt_name = 'mon_lrat_st'",
         )
         .await;
@@ -357,7 +357,7 @@ async fn test_pg_stat_stream_tables_nodata_not_stale() {
 
     let staleness_secs: f64 = db
         .query_scalar(
-            "SELECT EXTRACT(EPOCH FROM staleness) \
+            "SELECT EXTRACT(EPOCH FROM staleness)::float8 \
              FROM pgtrickle.pg_stat_stream_tables WHERE pgt_name = 'mon_pgstat_nd_st'",
         )
         .await;

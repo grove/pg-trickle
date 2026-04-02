@@ -984,6 +984,29 @@ fn validate_and_parse_query(
         }
     }
 
+    // DIAG-2: Warn when algebraic aggregates are used with low-cardinality
+    // GROUP BY columns — the DIFFERENTIAL overhead may not be justified.
+    // (Placeholder — actual check runs after source_relids is computed below.)
+    let diag2_info: Option<(Vec<String>, Vec<String>, i32)> = {
+        let threshold = crate::config::pg_trickle_agg_diff_cardinality_threshold();
+        if threshold > 0 {
+            if let Some(ref pr) = parsed_tree {
+                let alg_names = pr.tree.algebraic_aggregate_names();
+                if !alg_names.is_empty() {
+                    pr.tree
+                        .group_by_columns()
+                        .map(|gc| (alg_names, gc, threshold))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     let needs_pgt_count = parsed_tree
         .as_ref()
         .is_some_and(|pr| pr.tree.needs_pgt_count());
@@ -996,6 +1019,26 @@ fn validate_and_parse_query(
 
     // Extract source dependencies
     let source_relids = normalize_source_relations(extract_source_relations(q)?);
+
+    // DIAG-2: Now that source_relids is available, emit the low-cardinality warning.
+    if let Some((alg_names, group_cols, threshold)) = diag2_info {
+        let estimated_groups = estimate_group_cardinality(&source_relids, &group_cols);
+        if let Some(est) = estimated_groups
+            && est > 0
+            && est < threshold as i64
+        {
+            pgrx::warning!(
+                "pg_trickle: DIFFERENTIAL mode with algebraic aggregates [{}] \
+                 and estimated GROUP BY cardinality {} (below threshold {}). \
+                 Consider refresh_mode='full' or 'auto' for low-cardinality \
+                 groupings. Adjust pg_trickle.agg_diff_cardinality_threshold \
+                 to tune this warning.",
+                alg_names.join(", "),
+                est,
+                threshold,
+            );
+        }
+    }
 
     // EC-06: Detect keyless sources
     let has_keyless_source = source_relids.iter().any(|(oid, source_type)| {
@@ -3041,6 +3084,28 @@ fn alter_stream_table_impl(
             )));
         }
         let normalized = tier_str.to_lowercase();
+
+        // C-1b: Emit NOTICE when demoting from Hot to Cold or Frozen so
+        // operators are aware their configured interval will be multiplied.
+        let old_tier = RefreshTier::from_sql_str(&st.refresh_tier);
+        let new_tier = RefreshTier::from_sql_str(&normalized);
+        if old_tier == RefreshTier::Hot
+            && matches!(new_tier, RefreshTier::Cold | RefreshTier::Frozen)
+        {
+            let msg = match new_tier {
+                RefreshTier::Cold => format!(
+                    "stream table {}.{} demoted from hot to cold — effective refresh interval is now 10× the configured schedule",
+                    st.pgt_schema, st.pgt_name
+                ),
+                RefreshTier::Frozen => format!(
+                    "stream table {}.{} demoted from hot to frozen — refresh is suspended until the tier is changed back",
+                    st.pgt_schema, st.pgt_name
+                ),
+                _ => unreachable!(),
+            };
+            pgrx::notice!("{}", msg);
+        }
+
         StreamTableMeta::update_refresh_tier(st.pgt_id, &normalized)?;
     }
 
@@ -3118,6 +3183,19 @@ fn alter_stream_table_impl(
     shmem::signal_dag_invalidation(st.pgt_id);
     // G8.1: Notify other backends to flush delta/MERGE template caches.
     shmem::bump_cache_generation();
+
+    // ERR-1c: Clear error state when a pipeline-regenerating alter succeeds.
+    // This lets ALTER STREAM TABLE with a fixed query reset an ERROR table.
+    if st.status == StStatus::Error {
+        let _ = StreamTableMeta::clear_error_state(st.pgt_id);
+        let _ = StreamTableMeta::update_status(st.pgt_id, StStatus::Active);
+        Spi::run_with_args(
+            "UPDATE pgtrickle.pgt_stream_tables SET consecutive_errors = 0, updated_at = now() WHERE pgt_id = $1",
+            &[st.pgt_id.into()],
+        )
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+    }
+
     Ok(())
 }
 
@@ -3297,7 +3375,8 @@ fn resume_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
 
     Spi::run_with_args(
         "UPDATE pgtrickle.pgt_stream_tables \
-         SET status = 'ACTIVE', consecutive_errors = 0, updated_at = now() \
+         SET status = 'ACTIVE', consecutive_errors = 0, \
+         last_error_message = NULL, last_error_at = NULL, updated_at = now() \
          WHERE pgt_id = $1",
         &[st.pgt_id.into()],
     )
@@ -3348,12 +3427,17 @@ fn refresh_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
     let st = StreamTableMeta::get_by_name(&schema, &table_name)?;
 
-    // Phase 10: Check if ST is suspended — refuse manual refresh
-    if st.status == StStatus::Suspended {
+    // Phase 10: Check if ST is suspended or in error — refuse manual refresh
+    if st.status == StStatus::Suspended || st.status == StStatus::Error {
         return Err(PgTrickleError::InvalidArgument(format!(
-            "stream table {}.{} is suspended; use pgtrickle.resume_stream_table('{}') first",
+            "stream table {}.{} is {} ; use pgtrickle.resume_stream_table('{}') first",
             schema,
             table_name,
+            if st.status == StStatus::Suspended {
+                "suspended"
+            } else {
+                "in error state"
+            },
             if schema == "public" {
                 table_name.clone()
             } else {
@@ -3889,13 +3973,6 @@ fn execute_manual_differential_refresh(
 ) -> Result<(), PgTrickleError> {
     // If the ST has never been refreshed (frontier is None), fall back to
     // a FULL refresh to establish the baseline frontier.
-    //
-    // NOTE: we check `st.frontier.is_none()` rather than
-    // `prev_frontier.is_empty()` because STs whose sources are other stream
-    // tables (not raw tables) produce frontiers with `sources = {}` — those
-    // frontiers are non-default but still "empty" in the WAL-source sense.
-    // Without this distinction the first manual refresh would ALWAYS be a
-    // full refresh for ST-on-ST, bumping data_timestamp on every call.
     if st.frontier.is_none() {
         pgrx::info!(
             "Stream table {}.{}: no previous frontier, performing FULL refresh first",
@@ -3907,27 +3984,23 @@ fn execute_manual_differential_refresh(
 
     let prev_frontier = st.frontier.clone().unwrap_or_default();
 
-    // For STs whose sources are all STREAM_TABLEs (frontier.sources is empty
-    // because there are no WAL change buffers to track), always do a FULL
-    // refresh so the data is guaranteed correct. The background scheduler
-    // may have done a partial FULL refresh (some upstream STs not yet
-    // refreshed) which cannot be detected reliably by comparing timestamps
-    // or change buffer LSNs alone.
+    // If the frontier exists but tracks zero sources, the ST was populated
+    // via FULL but never differentially refreshed. Fall back to FULL to
+    // establish proper source tracking.
     if prev_frontier.is_empty() {
         return execute_manual_full_refresh(st, schema, table_name, source_oids);
     }
 
     refresh::poll_foreign_table_sources_for_st(st)?;
 
-    // Mixed-dependency guard: if ANY upstream is a STREAM_TABLE, always do
-    // a FULL refresh.  The background scheduler may race with manual
-    // refreshes of upstream STs, producing a FULL refresh of this ST from
-    // partially-updated upstream data. Because the scheduler's frontier
-    // captures the latest change buffer LSN at the time of its refresh,
-    // there is no reliable after-the-fact signal to distinguish "scheduler
-    // correctly consumed all changes" from "scheduler read stale upstream
-    // data."  Unconditionally re-running the FULL refresh guarantees that
-    // the manual refresh always returns correct data.
+    // ST-source guard: if ANY upstream dependency is a STREAM_TABLE, always
+    // fall back to a FULL refresh.  The manual FULL refresh path
+    // (`execute_manual_full_refresh`) does not populate ST change buffers
+    // (`changes_pgt_`), so a downstream DIFFERENTIAL refresh would see an
+    // empty change buffer and silently skip real changes.
+    // The background scheduler handles this correctly (via
+    // `capture_full_refresh_diff_to_st_buffer`), but the manual path
+    // does not, so we must force FULL here.
     {
         let deps = StDependency::get_for_st(st.pgt_id).unwrap_or_default();
         let has_st_source = deps.iter().any(|dep| dep.source_type == "STREAM_TABLE");
@@ -3936,7 +4009,7 @@ fn execute_manual_differential_refresh(
         }
     }
 
-    // Get current WAL positions (reuses source_oids from caller — G-N3)
+    // Get current WAL positions for non-ST sources (reuses source_oids — G-N3)
     let slot_positions = cdc::get_slot_positions(source_oids)?;
     let data_ts = get_data_timestamp_str();
     let new_frontier = version::compute_new_frontier(&slot_positions, &data_ts);
@@ -6516,6 +6589,78 @@ fn normalize_source_relations(
         .collect()
 }
 
+/// DIAG-2: Estimate the GROUP BY cardinality from pg_stats.n_distinct.
+///
+/// Queries `pg_stats` for the GROUP BY columns on any source table. Returns
+/// the minimum `n_distinct` value across all matched columns (conservative
+/// estimate of group count). Returns `None` if no statistics are available.
+fn estimate_group_cardinality(
+    source_relids: &[(pg_sys::Oid, String)],
+    group_cols: &[String],
+) -> Option<i64> {
+    if group_cols.is_empty() || source_relids.is_empty() {
+        return None;
+    }
+
+    let mut min_distinct: Option<i64> = None;
+
+    for (oid, _) in source_relids {
+        // Look up schema.table_name for this OID.
+        let schema_table: Option<(String, String)> = Spi::connect(|client| {
+            let tbl = client
+                .select(
+                    "SELECT n.nspname::text, c.relname::text \
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE c.oid = $1",
+                    None,
+                    &[(*oid).into()],
+                )
+                .ok()?;
+            if tbl.is_empty() {
+                return None;
+            }
+            let schema = tbl.get::<String>(1).ok()??;
+            let name = tbl.get::<String>(2).ok()??;
+            Some((schema, name))
+        });
+
+        if let Some((schema, table_name)) = schema_table {
+            for col in group_cols {
+                let n_distinct: Option<f32> = Spi::get_one_with_args::<f32>(
+                    "SELECT n_distinct FROM pg_stats \
+                     WHERE schemaname = $1 AND tablename = $2 AND attname = $3",
+                    &[
+                        schema.clone().into(),
+                        table_name.clone().into(),
+                        col.clone().into(),
+                    ],
+                )
+                .unwrap_or(None);
+
+                if let Some(nd) = n_distinct {
+                    // In pg_stats, n_distinct > 0 means absolute count,
+                    // n_distinct < 0 means fraction of reltuples (e.g. -0.5 = 50%).
+                    let effective = if nd > 0.0 {
+                        nd as i64
+                    } else {
+                        // Estimate using reltuples.
+                        let reltuples: f32 = Spi::get_one_with_args::<f32>(
+                            "SELECT reltuples FROM pg_class WHERE oid = $1",
+                            &[(*oid).into()],
+                        )
+                        .unwrap_or(Some(0.0))
+                        .unwrap_or(0.0);
+                        ((-nd) * reltuples).max(1.0) as i64
+                    };
+                    min_distinct = Some(min_distinct.map_or(effective, |m: i64| m.min(effective)));
+                }
+            }
+        }
+    }
+
+    min_distinct
+}
+
 /// Check for cycles after adding the proposed dependency edges.
 ///
 /// Loads the existing DAG from the catalog, adds the proposed edges,
@@ -7376,6 +7521,376 @@ fn find_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
 
 /// Restore stream tables from catalog entries after pg_restore.
 ///
+/// D-1c: Convert all existing logged change buffer tables to UNLOGGED.
+///
+/// Iterates all `pgtrickle_changes.changes_*` tables and converts any that
+/// are currently WAL-logged (`relpersistence = 'p'`) to UNLOGGED (`'u'`).
+/// Each conversion acquires `ACCESS EXCLUSIVE` lock on the buffer table,
+/// so this function should be run during a low-traffic maintenance window.
+///
+/// Returns the number of buffer tables converted.
+///
+/// **Warning:** After conversion, buffer contents will be lost on crash
+/// recovery. The scheduler will automatically schedule a FULL refresh for
+/// affected stream tables after a crash (see D-1b).
+#[pg_extern(schema = "pgtrickle")]
+fn convert_buffers_to_unlogged() -> Result<i64, PgTrickleError> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema();
+
+    // Find all logged buffer tables in the change schema.
+    let logged_buffers: Vec<String> = Spi::connect(|client| {
+        let table = client
+            .select(
+                &format!(
+                    "SELECT c.relname::text \
+                     FROM pg_class c \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = '{schema}' \
+                       AND c.relname LIKE 'changes\\_%' \
+                       AND c.relpersistence = 'p' \
+                       AND c.relkind IN ('r', 'p')",
+                    schema = change_schema,
+                ),
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut names = Vec::new();
+        for row in table {
+            if let Some(name) = row.get::<String>(1).ok().flatten() {
+                names.push(name);
+            }
+        }
+        Ok::<_, PgTrickleError>(names)
+    })?;
+
+    if logged_buffers.is_empty() {
+        pgrx::notice!("no logged change buffer tables found — nothing to convert");
+        return Ok(0);
+    }
+
+    let mut converted = 0i64;
+    for table_name in &logged_buffers {
+        let sql = format!(
+            "ALTER TABLE {schema}.{table} SET UNLOGGED",
+            schema = change_schema,
+            table = table_name,
+        );
+        match Spi::run(&sql) {
+            Ok(()) => {
+                converted += 1;
+                pgrx::notice!("converted {}.{} to UNLOGGED", change_schema, table_name,);
+            }
+            Err(e) => {
+                pgrx::warning!(
+                    "failed to convert {}.{} to UNLOGGED: {}",
+                    change_schema,
+                    table_name,
+                    e,
+                );
+            }
+        }
+    }
+
+    pgrx::notice!(
+        "converted {} of {} change buffer tables to UNLOGGED",
+        converted,
+        logged_buffers.len(),
+    );
+
+    Ok(converted)
+}
+
+// ── DIAG-1c: recommend_refresh_mode() ─────────────────────────────────────
+
+/// DIAG-1c: Analyze stream table refresh characteristics and recommend the
+/// optimal refresh mode (FULL vs DIFFERENTIAL).
+///
+/// When `st_name` is NULL, returns one row per active stream table.
+/// When provided, returns a single row for the named stream table (schema-qualified
+/// or search-path resolved).
+///
+/// Read-only — no side effects.
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "recommend_refresh_mode")]
+fn recommend_refresh_mode(
+    st_name: default!(Option<String>, "NULL"),
+) -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(pgt_schema, String),
+            name!(pgt_name, String),
+            name!(current_mode, String),
+            name!(effective_mode, Option<String>),
+            name!(recommended_mode, String),
+            name!(confidence, String),
+            name!(reason, String),
+            name!(signals, pgrx::JsonB),
+        ),
+    >,
+    PgTrickleError,
+> {
+    use crate::diagnostics;
+
+    let stream_tables = match st_name {
+        Some(name) => {
+            let (schema, table) = parse_qualified_name(&name)?;
+            let st = StreamTableMeta::get_by_name(&schema, &table)?;
+            vec![st]
+        }
+        None => StreamTableMeta::get_all()?,
+    };
+
+    let mut rows = Vec::new();
+    for st in &stream_tables {
+        let input = diagnostics::gather_all_signals(st);
+        let signals = diagnostics::collect_signals(&input);
+
+        // Effective mode: what actually ran last time
+        let effective = Spi::get_one_with_args::<String>(
+            "SELECT action FROM pgtrickle.pgt_refresh_history \
+             WHERE pgt_id = $1 AND status = 'COMPLETED' \
+             ORDER BY start_time DESC LIMIT 1",
+            &[st.pgt_id.into()],
+        )
+        .unwrap_or(None);
+
+        let rec = diagnostics::compute_recommendation(&signals, effective.as_deref());
+
+        // Build signals JSONB
+        let signals_json = build_signals_json(&input, &rec);
+
+        rows.push((
+            st.pgt_schema.clone(),
+            st.pgt_name.clone(),
+            st.refresh_mode.as_str().to_string(),
+            effective,
+            rec.recommended_mode.to_string(),
+            rec.confidence.to_string(),
+            rec.reason,
+            pgrx::JsonB(signals_json),
+        ));
+    }
+
+    Ok(TableIterator::new(rows))
+}
+
+/// Build the JSONB signals payload for recommend_refresh_mode output.
+fn build_signals_json(
+    input: &crate::diagnostics::DiagnosticsInput,
+    rec: &crate::diagnostics::Recommendation,
+) -> serde_json::Value {
+    let signal_array: Vec<serde_json::Value> = rec
+        .signals
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "score": s.score,
+                "weight": s.weight,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "change_ratio_current": input.change_ratio_current,
+        "change_ratio_avg": input.change_ratio_avg,
+        "diff_avg_ms": input.diff_avg_ms,
+        "full_avg_ms": input.full_avg_ms,
+        "diff_p95_ms": input.diff_p95_ms,
+        "target_size_bytes": input.target_size_bytes,
+        "join_count": input.join_count,
+        "has_covering_index": input.has_covering_index,
+        "history_rows_diff": input.history_rows_diff,
+        "history_rows_full": input.history_rows_full,
+        "composite_score": rec.composite_score,
+        "signals": signal_array,
+    })
+}
+
+// ── DIAG-1d: refresh_efficiency ───────────────────────────────────────────
+
+/// DIAG-1d: Per-table refresh efficiency metrics.
+///
+/// Returns operational metrics for each stream table: FULL vs DIFFERENTIAL
+/// timing, change ratios, speedup factor, and refresh counts. Suitable for
+/// monitoring dashboards and Grafana alerts.
+#[allow(clippy::type_complexity)]
+#[pg_extern(schema = "pgtrickle", name = "refresh_efficiency")]
+fn refresh_efficiency() -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(pgt_schema, String),
+            name!(pgt_name, String),
+            name!(refresh_mode, String),
+            name!(total_refreshes, i64),
+            name!(diff_count, i64),
+            name!(full_count, i64),
+            name!(avg_diff_ms, Option<f64>),
+            name!(avg_full_ms, Option<f64>),
+            name!(avg_change_ratio, Option<f64>),
+            name!(diff_speedup, Option<String>),
+            name!(last_refresh_at, Option<String>),
+        ),
+    >,
+    PgTrickleError,
+> {
+    use crate::diagnostics;
+
+    let stream_tables = StreamTableMeta::get_all()?;
+    let mut rows = Vec::new();
+
+    for st in &stream_tables {
+        let history = diagnostics::gather_history_stats(st.pgt_id);
+
+        let speedup = match (history.diff_avg_ms, history.full_avg_ms) {
+            (Some(diff), Some(full)) if diff > 0.0 => Some(format!("{:.1}x", full / diff)),
+            _ => None,
+        };
+
+        let last_refresh = st.data_timestamp.map(|ts| format!("{}", ts));
+
+        rows.push((
+            st.pgt_schema.clone(),
+            st.pgt_name.clone(),
+            st.refresh_mode.as_str().to_string(),
+            history.total_rows,
+            history.diff_count,
+            history.full_count,
+            history.diff_avg_ms,
+            history.full_avg_ms,
+            history.avg_change_ratio,
+            speedup,
+            last_refresh,
+        ));
+    }
+
+    Ok(TableIterator::new(rows))
+}
+
+// ── G15-EX: export_definition() ───────────────────────────────────────────
+
+/// G15-EX: Export a stream table's configuration as reproducible DDL.
+///
+/// Returns a `DROP STREAM TABLE IF EXISTS` + `CREATE STREAM TABLE ... WITH (...)`
+/// statement that can recreate the stream table from scratch.
+#[pg_extern(schema = "pgtrickle", name = "export_definition")]
+fn export_definition(st_name: &str) -> Result<String, PgTrickleError> {
+    let (schema, table) = parse_qualified_name(st_name)?;
+    let st = StreamTableMeta::get_by_name(&schema, &table)?;
+
+    let qualified = format!("{}.{}", quote_ident(&schema), quote_ident(&table));
+
+    let mut ddl = format!("DROP STREAM TABLE IF EXISTS {};\n", qualified);
+
+    ddl.push_str(&format!(
+        "SELECT pgtrickle.create_stream_table(\n  '{}'::text,\n  $pgt${}$pgt$::text",
+        qualified.replace('\'', "''"),
+        st.defining_query,
+    ));
+
+    // Optional parameters
+    if let Some(ref schedule) = st.schedule {
+        ddl.push_str(&format!(
+            ",\n  schedule => '{}'",
+            schedule.replace('\'', "''")
+        ));
+    }
+
+    ddl.push_str(&format!(
+        ",\n  refresh_mode => '{}'",
+        st.refresh_mode.as_str()
+    ));
+
+    if let Some(ref cdc) = st.requested_cdc_mode {
+        ddl.push_str(&format!(",\n  cdc_mode => '{}'", cdc));
+    }
+
+    if st.is_append_only {
+        ddl.push_str(",\n  append_only => true");
+    }
+
+    if st.pooler_compatibility_mode {
+        ddl.push_str(",\n  pooler_compatibility_mode => true");
+    }
+
+    if let Some(ref pk) = st.st_partition_key {
+        ddl.push_str(&format!(
+            ",\n  partition_by => '{}'",
+            pk.replace('\'', "''")
+        ));
+    }
+
+    if let Some(mdj) = st.max_differential_joins {
+        ddl.push_str(&format!(",\n  max_differential_joins => {}", mdj));
+    }
+
+    if let Some(mdf) = st.max_delta_fraction {
+        ddl.push_str(&format!(",\n  max_delta_fraction => {}", mdf));
+    }
+
+    let dc = st.diamond_consistency.as_str();
+    if dc != "none" {
+        ddl.push_str(&format!(",\n  diamond_consistency => '{}'", dc));
+    }
+
+    let dsp = st.diamond_schedule_policy.as_str();
+    if dsp != "fastest" {
+        ddl.push_str(&format!(",\n  diamond_schedule_policy => '{}'", dsp));
+    }
+
+    ddl.push_str("\n);\n");
+
+    // Post-creation settings via ALTER
+    let mut alters = Vec::new();
+
+    if st.refresh_tier != "hot" {
+        alters.push(format!("tier => '{}'", st.refresh_tier));
+    }
+
+    if st.fuse_mode != "off" {
+        alters.push(format!("fuse => '{}'", st.fuse_mode));
+    }
+
+    if let Some(ceiling) = st.fuse_ceiling {
+        alters.push(format!("fuse_ceiling => {}", ceiling));
+    }
+
+    if let Some(sensitivity) = st.fuse_sensitivity {
+        alters.push(format!("fuse_sensitivity => {}", sensitivity));
+    }
+
+    if !alters.is_empty() {
+        ddl.push_str(&format!(
+            "\nSELECT pgtrickle.alter_stream_table('{}', {});\n",
+            qualified.replace('\'', "''"),
+            alters.join(", "),
+        ));
+    }
+
+    Ok(ddl)
+}
+
+/// Quote an identifier for safe use in SQL.
+fn quote_ident(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
 /// During a `pg_restore`, `pg_dump` will restore the base storage tables and
 /// the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers
 /// and internal wiring will be missing. This function re-establishes them.
@@ -8072,6 +8587,8 @@ mod tests {
             st_partition_key: None,
             max_differential_joins: None,
             max_delta_fraction: None,
+            last_error_message: None,
+            last_error_at: None,
         }
     }
 

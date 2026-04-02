@@ -242,9 +242,9 @@ async fn test_stream_tables_info_view() {
 
     db.execute(
         "INSERT INTO pgtrickle.pgt_stream_tables
-            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp)
+            (pgt_relid, pgt_name, pgt_schema, defining_query, schedule, refresh_mode, status, data_timestamp, last_refresh_at)
          VALUES
-            ((SELECT 'src_info'::regclass::oid), 'info_st', 'public', 'SELECT 1', '1m', 'FULL', 'ACTIVE', now() - interval '30 seconds')"
+            ((SELECT 'src_info'::regclass::oid), 'info_st', 'public', 'SELECT 1', '1m', 'FULL', 'ACTIVE', now() - interval '30 seconds', now() - interval '30 seconds')"
     ).await;
 
     // Check the view exists and returns data

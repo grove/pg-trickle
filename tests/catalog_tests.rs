@@ -361,7 +361,7 @@ async fn test_staleness_uses_last_refresh_at_not_data_timestamp() {
 
     let staleness_secs: f64 = db
         .query_scalar(
-            "SELECT EXTRACT(EPOCH FROM staleness) \
+            "SELECT EXTRACT(EPOCH FROM staleness)::float8 \
              FROM pgtrickle.stream_tables_info WHERE pgt_name = 'nodata_st'",
         )
         .await;
@@ -467,7 +467,7 @@ async fn test_stale_null_when_last_refresh_at_is_null() {
 
     let staleness: Option<f64> = db
         .query_scalar_opt(
-            "SELECT EXTRACT(EPOCH FROM staleness) \
+            "SELECT EXTRACT(EPOCH FROM staleness)::float8 \
              FROM pgtrickle.stream_tables_info WHERE pgt_name = 'never_st'",
         )
         .await;
@@ -546,7 +546,7 @@ async fn test_pg_stat_stream_tables_nodata_not_stale() {
 
     let staleness_secs: f64 = db
         .query_scalar(
-            "SELECT EXTRACT(EPOCH FROM staleness) \
+            "SELECT EXTRACT(EPOCH FROM staleness)::float8 \
              FROM pgtrickle.pg_stat_stream_tables WHERE pgt_name = 'pgstat_nodata_st'",
         )
         .await;

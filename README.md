@@ -347,17 +347,48 @@ SELECT * FROM pgtrickle.change_buffer_sizes();  -- CDC buffer health
 SELECT pgtrickle.drop_stream_table('regional_totals');
 ```
 
+## Terminal UI & CLI
+
+pg_trickle ships a standalone terminal tool (`pgtrickle`) for managing and
+monitoring stream tables from outside SQL. It works as both an interactive
+dashboard and a scriptable CLI. See **[docs/TUI.md](docs/TUI.md)** for the
+full user guide.
+
+```bash
+# Build (requires Rust toolchain, not the PG extension)
+cargo build --release -p pgtrickle-tui
+
+# Interactive dashboard (auto-refresh every 2s)
+pgtrickle --url postgres://user:pass@host:5432/mydb
+
+# One-shot CLI (for scripts, CI, monitoring)
+pgtrickle list --format json
+pgtrickle health                        # exit code 1 on critical
+pgtrickle refresh order_totals
+pgtrickle explain order_totals --analyze
+pgtrickle watch -n 5                    # continuous output
+```
+
+18 subcommands: `list`, `status`, `refresh`, `create`, `drop`, `alter`,
+`export`, `diag`, `cdc`, `graph`, `config`, `health`, `workers`, `fuse`,
+`watermarks`, `explain`, `watch`, `completions`.
+
+13 interactive views: Dashboard, Detail, Dependencies, Refresh Log,
+Diagnostics, CDC Health, Configuration, Health Checks, Alerts, Workers,
+Fuse, Watermarks, and Delta Inspector.
+
 ## Documentation
 
 | Document | Description |
 |---|---|
 | [GETTING_STARTED.md](docs/GETTING_STARTED.md) | Hands-on tutorial building an org-chart with stream tables |
 | [INSTALL.md](INSTALL.md) | Detailed installation and configuration guide |
+| [docs/TUI.md](docs/TUI.md) | Terminal UI & CLI user guide — building, connecting, views, commands |
 | [docs/SQL_REFERENCE.md](docs/SQL_REFERENCE.md) | Complete SQL function reference |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and data flow |
 | [docs/DVM_OPERATORS.md](docs/DVM_OPERATORS.md) | Supported operators and differentiation rules |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | GUC variables and tuning guide |
-| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans (current milestone: v0.13.0) |
+| [ROADMAP.md](ROADMAP.md) | Release milestones and future plans |
 | [What Happens on INSERT](docs/tutorials/WHAT_HAPPENS_ON_INSERT.md) | Full 7-phase lifecycle of a single INSERT through the pipeline |
 | [What Happens on UPDATE](docs/tutorials/WHAT_HAPPENS_ON_UPDATE.md) | D+I split, group key changes, net-effect for multiple UPDATEs |
 | [What Happens on DELETE](docs/tutorials/WHAT_HAPPENS_ON_DELETE.md) | Reference counting, group deletion, INSERT+DELETE cancellation |
