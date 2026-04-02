@@ -86,6 +86,9 @@ jobs:
           PG_CONFIG_PATH="$(cargo pgrx info path pg18)/bin/pg_config"
           cargo pgrx package --pg-config "${PG_CONFIG_PATH}"
 
+      - name: Build pgtrickle TUI binary
+        run: cargo build --release -p pgtrickle-tui
+
       - name: Create archive (tar.gz)
         if: matrix.archive_ext == 'tar.gz'
         shell: bash
@@ -113,6 +116,9 @@ jobs:
 
           # Copy docs
           cp README.md LICENSE INSTALL.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
+
+          # Copy pgtrickle TUI binary
+          cp target/release/pgtrickle "dist/${ARCHIVE_NAME}/"
 
           cd dist
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
@@ -169,6 +175,9 @@ jobs:
 
           # Copy docs
           Copy-Item README.md, LICENSE, INSTALL.md "dist\${archiveName}\" -ErrorAction SilentlyContinue
+
+          # Copy pgtrickle TUI binary
+          Copy-Item "target\release\pgtrickle.exe" "dist\${archiveName}\"
 
           Compress-Archive -Path "dist\${archiveName}" -DestinationPath "dist\${archiveName}.zip"
           Write-Host "Archive: ${archiveName}.zip"
