@@ -7,8 +7,14 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::state::{AppState, StreamTableInfo};
 use crate::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, st_index: usize) {
-    let st = match state.stream_tables.get(st_index) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    st_index: Option<usize>,
+) {
+    let st = match st_index.and_then(|idx| state.stream_tables.get(idx)) {
         Some(st) => st,
         None => {
             let block = Block::default()

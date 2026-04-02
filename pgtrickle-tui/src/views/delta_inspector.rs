@@ -6,9 +6,15 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::state::AppState;
 use crate::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, selected: usize) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    selected: Option<usize>,
+) {
     // Show delta SQL for the selected stream table (if any).
-    let st = state.stream_tables.get(selected);
+    let st = selected.and_then(|idx| state.stream_tables.get(idx));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

@@ -154,6 +154,41 @@ impl App {
             .collect()
     }
 
+    /// Get filtered stream tables in the same sorted order the Dashboard uses.
+    fn filtered_sorted_stream_tables(&self) -> Vec<usize> {
+        let mut indices = self.filtered_stream_tables();
+        indices.sort_by(|&a, &b| {
+            let sa = &self.state.stream_tables[a];
+            let sb = &self.state.stream_tables[b];
+            let ord = |st: &crate::state::StreamTableInfo| -> u8 {
+                if st.status == "ERROR" || st.status == "SUSPENDED" {
+                    0
+                } else if st.cascade_stale {
+                    1
+                } else if st.stale {
+                    2
+                } else {
+                    3
+                }
+            };
+            ord(sa).cmp(&ord(sb)).then_with(|| sa.name.cmp(&sb.name))
+        });
+        indices
+    }
+
+    fn selected_stream_table_index(&self) -> Option<usize> {
+        self.filtered_sorted_stream_tables().get(self.selected).copied()
+    }
+
+    fn clamp_selection(&mut self) {
+        let len = self.list_len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
     fn list_len(&self) -> usize {
         match self.current_view {
             View::Dashboard | View::Detail | View::DeltaInspector => {
@@ -249,6 +284,7 @@ async fn run_app(
                     let alerts = std::mem::take(&mut app.state.alerts);
                     app.state = *new_state;
                     app.state.alerts = alerts;
+                    app.clamp_selection();
                 }
                 PollMsg::Error(e) => {
                     app.state.error_message = Some(e);
@@ -336,6 +372,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                     app.filter = Some(app.filter_input.clone());
                 }
                 app.filter_input.clear();
+                app.clamp_selection();
             }
             KeyCode::Backspace => {
                 app.filter_input.pop();
@@ -427,8 +464,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
 fn switch_view(app: &mut App, view: View) {
     if app.current_view != view {
+        let preserve_selection = matches!(app.current_view, View::Dashboard | View::Detail | View::DeltaInspector)
+            && matches!(view, View::Dashboard | View::Detail | View::DeltaInspector);
         app.current_view = view;
-        app.selected = 0;
+        if !preserve_selection {
+            app.selected = 0;
+        }
+        app.clamp_selection();
     }
 }
 
@@ -537,7 +579,13 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             app.selected,
             app.filter.as_deref(),
         ),
-        View::Detail => views::detail::render(frame, area, &app.state, &app.theme, app.selected),
+        View::Detail => views::detail::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected_stream_table_index(),
+        ),
         View::Graph => views::graph::render(frame, area, &app.state, &app.theme, app.selected),
         View::RefreshLog => {
             views::refresh_log::render(frame, area, &app.state, &app.theme, app.selected)
@@ -555,7 +603,13 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             views::watermarks::render(frame, area, &app.state, &app.theme, app.selected)
         }
         View::DeltaInspector => {
-            views::delta_inspector::render(frame, area, &app.state, &app.theme, app.selected)
+            views::delta_inspector::render(
+                frame,
+                area,
+                &app.state,
+                &app.theme,
+                app.selected_stream_table_index(),
+            )
         }
         View::Issues => views::issues::render(frame, area, &app.state, &app.theme, app.selected),
     }
