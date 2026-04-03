@@ -95,10 +95,16 @@ async fn test_permanent_error_sets_error_status_and_alter_clears() {
     assert_eq!(db.count("public.err1e_st").await, 1);
 
     // ── Inject permanent error: drop the column ──
-    // Disable the block-source-DDL guard to allow the ALTER TABLE
+    // Wrap DML + DDL in a single transaction so the CDC change and schema
+    // change become visible atomically.  The DML triggers CDC so the
+    // scheduler detects upstream changes and attempts a FULL refresh,
+    // which fails because the defining query references the dropped column.
     db.execute_seq(&[
-        "SET pg_trickle.block_source_ddl = false",
+        "BEGIN",
+        "INSERT INTO err1e_src(id, val, extra) VALUES (2, 'trigger_dml', 'z')",
+        "SET LOCAL pg_trickle.block_source_ddl = false",
         "ALTER TABLE err1e_src DROP COLUMN extra",
+        "COMMIT",
     ])
     .await;
 
@@ -161,11 +167,8 @@ async fn test_permanent_error_sets_error_status_and_alter_clears() {
         .await;
 
     // ALTER to a valid query (without the dropped 'extra' column)
-    db.alter_st(
-        "err1e_st",
-        "defining_query => 'SELECT id, val FROM err1e_src'",
-    )
-    .await;
+    db.alter_st("err1e_st", "query => 'SELECT id, val FROM err1e_src'")
+        .await;
 
     // ── Verify status is back to ACTIVE ──
     let (status, _, _, _) = db.pgt_status("err1e_st").await;
@@ -217,10 +220,14 @@ async fn test_error_columns_visible_in_info_view() {
     // Wait for initial population
     assert_eq!(db.count("public.err1e_view_st").await, 1);
 
-    // Inject permanent error
+    // Inject permanent error — wrap DML + DDL in a transaction so CDC
+    // captures a change atomically with the schema break.
     db.execute_seq(&[
-        "SET pg_trickle.block_source_ddl = false",
+        "BEGIN",
+        "INSERT INTO err1e_view_src(id, val) VALUES (2, 'trigger_dml')",
+        "SET LOCAL pg_trickle.block_source_ddl = false",
         "ALTER TABLE err1e_view_src DROP COLUMN val",
+        "COMMIT",
     ])
     .await;
 
@@ -261,10 +268,14 @@ async fn test_refresh_rejects_error_status() {
     )
     .await;
 
-    // Inject permanent error
+    // Inject permanent error — wrap DML + DDL in a transaction so CDC
+    // captures a change atomically with the schema break.
     db.execute_seq(&[
-        "SET pg_trickle.block_source_ddl = false",
+        "BEGIN",
+        "INSERT INTO err1e_rej_src(id, val) VALUES (2, 'trigger_dml')",
+        "SET LOCAL pg_trickle.block_source_ddl = false",
         "ALTER TABLE err1e_rej_src DROP COLUMN val",
+        "COMMIT",
     ])
     .await;
 
