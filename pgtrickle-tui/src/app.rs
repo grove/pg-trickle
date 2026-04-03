@@ -1822,10 +1822,17 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         // Context-sensitive key hints
         for view in &ALL_VIEWS {
             if *view == app.current_view {
-                spans.push(Span::styled(
-                    format!(" [{}]{} ", view.key_hint(), view.label()),
-                    app.theme.footer_active,
-                ));
+                let label = if *view == View::DeltaInspector {
+                    let table_suffix = app
+                        .selected_stream_table_index()
+                        .and_then(|idx| app.state.stream_tables.get(idx))
+                        .map(|st| format!(": {}.{}", st.schema, st.name))
+                        .unwrap_or_default();
+                    format!(" [{}]{}{} ", view.key_hint(), view.label(), table_suffix)
+                } else {
+                    format!(" [{}]{} ", view.key_hint(), view.label())
+                };
+                spans.push(Span::styled(label, app.theme.footer_active));
             } else {
                 spans.push(Span::styled(
                     format!(" {}-{} ", view.key_hint(), view.label()),
