@@ -2852,19 +2852,16 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **G15-BC subtotal: ✅ Completed**
 
-### Parser Modularization (G13-PRF)
+### Parser Modularization (G13-PRF) -- ✅ Done
 
-> **In plain terms:** At ~19,700 lines (25% of all source), `parser.rs` is
-> too large to maintain safely. This splits it into sub-modules by SQL
-> construct — no behavior change. Improves contributor onboarding, reduces
-> merge conflict risk, and is a **prerequisite for PG backward compatibility
-> (v0.16.0 BC2)** and **native DDL syntax (v0.16.0 NAT-1/NAT-2)**.
+> **In plain terms:** At ~21,000 lines, `parser.rs` was too large to maintain
+> safely. Split into 5 sub-modules by concern -- zero behavior change.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G13-PRF | **Modularize `src/dvm/parser.rs`.** Split into sub-modules by SQL construct: `parser/joins.rs`, `parser/aggregates.rs`, `parser/ctes.rs`, `parser/window.rs`, `parser/subqueries.rs`. No behavior change; prerequisite for BC2 (native DDL syntax) and PG backward compatibility. **Also:** audit all ~690 `unsafe` blocks and add missing `// SAFETY:` comments (only ~38 currently documented). | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G13-PRF | ~~**Modularize `src/dvm/parser.rs`.**~~ ✅ Done. Split into `mod.rs`, `types.rs`, `validation.rs`, `rewrites.rs`, `sublinks.rs`. Added `// SAFETY:` comments to all ~750 `unsafe` blocks (~676 newly documented). | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> **G13-PRF subtotal: ~3–4 weeks**
+> **G13-PRF subtotal: ✅ Completed**
 
 ### Watermark Hold-Back Mode (WM-7) -- ✅ Done
 
@@ -3089,7 +3086,7 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [x] At least one external test corpus (sqllogictest, JOB, or Nexmark) passes
 - [ ] Complete documentation review done
 - [ ] G15-BC: `pgtrickle.bulk_create(definitions JSONB)` creates all STs and CDC triggers atomically; tested with 10+ definitions in a single call
-- [ ] G13-PRF: `parser.rs` split into ≥5 sub-modules; zero behavior change; all existing tests pass
+- [x] G13-PRF: `parser.rs` split into 5 sub-modules; zero behavior change; all existing tests pass
 - [x] WM-7: Stuck watermarks detected and downstream STs paused; `watermark_stuck` alert emitted; auto-resume on watermark advance
 - [x] PH-E1: Delta cost estimation via capped COUNT on delta subquery; `max_delta_estimate_rows` GUC; FULL downgrade + NOTICE when threshold exceeded
 - [x] PH-E2: Spill-aware auto-adjustment triggers after 3 consecutive spills; `spill_info` exposed in `explain_st()`
@@ -3107,7 +3104,7 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [x] G8.1: Cross-session MERGE cache invalidation via catalog version counter; tested with concurrent ALTER QUERY + refresh
 - [x] EXPL-ENH: `explain_st()` shows refresh timing stats, source partition info, and dependency sub-graph (DOT format)
 - [x] R4: CNPG operator hardening — ImageVolume, health probes, failover tested
-- [ ] G13-PRF: `parser.rs` split into ≥5 sub-modules; all ~690 `unsafe` blocks have `// SAFETY:` comments; zero behavior change; all existing tests pass
+- [x] G13-PRF: `parser.rs` split into 5 sub-modules; all ~750 `unsafe` blocks have `// SAFETY:` comments; zero behavior change; all existing tests pass
 - [ ] Extension upgrade path tested (`0.14.0 → 0.15.0`)
 
 ---
@@ -3324,7 +3321,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| ~~G13-PRF~~ | ~~**Modularize `src/dvm/parser.rs`.**~~ ➡️ Pulled to v0.15.0 | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| ~~G13-PRF~~ | ~~**Modularize `src/dvm/parser.rs`.**~~ ✅ Done in v0.15.0 | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~G14-SHC~~ | ~~**Shared-memory template caching (research spike).**~~ ➡️ Pulled to v0.16.0 | ~2–3wk | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
 
 > **Parser modularization & caching research: ➡️ Pulled forward to v0.15.0/v0.16.0**

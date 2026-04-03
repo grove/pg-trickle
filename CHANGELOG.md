@@ -122,6 +122,14 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `pgtrickle.explain_st()` via the new `spill_info` property. Requires the
   `pg_stat_statements` extension.
 
+- **G13-PRF:** Parser modularization and unsafe audit. Split the monolithic
+  `src/dvm/parser.rs` (~21,000 lines) into 5 sub-modules: `mod.rs` (FFI helpers,
+  macros, entry points, tests), `types.rs` (OpTree, Expr, Column, etc.),
+  `validation.rs` (volatility checking, IVM support, IMMEDIATE, monotonicity),
+  `rewrites.rs` (all SQL rewrite passes), `sublinks.rs` (SubLink extraction from
+  WHERE clauses). Added `// SAFETY:` comments to all ~750 `unsafe` blocks (~676
+  newly documented). Zero behavior change -- all 1687 unit tests pass.
+
 ### Changed
 
 - **I2:** Complete documentation review for v0.15.0 readiness. Fixed `CONFIGURATION.md`
