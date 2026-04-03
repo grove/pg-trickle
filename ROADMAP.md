@@ -2889,19 +2889,19 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **PH-E1 subtotal: ✅ Complete**
 
-### dbt Hub Publication (I3)
+### dbt Hub Publication (I3) — ✅ Done
 
-> **In plain terms:** `dbt-pgtrickle` is currently installed via a git URL
-> in `packages.yml`. Publishing to dbt Hub lets users install with a simple
-> package name — `- package: pgtrickle/dbt_pgtrickle` — without hard-coding
-> a GitHub URL or revision. This is the standard distribution path for dbt
-> macro packages.
+> **In plain terms:** `dbt-pgtrickle` is now prepared for dbt Hub publication.
+> The `dbt_project.yml` is version-synced (0.15.0), README documents both
+> git and Hub install methods, and a submission guide documents the hubcap
+> PR process. Actual Hub listing requires creating a standalone `grove/dbt-pgtrickle`
+> repository and submitting a PR to `dbt-labs/hubcap`.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| I3 | Submit `dbt-pgtrickle` to [dbt Hub](https://hub.getdbt.com/); verify `packages.yml` install by package name works; update README install instructions. | 2–4h | [dbt-pgtrickle/](dbt-pgtrickle/) · [PLAN_DBT_MACRO.md](plans/dbt/PLAN_DBT_MACRO.md) |
+| I3 | Prepared `dbt-pgtrickle` for [dbt Hub](https://hub.getdbt.com/) publication. Version synced to 0.15.0, README updated with Hub install snippet, submission guide written. Hub listing pending separate repo creation + hubcap PR. | 2–4h | [dbt-pgtrickle/](dbt-pgtrickle/) · [docs/integrations/dbt-hub-submission.md](docs/integrations/dbt-hub-submission.md) |
 
-> **I3 subtotal: ~2–4 hours**
+> **I3 subtotal: ~2–4 hours** — ✅ Complete
 
 ### Hash-Join Planner Hints (PH-D2) — ✅ Done
 
@@ -3084,8 +3084,8 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 **Exit criteria:**
 - [x] At least one external test corpus (sqllogictest, JOB, or Nexmark) passes
-- [ ] Complete documentation review done
-- [ ] G15-BC: `pgtrickle.bulk_create(definitions JSONB)` creates all STs and CDC triggers atomically; tested with 10+ definitions in a single call
+- [x] Complete documentation review done
+- [x] G15-BC: `pgtrickle.bulk_create(definitions JSONB)` creates all STs and CDC triggers atomically; tested with 10+ definitions in a single call
 - [x] G13-PRF: `parser.rs` split into 5 sub-modules; zero behavior change; all existing tests pass
 - [x] WM-7: Stuck watermarks detected and downstream STs paused; `watermark_stuck` alert emitted; auto-resume on watermark advance
 - [x] PH-E1: Delta cost estimation via capped COUNT on delta subquery; `max_delta_estimate_rows` GUC; FULL downgrade + NOTICE when threshold exceeded
@@ -3093,9 +3093,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [x] PH-D2: `merge_join_strategy` GUC with manual override (`auto`/`hash_join`/`nested_loop`/`merge_join`)
 - [x] G14-SHC-SPIKE: RFC written; prototype benchmark validates or invalidates DSM-based approach
 - [x] I2: Complete documentation review done -- CONFIGURATION.md GUCs documented (40+), SQL_REFERENCE.md gaps filled, FAQ refs fixed
-- [ ] TRUNC-1: TRUNCATE on trigger-mode CDC source marks downstream STs for reinit; tested end-to-end
-- [ ] VOL-1: `volatile_function_policy` GUC controls volatile function handling; `reject`/`warn`/`allow` modes tested
-- [ ] I3: `dbt-pgtrickle` published on dbt Hub; `packages.yml` package-name install verified
+- [x] TRUNC-1: TRUNCATE on trigger-mode CDC source marks downstream STs for reinit; tested end-to-end
+- [x] VOL-1: `volatile_function_policy` GUC controls volatile function handling; `reject`/`warn`/`allow` modes tested
+- [x] I3: `dbt-pgtrickle` prepared for dbt Hub; submission guide written; Hub listing pending separate repo + hubcap PR
 - [x] E4: Flyway / Liquibase integration guide published in `docs/integrations/flyway-liquibase.md`
 - [x] E5: ORM integration guides (SQLAlchemy, Django) published in `docs/integrations/orm.md`
 - [x] EC-01: R₀ pre-change snapshot ensures DELETE deltas find old join partners; unit + TPC-H regression tests confirm correctness

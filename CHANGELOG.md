@@ -130,6 +130,13 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   WHERE clauses). Added `// SAFETY:` comments to all ~750 `unsafe` blocks (~676
   newly documented). Zero behavior change -- all 1687 unit tests pass.
 
+- **I3:** dbt Hub publication readiness. Updated `dbt-pgtrickle/dbt_project.yml`
+  version to 0.15.0 (synced with extension). Updated `dbt-pgtrickle/README.md` with
+  both git-based and dbt Hub installation methods, fixed GitHub org placeholder.
+  Added dbt integration section to root `README.md`. Created dbt Hub submission
+  guide (`docs/integrations/dbt-hub-submission.md`) documenting the hubcap PR
+  process, separate-repo approach, and version syncing workflow.
+
 ### Changed
 
 - **I2:** Complete documentation review for v0.15.0 readiness. Fixed `CONFIGURATION.md`
