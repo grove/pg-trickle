@@ -1178,8 +1178,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 });
             }
         }
-        KeyCode::Char('e') if app.current_view == View::Detail
-            || app.current_view == View::DeltaInspector =>
+        KeyCode::Char('e')
+            if app.current_view == View::Detail || app.current_view == View::DeltaInspector =>
         {
             // Export DDL overlay
             if let Some(idx) = app.selected_stream_table_index() {
@@ -2421,7 +2421,7 @@ mod tests {
         let mut app = app_with_data();
         app.filter = Some("ERROR".to_string());
         let indices = app.filtered_stream_tables();
-        assert!(indices.len() >= 1);
+        assert!(!indices.is_empty());
     }
 
     #[test]

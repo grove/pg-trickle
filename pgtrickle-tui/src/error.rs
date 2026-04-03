@@ -6,6 +6,7 @@ pub enum CliError {
     Connection(#[from] tokio_postgres::Error),
 
     #[error("connection failed: {0}")]
+    #[allow(dead_code)] // Used only with the `tls` feature
     ConnectionMsg(String),
 
     #[error("not found: {0}")]

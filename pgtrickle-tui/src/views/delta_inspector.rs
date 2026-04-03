@@ -66,10 +66,7 @@ fn render_delta_sql(
         if let Some(sql) = state.delta_sql_cache.get(&st.name) {
             // Render the actual delta SQL
             let mut lines = vec![
-                Line::styled(
-                    " Generated Delta SQL (Enter to reload):",
-                    theme.header,
-                ),
+                Line::styled(" Generated Delta SQL (Enter to reload):", theme.header),
                 Line::raw(""),
             ];
             for sql_line in sql.lines() {

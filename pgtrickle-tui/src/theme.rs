@@ -36,8 +36,7 @@ impl Theme {
             border: Style::default().fg(Color::DarkGray),
             warning: Style::default().fg(Color::Yellow),
             ok: Style::default().fg(Color::Green),
-            title: Style::default()
-                .add_modifier(Modifier::BOLD),
+            title: Style::default().add_modifier(Modifier::BOLD),
             footer: Style::default().fg(Color::DarkGray),
             footer_active: Style::default()
                 .add_modifier(Modifier::REVERSED)

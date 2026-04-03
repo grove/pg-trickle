@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_csv_escaping_with_comma() {
-        let rows = vec![TestRow {
+        let rows = [TestRow {
             name: "hello,world".to_string(),
             value: 42,
         }];
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_csv_escaping_with_quotes() {
-        let rows = vec![TestRow {
+        let rows = [TestRow {
             name: "say \"hello\"".to_string(),
             value: 1,
         }];
