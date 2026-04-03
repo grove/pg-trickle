@@ -3355,21 +3355,27 @@ fn alter_stream_table_impl(
 }
 
 /// Drop a stream table, removing the storage table and all catalog entries.
+///
+/// When `cascade` is `true` (the default) any downstream stream tables that
+/// depend on this one are automatically dropped first.  When `cascade` is
+/// `false` the function raises an error if any dependents exist, matching the
+/// behaviour of PostgreSQL's own `DROP TABLE … CASCADE | RESTRICT`.
 #[pg_extern(schema = "pgtrickle")]
-fn drop_stream_table(name: &str) {
-    let result = drop_stream_table_impl(name);
+fn drop_stream_table(name: &str, cascade: default!(bool, true)) {
+    let result = drop_stream_table_impl(name, cascade);
     if let Err(e) = result {
         raise_error_with_context(e);
     }
 }
 
-fn drop_stream_table_impl(name: &str) -> Result<(), PgTrickleError> {
+fn drop_stream_table_impl(name: &str, cascade: bool) -> Result<(), PgTrickleError> {
     let mut visited_pgt_ids = HashSet::new();
-    drop_stream_table_impl_inner(name, &mut visited_pgt_ids)
+    drop_stream_table_impl_inner(name, cascade, &mut visited_pgt_ids)
 }
 
 fn drop_stream_table_impl_inner(
     name: &str,
+    cascade: bool,
     visited_pgt_ids: &mut HashSet<i64>,
 ) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
@@ -3384,10 +3390,23 @@ fn drop_stream_table_impl_inner(
     // this ST's storage table.  We iterate by pgt_id to avoid re-querying
     // after each recursive drop changes the catalog.
     let downstream_ids = StDependency::get_downstream_pgt_ids(st.pgt_relid)?;
+    if !downstream_ids.is_empty() && !cascade {
+        let names: Vec<String> = downstream_ids
+            .iter()
+            .filter_map(|id| StreamTableMeta::get_by_id(*id).ok().flatten())
+            .map(|s| format!("{}.{}", s.pgt_schema, s.pgt_name))
+            .collect();
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "stream table {}.{} has dependent stream tables: {}. Use cascade => true to drop them automatically.",
+            schema,
+            table_name,
+            names.join(", ")
+        )));
+    }
     for downstream_id in downstream_ids {
         if let Some(downstream_st) = StreamTableMeta::get_by_id(downstream_id)? {
             let qualified = format!("{}.{}", downstream_st.pgt_schema, downstream_st.pgt_name);
-            drop_stream_table_impl_inner(&qualified, visited_pgt_ids)?;
+            drop_stream_table_impl_inner(&qualified, cascade, visited_pgt_ids)?;
         }
     }
 

@@ -265,7 +265,7 @@ $$;
 
 -- ── drop_stream_table() ───────────────────────────────────────────────────
 -- Used by: drop
-CREATE OR REPLACE FUNCTION pgtrickle.drop_stream_table(name text)
+CREATE OR REPLACE FUNCTION pgtrickle.drop_stream_table(name text, cascade boolean DEFAULT true)
 RETURNS void LANGUAGE sql AS $$
     SELECT
 $$;
