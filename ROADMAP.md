@@ -2862,7 +2862,7 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G13-PRF | **Modularize `src/dvm/parser.rs`.** Split into sub-modules by SQL construct: `parser/joins.rs`, `parser/aggregates.rs`, `parser/ctes.rs`, `parser/window.rs`, `parser/subqueries.rs`. No behavior change; prerequisite for BC2 (native DDL syntax) and PG backward compatibility. | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G13-PRF | **Modularize `src/dvm/parser.rs`.** Split into sub-modules by SQL construct: `parser/joins.rs`, `parser/aggregates.rs`, `parser/ctes.rs`, `parser/window.rs`, `parser/subqueries.rs`. No behavior change; prerequisite for BC2 (native DDL syntax) and PG backward compatibility. **Also:** audit all ~690 `unsafe` blocks and add missing `// SAFETY:` comments (only ~38 currently documented). | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
 
 > **G13-PRF subtotal: ~3–4 weeks**
 
@@ -3004,7 +3004,55 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **E4 subtotal: ~8–12 hours**
 
-> **v0.15.0 total: ~40–70 hours + ~2–3d bulk create + ~3–5d planner hints + ~2–3d cache spike + ~3–4wk parser modularization + ~1–2wk watermark hold-back + ~2–4wk delta cost/spill estimation**
+### JOIN Key Change + DELETE Correctness Fix (EC-01)
+
+> **In plain terms:** When a row's join key is updated (`UPDATE orders SET
+> cust_id = 5 WHERE cust_id = 3`) in the same refresh cycle as the old join
+> partner is deleted, the delta query reads `current_right` after all changes
+> are applied — so the DELETE half finds no match and the stream table retains
+> stale data. This is a known data-correctness gap (G1.1 from
+> [GAP_SQL_PHASE_7.md](plans/sql/GAP_SQL_PHASE_7.md)). Option D (document +
+> FULL fallback) was the v0.2.0 decision; EC-01 implements the compensating
+> anti-join fix (Option C) to close it for good.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| EC-01 | **Compensating anti-join for JOIN key change + DELETE.** After the MERGE, detect orphaned rows whose join partner no longer exists and emit corrective DELETEs. Closes G1.1 for all refresh modes. | 2–3d | [GAP_SQL_PHASE_7.md §G1.1](plans/sql/GAP_SQL_PHASE_7.md) |
+
+> **EC-01 subtotal: ~2–3 days**
+
+### Multi-Level ST-on-ST Testing (STST-3)
+
+> **In plain terms:** FIX-STST-DIFF (v0.14.0) fixed 2-level
+> stream-table-on-stream-table DIFFERENTIAL refresh. Some 3-level cascade
+> tests exist, but systematic coverage for 3+ level chains — including
+> mixed refresh modes, concurrent DML at multiple levels, and DELETE/UPDATE
+> propagation through deep chains — is missing. This adds a dedicated test
+> matrix to prevent regressions as cascade depth increases.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| STST-3 | **Multi-level ST-on-ST test matrix (3+ levels).** Systematic coverage: 3-level and 4-level chains, INSERT/UPDATE/DELETE propagation, mixed DIFFERENTIAL/FULL modes, concurrent DML at multiple levels, correctness comparison against materialized-view baseline. | 3–5d | [e2e_cascade_regression_tests.rs](tests/e2e_cascade_regression_tests.rs) |
+
+> **STST-3 subtotal: ~3–5 days**
+
+### Circular Dependencies + IMMEDIATE Mode (CIRC-IMM)
+
+> **In plain terms:** Circular dependencies are rejected at creation time
+> (EC-30), but the interaction between near-circular topologies (e.g.
+> diamond dependencies with IMMEDIATE triggers on both sides) and IMMEDIATE
+> mode is untested territory. This adds targeted testing and, if needed,
+> hardening to ensure IMMEDIATE mode doesn't deadlock or produce incorrect
+> results on complex dependency graphs. **Conditional P1 — can slip to
+> v0.16.0 if no issues surface during other IMMEDIATE-mode work.**
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| CIRC-IMM | **Circular-dependency + IMMEDIATE mode hardening.** Test: diamond deps with IMMEDIATE triggers, near-circular topologies, lock ordering under concurrent DML. Add deadlock detection / timeout guard if issues found. | 3–5d | [PLAN_EDGE_CASES.md §EC-30](plans/PLAN_EDGE_CASES.md) · [PLAN_CIRCULAR_REFERENCES.md](plans/sql/PLAN_CIRCULAR_REFERENCES.md) |
+
+> **CIRC-IMM subtotal: ~3–5 days (conditional — can slip to v0.16.0)**
+
+> **v0.15.0 total: ~40–70h + ~2–3d bulk create + ~3–5d planner hints + ~2–3d cache spike + ~3–4wk parser + ~1–2wk watermark + ~2–4wk delta cost/spill + ~2–3d EC-01 + ~3–5d ST-on-ST + ~3–5d CIRC-IMM**
 
 **Exit criteria:**
 - [ ] At least one external test corpus (sqllogictest, JOB, or Nexmark) passes
@@ -3021,6 +3069,10 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [ ] I3: `dbt-pgtrickle` published on dbt Hub; `packages.yml` package-name install verified
 - [ ] E4: Flyway / Liquibase integration guide published in `docs/`
 - [ ] E5: ORM integration guides (SQLAlchemy, Django) published in `docs/`
+- [ ] EC-01: Compensating anti-join eliminates stale rows after JOIN key change + DELETE; E2E test confirms correctness
+- [ ] STST-3: 3-level and 4-level ST-on-ST chains tested with INSERT/UPDATE/DELETE propagation; mixed modes covered
+- [ ] CIRC-IMM: Diamond + near-circular IMMEDIATE topologies tested; no deadlocks or incorrect results (conditional — can slip to v0.16.0)
+- [ ] G13-PRF: `parser.rs` split into ≥5 sub-modules; all ~690 `unsafe` blocks have `// SAFETY:` comments; zero behavior change; all existing tests pass
 - [ ] Extension upgrade path tested (`0.14.0 → 0.15.0`)
 
 ---
