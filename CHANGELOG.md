@@ -65,7 +65,19 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   configured limit, emits a NOTICE and falls back to FULL refresh to prevent OOM or
   excessive temp-file spills. Default: 0 (disabled). Recommended: 50000–500000.
 
+- **STST-3:** Seven new E2E tests for multi-level ST-on-ST cascade chains (3-level
+  and 4-level). Covers INSERT/UPDATE/DELETE propagation, mixed refresh modes
+  (DIFFERENTIAL + FULL in same chain), concurrent DML at multiple levels, and
+  DROP of intermediate stream tables with CASCADE.
+
 ### Changed
+
+- **I2:** Complete documentation review for v0.15.0 readiness. Fixed `CONFIGURATION.md`
+  GUC count (23 → 40+), added 10 missing GUC documentation sections (`cdc_trigger_mode`,
+  `tick_watermark_enabled`, `matview_polling`, `log_merge_sql`, `fuse_default_ceiling`,
+  `delta_amplification_threshold`, `algebraic_drift_reset_cycles`,
+  `agg_diff_cardinality_threshold`). Added missing `rebuild_cdc_triggers()` documentation
+  to `SQL_REFERENCE.md`. Fixed outdated version reference in `FAQ.md`.
 
 - **TRUNC-1:** Documented existing TRUNCATE capture behavior in `docs/SQL_REFERENCE.md`.
   TRUNCATE on source tables in trigger CDC mode already triggers automatic FULL refresh

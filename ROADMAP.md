@@ -2840,9 +2840,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| I2 | Complete documentation review & polish | 4–6h | [docs/](docs/) |
+| I2 | Complete documentation review & polish | 4--6h | [docs/](docs/) |
 
-> **Documentation subtotal: ~4–6 hours**
+> **Documentation subtotal: ✅ Done**
 
 ### Bulk Create API (G15-BC)
 
@@ -3028,7 +3028,7 @@ Validate correctness against independent query corpora beyond TPC-H.
 |------|-------------|--------|-----|
 | STST-3 | **Multi-level ST-on-ST test matrix (3+ levels).** Systematic coverage: 3-level and 4-level chains, INSERT/UPDATE/DELETE propagation, mixed DIFFERENTIAL/FULL modes, concurrent DML at multiple levels, correctness comparison against materialized-view baseline. | 3–5d | [e2e_cascade_regression_tests.rs](tests/e2e_cascade_regression_tests.rs) |
 
-> **STST-3 subtotal: ~3–5 days**
+> **STST-3 subtotal: ✅ Done**
 
 ### Circular Dependencies + IMMEDIATE Mode (CIRC-IMM)
 
@@ -3097,13 +3097,14 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [ ] PH-E2: Spill-aware auto-adjustment triggers after 3 consecutive spills; `spill_history` exposed in `explain_st()`
 - [x] PH-D2: `merge_join_strategy` GUC with manual override (`auto`/`hash_join`/`nested_loop`/`merge_join`)
 - [ ] G14-SHC-SPIKE: RFC written; prototype benchmark validates or invalidates DSM-based approach
+- [x] I2: Complete documentation review done -- CONFIGURATION.md GUCs documented (40+), SQL_REFERENCE.md gaps filled, FAQ refs fixed
 - [ ] TRUNC-1: TRUNCATE on trigger-mode CDC source marks downstream STs for reinit; tested end-to-end
 - [ ] VOL-1: `volatile_function_policy` GUC controls volatile function handling; `reject`/`warn`/`allow` modes tested
 - [ ] I3: `dbt-pgtrickle` published on dbt Hub; `packages.yml` package-name install verified
 - [ ] E4: Flyway / Liquibase integration guide published in `docs/`
 - [ ] E5: ORM integration guides (SQLAlchemy, Django) published in `docs/`
 - [x] EC-01: R₀ pre-change snapshot ensures DELETE deltas find old join partners; unit + TPC-H regression tests confirm correctness
-- [ ] STST-3: 3-level and 4-level ST-on-ST chains tested with INSERT/UPDATE/DELETE propagation; mixed modes covered
+- [x] STST-3: 3-level and 4-level ST-on-ST chains tested with INSERT/UPDATE/DELETE propagation; mixed modes covered
 - [ ] CIRC-IMM: Diamond + near-circular IMMEDIATE topologies tested; no deadlocks or incorrect results (conditional — can slip to v0.16.0)
 - [ ] G8.1: Cross-session MERGE cache invalidation via catalog version counter; tested with concurrent ALTER QUERY + refresh
 - [x] EXPL-ENH: `explain_st()` shows refresh timing stats, source partition info, and dependency sub-graph (DOT format)
