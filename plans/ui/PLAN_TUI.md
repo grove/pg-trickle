@@ -1921,26 +1921,26 @@ responsive layout, help system, integration tests, documentation.
 - [x] Shell completions for bash, zsh, fish, PowerShell
 - [x] Interactive TUI launches when no subcommand is given
 - [~] Dashboard (F1): live-updating, filterable, EFF column, errors-first sort, cascade-stale count, sparklines, issues sidebar ✅ — bookmarks, column picker, grouping, row preview pane deferred
-- [~] Detail view (F2): properties, refresh stats, upstream health, recent refreshes, error details ✅ — defining query pane, table size/row count, SCC indicators deferred
+- [x] Detail view (F2): properties (including explain_refresh_mode), source tables, refresh history, CDC health, diagnosed errors ✅
 - [~] Dependency graph (F3): ASCII DAG layout, status coloring, node navigation ✅ — path highlighting, broken edge rendering, staleness heatmap overlay deferred
 - [~] Refresh log (F4): scrollable ✅ — filter, auto-tailing, NOTIFY events, histogram deferred
 - [~] Diagnostics (F5): recommendation table with confidence levels ✅ — signal breakdown bar charts, apply action deferred
 - [x] CDC health (F6): buffer sizes, trigger inventory, overall health indicator
 - [~] Configuration (F7): browse GUCs grouped by category ✅ — inline edit and apply via ALTER SYSTEM deferred
 - [~] Alert feed (F8): real-time NOTIFY alerts with severity icons ✅ — toast popups for critical events deferred
-- [ ] Command palette (F9): fuzzy-search command execution with ST autocomplete — not implemented
+- [x] Command palette (F9): `:` opens palette with fuzzy-search, ST autocomplete, and commands: refresh, pause, resume, repair, export, explain, validate, fuse reset, quit
 - [x] Sparklines (F11): refresh duration trends in dashboard (when terminal width allows)
 - [x] Help system (F12): context-sensitive help overlay in every view with per-view tips
 - [x] Scheduler & workers (F13): scheduler heartbeat, worker pool status, job queue
-- [~] Fuse panel (F14): fuse overview, detail panel, reset instructions ✅ — inline TUI reset execution, batch reset deferred
-- [~] Watermark & gating (F15): watermark groups and per-source watermarks ✅ — gate/ungate from TUI deferred
-- [~] Delta SQL inspector (F16): links to `pgtrickle explain` CLI ✅ — inline EXPLAIN ANALYZE and DVM operator tree deferred
+- [~] Fuse panel (F14): fuse overview, detail panel, `A` to re-arm from TUI ✅ — batch reset deferred
+- [x] Watermark & gating (F15): watermark groups, per-source watermarks, gate/ungate from TUI (`g` key on Gates tab)
+- [x] Delta SQL inspector (F16): auto-fetches delta SQL on view entry, `Enter` to reload, `e` for DDL overlay, Tab for Auxiliary Columns tab
 - [ ] Batch operations (F17): multi-select with Space, batch refresh/tier/mode/pause/resume/drop — not implemented
 - [x] System health (F18): HEALTHY/DEGRADED/WARNINGS summary, severity-colored check table
 - [x] Watch mode (F19): non-interactive continuous output with `--compact`, `--no-color`, `--append`, `--filter`
 - [~] DAG Health & Impact Analysis (F20): issue categories (error chains, cascade stale, buffer growth, blown fuses), severity summary, blast radius ranking ✅ — inline mini-graphs deferred
 - [~] Cascade Staleness Tracker (F21): DAG traversal, EFF column, upstream health pane in detail view, issue badge in header ✅ — staleness heatmap overlay in graph deferred
-- [ ] 6 built-in themes + custom theme support — not implemented (single dark theme only)
+- [ ] 6 built-in themes + custom theme support — not implemented (light and dark themes only)
 - [ ] Adaptive polling adjusts rate based on activity level — not implemented
 - [x] Connection recovery with auto-reconnect and status indicator
 - [~] Responsive layout adapts to terminal size — basic adaptation ✅; 80-col minimum mode not fully tested
