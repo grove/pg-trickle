@@ -651,7 +651,12 @@ async fn run_app(
                     app.toast = Some(Toast::success(format!("Delta SQL loaded for {bare_name}")));
                 }
                 PollMsg::Ddl(name, ddl) => {
-                    app.state.ddl_cache.insert(name.clone(), ddl.clone());
+                    // Cache by bare name so future 'e' presses hit the cache.
+                    let bare_name = name
+                        .split_once('.')
+                        .map(|(_, n)| n.to_string())
+                        .unwrap_or_else(|| name.clone());
+                    app.state.ddl_cache.insert(bare_name, ddl.clone());
                     app.ddl_overlay = Some(ddl);
                 }
                 PollMsg::DiagnosedErrors(name, json) => {
@@ -1178,11 +1183,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         {
             // Export DDL overlay
             if let Some(idx) = app.selected_stream_table_index() {
-                let name = app.state.stream_tables[idx].name.clone();
-                if let Some(ddl) = app.state.ddl_cache.get(&name) {
+                let st = &app.state.stream_tables[idx];
+                let bare_name = st.name.clone();
+                if let Some(ddl) = app.state.ddl_cache.get(&bare_name) {
                     app.ddl_overlay = Some(ddl.clone());
                 } else if let Some(ref tx) = app.action_tx {
-                    let _ = tx.try_send(ActionRequest::FetchDdl(name));
+                    let qualified = format!("{}.{}", st.schema, st.name);
+                    let _ = tx.try_send(ActionRequest::FetchDdl(qualified));
                 }
             }
         }
@@ -1408,7 +1415,17 @@ fn execute_palette_command(app: &mut App, input: &str) {
         "export" => {
             if let Some(name) = arg {
                 if let Some(ref tx) = app.action_tx {
-                    let _ = tx.try_send(ActionRequest::FetchDdl(name));
+                    let qualified = if name.contains('.') {
+                        name.clone()
+                    } else {
+                        app.state
+                            .stream_tables
+                            .iter()
+                            .find(|st| st.name == name)
+                            .map(|st| format!("{}.{}", st.schema, st.name))
+                            .unwrap_or_else(|| name.clone())
+                    };
+                    let _ = tx.try_send(ActionRequest::FetchDdl(qualified));
                 }
             } else {
                 app.toast = Some(Toast::error("Usage: export <name>"));
