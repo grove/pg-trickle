@@ -8,7 +8,7 @@ expression: output
 ┌ Delta SQL ───────────────────────────────────────────────────────────────────┐
 │                                                                              │
 │ No stream table selected. Press 1 to go to Dashboard, select a table, then   │
-│press 0.                                                                      │
+│press d.                                                                      │
 │                                                                              │
 │                                                                              │
 │                                                                              │

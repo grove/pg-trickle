@@ -7,16 +7,16 @@ expression: output
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Delta SQL ───────────────────────────────────────────────────────────────────┐
 │                                                                              │
-│ Use the CLI to inspect delta SQL:                                            │
+│ Delta SQL not yet loaded. Fetch it with:                                     │
+│                                                                              │
+│   :explain orders_live        (command palette)                              │
+│                                                                              │
+│ Or use the CLI:                                                              │
 │                                                                              │
 │   pgtrickle explain orders_live                                              │
-│                                                                              │
-│ Available inspections:                                                       │
-│                                                                              │
-│   pgtrickle explain <name>              Show generated delta SQL             │
-│   pgtrickle explain <name> --analyze     Run EXPLAIN ANALYZE on delta        │
-│   pgtrickle explain <name> --operators   Show DVM operator tree              │
-│   pgtrickle explain <name> --dedup       Show deduplication stats            │
+│   pgtrickle explain --analyze                                                │
+│   pgtrickle explain --operators                                              │
+│   pgtrickle explain --dedup                                                  │
 │                                                                              │
 │ The delta SQL can be copied and run in psql for further analysis.            │
 │                                                                              │

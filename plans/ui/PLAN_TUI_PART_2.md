@@ -31,24 +31,24 @@ not just observe them.
 | Configurable poll interval (`--interval`) | P1 | ✅ Implemented |
 | TLS support (`--sslmode`) | P1 | ✅ Implemented (behind `tls` feature flag) |
 | Sort column cycling (`s`/`S`) | P2 | ✅ Implemented |
-| Inline delta SQL fetch | P2 | ✅ Implemented (action channel + cache) |
+| Inline delta SQL fetch | P2 | ✅ Implemented (action + cache + inline view) |
 | Cross-view filter persistence | P2 | Partial (Dashboard/Detail/DeltaInspector) |
 | Toast / flash messages | P2 | ✅ Implemented |
-| Parallel polling | P2 | Not started |
+| Parallel polling | P2 | ✅ Implemented (tokio::join! for all 17 queries) |
 | Mouse support (`--mouse`) | P3 | ✅ Implemented (scroll wheel) |
 | Theme toggle (`t` key, `--theme`) | P3 | ✅ Implemented |
 | Export current view (`Ctrl+E`) | P3 | ✅ Implemented |
 | Notification bell (`--bell`) | P3 | ✅ Implemented |
-| Diagnostics signal breakdown | P1 | ✅ Implemented (signals column polled) |
+| Diagnostics signal breakdown | P1 | ✅ Implemented (signals polled + bar chart view) |
 | Error diagnosis panel | P1 | Polling wired; view rendering deferred |
-| Source gating actions | P1 | ✅ Implemented (gate/ungate actions + Watermarks tab) |
-| Dedup stats view | P2 | ✅ Implemented (polling) |
+| Source gating actions | P1 | ✅ Implemented (gate/ungate actions + Watermarks tab 2) |
+| Dedup stats view | P2 | ✅ Implemented (polling + CDC view rendering) |
 | Shared buffer stats view | P2 | Not started |
 | Explain refresh mode | P2 | Not started |
 | Source table detail | P2 | Not started |
 | Diamond groups & SCC | P2 | Not started |
 | Quick health in header | P2 | ✅ Implemented (scheduler indicator) |
-| CDC health deep dive | P2 | ✅ Implemented (polling) |
+| CDC health deep dive | P2 | ✅ Implemented (polling + CDC view + Detail view) |
 | Refresh history detail | P2 | Not started |
 | Repair action | P2 | ✅ Implemented (command palette + action) |
 | Export DDL inline | P2 | ✅ Implemented (DDL overlay) |

@@ -296,7 +296,7 @@ mod snapshot_tests {
     #[test]
     fn test_watermarks_view() {
         let output = render_to_string(100, 24, |frame, area, state, theme| {
-            super::watermarks::render(frame, area, state, theme, 0);
+            super::watermarks::render(frame, area, state, theme, 0, 0);
         });
         insta::assert_snapshot!(output);
     }

@@ -516,10 +516,10 @@ async fn run_app(
         }
 
         // Expire toast
-        if let Some(ref toast) = app.toast {
-            if toast.is_expired() {
-                app.toast = None;
-            }
+        if let Some(ref toast) = app.toast
+            && toast.is_expired()
+        {
+            app.toast = None;
         }
 
         if app.should_quit {
@@ -1347,9 +1347,14 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::Alerts => views::alert::render(frame, area, &app.state, &app.theme),
         View::Workers => views::workers::render(frame, area, &app.state, &app.theme, app.selected),
         View::Fuse => views::fuse::render(frame, area, &app.state, &app.theme, app.selected),
-        View::Watermarks => {
-            views::watermarks::render(frame, area, &app.state, &app.theme, app.selected)
-        }
+        View::Watermarks => views::watermarks::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.selected,
+            app.watermarks_tab,
+        ),
         View::DeltaInspector => views::delta_inspector::render(
             frame,
             area,

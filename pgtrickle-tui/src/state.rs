@@ -554,33 +554,32 @@ impl AppState {
         }
 
         // Scheduler stopped (from quick_health)
-        if let Some(ref qh) = self.quick_health {
-            if !qh.scheduler_running {
-                issues.push(Issue {
-                    severity: "error".to_string(),
-                    category: "Scheduler Stopped".to_string(),
-                    summary: "Background scheduler is not running".to_string(),
-                    detail:
-                        "No automatic refreshes are being scheduled. Check pg_trickle.enabled GUC."
-                            .to_string(),
-                    affected_table: None,
-                    blast_radius: self.stream_tables.len(),
-                });
-            }
+        if let Some(ref qh) = self.quick_health
+            && !qh.scheduler_running
+        {
+            issues.push(Issue {
+                severity: "error".to_string(),
+                category: "Scheduler Stopped".to_string(),
+                summary: "Background scheduler is not running".to_string(),
+                detail: "No automatic refreshes are being scheduled. Check pg_trickle.enabled GUC."
+                    .to_string(),
+                affected_table: None,
+                blast_radius: self.stream_tables.len(),
+            });
         }
 
         // Dedup ratio warning
-        if let Some(ref ds) = self.dedup_stats {
-            if ds.dedup_ratio_pct >= 10.0 {
-                issues.push(Issue {
-                    severity: "warning".to_string(),
-                    category: "High Dedup Ratio".to_string(),
-                    summary: format!("MERGE dedup ratio: {:.1}%", ds.dedup_ratio_pct),
-                    detail: "Consider pre-aggregation or two-pass MERGE strategy".to_string(),
-                    affected_table: None,
-                    blast_radius: 0,
-                });
-            }
+        if let Some(ref ds) = self.dedup_stats
+            && ds.dedup_ratio_pct >= 10.0
+        {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "High Dedup Ratio".to_string(),
+                summary: format!("MERGE dedup ratio: {:.1}%", ds.dedup_ratio_pct),
+                detail: "Consider pre-aggregation or two-pass MERGE strategy".to_string(),
+                affected_table: None,
+                blast_radius: 0,
+            });
         }
 
         // Sort: errors first, then by blast radius desc

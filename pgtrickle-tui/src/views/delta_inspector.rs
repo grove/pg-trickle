@@ -34,34 +34,47 @@ pub fn render(
     );
     frame.render_widget(header, chunks[0]);
 
-    // Body: instructions (actual SQL requires a live query per-table)
-    let body_lines = if st.is_some() {
-        vec![
-            Line::raw(""),
-            Line::styled(" Use the CLI to inspect delta SQL:", theme.header),
-            Line::raw(""),
-            Line::raw(format!(
-                "   pgtrickle explain {}",
-                st.map(|s| s.name.as_str()).unwrap_or("...")
-            )),
-            Line::raw(""),
-            Line::styled(" Available inspections:", theme.header),
-            Line::raw(""),
-            Line::raw("   pgtrickle explain <name>              Show generated delta SQL"),
-            Line::raw("   pgtrickle explain <name> --analyze     Run EXPLAIN ANALYZE on delta"),
-            Line::raw("   pgtrickle explain <name> --operators   Show DVM operator tree"),
-            Line::raw("   pgtrickle explain <name> --dedup       Show deduplication stats"),
-            Line::raw(""),
-            Line::styled(
-                " The delta SQL can be copied and run in psql for further analysis.",
-                theme.dim,
-            ),
-        ]
+    // Body: show cached delta SQL or instructions to fetch
+    let body_lines = if let Some(st) = st {
+        if let Some(sql) = state.delta_sql_cache.get(&st.name) {
+            // Render the actual delta SQL
+            let mut lines = vec![
+                Line::styled(
+                    " Generated Delta SQL (press Ctrl+R to reload):",
+                    theme.header,
+                ),
+                Line::raw(""),
+            ];
+            for sql_line in sql.lines() {
+                lines.push(Line::raw(format!("  {sql_line}")));
+            }
+            lines
+        } else {
+            // SQL not yet fetched — show instructions
+            vec![
+                Line::raw(""),
+                Line::styled(" Delta SQL not yet loaded. Fetch it with:", theme.header),
+                Line::raw(""),
+                Line::raw(format!("   :explain {}        (command palette)", st.name,)),
+                Line::raw(""),
+                Line::styled(" Or use the CLI:", theme.header),
+                Line::raw(""),
+                Line::raw(format!("   pgtrickle explain {}", st.name)),
+                Line::raw("   pgtrickle explain --analyze"),
+                Line::raw("   pgtrickle explain --operators"),
+                Line::raw("   pgtrickle explain --dedup"),
+                Line::raw(""),
+                Line::styled(
+                    " The delta SQL can be copied and run in psql for further analysis.",
+                    theme.dim,
+                ),
+            ]
+        }
     } else {
         vec![
             Line::raw(""),
             Line::styled(
-                " No stream table selected. Press 1 to go to Dashboard, select a table, then press 0.",
+                " No stream table selected. Press 1 to go to Dashboard, select a table, then press d.",
                 theme.dim,
             ),
         ]

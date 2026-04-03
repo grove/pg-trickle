@@ -25,20 +25,43 @@ pub fn render(
         }
     };
 
+    // Determine whether we have CDC health info for this table's sources
+    let has_cdc_health = state.cdc_health.iter().any(|h| {
+        state
+            .cdc_buffers
+            .iter()
+            .any(|b| b.stream_table == st.name && b.source_table == h.source_table)
+    });
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(10), // Properties
-            Constraint::Length(10), // Refresh stats + efficiency
-            Constraint::Length(8),  // Recent refreshes
-            Constraint::Min(4),     // Error details / upstream health
-        ])
+        .constraints(if has_cdc_health {
+            vec![
+                Constraint::Length(10), // Properties
+                Constraint::Length(10), // Refresh stats + efficiency
+                Constraint::Length(8),  // Recent refreshes
+                Constraint::Length(6),  // CDC source health
+                Constraint::Min(4),     // Error details / upstream health
+            ]
+        } else {
+            vec![
+                Constraint::Length(10), // Properties
+                Constraint::Length(10), // Refresh stats + efficiency
+                Constraint::Length(8),  // Recent refreshes
+                Constraint::Min(4),     // Error details / upstream health
+            ]
+        })
         .split(area);
 
     render_properties(frame, chunks[0], st, theme);
     render_stats(frame, chunks[1], st, state, theme);
     render_recent_refreshes(frame, chunks[2], st, state, theme);
-    render_details(frame, chunks[3], st, state, theme);
+    if has_cdc_health {
+        render_source_health(frame, chunks[3], st, state, theme);
+        render_details(frame, chunks[4], st, state, theme);
+    } else {
+        render_details(frame, chunks[3], st, state, theme);
+    }
 }
 
 fn render_properties(frame: &mut Frame, area: Rect, st: &StreamTableInfo, theme: &Theme) {
@@ -282,4 +305,70 @@ fn render_details(
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn render_source_health(
+    frame: &mut Frame,
+    area: Rect,
+    st: &StreamTableInfo,
+    state: &AppState,
+    theme: &Theme,
+) {
+    // Find CDC health entries for this stream table's sources
+    let source_tables: Vec<&str> = state
+        .cdc_buffers
+        .iter()
+        .filter(|b| b.stream_table == st.name)
+        .map(|b| b.source_table.as_str())
+        .collect();
+
+    let entries: Vec<Line> = state
+        .cdc_health
+        .iter()
+        .filter(|h| source_tables.contains(&h.source_table.as_str()))
+        .map(|h| {
+            let lag_str = h
+                .lag_bytes
+                .map(|b| {
+                    if b < 1024 {
+                        format!("{b} B")
+                    } else if b < 1024 * 1024 {
+                        format!("{:.1} KB", b as f64 / 1024.0)
+                    } else {
+                        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let lag_style = match h.lag_bytes {
+                Some(b) if b > 10_000_000 => theme.error,
+                Some(b) if b > 1_000_000 => theme.warning,
+                _ => theme.ok,
+            };
+            let alert_span = h
+                .alert
+                .as_deref()
+                .map(|a| Span::styled(format!(" ⚠ {a}"), theme.warning))
+                .unwrap_or_else(|| Span::raw(""));
+            Line::from(vec![
+                Span::styled(format!(" {} ", h.source_table), theme.header),
+                Span::raw(format!("[{}] ", h.cdc_mode)),
+                Span::raw("lag: "),
+                Span::styled(lag_str, lag_style),
+                alert_span,
+            ])
+        })
+        .collect();
+
+    let display = if entries.is_empty() {
+        vec![Line::styled(" No CDC health data for sources", theme.dim)]
+    } else {
+        entries
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Span::styled(" Source CDC Health ", theme.title));
+
+    frame.render_widget(Paragraph::new(display).block(block), area);
 }
