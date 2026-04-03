@@ -7,24 +7,24 @@ expression: output
 │                                                                              │
 │  1        Dashboard                     r        Refresh selected            │
 │  2        Detail view                   R        Refresh all                 │
-│  3        Dependency graph              Ctrl+R   Force poll now              │
-│  4        Refresh log                   /        Filter tables               │
-│  5        Diagnostics                   :        Command palette             │
-│  6        CDC health                    ?        Toggle help                 │
-│  7        Configuration                 q        Quit                        │
-│  0        Health checks                 Ctrl+C   Quit                        │
-│  9        Alerts                                                             │
-│  w        Workers & job queue          Dashboard Tips                        │
-│  f        Fuse & circuit breaker                                             │
-│  m        Watermarks & gating           / to filter, Enter for detail        │
-│  d        Delta SQL inspector           Errors sort to top automatically     │
-│  g        Graph view                    EFF column shows cascade staleness   │
-│  i        Issues                                                             │
+│  3        Dependency graph              p        Pause selected              │
+│  4        Refresh log                   P        Resume selected             │
+│  5        Diagnostics                   s / S    Sort / reverse sort         │
+│  6        CDC health                    t        Toggle light/dark theme     │
+│  7        Configuration                 Ctrl+R   Force poll now              │
+│  8        Health checks                 Ctrl+E   Export view to JSON         │
+│  9        Alerts                        /        Filter tables               │
+│  w        Workers & job queue           :        Command palette             │
+│  f        Fuse & circuit breaker        ?        Toggle help                 │
+│  m        Watermarks & gating           q        Quit                        │
+│  d        Delta SQL inspector           Ctrl+C   Quit                        │
+│  g        Graph view                                                         │
+│  i        Issues                       Dashboard Tips                        │
 │                                                                              │
-│  j / ↓    Move down                                                          │
-│  k / ↑    Move up                                                            │
-│  Enter    Drill into detail                                                  │
-│  Esc      Back / close overlay                                               │
+│  j / ↓    Move down                     / to filter, Enter for detail        │
+│  k / ↑    Move up                       s to cycle sort, S to reverse        │
+│  Enter    Drill into detail             r to refresh selected, R for all     │
+│  Esc      Back / close overlay          EFF column shows cascade staleness   │
 │  Tab      Next pane                                                          │
 │                                                                              │
 │                                                                              │

@@ -3,22 +3,22 @@ source: pgtrickle-tui/src/views/mod.rs
 expression: output
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Delta Inspector — public.orders_live                                         │
+│ Delta Inspector — public.orders_live   [Delta SQL]  Auxiliary Columns  Tab to│
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Delta SQL ───────────────────────────────────────────────────────────────────┐
+┌ Delta SQL  e-Show DDL ───────────────────────────────────────────────────────┐
 │                                                                              │
-│ Use the CLI to inspect delta SQL:                                            │
+│ Fetching delta SQL…                                                          │
+│                                                                              │
+│ CLI reference:                                                               │
 │                                                                              │
 │   pgtrickle explain orders_live                                              │
+│   pgtrickle explain --analyze                                                │
+│   pgtrickle explain --operators                                              │
+│   pgtrickle explain --dedup                                                  │
 │                                                                              │
-│ Available inspections:                                                       │
 │                                                                              │
-│   pgtrickle explain <name>              Show generated delta SQL             │
-│   pgtrickle explain <name> --analyze     Run EXPLAIN ANALYZE on delta        │
-│   pgtrickle explain <name> --operators   Show DVM operator tree              │
-│   pgtrickle explain <name> --dedup       Show deduplication stats            │
 │                                                                              │
-│ The delta SQL can be copied and run in psql for further analysis.            │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

@@ -1,7 +1,128 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+
+// ── Action types for TUI write operations ────────────────────────
+
+/// Request from UI thread → poller to execute a write action.
+#[derive(Debug, Clone)]
+pub enum ActionRequest {
+    RefreshTable(String),
+    RefreshAll,
+    PauseTable(String),
+    ResumeTable(String),
+    ResetFuse(String, String), // (table, strategy: rearm/reinitialize/skip)
+    RepairTable(String),
+    GateSource(String),
+    UngateSource(String),
+    FetchDeltaSql(String),
+    FetchDdl(String),
+    ValidateQuery(String),
+    FetchDiagnoseErrors(String),
+    FetchExplainMode(String),
+    FetchSources(String),
+    FetchRefreshHistory(String),
+    FetchAuxiliaryColumns(String),
+}
+
+/// Result from poller → UI thread after executing an action.
+#[derive(Debug, Clone)]
+pub struct ActionResult {
+    pub success: bool,
+    pub message: String,
+}
+
+// ── Toast notifications ──────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub message: String,
+    pub style: ToastStyle,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastStyle {
+    Success,
+    Error,
+    Info,
+}
+
+impl Toast {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            style: ToastStyle::Success,
+            expires_at: Instant::now() + std::time::Duration::from_secs(3),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            style: ToastStyle::Error,
+            expires_at: Instant::now() + std::time::Duration::from_secs(5),
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            style: ToastStyle::Info,
+            expires_at: Instant::now() + std::time::Duration::from_secs(3),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Instant::now() > self.expires_at
+    }
+}
+
+// ── Confirmation dialog ──────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    pub message: String,
+    pub action: ActionRequest,
+}
+
+// ── Sort state for dashboard ─────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    StatusSeverity,
+    Name,
+    AvgDuration,
+    LastRefresh,
+    TotalRefreshes,
+    Staleness,
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::StatusSeverity => Self::Name,
+            Self::Name => Self::AvgDuration,
+            Self::AvgDuration => Self::LastRefresh,
+            Self::LastRefresh => Self::TotalRefreshes,
+            Self::TotalRefreshes => Self::Staleness,
+            Self::Staleness => Self::StatusSeverity,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StatusSeverity => "Status",
+            Self::Name => "Name",
+            Self::AvgDuration => "Avg Duration",
+            Self::LastRefresh => "Last Refresh",
+            Self::TotalRefreshes => "Total Refreshes",
+            Self::Staleness => "Staleness",
+        }
+    }
+}
 
 /// Central state store for the TUI — updated by async pollers.
 #[derive(Default)]
@@ -18,7 +139,6 @@ pub struct AppState {
     pub last_poll: Option<DateTime<Utc>>,
     pub connected: bool,
     pub reconnecting: bool,
-    #[allow(dead_code)]
     pub poll_interval_ms: u64,
     pub error_message: Option<String>,
     /// Sparkline data: st_name -> last N refresh durations
@@ -30,6 +150,42 @@ pub struct AppState {
     pub trigger_inventory: Vec<TriggerInfo>,
     /// Detected issues for DAG health view (F20)
     pub issues: Vec<Issue>,
+    /// Diagnostics signal data (signals JSONB from recommend_refresh_mode)
+    pub diag_signals: HashMap<String, serde_json::Value>,
+    /// Dedup stats from pgtrickle.dedup_stats()
+    pub dedup_stats: Option<DedupStats>,
+    /// CDC health from pgtrickle.check_cdc_health()
+    pub cdc_health: Vec<CdcHealthEntry>,
+    /// Quick health from pgtrickle.quick_health view
+    pub quick_health: Option<QuickHealth>,
+    /// Source gates from pgtrickle.bootstrap_gate_status()
+    pub source_gates: Vec<SourceGate>,
+    /// Watermark alignment from pgtrickle.watermark_status()
+    pub watermark_alignment: Vec<WatermarkAlignment>,
+    /// Delta SQL cache: st_name -> sql
+    pub delta_sql_cache: HashMap<String, String>,
+    /// DDL cache: st_name -> ddl
+    pub ddl_cache: HashMap<String, String>,
+    /// Diagnosed errors cache: st_name -> errors
+    pub diagnosed_errors: HashMap<String, Vec<DiagnosedError>>,
+    /// Shared buffer stats from pgtrickle.shared_buffer_stats()
+    pub shared_buffer_stats: Vec<SharedBufferInfo>,
+    /// Explain refresh mode cache: st_name -> explanation
+    pub explain_mode_cache: HashMap<String, ExplainRefreshMode>,
+    /// Source table detail cache: st_name -> sources
+    pub source_detail_cache: HashMap<String, Vec<SourceTableInfo>>,
+    /// Diamond groups from pgtrickle.diamond_groups()
+    pub diamond_groups: Vec<DiamondGroup>,
+    /// SCC status from pgtrickle.pgt_scc_status()
+    pub scc_groups: Vec<SccGroup>,
+    /// Refresh history cache: st_name -> history entries
+    pub refresh_history_cache: HashMap<String, Vec<RefreshHistoryEntry>>,
+    /// Auxiliary columns cache: st_name -> columns
+    pub auxiliary_columns_cache: HashMap<String, Vec<AuxiliaryColumn>>,
+
+    /// Whether all poll sub-queries failed (connection lost detection)
+    pub poll_failure_count: usize,
+    pub poll_total_count: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -106,6 +262,8 @@ pub struct DiagRecommendation {
     pub recommended_mode: String,
     pub confidence: String,
     pub reason: String,
+    #[serde(skip)]
+    pub signals: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -175,6 +333,124 @@ pub struct TriggerInfo {
     pub firing_events: String,
 }
 
+// ── New types for SQL API surface expansion ──────────────────────
+
+#[derive(Clone, Serialize)]
+pub struct DedupStats {
+    pub total_diff_refreshes: i64,
+    pub dedup_needed: i64,
+    pub dedup_ratio_pct: f64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct CdcHealthEntry {
+    pub source_table: String,
+    pub cdc_mode: String,
+    pub slot_name: Option<String>,
+    pub lag_bytes: Option<i64>,
+    pub confirmed_lsn: Option<String>,
+    pub alert: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct QuickHealth {
+    pub total_stream_tables: i64,
+    pub error_tables: i64,
+    pub stale_tables: i64,
+    pub scheduler_running: bool,
+    pub status: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SourceGate {
+    pub source_table: String,
+    pub schema_name: String,
+    pub gated: bool,
+    pub gated_at: Option<String>,
+    pub gate_duration: Option<String>,
+    pub affected_stream_tables: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct WatermarkAlignment {
+    pub group_name: String,
+    pub lag_secs: Option<f64>,
+    pub aligned: bool,
+    pub sources_with_watermark: i32,
+    pub sources_total: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiagnosedError {
+    pub event_time: String,
+    pub error_type: String,
+    pub error_message: String,
+    pub remediation: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SharedBufferInfo {
+    pub source_table: String,
+    pub consumer_count: i32,
+    pub consumers: String,
+    pub columns_tracked: i32,
+    pub safe_frontier_lsn: Option<String>,
+    pub buffer_rows: i64,
+    pub is_partitioned: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExplainRefreshMode {
+    pub configured_mode: String,
+    pub effective_mode: String,
+    pub downgrade_reason: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SourceTableInfo {
+    pub source_table: String,
+    pub source_type: String,
+    pub cdc_mode: String,
+    pub columns_used: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DiamondGroup {
+    pub group_id: i32,
+    pub member_name: String,
+    pub is_convergence: bool,
+    pub epoch: i64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SccGroup {
+    pub scc_id: i32,
+    pub member_count: i32,
+    pub members: String,
+    pub last_iterations: i32,
+    pub last_converged_at: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RefreshHistoryEntry {
+    pub action: String,
+    pub status: String,
+    pub rows_inserted: Option<i64>,
+    pub rows_deleted: Option<i64>,
+    pub delta_row_count: Option<i64>,
+    pub duration_ms: Option<f64>,
+    pub was_full_fallback: bool,
+    pub start_time: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AuxiliaryColumn {
+    pub column_name: String,
+    pub data_type: String,
+    pub purpose: String,
+}
+
 impl AppState {
     pub fn active_count(&self) -> usize {
         self.stream_tables
@@ -210,6 +486,22 @@ impl AppState {
 
     pub fn issue_count(&self) -> usize {
         self.issues.len()
+    }
+
+    /// Returns true when all poll sub-queries failed (connection lost).
+    pub fn all_polls_failed(&self) -> bool {
+        self.poll_total_count > 0 && self.poll_failure_count == self.poll_total_count
+    }
+
+    /// Track a poll failure.
+    pub fn record_poll_failure(&mut self) {
+        self.poll_failure_count += 1;
+        self.poll_total_count += 1;
+    }
+
+    /// Track a poll success.
+    pub fn record_poll_success(&mut self) {
+        self.poll_total_count += 1;
     }
 
     /// Compute cascade staleness from DAG topology (F21).
@@ -351,6 +643,35 @@ impl AppState {
                     blast_radius: 1,
                 });
             }
+        }
+
+        // Scheduler stopped (from quick_health)
+        if let Some(ref qh) = self.quick_health
+            && !qh.scheduler_running
+        {
+            issues.push(Issue {
+                severity: "error".to_string(),
+                category: "Scheduler Stopped".to_string(),
+                summary: "Background scheduler is not running".to_string(),
+                detail: "No automatic refreshes are being scheduled. Check pg_trickle.enabled GUC."
+                    .to_string(),
+                affected_table: None,
+                blast_radius: self.stream_tables.len(),
+            });
+        }
+
+        // Dedup ratio warning
+        if let Some(ref ds) = self.dedup_stats
+            && ds.dedup_ratio_pct >= 10.0
+        {
+            issues.push(Issue {
+                severity: "warning".to_string(),
+                category: "High Dedup Ratio".to_string(),
+                summary: format!("MERGE dedup ratio: {:.1}%", ds.dedup_ratio_pct),
+                detail: "Consider pre-aggregation or two-pass MERGE strategy".to_string(),
+                affected_table: None,
+                blast_radius: 0,
+            });
         }
 
         // Sort: errors first, then by blast radius desc

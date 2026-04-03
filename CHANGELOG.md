@@ -9,6 +9,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.15.0 — Unreleased](#0150--unreleased)
 - [0.14.0 — 2026-04-02](#0140--2026-04-02)
 - [0.13.0 — 2026-03-31](#0130--2026-03-31)
 - [0.12.0 — 2026-03-28](#0120--2026-03-28)
@@ -36,6 +37,112 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ## [Unreleased]
 
 <!-- Next release notes go here -->
+
+---
+
+## [0.15.0] — Unreleased
+
+0.15.0 is the **TUI Operational Capability** release. It transforms the
+terminal dashboard from a read-only monitor into a fully interactive tool
+for acting on problems — with write actions, a command palette, and deep
+enrichment across all views.
+
+### TUI — Write Actions
+
+The dashboard now supports in-terminal write operations without leaving the
+UI:
+
+- **Refresh** a single stream table or all tables at once (`:refresh <name>`,
+  `:refresh all`).
+- **Pause / resume** a stream table to temporarily halt refreshes
+  (`:pause <name>`, `:resume <name>`).
+- **Reset fuse** to recover a blown or tripped circuit breaker
+  (`:fuse reset <name>`).
+- **Repair** a stream table that has fallen out of sync
+  (`:repair <name>`).
+- **Gate / ungate** a source table to hold back change propagation from the
+  Watermarks view (`g`/`u` keys).
+
+### TUI — Command Palette
+
+Press `:` to open a command palette with fuzzy matching and tab-completion.
+Type a command name or table name; matching suggestions appear instantly.
+Supported commands: `refresh`, `pause`, `resume`, `repair`, `fuse reset`,
+`export`, `validate`, `explain`.
+
+### TUI — Reconnect & Resilience
+
+The poller now reconnects automatically after a connection loss using
+exponential back-off (capped at 15 s). A "reconnecting…" indicator appears
+in the header while the connection is being re-established. Actions are
+buffered in a channel (mpsc) so outstanding requests survive brief
+disconnects.
+
+### TUI — View Enrichment
+
+All 14 views have been enriched with additional live data polled from the
+database in two parallel phases (20 queries via `tokio::join!`):
+
+- **Diagnostics** — per-signal bar chart breakdown showing which signals
+  drove each refresh-mode recommendation.
+- **CDC Health** — dedicated panel with lag bytes, replication slot name,
+  LSN, and per-source alerts. Also shows dedup statistics and shared buffer
+  occupancy for change buffers.
+- **Detail** — properties panel now includes explain refresh mode (configured
+  vs effective mode with downgrade reason), source table list, rich refresh
+  history (with `+N / -N` row-delta counts and full-fallback indicator),
+  error diagnosis with classified error types and remediation hints, CDC
+  health per source, and diamond group / SCC membership.
+- **Graph** — nodes annotated with diamond group badges and SCC cycle
+  indicators; a metadata panel appears for the selected node.
+- **Delta Inspector** — Tab-switchable between the SQL plan and an Auxiliary
+  Columns tab listing `_pgt_*` tracking columns.
+- **Workers** — parallel job queue panel alongside the worker pool.
+- **Watermarks** — source gate status and alignment per watermark group.
+- **Header** — quick health row counts (total / error / stale) and scheduler
+  liveness indicator.
+
+### TUI — Cross-View Filter Persistence
+
+The `/` key filter now applies across **all 10 list views**: Dashboard,
+Detail, Refresh Log, Diagnostics, CDC Health, Configuration, Health Checks,
+Workers, Fuse, and Issues. Filtering is case-insensitive and matches on
+contextually relevant fields per view.
+
+### TUI — Detail View Re-fetch on Navigation
+
+Pressing `j`/`k` (or arrow keys) while on the Detail view immediately
+re-fetches enrichment data for the newly selected table so properties and
+history stay current without waiting for the next poll cycle.
+
+### TUI — Polish
+
+- **Toast messages** with auto-expiry confirm write actions and surface
+  errors.
+- **Sort cycling** — press `s` / `S` on the Dashboard to cycle through 6
+  sort modes (name, status, errors, staleness, duration, tier).
+- **Scrollable views** — PgUp / PgDn / Home / End work in all list views.
+- **Mouse support** — scroll wheel navigation via `--mouse` flag.
+- **Theme toggle** — switch between dark and light themes with `t` or
+  `--theme dark|light`.
+- **Export** — `Ctrl+E` or `:export <name>` writes the current view to JSON.
+- **Notification bell** — `--bell` plays a terminal bell on critical
+  LISTEN/NOTIFY alerts.
+- **TLS support** — `--sslmode` and `--sslrootcert` flags, compiled under the
+  `tls` feature flag.
+- **Configurable poll interval** — `--interval <seconds>`.
+
+### Bug Fixes
+
+- Fixed a panic when deserializing `pgtrickle.quick_health` — the view
+  returns `bigint` columns but the `QuickHealth` struct declared them as
+  `i32`. Changed to `i64`.
+- Fixed "Error: db error" toast appearing on tab 2 (Detail). Background
+  enrichment fetches (`FetchExplainMode`, `FetchSources`,
+  `FetchRefreshHistory`, `FetchDiagnoseErrors`, `FetchAuxiliaryColumns`) now
+  degrade silently on failure, matching the same graceful-degradation
+  pattern used for phase-2 poll queries. Only user-triggered commands still
+  show error toasts.
 
 ---
 
