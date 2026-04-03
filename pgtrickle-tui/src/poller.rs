@@ -263,7 +263,7 @@ pub async fn execute_action(client: &Client, action: &ActionRequest) -> ActionRe
         }
         ActionRequest::FetchDdl(name) => {
             match client
-                .query_one("SELECT pgtrickle.export_definition($1)", &[name])
+                .query_one("SELECT pgtrickle.export_definition($1::text)", &[name])
                 .await
             {
                 Ok(row) => {
