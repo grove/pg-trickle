@@ -2950,9 +2950,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| TRUNC-1 | **TRUNCATE capture for trigger-mode CDC.** Add a DDL event trigger or statement-level trigger that detects TRUNCATE on source tables in trigger CDC mode and marks downstream STs for `needs_reinit`. | 4–6h | [plans/adrs/PLAN_ADRS.md](plans/adrs/PLAN_ADRS.md) ADR-070 |
+| TRUNC-1 | ~~**TRUNCATE capture for trigger-mode CDC.** Add a DDL event trigger or statement-level trigger that detects TRUNCATE on source tables in trigger CDC mode and marks downstream STs for `needs_reinit`.~~ ✅ Done — CDC TRUNCATE triggers write `action='T'` marker; refresh engine detects and falls back to FULL. | 4–6h | [plans/adrs/PLAN_ADRS.md](plans/adrs/PLAN_ADRS.md) ADR-070 |
 
-> **TRUNC-1 subtotal: ~4–6 hours**
+> **TRUNC-1 subtotal: ✅ Completed**
 
 ### Volatile Function Policy GUC (VOL-1)
 
@@ -2964,9 +2964,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| VOL-1 | **`pg_trickle.volatile_function_policy` GUC.** Add a GUC with values `reject` (default), `warn`, `allow` to control volatile function handling. `reject` preserves current behavior; `warn` emits WARNING but allows creation; `allow` silently permits (user accepts correctness risk). | 3–5h | [plans/sql/PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) |
+| VOL-1 | ~~**`pg_trickle.volatile_function_policy` GUC.** Add a GUC with values `reject` (default), `warn`, `allow` to control volatile function handling. `reject` preserves current behavior; `warn` emits WARNING but allows creation; `allow` silently permits (user accepts correctness risk).~~ ✅ Done | 3–5h | [plans/sql/PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) |
 
-> **VOL-1 subtotal: ~3–5 hours**
+> **VOL-1 subtotal: ✅ Completed**
 
 ### Spill-Aware Refresh (PH-E2)
 

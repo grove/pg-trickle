@@ -35,7 +35,18 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
-<!-- Next release notes go here -->
+### Added
+
+- **VOL-1:** `pg_trickle.volatile_function_policy` GUC — controls how volatile functions
+  are handled in DIFFERENTIAL/IMMEDIATE mode defining queries. Modes: `reject` (default,
+  current behavior), `warn` (WARNING but allow creation), `allow` (silent). Gives operators
+  flexibility when volatile expressions are intentional (e.g., sampling, audit timestamps).
+
+### Changed
+
+- **TRUNC-1:** Documented existing TRUNCATE capture behavior in `docs/SQL_REFERENCE.md`.
+  TRUNCATE on source tables in trigger CDC mode already triggers automatic FULL refresh
+  via the `action='T'` marker mechanism (implemented in v0.14.0 CDC triggers).
 
 ---
 
