@@ -51,6 +51,15 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
   - [Advanced / Internal](#advanced--internal)
     - [pg\_trickle.change\_buffer\_schema](#pg_tricklechange_buffer_schema)
     - [pg\_trickle.foreign\_table\_polling](#pg_trickleforeign_table_polling)
+    - [pg\_trickle.matview\_polling](#pg_tricklematview_polling)
+    - [pg\_trickle.cdc\_trigger\_mode](#pg_tricklecdc_trigger_mode)
+    - [pg\_trickle.tick\_watermark\_enabled](#pg_trickletick_watermark_enabled)
+    - [pg\_trickle.log\_merge\_sql](#pg_tricklelog_merge_sql)
+  - [Guardrails & Diagnostics](#guardrails--diagnostics)
+    - [pg\_trickle.fuse\_default\_ceiling](#pg_tricklefuse_default_ceiling)
+    - [pg\_trickle.delta\_amplification\_threshold](#pg_trickledelta_amplification_threshold)
+    - [pg\_trickle.algebraic\_drift\_reset\_cycles](#pg_tricklealgebraic_drift_reset_cycles)
+    - [pg\_trickle.agg\_diff\_cardinality\_threshold](#pg_trickleagg_diff_cardinality_threshold)
   - [Circular Dependencies](#circular-dependencies)
     - [pg\_trickle.allow\_circular](#pg_trickleallow_circular)
     - [pg\_trickle.max\_fixpoint\_iterations](#pg_tricklemax_fixpoint_iterations)
@@ -67,7 +76,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
 
 ## Overview
 
-pg_trickle exposes twenty-three configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
+pg_trickle exposes over forty configuration variables in the `pg_trickle` namespace. All can be set in `postgresql.conf` or at runtime via `SET` / `ALTER SYSTEM`.
 
 **Required `postgresql.conf` settings:**
 
@@ -1263,6 +1272,207 @@ incremental maintenance.
 
 ```sql
 SET pg_trickle.foreign_table_polling = true;
+```
+
+---
+
+### pg_trickle.matview_polling
+
+Enable polling-based CDC for materialized views. When enabled, materialized
+views referenced in defining queries are supported via snapshot-comparison
+(the same mechanism as foreign table polling). A local shadow table stores
+the previous state; `EXCEPT ALL` computes the delta on each refresh cycle.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `false` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+SET pg_trickle.matview_polling = true;
+```
+
+---
+
+### pg_trickle.cdc_trigger_mode
+
+Controls the CDC trigger granularity: `statement` (default) or `row`.
+
+`statement` uses statement-level `AFTER` triggers with transition tables
+(`NEW TABLE` / `OLD TABLE`). A single invocation per DML statement processes
+all affected rows in one bulk `INSERT ... SELECT`, giving 50-80% less
+write-side overhead for bulk `UPDATE`/`DELETE`. Single-row DML is unaffected.
+
+`row` uses the legacy per-row trigger approach (pg_trickle < 0.4.0 behavior).
+
+Changing this setting takes effect for newly installed CDC triggers. Call
+`pgtrickle.rebuild_cdc_triggers()` to migrate existing stream tables.
+
+| Property | Value |
+|---|---|
+| Type | `string` |
+| Default | `'statement'` |
+| Valid values | `statement`, `row` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Switch to statement-level triggers (default, recommended)
+SET pg_trickle.cdc_trigger_mode = 'statement';
+
+-- After changing, rebuild existing triggers:
+SELECT pgtrickle.rebuild_cdc_triggers();
+```
+
+---
+
+### pg_trickle.tick_watermark_enabled
+
+Cap CDC consumption to the WAL LSN at scheduler tick start. When enabled
+(default), each scheduler tick captures `pg_current_wal_lsn()` at its start
+and prevents any refresh from consuming WAL changes beyond that LSN. This
+bounds cross-source staleness without requiring user configuration.
+
+Disable only if you need stream tables to always advance to the latest
+available LSN.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `true` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Disable tick watermark bounding
+SET pg_trickle.tick_watermark_enabled = false;
+```
+
+---
+
+### pg_trickle.log_merge_sql
+
+Log the generated MERGE SQL template on every refresh cycle. When enabled,
+the MERGE SQL template built during differential refresh is emitted to the
+PostgreSQL server log at `LOG` level.
+
+**Intended for debugging MERGE query generation only. Do not enable in
+production** — the output is verbose and includes the full SQL for every
+refresh.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `false` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+SET pg_trickle.log_merge_sql = true;
+```
+
+---
+
+## Guardrails & Diagnostics
+
+These GUCs control safety thresholds and diagnostic warnings.
+
+### pg_trickle.fuse_default_ceiling
+
+Global default change-count ceiling for the fuse circuit breaker. When a
+stream table has `fuse_mode = 'on'` or `'auto'` and no per-ST `fuse_ceiling`,
+this value is used. If pending changes exceed this count, the fuse blows
+and the stream table is suspended (status = `SUSPENDED`).
+
+Set to `0` to disable the global default (per-ST ceilings still apply).
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Range | 0 - 2,000,000,000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Set global fuse ceiling to 1 million rows
+SET pg_trickle.fuse_default_ceiling = 1000000;
+```
+
+---
+
+### pg_trickle.delta_amplification_threshold
+
+Delta amplification detection threshold (output/input ratio). When a
+`DIFFERENTIAL` refresh produces more than this multiple of the input delta
+rows, a `WARNING` is emitted so operators can identify pathological join
+fan-out or many-to-many amplification.
+
+Set to `0.0` to disable.
+
+| Property | Value |
+|---|---|
+| Type | `float` |
+| Default | `0.0` (disabled) |
+| Range | 0.0 - 100,000.0 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Warn when delta output is 10x the input
+SET pg_trickle.delta_amplification_threshold = 10.0;
+```
+
+---
+
+### pg_trickle.algebraic_drift_reset_cycles
+
+Differential cycles between automatic full recomputes for algebraic
+aggregates. After this many differential refresh cycles, stream tables
+with algebraic aggregates (`AVG`, `STDDEV`, `VAR`) are automatically
+reinitialized to reset accumulated floating-point drift in auxiliary
+columns.
+
+Set to `0` to disable automatic resets.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Range | 0 - 100,000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Reset algebraic aggregates every 10,000 cycles
+SET pg_trickle.algebraic_drift_reset_cycles = 10000;
+```
+
+---
+
+### pg_trickle.agg_diff_cardinality_threshold
+
+Estimated `GROUP BY` cardinality threshold for algebraic aggregate warnings.
+At `create_stream_table` time, if the defining query uses algebraic
+aggregates (`SUM`, `COUNT`, `AVG`) in `DIFFERENTIAL` mode and the estimated
+group cardinality is below this threshold, a `WARNING` is emitted suggesting
+`FULL` or `AUTO` mode.
+
+Set to `0` to disable the warning.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Range | 0 - 100,000,000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Warn when GROUP BY cardinality is below 100
+SET pg_trickle.agg_diff_cardinality_threshold = 100;
 ```
 
 ---

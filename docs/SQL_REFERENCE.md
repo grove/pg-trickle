@@ -41,8 +41,14 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
     - [pgtrickle.explain\_st](#pgtrickleexplain_st)
     - [pgtrickle.list\_sources](#pgtricklelist_sources)
   - [Utilities](#utilities)
+    - [pgtrickle.rebuild\_cdc\_triggers](#pgtricklerebuild_cdc_triggers)
+    - [pgtrickle.convert\_buffers\_to\_unlogged](#pgtrickleconvert_buffers_to_unlogged)
     - [pgtrickle.pg\_trickle\_hash](#pgtricklepg_trickle_hash)
     - [pgtrickle.pg\_trickle\_hash\_multi](#pgtricklepg_trickle_hash_multi)
+  - [Diagnostics](#diagnostics)
+    - [pgtrickle.recommend\_refresh\_mode](#pgtricklerecommend_refresh_mode)
+    - [pgtrickle.refresh\_efficiency](#pgtricklerefresh_efficiency)
+    - [pgtrickle.export\_definition](#pgtrickleexport_definition)
 - [Expression Support](#expression-support)
   - [Conditional Expressions](#conditional-expressions)
   - [Comparison Operators](#comparison-operators)
@@ -1764,7 +1770,41 @@ not refreshing or to audit which source tables are being trigger-tracked.
 
 ### Utilities
 
-Low-level hashing functions used internally for row identity.
+Utility functions for CDC management and row identity hashing.
+
+---
+
+### pgtrickle.rebuild_cdc_triggers
+
+Rebuild all CDC triggers (function body + trigger DDL) for every source
+table tracked by pg_trickle. This recreates trigger functions and
+re-attaches the trigger to each source table.
+
+```sql
+pgtrickle.rebuild_cdc_triggers() → text
+```
+
+Returns `'done'` on success. Emits a `WARNING` per table on error and
+continues processing remaining sources.
+
+**When to use:**
+
+- After changing [`pg_trickle.cdc_trigger_mode`](CONFIGURATION.md#pg_tricklecdc_trigger_mode) from `row` to `statement` (or vice versa).
+- After `ALTER EXTENSION pg_trickle UPDATE` when the CDC trigger function body has changed.
+- After restoring from a backup where triggers may have been lost.
+
+**Example:**
+
+```sql
+-- Switch to statement-level triggers and rebuild
+SET pg_trickle.cdc_trigger_mode = 'statement';
+SELECT pgtrickle.rebuild_cdc_triggers();
+```
+
+**Notes:**
+- Called automatically during `ALTER EXTENSION pg_trickle UPDATE` (0.3.0 → 0.4.0) migration.
+- Safe to call at any time — existing triggers are dropped and recreated.
+- On error for a specific table, a `WARNING` is logged and processing continues with remaining sources.
 
 ---
 
