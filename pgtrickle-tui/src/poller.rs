@@ -247,11 +247,15 @@ pub async fn execute_action(client: &Client, action: &ActionRequest) -> ActionRe
         }
         ActionRequest::FetchDeltaSql(name) => {
             match client
-                .query_one("SELECT pgtrickle.explain_delta($1)", &[name])
+                .query("SELECT pgtrickle.explain_delta($1)", &[name])
                 .await
             {
-                Ok(row) => {
-                    let sql: String = row.get(0);
+                Ok(rows) => {
+                    let sql = rows
+                        .iter()
+                        .map(|row| row.get::<_, String>(0))
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     Ok(sql)
                 }
                 Err(e) => Err(e),
