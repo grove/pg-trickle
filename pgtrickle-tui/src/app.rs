@@ -1247,6 +1247,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // Enter in Delta Inspector: (re)fetch SQL for the selected table
+        KeyCode::Enter if app.current_view == View::DeltaInspector => {
+            if let Some(idx) = app.selected_stream_table_index() {
+                let st = &app.state.stream_tables[idx];
+                let qualified = format!("{}.{}", st.schema, st.name);
+                if let Some(ref tx) = app.action_tx {
+                    let _ = tx.try_send(ActionRequest::FetchDeltaSql(qualified.clone()));
+                    app.toast = Some(Toast::info(format!("Fetching delta SQL for {}…", st.name)));
+                }
+            }
+        }
+
         // View switching via number keys
         KeyCode::Char('1') => switch_view(app, View::Dashboard),
         KeyCode::Char('2') => switch_view(app, View::Detail),
@@ -1488,6 +1500,24 @@ fn switch_view(app: &mut App, view: View) {
         // Trigger on-demand fetches for Detail view
         if view == View::Detail {
             fetch_detail_data(app);
+        }
+
+        // Auto-fetch delta SQL when entering Delta Inspector
+        if view == View::DeltaInspector {
+            fetch_delta_sql(app);
+        }
+    }
+}
+
+/// Fetch delta SQL for the currently selected stream table (if not cached).
+fn fetch_delta_sql(app: &App) {
+    if let Some(idx) = app.selected_stream_table_index() {
+        let st = &app.state.stream_tables[idx];
+        if !app.state.delta_sql_cache.contains_key(&st.name) {
+            let qualified = format!("{}.{}", st.schema, st.name);
+            if let Some(ref tx) = app.action_tx {
+                let _ = tx.try_send(ActionRequest::FetchDeltaSql(qualified));
+            }
         }
     }
 }

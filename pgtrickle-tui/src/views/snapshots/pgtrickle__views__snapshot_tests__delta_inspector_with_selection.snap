@@ -7,18 +7,18 @@ expression: output
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Delta SQL ───────────────────────────────────────────────────────────────────┐
 │                                                                              │
-│ Delta SQL not yet loaded. Fetch it with:                                     │
+│ Loading delta SQL…                                                           │
 │                                                                              │
-│   :explain orders_live        (command palette)                              │
-│                                                                              │
-│ Or use the CLI:                                                              │
+│ Press Enter to fetch, or use the CLI:                                        │
 │                                                                              │
 │   pgtrickle explain orders_live                                              │
 │   pgtrickle explain --analyze                                                │
 │   pgtrickle explain --operators                                              │
 │   pgtrickle explain --dedup                                                  │
 │                                                                              │
-│ The delta SQL can be copied and run in psql for further analysis.            │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

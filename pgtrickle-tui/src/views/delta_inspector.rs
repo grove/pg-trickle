@@ -67,7 +67,7 @@ fn render_delta_sql(
             // Render the actual delta SQL
             let mut lines = vec![
                 Line::styled(
-                    " Generated Delta SQL (press Ctrl+R to reload):",
+                    " Generated Delta SQL (Enter to reload):",
                     theme.header,
                 ),
                 Line::raw(""),
@@ -77,24 +77,17 @@ fn render_delta_sql(
             }
             lines
         } else {
-            // SQL not yet fetched — show instructions
+            // SQL not yet fetched — show loading state
             vec![
                 Line::raw(""),
-                Line::styled(" Delta SQL not yet loaded. Fetch it with:", theme.header),
+                Line::styled(" Loading delta SQL…", theme.dim),
                 Line::raw(""),
-                Line::raw(format!("   :explain {}        (command palette)", st.name,)),
-                Line::raw(""),
-                Line::styled(" Or use the CLI:", theme.header),
+                Line::styled(" Press Enter to fetch, or use the CLI:", theme.header),
                 Line::raw(""),
                 Line::raw(format!("   pgtrickle explain {}", st.name)),
                 Line::raw("   pgtrickle explain --analyze"),
                 Line::raw("   pgtrickle explain --operators"),
                 Line::raw("   pgtrickle explain --dedup"),
-                Line::raw(""),
-                Line::styled(
-                    " The delta SQL can be copied and run in psql for further analysis.",
-                    theme.dim,
-                ),
             ]
         }
     } else {
