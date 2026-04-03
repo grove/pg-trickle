@@ -2970,9 +2970,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| PH-E2 | **Spill-aware refresh.** Monitor `temp_bytes` from `pg_stat_statements` after each refresh cycle. If spill exceeds threshold 3 consecutive times, automatically increase `per-ST work_mem` override or switch to FULL. Expose in `explain_st()` as `spill_history`. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+| PH-E2 | ~~**Spill-aware refresh.** Monitor `temp_bytes` from `pg_stat_statements` after each refresh cycle. If spill exceeds threshold 3 consecutive times, automatically increase `per-ST work_mem` override or switch to FULL. Expose in `explain_st()` as `spill_history`.~~ ✅ Done | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
 
-> **PH-E2 subtotal: ~1–2 weeks**
+> **PH-E2 subtotal: ✅ Completed**
 
 ### ORM Integration Guides (E5)
 
@@ -3092,7 +3092,7 @@ Validate correctness against independent query corpora beyond TPC-H.
 - [ ] G13-PRF: `parser.rs` split into ≥5 sub-modules; zero behavior change; all existing tests pass
 - [x] WM-7: Stuck watermarks detected and downstream STs paused; `watermark_stuck` alert emitted; auto-resume on watermark advance
 - [x] PH-E1: Delta cost estimation via capped COUNT on delta subquery; `max_delta_estimate_rows` GUC; FULL downgrade + NOTICE when threshold exceeded
-- [ ] PH-E2: Spill-aware auto-adjustment triggers after 3 consecutive spills; `spill_history` exposed in `explain_st()`
+- [x] PH-E2: Spill-aware auto-adjustment triggers after 3 consecutive spills; `spill_info` exposed in `explain_st()`
 - [x] PH-D2: `merge_join_strategy` GUC with manual override (`auto`/`hash_join`/`nested_loop`/`merge_join`)
 - [x] G14-SHC-SPIKE: RFC written; prototype benchmark validates or invalidates DSM-based approach
 - [x] I2: Complete documentation review done -- CONFIGURATION.md GUCs documented (40+), SQL_REFERENCE.md gaps filled, FAQ refs fixed
@@ -3188,10 +3188,10 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| PH-E1 | **Delta cost estimation.** Before executing delta SQL, estimate intermediate cardinality from change buffer row count × join fan-out heuristic. Compare against `pg_trickle.max_delta_work_mem_mb` GUC (default: 2× `work_mem`). If exceeded, downgrade to FULL + emit `NOTICE`. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
-| PH-E2 | ~~**Spill-aware refresh.** Monitor `temp_bytes` from `pg_stat_statements` after each refresh cycle. If spill exceeds threshold 3 consecutive times, automatically increase `per-ST work_mem` override or switch to FULL. Expose in `explain_st()` as `spill_history`.~~ ➡️ Pulled to v0.15.0 | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+| PH-E1 | ~~**Delta cost estimation.**~~ ➡️ Pulled to v0.15.0, ✅ Done | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+| PH-E2 | ~~**Spill-aware refresh.**~~ ➡️ Pulled to v0.15.0, ✅ Done | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
 
-> **Memory & I/O budget subtotal: PH-E1 + PH-E2 ➡️ pulled to v0.15.0**
+> **Memory & I/O budget subtotal: PH-E1 + PH-E2 ➡️ ✅ Completed in v0.15.0**
 
 ### Shared-Memory Template Caching (G14-SHC)
 
@@ -3218,7 +3218,7 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 - [ ] Hook chaining verified with TimescaleDB; non-pgtrickle matviews pass through unchanged
 - [ ] PH-D: DELETE+INSERT strategy benchmarked and gated behind GUC; hash-join planner hints for medium deltas
 - [ ] B-1: Algebraic aggregate fast-path replaces MERGE for `SUM`/`COUNT`/`AVG` GROUP BY queries; `__pgt_aux_count`/`__pgt_aux_sum` aux columns present; benchmarked at 100/1K/10K group cardinalities; `aggregate_fast_path` GUC respected; existing tests pass
-- [ ] PH-E: Delta cost estimation prevents OOM on large deltas; spill-aware auto-adjustment tested
+- [ ] PH-E: ~~Delta cost estimation prevents OOM on large deltas; spill-aware auto-adjustment tested~~ ✅ Done in v0.15.0
 - [ ] G14-SHC: Shared-memory template cache RFC written; prototype shows measurable cold-start elimination; implementation shipped or deferred with findings documented
 - [ ] Extension upgrade path tested (`0.15.0 → 0.16.0`)
 

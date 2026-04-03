@@ -1713,6 +1713,7 @@ SELECT * FROM pgtrickle.explain_st('order_totals');
 | refresh_timing_stats | {"samples":10,"min_ms":12.3,...} |
 | source_partitions | [{"source":"public.orders",...}] |
 | dependency_graph_dot | digraph dependency_subgraph { ... } |
+| spill_info | {"temp_blks_read":0,"temp_blks_written":1234,...} |
 
 #### Output Fields
 
@@ -1734,6 +1735,7 @@ SELECT * FROM pgtrickle.explain_st('order_totals');
 | `refresh_timing_stats` | Refresh duration statistics over the last 20 completed refreshes (JSON). Fields: `samples`, `min_ms`, `max_ms`, `avg_ms`, `latest_ms`, `latest_action` |
 | `source_partitions` | Partition info for partitioned source tables (JSON array). Fields per entry: `source`, `partition_key`, `partitions` |
 | `dependency_graph_dot` | Dependency sub-graph in [DOT format](https://graphviz.org/doc/info/lang.html). Shows immediate upstream sources (ellipses for base tables, boxes for stream tables) and downstream dependents. Paste into a Graphviz renderer to visualize. |
+| `spill_info` | Temp file spill metrics from `pg_stat_statements` (JSON). Fields: `temp_blks_read`, `temp_blks_written`, `threshold`, `exceeds_threshold`. Only present when `pg_trickle.spill_threshold_blocks > 0`. |
 
 > **Note:** Properties are only included when data is available. For example,
 > `source_partitions` only appears when at least one source table is

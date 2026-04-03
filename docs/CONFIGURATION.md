@@ -55,6 +55,8 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.cdc\_trigger\_mode](#pg_tricklecdc_trigger_mode)
     - [pg\_trickle.tick\_watermark\_enabled](#pg_trickletick_watermark_enabled)
     - [pg\_trickle.watermark\_holdback\_timeout](#pg_tricklewatermark_holdback_timeout)
+    - [pg\_trickle.spill\_threshold\_blocks](#pg_tricklespill_threshold_blocks)
+    - [pg\_trickle.spill\_consecutive\_limit](#pg_tricklespill_consecutive_limit)
     - [pg\_trickle.log\_merge\_sql](#pg_tricklelog_merge_sql)
   - [Guardrails & Diagnostics](#guardrails--diagnostics)
     - [pg\_trickle.fuse\_default\_ceiling](#pg_tricklefuse_default_ceiling)
@@ -1388,6 +1390,61 @@ SELECT pg_reload_conf();
 ```json
 {"event":"watermark_stuck","group":"order_pipeline","source_oid":16385,"age_secs":620}
 {"event":"watermark_resumed","source_oid":16385}
+```
+
+---
+
+### pg_trickle.spill_threshold_blocks
+
+Temp blocks written threshold for spill detection. After each differential
+MERGE, pg\_trickle queries `pg_stat_statements` for the `temp_blks_written`
+metric. If the value exceeds this threshold, the refresh is considered a
+**spill**.
+
+After `spill_consecutive_limit` consecutive spills, the scheduler forces a
+FULL refresh for that stream table to prevent repeated expensive
+differential merges.
+
+Requires the `pg_stat_statements` extension to be installed. Set to `0` to
+disable spill detection (default).
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Min | `0` |
+| Max | `100000000` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Enable spill detection: flag > 1000 temp blocks as a spill
+ALTER SYSTEM SET pg_trickle.spill_threshold_blocks = 1000;
+SELECT pg_reload_conf();
+```
+
+---
+
+### pg_trickle.spill_consecutive_limit
+
+Number of consecutive spilling differential refreshes before the scheduler
+automatically forces a FULL refresh. Resets after any non-spilling refresh.
+
+Only effective when `spill_threshold_blocks > 0`.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `3` |
+| Min | `1` |
+| Max | `100` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Force FULL after 5 consecutive spills (default: 3)
+ALTER SYSTEM SET pg_trickle.spill_consecutive_limit = 5;
+SELECT pg_reload_conf();
 ```
 
 ---

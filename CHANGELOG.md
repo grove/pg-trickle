@@ -114,6 +114,14 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   advanced, with a `watermark_resumed` event. Protects against silent data staleness
   from broken ETL pipelines.
 
+- **PH-E2:** Spill-aware refresh. Two new GUCs: `pg_trickle.spill_threshold_blocks`
+  (default 0 = disabled) and `pg_trickle.spill_consecutive_limit` (default 3). After
+  each differential MERGE, queries `pg_stat_statements` for `temp_blks_written`. If the
+  value exceeds the threshold for N consecutive refreshes, the scheduler forces a FULL
+  refresh to prevent repeated expensive spilling merges. Spill metrics are exposed in
+  `pgtrickle.explain_st()` via the new `spill_info` property. Requires the
+  `pg_stat_statements` extension.
+
 ### Changed
 
 - **I2:** Complete documentation review for v0.15.0 readiness. Fixed `CONFIGURATION.md`
