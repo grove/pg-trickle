@@ -941,7 +941,8 @@ AS 'MODULE_PATHNAME', 'slot_health_wrapper';
 -- src/api.rs:3203
 -- pg_trickle::api::drop_stream_table
 CREATE  FUNCTION pgtrickle."drop_stream_table"(
-	"name" TEXT /* &str */
+	"name" TEXT /* &str */,
+	"cascade" BOOL DEFAULT true /* bool */
 ) RETURNS void
 STRICT 
 LANGUAGE c /* Rust */

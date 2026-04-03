@@ -38,3 +38,14 @@
 --   Detects stuck watermarks and pauses downstream stream tables.
 --
 -- No catalog schema changes in this upgrade step.
+
+-- drop_stream_table: add cascade parameter (defaults to true)
+-- The old 1-arg overload is replaced by a 2-arg overload with a default.
+DROP FUNCTION IF EXISTS pgtrickle."drop_stream_table"(TEXT);
+CREATE FUNCTION pgtrickle."drop_stream_table"(
+    "name" TEXT /* &str */,
+    "cascade" BOOL DEFAULT true /* bool */
+) RETURNS void
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'drop_stream_table_wrapper';
