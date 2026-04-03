@@ -2848,9 +2848,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G15-BC | **`bulk_create(definitions JSONB)`** — create multiple stream tables and their CDC triggers in a single transaction. Useful for dbt/CI pipelines that manage many STs programmatically. | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
+| G15-BC | ~~**`bulk_create(definitions JSONB)`** — create multiple stream tables and their CDC triggers in a single transaction. Useful for dbt/CI pipelines that manage many STs programmatically.~~ ✅ Done | ~2–3d | [plans/performance/REPORT_OVERALL_STATUS.md §15](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> **G15-BC subtotal: ~2–3 days**
+> **G15-BC subtotal: ✅ Completed**
 
 ### Parser Modularization (G13-PRF)
 
@@ -3062,9 +3062,9 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| G8.1 | **Cross-session MERGE cache invalidation.** Add a `catalog_version` counter to `pgt_stream_tables`, bump on ALTER QUERY / DROP / reinit. Before each refresh, compare cached version to catalog; regenerate template on mismatch. | 4–6h | — |
+| G8.1 | ~~**Cross-session MERGE cache invalidation.** Add a `catalog_version` counter to `pgt_stream_tables`, bump on ALTER QUERY / DROP / reinit. Before each refresh, compare cached version to catalog; regenerate template on mismatch.~~ ✅ Done — existing `CACHE_GENERATION` counter + `defining_query_hash` provides cross-session + per-ST invalidation without a schema change. | 4–6h | — |
 
-> **G8.1 subtotal: ~4–6 hours**
+> **G8.1 subtotal: ✅ Completed**
 
 ### `explain_st()` Enhancements (EXPL-ENH)
 

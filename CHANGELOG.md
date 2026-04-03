@@ -42,11 +42,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   current behavior), `warn` (WARNING but allow creation), `allow` (silent). Gives operators
   flexibility when volatile expressions are intentional (e.g., sampling, audit timestamps).
 
+- **G15-BC:** `pgtrickle.bulk_create(definitions JSONB)` — create multiple stream tables
+  in a single transaction. Accepts a JSONB array of definitions (each with `name`, `query`,
+  and optional parameters matching `create_stream_table`). Returns a JSONB array of results
+  with `name`, `status`, and `pgt_id` per definition. Atomic: entire batch rolls back on
+  any error.
+
 ### Changed
 
 - **TRUNC-1:** Documented existing TRUNCATE capture behavior in `docs/SQL_REFERENCE.md`.
   TRUNCATE on source tables in trigger CDC mode already triggers automatic FULL refresh
   via the `action='T'` marker mechanism (implemented in v0.14.0 CDC triggers).
+
+- **G8.1:** Verified cross-session MERGE cache invalidation is already complete via the
+  shared-memory `CACHE_GENERATION` counter + per-ST `defining_query_hash` check. No
+  additional `catalog_version` column needed.
 
 ---
 
