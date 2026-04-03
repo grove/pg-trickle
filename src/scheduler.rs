@@ -617,6 +617,17 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
                 error_msg,
             );
 
+            // ERR-1d fix: After a PG ERROR inside BackgroundWorker::transaction,
+            // the PostgreSQL transaction state is left in STARTED/ABORT state
+            // because CommitTransactionCommand was never called.  We must abort
+            // the orphaned transaction before starting a new one, otherwise
+            // StartTransactionCommand raises "unexpected state STARTED".
+            // SAFETY: AbortCurrentTransaction properly cleans up the aborted
+            // transaction and returns PostgreSQL to idle state.
+            unsafe {
+                pg_sys::AbortCurrentTransaction();
+            }
+
             // Determine if this is a retryable or permanent error.
             let is_retryable = crate::error::classify_spi_error_retryable(&error_msg);
 
@@ -4217,7 +4228,41 @@ fn refresh_single_st(
         }
         base_action
     };
-    let result = execute_scheduled_refresh(&st, action, tick_watermark, drift_counter);
+
+    // ERR-1e: Wrap the refresh in a subtransaction + catch_unwind so that
+    // PG ERRORs (which pgrx converts to panics via longjmp) don't abort
+    // the entire tick transaction.  On panic the subtransaction rolls back
+    // (undoing TRUNCATE + partial writes) and we set ERROR status in the
+    // still-valid outer transaction.
+    let subtxn = SubTransaction::begin();
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        execute_scheduled_refresh(&st, action, tick_watermark, drift_counter)
+    }));
+    let result = match result {
+        Ok(outcome) => {
+            subtxn.commit();
+            outcome
+        }
+        Err(panic_payload) => {
+            subtxn.rollback();
+            let error_msg = extract_panic_message(&panic_payload);
+            log!(
+                "pg_trickle: refresh panicked for {}.{}: {} — setting error state",
+                st.pgt_schema,
+                st.pgt_name,
+                error_msg,
+            );
+            let is_retryable = crate::error::classify_spi_error_retryable(&error_msg);
+            if !is_retryable {
+                let _ = StreamTableMeta::set_error_state(pgt_id, &error_msg);
+            }
+            if is_retryable {
+                RefreshOutcome::RetryableFailure
+            } else {
+                RefreshOutcome::PermanentFailure
+            }
+        }
+    };
 
     let retry = retry_states.entry(pgt_id).or_default();
     match result {
