@@ -1269,7 +1269,6 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('7') => switch_view(app, View::Config),
         KeyCode::Char('8') => switch_view(app, View::Health),
         KeyCode::Char('9') => switch_view(app, View::Alerts),
-        KeyCode::Char('0') => switch_view(app, View::Health),
         // Extended view switching via letter keys
         KeyCode::Char('w') => switch_view(app, View::Workers),
         KeyCode::Char('f') => switch_view(app, View::Fuse),
@@ -1647,8 +1646,18 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled("✗ disconnected", app.theme.error)
     };
 
+    let view_label_text = if app.current_view == View::DeltaInspector {
+        let table_suffix = app
+            .selected_stream_table_index()
+            .and_then(|idx| app.state.stream_tables.get(idx))
+            .map(|st| format!(" — {}.{}", st.schema, st.name))
+            .unwrap_or_default();
+        format!(" Delta SQL{table_suffix} ")
+    } else {
+        format!(" {} ", app.current_view.label())
+    };
     let view_label = Span::styled(
-        format!(" {} ", app.current_view.label()),
+        view_label_text,
         app.theme.title.add_modifier(Modifier::REVERSED),
     );
 

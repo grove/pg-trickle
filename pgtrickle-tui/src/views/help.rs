@@ -35,7 +35,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, current_view: View) 
         Line::raw("  5        Diagnostics"),
         Line::raw("  6        CDC health"),
         Line::raw("  7        Configuration"),
-        Line::raw("  0        Health checks"),
+        Line::raw("  8        Health checks"),
         Line::raw("  9        Alerts"),
         Line::raw("  w        Workers & job queue"),
         Line::raw("  f        Fuse & circuit breaker"),
