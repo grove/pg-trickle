@@ -413,8 +413,15 @@ async fn test_action_fetch_ddl_with_schema_returns_ddl() {
         &crate::state::ActionRequest::FetchDdl("public.test_table".into()),
     )
     .await;
-    assert!(result.success, "FetchDdl should succeed, got: {}", result.message);
-    assert!(!result.message.is_empty(), "FetchDdl should return DDL text");
+    assert!(
+        result.success,
+        "FetchDdl should succeed, got: {}",
+        result.message
+    );
+    assert!(
+        !result.message.is_empty(),
+        "FetchDdl should return DDL text"
+    );
 }
 
 #[tokio::test]
