@@ -2833,20 +2833,16 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **External test suites subtotal: ~1–2 days (TS3 only; TS1/TS2 in v0.11.0)**
 
-### Integration & Release Prep
+### Documentation Review
 
-> **In plain terms:** Ships the dbt integration as a proper
-> pip-installable Python package on PyPI so `pip install dbt-pgtrickle`
-> works — no manual git cloning required. Alongside that, a full
-> documentation review polishes everything so the product is ready to be
-> announced to the wider PostgreSQL community.
+> **In plain terms:** A full documentation review polishes everything so the
+> product is ready to be announced to the wider PostgreSQL community.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| I1 | dbt-pgtrickle 0.1.0 formal release (PyPI) | 2–3h | [dbt-pgtrickle/](dbt-pgtrickle/) · [PLAN_DBT_MACRO.md](plans/dbt/PLAN_DBT_MACRO.md) |
 | I2 | Complete documentation review & polish | 4–6h | [docs/](docs/) |
 
-> **Integration subtotal: ~6–9 hours**
+> **Documentation subtotal: ~4–6 hours**
 
 ### Bulk Create API (G15-BC)
 
@@ -2885,15 +2881,46 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 > **WM-7 subtotal: ~1–2 weeks**
 
-> **v0.15.0 total: ~14–25 hours + ~2–3d bulk create + ~3–4wk parser modularization + ~1–2wk watermark hold-back**
+### Delta Cost Estimation (PH-E1)
+
+> **In plain terms:** When a stream table's delta is unexpectedly large (e.g.
+> because a batch load was not gated), the generated delta SQL can consume all
+> available `work_mem` and spill multi-GB temp files. This adds a lightweight
+> pre-flight check: before executing the delta SQL, estimate intermediate
+> cardinality and downgrade to FULL refresh with a `NOTICE` if the estimate
+> exceeds a configurable budget. Prevents OOM and runaway temp-file growth on
+> unexpected large deltas.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PH-E1 | **Delta cost estimation.** Before executing delta SQL, estimate intermediate cardinality from change buffer row count × join fan-out heuristic. Compare against `pg_trickle.max_delta_work_mem_mb` GUC (default: 2× `work_mem`). If exceeded, downgrade to FULL + emit `NOTICE`. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+
+> **PH-E1 subtotal: ~1–2 weeks**
+
+### dbt Hub Publication (I3)
+
+> **In plain terms:** `dbt-pgtrickle` is currently installed via a git URL
+> in `packages.yml`. Publishing to dbt Hub lets users install with a simple
+> package name — `- package: pgtrickle/dbt_pgtrickle` — without hard-coding
+> a GitHub URL or revision. This is the standard distribution path for dbt
+> macro packages.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| I3 | Submit `dbt-pgtrickle` to [dbt Hub](https://hub.getdbt.com/); verify `packages.yml` install by package name works; update README install instructions. | 2–4h | [dbt-pgtrickle/](dbt-pgtrickle/) · [PLAN_DBT_MACRO.md](plans/dbt/PLAN_DBT_MACRO.md) |
+
+> **I3 subtotal: ~2–4 hours**
+
+> **v0.15.0 total: ~16–28 hours + ~2–3d bulk create + ~3–4wk parser modularization + ~1–2wk watermark hold-back + ~1–2wk delta cost estimation**
 
 **Exit criteria:**
 - [ ] At least one external test corpus (sqllogictest, JOB, or Nexmark) passes
-- [ ] dbt-pgtrickle 0.1.0 on PyPI
 - [ ] Complete documentation review done
 - [ ] G15-BC: `pgtrickle.bulk_create(definitions JSONB)` creates all STs and CDC triggers atomically; tested with 10+ definitions in a single call
 - [ ] G13-PRF: `parser.rs` split into ≥5 sub-modules; zero behavior change; all existing tests pass
 - [ ] WM-7: Stuck watermarks detected and downstream STs paused; `watermark_stuck` alert emitted; auto-resume on watermark advance
+- [ ] PH-E1: Delta cost estimation prevents OOM on large deltas; `max_delta_work_mem_mb` GUC respected; FULL downgrade + NOTICE emitted when threshold exceeded; tested with oversized delta
+- [ ] I3: `dbt-pgtrickle` published on dbt Hub; `packages.yml` package-name install verified
 - [ ] Extension upgrade path tested (`0.14.0 → 0.15.0`)
 
 ---
@@ -2977,7 +3004,7 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 | PH-E1 | **Delta cost estimation.** Before executing delta SQL, estimate intermediate cardinality from change buffer row count × join fan-out heuristic. Compare against `pg_trickle.max_delta_work_mem_mb` GUC (default: 2× `work_mem`). If exceeded, downgrade to FULL + emit `NOTICE`. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
 | PH-E2 | **Spill-aware refresh.** Monitor `temp_bytes` from `pg_stat_statements` after each refresh cycle. If spill exceeds threshold 3 consecutive times, automatically increase `per-ST work_mem` override or switch to FULL. Expose in `explain_st()` as `spill_history`. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
 
-> **Memory & I/O budget subtotal: ~2–4 weeks**
+> **Memory & I/O budget subtotal: ~1–2 weeks (PH-E1 ➡️ pulled to v0.15.0; PH-E2 remains here)**
 
 ### Shared-Memory Template Caching (G14-SHC)
 
@@ -3150,7 +3177,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
 | v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
 | v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~4–6d TUI + ~0.5d docs | — | |
-| v0.15.0 — External Test Suites & Integration | ~14–25h + ~2–3d bulk create + ~3–4wk parser + ~1–2wk watermark | — | |
+| v0.15.0 — External Test Suites & Integration | ~16–28h + ~2–3d bulk create + ~3–4wk parser + ~1–2wk watermark + ~1–2wk delta cost estimation | — | |
 | v0.16.0 — PG Backward Compatibility & Native DDL Syntax | ~38–56h (PG compat) + ~13–21d (Native DDL) + ~2–3wk MERGE alts + ~2–4wk memory budget + ~2–3wk template cache | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
