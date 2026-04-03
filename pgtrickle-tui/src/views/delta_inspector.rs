@@ -105,7 +105,7 @@ fn render_delta_sql(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme.border)
-                .title(Span::styled(" Delta SQL ", theme.title)),
+                .title(Span::styled(" Delta SQL  e-Show DDL ", theme.title)),
         )
         .wrap(Wrap { trim: false });
 

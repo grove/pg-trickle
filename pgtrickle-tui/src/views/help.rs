@@ -118,8 +118,8 @@ fn context_help(view: View) -> Vec<&'static str> {
             "g to gate/ungate source (tab 2)",
         ],
         View::DeltaInspector => vec![
-            ":explain <name> to fetch delta SQL",
-            "Shows cached SQL inline when loaded",
+            "Enter to reload delta SQL",
+            "e to show CREATE statement (DDL)",
             "Tab to switch Delta SQL / Auxiliary Columns",
         ],
         View::Diagnostics => vec![

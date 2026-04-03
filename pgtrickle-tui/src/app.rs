@@ -1173,7 +1173,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 });
             }
         }
-        KeyCode::Char('e') if app.current_view == View::Detail => {
+        KeyCode::Char('e') if app.current_view == View::Detail
+            || app.current_view == View::DeltaInspector =>
+        {
             // Export DDL overlay
             if let Some(idx) = app.selected_stream_table_index() {
                 let name = app.state.stream_tables[idx].name.clone();

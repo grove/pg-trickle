@@ -5,7 +5,7 @@ expression: output
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ Delta Inspector — select a stream table on Dashboard   [Delta SQL]  Auxiliary│
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Delta SQL ───────────────────────────────────────────────────────────────────┐
+┌ Delta SQL  e-Show DDL ───────────────────────────────────────────────────────┐
 │                                                                              │
 │ No stream table selected. Press 1 to go to Dashboard, select a table, then   │
 │press d.                                                                      │
