@@ -527,8 +527,9 @@ The stream tables don't know about Heidi yet. The change is in the buffer, waiti
 > ```sql
 > SELECT name, data_timestamp, staleness FROM pgtrickle.pgt_status();
 > ```
-> Or force an immediate synchronous refresh for the tutorial:
+> Or force an immediate synchronous refresh for the tutorial. Note that `refresh_stream_table` only refreshes the named table — it does not cascade upstream — so refresh in topological order:
 > ```sql
+> SELECT pgtrickle.refresh_stream_table('department_stats');
 > SELECT pgtrickle.refresh_stream_table('department_report');
 > ```
 
@@ -568,7 +569,12 @@ INSERT INTO departments (id, name, parent_id) VALUES
 
 **What happened:** The CDC trigger on `departments` fired. The change buffer for `departments` has one new row. None of the stream tables know about it yet.
 
-> **The scheduler handles this automatically** — all three tables will refresh within a second in the correct dependency order (upstream first). To force it synchronously: `SELECT pgtrickle.refresh_stream_table('department_report');`
+> **The scheduler handles this automatically** — all three tables will refresh within a second in the correct dependency order (upstream first). To force it synchronously, refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
+> ```sql
+> SELECT pgtrickle.refresh_stream_table('department_tree');
+> SELECT pgtrickle.refresh_stream_table('department_stats');
+> SELECT pgtrickle.refresh_stream_table('department_report');
+> ```
 
 **What happened across all three layers:**
 
@@ -605,7 +611,13 @@ UPDATE departments SET name = 'R&D' WHERE id = 2;
 
 **What happened in the change buffer:** The CDC trigger captured the **old** row (`name='Engineering'`) and the **new** row (`name='R&D'`). Both old and new values are stored so the delta can compute what to remove and what to add.
 
-Wait a moment for the scheduler to propagate the rename through all layers (or force it: `SELECT pgtrickle.refresh_stream_table('department_report');`).
+Wait a moment for the scheduler to propagate the rename through all layers. To force it synchronously, refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
+
+```sql
+SELECT pgtrickle.refresh_stream_table('department_tree');
+SELECT pgtrickle.refresh_stream_table('department_stats');
+SELECT pgtrickle.refresh_stream_table('department_report');
+```
 
 **What happened across all three layers:**
 
@@ -641,16 +653,26 @@ DELETE FROM employees WHERE name = 'Bob';
 
 **What happened:** The `AFTER DELETE` trigger on `employees` fired, writing a change buffer row with action type `D` and Bob's old values (`department_id=5, salary=115000`). The delta query will use these old values to compute the correct aggregate adjustment — it knows to subtract 115000 from Backend's salary sum and decrement the count.
 
-Wait about a second for the scheduler to process the DELETE, then:
+The scheduler handles this automatically — all three tables refresh within about a second. To force it synchronously, refresh in upstream-first order:
 
 ```sql
-SELECT * FROM department_stats WHERE department_name = 'Backend';
+SELECT pgtrickle.refresh_stream_table('department_stats');
+SELECT pgtrickle.refresh_stream_table('department_report');
+```
+
+> **Why call `department_stats` first?** `department_stats` is the table that directly sources from `employees`. Calling `refresh_stream_table('department_report')` only refreshes the downstream table — it does not cascade upstream. You need to explicitly refresh each table in topological order, or let the background scheduler do it automatically.
+
+Then verify the result:
+
+```sql
+SELECT department_name, headcount, total_salary, avg_salary
+FROM department_stats WHERE department_name = 'Backend';
 ```
 
 ```
- department_id | department_name | headcount | total_salary | avg_salary
----------------+-----------------+-----------+--------------+------------
-             5 | Backend         |         1 |    120000.00 |  120000.00
+ department_name | headcount | total_salary | avg_salary
+-----------------+-----------+--------------+------------
+ Backend         |         1 |    120000.00 |  120000.00
 ```
 
 Headcount dropped from 2 → 1 and the salary aggregates updated. Again, only the Backend group was touched — the other 6 department rows were untouched.
