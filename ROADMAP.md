@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-03
+> **Last updated:** 2026-04-04
 > **Latest release:** 0.15.0 (2026-04-03)
-> **Current milestone:** v0.16.0 — PG Backward Compatibility & Native DDL Syntax
+> **Current milestone:** v0.16.0 — Performance & Refresh Optimization
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -32,9 +32,10 @@ coverage, all in plain language.
 - [v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling](#v0130--scalability-foundations-partitioning-enhancements-merge-profiling--multi-tenant-scheduling)
 - [v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics](#v0140--tiered-scheduling-unlogged-buffers--diagnostics)
 - [v0.15.0 — External Test Suites & Integration](#v0150--external-test-suites--integration)
-- [v0.16.0 — PG Backward Compatibility & Native DDL Syntax](#v0160--pg-backward-compatibility--native-ddl-syntax)
+- [v0.16.0 — Performance & Refresh Optimization](#v0160--performance--refresh-optimization)
+- [v0.17.0 — Query Intelligence & Stability](#v0170--query-intelligence--stability)
 - [v1.0.0 — Stable Release](#v100--stable-release)
-- [Post-1.0 — Scale & Ecosystem](#post-10--scale--ecosystem)
+- [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
 - [References](#references)
 <!-- TOC end -->
@@ -70,11 +71,11 @@ from the v0.1.x series to 1.0 and beyond.
          We are here
               │
               ▼
-              └─ ┌─────────┐ ┌────────┐ ┌────────┐
-                 │ 0.16.0  │ │ 1.0.0  │ │ 1.x+   │
-                 │PGCompat │─│Stable  │─│Scale & │
-                 │+DDL     │ │Release │ │Ecosys. │
-                 └─────────┘ └────────┘ └────────┘
+              └─ ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐
+                 │ 0.16.0  │ │ 0.17.0  │ │ 1.0.0  │ │ 1.x+   │
+                 │Perf &   │─│Query    │─│Stable  │─│Scale & │
+                 │Refresh  │ │Intel.   │ │Release │ │Ecosys. │
+                 └─────────┘ └─────────┘ └────────┘ └────────┘
 ```
 
 ---
@@ -3117,86 +3118,70 @@ Validate correctness against independent query corpora beyond TPC-H.
 
 ---
 
-## v0.16.0 — PG Backward Compatibility & Native DDL Syntax
+## v0.16.0 — Performance & Refresh Optimization
 
-**Goal:** Widen the deployment target to PG 16–18 so teams that haven't yet
-upgraded can use the extension, and add `CREATE MATERIALIZED VIEW …
-WITH (pgtrickle.stream = true)` DDL syntax so stream tables feel native to
-PostgreSQL tooling (pg_dump, ORMs, `\dm`).
-
-### PostgreSQL Backward Compatibility (PG 16–18)
-
-> **In plain terms:** pg_trickle currently only targets PostgreSQL 18. This
-> work adds support for PG 16 and PG 17 so teams that haven't yet upgraded
-> can still use the extension. Each PostgreSQL major version has subtly
-> different internal APIs — especially around query parsing and the WAL
-> format used for change-data-capture — so each version needs its own
-> feature flags, build path, and CI test run.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| BC1 | Cargo.toml feature flags (`pg16`, `pg17`, `pg18`) + `cfg_aliases` | 4–8h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 1 |
-| BC2 | `#[cfg]` gate JSON_TABLE nodes in `parser.rs` (~250 lines, PG 17+) | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 2 |
-| BC3 | `pg_get_viewdef()` trailing-semicolon behavior verification | 2–4h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 3 |
-| BC4 | CI matrix expansion (PG 16, 17, 18) + parameterized Dockerfiles | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phases 4–5 |
-| BC5 | WAL decoder validation against PG 16–17 `pgoutput` format | 8–12h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §6A |
-
-> **Backward compatibility subtotal: ~38–56 hours**
-
-### Native DDL Syntax
-
-> **In plain terms:** Currently you create stream tables by calling a
-> function: `SELECT pgtrickle.create_stream_table(...)`. This adds support
-> for standard PostgreSQL DDL syntax: `CREATE MATERIALIZED VIEW my_view
-> WITH (pgtrickle.stream = true) AS SELECT ...`. That single change means
-> `pg_dump` can back them up properly, `\dm` in psql lists them, ORMs can
-> introspect them, and migration tools like Flyway treat them like ordinary
-> database objects. Stream tables finally look native to PostgreSQL tooling.
-
-Intercept `CREATE/DROP/REFRESH MATERIALIZED VIEW` via `ProcessUtility_hook`
-and route stream-table variants through the existing internal implementations.
-Allows existing SQL tooling — pg_dump, `\dm`, ORMs — to interact with stream
-tables naturally without calling `pgtrickle.create_stream_table()`.
-
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| NAT-1 | `ProcessUtility_hook` infrastructure: register in `_PG_init()`, dispatch+passthrough, hook chaining with TimescaleDB/pg_stat_statements | 3–5d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
-| NAT-2 | CREATE/DROP/REFRESH interception: parse `CreateTableAsStmt` reloptions, route to internal impls, IF EXISTS handling, CONCURRENTLY no-op | 8–13d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
-| NAT-3 | E2E tests: CREATE/DROP/REFRESH via DDL syntax, hook chaining, non-pg_trickle matview passthrough | 2–3d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
-
-> **Native DDL syntax subtotal: ~13–21 days**
+**Goal:** Attack the MERGE bottleneck from multiple angles — alternative merge
+strategies, algebraic aggregate shortcuts, append-only bypass, delta filtering,
+shared-memory template caching — and add PostgreSQL 19 forward-compatibility
+before PG 19 reaches beta.
 
 ### MERGE Alternatives & Planner Control (Phase D)
 
 > **In plain terms:** MERGE dominates 70–97% of refresh time. This explores
 > whether replacing MERGE with DELETE+INSERT (or INSERT ON CONFLICT + DELETE)
 > is faster for specific patterns — particularly for small deltas against
-> large stream tables where the MERGE join is the bottleneck. Also extends
-> planner hint injection beyond the existing `enable_seqscan` control.
+> large stream tables where the MERGE join is the bottleneck.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | PH-D1 | **DELETE+INSERT strategy.** For stream tables where delta is <1% of target, replace MERGE with `DELETE WHERE __pgt_row_id IN (delta_deletes)` + `INSERT ... SELECT FROM delta_inserts`. Benchmark against MERGE for 1K/10K/100K deltas against 1M/10M targets. Gate behind `pg_trickle.merge_strategy = 'auto'\|'merge'\|'delete_insert'` GUC. | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase D](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
-| PH-D2 | **Hash-join planner hints.** Extend `SET LOCAL` injection to prefer hash joins over nested-loop joins for MERGE when delta exceeds 1K rows (nested-loop is optimal for tiny deltas, hash-join for medium). | 3–5d | [PLAN_PERFORMANCE_PART_9.md §Phase D](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
-| B-1 | **Algebraic aggregate UPDATE fast-path.** For `GROUP BY` queries where all aggregates are algebraically invertible (`SUM`/`COUNT`/`AVG`), replace the MERGE with a direct `UPDATE target SET col = col + Δ WHERE group_key = ?` for existing groups, plus `INSERT` for newly-appearing groups and `DELETE` for groups whose count reaches zero. Eliminates the MERGE join overhead — the dominant cost for aggregate refresh when group cardinality is high. Requires adding `__pgt_aux_count` / `__pgt_aux_sum` auxiliary columns to the stream table. Fallback to existing MERGE path for non-algebraic aggregates (`MIN`, `MAX`, `STRING_AGG`, etc.). Gate behind `pg_trickle.aggregate_fast_path` GUC (default `true`). Expected impact: **5–20× apply-time reduction** for high-cardinality GROUP BY (10K+ distinct groups); aggregate scenarios at 100K/1% projected to drop from ~50ms to sub-1ms apply time. | 4–6 wk | [plans/performance/PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) · [plans/sql/PLAN_TRANSACTIONAL_IVM.md §Phase 4](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
 
-> **MERGE alternatives subtotal: ~6–11 weeks**
+> **MERGE alternatives subtotal: ~1–2 weeks**
 
-### Memory & I/O Budget Management (Phase E)
+### Algebraic Aggregate UPDATE Fast-Path (B-1)
 
-> **In plain terms:** When a stream table's delta is unexpectedly large (e.g.
-> because a batch load was not gated), the generated SQL can consume all
-> available `work_mem` and spill multi-GB temp files. This adds resource
-> awareness: the scheduler estimates delta cost before executing, and either
-> throttles or downgrades to FULL refresh when the estimated cost exceeds a
-> configurable budget. Prevents OOM and runaway temp file growth.
+> **In plain terms:** The current aggregate delta rule recomputes entire
+> groups where the GROUP BY key appears in the delta. For a group with 100K
+> rows where 1 row changed, the aggregate re-scans all 100K rows in that
+> group. For decomposable aggregates (`SUM`/`COUNT`/`AVG`), a direct
+> `UPDATE target SET col = col + Δ` replaces the full MERGE join — dropping
+> aggregate refresh from O(group_size) to O(1) per group.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| PH-E1 | ~~**Delta cost estimation.**~~ ➡️ Pulled to v0.15.0, ✅ Done | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
-| PH-E2 | ~~**Spill-aware refresh.**~~ ➡️ Pulled to v0.15.0, ✅ Done | 1–2 wk | [PLAN_PERFORMANCE_PART_9.md §Phase E](plans/performance/PLAN_PERFORMANCE_PART_9.md) |
+| B-1 | **Algebraic aggregate UPDATE fast-path.** For `GROUP BY` queries where all aggregates are algebraically invertible (`SUM`/`COUNT`/`AVG`), replace the MERGE with a direct `UPDATE target SET col = col + Δ WHERE group_key = ?` for existing groups, plus `INSERT` for newly-appearing groups and `DELETE` for groups whose count reaches zero. Eliminates the MERGE join overhead — the dominant cost for aggregate refresh when group cardinality is high. Requires adding `__pgt_aux_count` / `__pgt_aux_sum` auxiliary columns to the stream table. Fallback to existing MERGE path for non-algebraic aggregates (`MIN`, `MAX`, `STRING_AGG`, etc.). Gate behind `pg_trickle.aggregate_fast_path` GUC (default `true`). Expected impact: **5–20× apply-time reduction** for high-cardinality GROUP BY (10K+ distinct groups); aggregate scenarios at 100K/1% projected to drop from ~50ms to sub-1ms apply time. | 4–6 wk | [plans/performance/PLAN_NEW_STUFF.md §B-1](plans/performance/PLAN_NEW_STUFF.md) · [plans/sql/PLAN_TRANSACTIONAL_IVM.md §Phase 4](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
 
-> **Memory & I/O budget subtotal: PH-E1 + PH-E2 ➡️ ✅ Completed in v0.15.0**
+> **B-1 subtotal: ~4–6 weeks**
+
+### Append-Only Stream Tables — MERGE Bypass (A-3-AO)
+
+> **In plain terms:** When a stream table's sources are insert-only (e.g.
+> event logs, append-only tables where CDC never sees DELETE/UPDATE), the
+> MERGE is pure overhead — every delta row is an INSERT, never a match.
+> Bypassing MERGE entirely with a plain `INSERT INTO st SELECT ... FROM delta`
+> removes the join against the target table, takes only `RowExclusiveLock`,
+> and is the single highest-payoff optimization for event-sourced architectures.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A-3-AO | **Append-only stream table fast path.** Expose an explicit `CREATE STREAM TABLE … APPEND ONLY` declaration. When set, refresh uses `INSERT INTO st SELECT ... FROM delta` instead of MERGE — no target-table join, `RowExclusiveLock` only. CDC-observed heuristic fallback: if no DELETE/UPDATE has been seen, use the fast path; fall back to MERGE on first non-insert. Benchmark against MERGE for 1K/10K/100K append deltas. | 1–2 wk | [plans/performance/PLAN_NEW_STUFF.md §A-3](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **A-3-AO subtotal: ~1–2 weeks**
+
+### Delta Predicate Pushdown (B-2)
+
+> **In plain terms:** For a query like `SELECT ... FROM orders WHERE status =
+> 'shipped'`, if a CDC change row has `status = 'pending'`, the delta
+> processes it through scan → filter → discard. All the scan and join work
+> is wasted. Pushing the WHERE predicate down into the change buffer scan
+> eliminates irrelevant rows before any join processing begins — a 5–10×
+> reduction in delta row volume for selective queries.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B-2 | **Delta predicate pushdown.** During OpTree construction, identify `Filter` nodes whose predicates reference only columns from a single source table. Inject these predicates into the `delta_scan` CTE as additional WHERE clauses (including `OR old_col = 'value'` for DELETE correctness). Expected impact: **5–10× delta row reduction** for queries with < 10% selectivity. | 2–3 wk | [plans/performance/PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **B-2 subtotal: ~2–3 weeks**
 
 ### Shared-Memory Template Caching (G14-SHC)
 
@@ -3213,19 +3198,116 @@ tables naturally without calling `pgtrickle.create_stream_table()`.
 
 > **G14-SHC subtotal: ~2–3 weeks**
 
-> **v0.16.0 total: ~38–56 hours (PG compat) + ~13–21 days (Native DDL) + ~6–11 weeks (MERGE alternatives + aggregate fast-path) + ~2–4 weeks (memory budget) + ~2–3 weeks (template caching)**
+### PostgreSQL 19 Forward-Compatibility (A3)
+
+> **In plain terms:** PostgreSQL 19 beta is expected late 2026. Adding
+> forward-compatibility now — before the beta lands — ensures pg_trickle
+> users can test on PG 19 immediately. The work involves bumping pgrx,
+> auditing `pg_sys::*` API changes, adding conditional compilation gates,
+> and validating the WAL decoder against any pgoutput format changes.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A3-1 | pgrx version bump to 0.18.x (PG 19 support) + `cargo pgrx init --pg19` | 2–4h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) §2 |
+| A3-2 | `pg_sys::*` API audit: heap access, catalog structs, WAL decoder `LogicalDecodingContext` | 8–16h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) §3 |
+| A3-3 | Conditional compilation (`#[cfg(feature = "pg19")]`) for changed APIs | 4–8h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) §4 |
+| A3-4 | CI matrix expansion for PG 19 beta + full E2E suite run | 4–8h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
+
+> **A3 subtotal: ~18–36 hours (gated on PG 19 beta availability; preliminary work can begin against PG 19 dev snapshots)**
+
+> **v0.16.0 total: ~1–2 weeks (MERGE alts) + ~4–6 weeks (aggregate fast-path) + ~1–2 weeks (append-only) + ~2–3 weeks (predicate pushdown) + ~2–3 weeks (template cache) + ~18–36 hours (PG 19 compat)**
 
 **Exit criteria:**
-- [ ] PG 16 and PG 17 pass full E2E suite (trigger CDC mode)
-- [ ] WAL decoder validated against PG 16–17 `pgoutput` format
-- [ ] CI matrix covers PG 16, 17, 18
-- [ ] `CREATE MATERIALIZED VIEW … WITH (pgtrickle.stream = true)` creates a stream table
-- [ ] Hook chaining verified with TimescaleDB; non-pgtrickle matviews pass through unchanged
-- [ ] PH-D: DELETE+INSERT strategy benchmarked and gated behind GUC; hash-join planner hints for medium deltas
+- [ ] PH-D1: DELETE+INSERT strategy benchmarked and gated behind `merge_strategy` GUC; correctness verified for INSERT/UPDATE/DELETE deltas
 - [ ] B-1: Algebraic aggregate fast-path replaces MERGE for `SUM`/`COUNT`/`AVG` GROUP BY queries; `__pgt_aux_count`/`__pgt_aux_sum` aux columns present; benchmarked at 100/1K/10K group cardinalities; `aggregate_fast_path` GUC respected; existing tests pass
-- [ ] PH-E: ~~Delta cost estimation prevents OOM on large deltas; spill-aware auto-adjustment tested~~ ✅ Done in v0.15.0
-- [ ] G14-SHC: Shared-memory template cache RFC written; prototype shows measurable cold-start elimination; implementation shipped or deferred with findings documented
+- [ ] A-3-AO: `CREATE STREAM TABLE … APPEND ONLY` accepted; refresh uses INSERT path; falls back to MERGE on first non-insert CDC event; benchmarked against MERGE baseline
+- [ ] B-2: Delta predicate pushdown implemented for single-source Filter nodes; DELETE correctness verified (OR old_col predicate); selective-query benchmarks show delta row reduction
+- [ ] G14-SHC: Shared-memory template cache eliminates cold-start; DSM + lwlock implementation validated under PgBouncer transaction mode
+- [ ] A3: PG 19 builds and passes full E2E suite (conditional on PG 19 beta availability; if beta not yet available, pgrx bump + API audit complete with CI gated on snapshot)
 - [ ] Extension upgrade path tested (`0.15.0 → 0.16.0`)
+
+---
+
+## v0.17.0 — Query Intelligence & Stability
+
+**Goal:** Make the refresh engine smarter — cost-based strategy selection
+replaces the fixed DIFF/FULL threshold, columnar change tracking skips
+irrelevant columns in wide-table UPDATEs, and the remaining Transactional IVM
+Phase 4 work brings ENR-based transition tables and C-level triggers for
+lower-overhead immediate mode.
+
+### Cost-Based Refresh Strategy Selection (B-4)
+
+> **In plain terms:** The current adaptive FULL/DIFFERENTIAL threshold is a
+> fixed ratio (`differential_max_change_ratio` default 0.5). A join-heavy
+> query may be better off with FULL at 5% change rate, while a scan-only
+> query benefits from DIFFERENTIAL up to 80%. This replaces the fixed
+> threshold with a cost model trained on each stream table's own refresh
+> history — selecting the cheapest strategy per cycle automatically.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| B-4 | **Cost-based refresh strategy selection.** Collect per-ST statistics (`delta_row_count`, `merge_duration_ms`, `full_refresh_duration_ms`, `query_complexity_class`) from `pgt_refresh_history`. Fit a simple linear cost model. Before each refresh, compare `estimated_diff_cost(Δ)` vs `estimated_full_cost × safety_margin` and select the cheaper path. Cold-start heuristic (< 10 refreshes) falls back to existing fixed threshold. Gate behind `pg_trickle.refresh_strategy = 'auto'\|'differential'\|'full'` GUC. | 2–3 wk | [plans/performance/PLAN_NEW_STUFF.md §B-4](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **B-4 subtotal: ~2–3 weeks**
+
+### Columnar Change Tracking (A-2-COL)
+
+> **In plain terms:** When a source table UPDATE changes only 1 of 50 columns,
+> the current CDC captures the entire row (old + new) and the delta query
+> processes all columns. If the changed column is not referenced by the stream
+> table's defining query, the entire refresh is wasted work. Columnar change
+> tracking adds a per-column bitmask to CDC events so the delta query can skip
+> irrelevant rows at scan time — a 50–90% reduction in delta volume for
+> wide-table OLTP workloads.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A-2-COL-1 | **CDC trigger bitmask.** Compute `changed_columns` bitmask (`old.col IS DISTINCT FROM new.col`) in the CDC trigger; store as `int8` or `bit(n)` alongside the change row. | 1–2 wk | [plans/performance/PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
+| A-2-COL-2 | **Delta-scan column filtering.** At delta-query build time, consult the bitmask: skip rows where no referenced column changed; use lightweight UPDATE-only path when only projected columns changed (no join keys, no filter predicates, no aggregate keys). | 1–2 wk | [plans/performance/PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
+| A-2-COL-3 | **Aggregate correction optimization.** For aggregates where only the aggregated value column changed (not GROUP BY key), emit a single correction row instead of delete-old + insert-new. | 3–5d | [plans/performance/PLAN_NEW_STUFF.md §A-2](plans/performance/PLAN_NEW_STUFF.md) |
+
+> **A-2-COL subtotal: ~3–4 weeks**
+
+### Transactional IVM Phase 4 Remaining (A2)
+
+> **In plain terms:** IMMEDIATE mode (same-transaction refresh) shipped in
+> v0.2.0 using SQL-level statement triggers. Phase 4 completes the transition
+> to lower-overhead C-level triggers and ENR-based transition tables — sharing
+> the transition tuplestore directly between the trigger and the refresh engine
+> instead of copying through a temp table. Also adds prepared statement reuse
+> to eliminate repeated parse/plan overhead for the delta query.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A2-ENR | **ENR-based transition tables.** Replace temp-table delta handoff with Ephemeral Named Relations — the trigger writes directly into an ENR tuplestore that the refresh engine reads without copying. Eliminates the INSERT/SELECT round-trip for transition data. | 12–18h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+| A2-CTR | **C-level triggers.** Replace the SQL-level `CREATE TRIGGER` with a C-level trigger function registered via `CreateTrigger()`. Reduces per-statement overhead from ~0.5ms to ~0.05ms by eliminating SPI round-trips for the trigger body. | 12–18h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+| A2-PS | **Prepared statement reuse.** Cache the delta query as a prepared statement (`SPI_prepare` + `SPI_execute_plan`) across refresh cycles within the same session. Eliminates repeated parse/plan overhead (~2–5ms per refresh for complex queries). | 8–12h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+
+> **A2 subtotal: ~32–48 hours**
+
+### `ROWS FROM()` Support (A8)
+
+> **In plain terms:** `ROWS FROM()` with multiple set-returning functions
+> is a rarely-used SQL feature, but supporting it closes a coverage gap
+> in the parser and DVM pipeline.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| A8 | **`ROWS FROM()` with multiple SRF functions.** Parser + DVM support for `ROWS FROM(generate_series(...), unnest(...))` in defining queries. Very low demand. | ~1–2d | [PLAN_TRANSACTIONAL_IVM_PART_2.md](plans/sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) Task 2.3 |
+
+> **A8 subtotal: ~1–2 days**
+
+> **v0.17.0 total: ~2–3 weeks (cost-based strategy) + ~3–4 weeks (columnar tracking) + ~32–48 hours (TIVM Phase 4) + ~1–2 days (ROWS FROM)**
+
+**Exit criteria:**
+- [ ] B-4: Cost-based strategy selector trained on per-ST history; cold-start fallback to fixed threshold; benchmarked on mixed workloads (scan, join, aggregate); `refresh_strategy` GUC respected
+- [ ] A-2-COL: CDC trigger emits `changed_columns` bitmask; delta-scan filters irrelevant rows; wide-table UPDATE benchmark shows ≥50% delta reduction; aggregate correction optimization tested
+- [ ] A2-ENR: ENR-based transition tables eliminate temp-table round-trip; IMMEDIATE mode latency reduced vs SQL-trigger baseline
+- [ ] A2-CTR: C-level triggers registered; per-statement overhead < 0.1ms; existing IMMEDIATE mode tests pass
+- [ ] A2-PS: Prepared statement reuse across refresh cycles; parse/plan overhead eliminated on steady-state workloads
+- [ ] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
+- [ ] Extension upgrade path tested (`0.16.0 → 0.17.0`)
 
 ---
 
@@ -3259,14 +3341,16 @@ distribution — getting pg_trickle onto package registries.
 - [ ] Published on PGXN (stable) and apt/rpm via PGDG
 - [x] CNPG extension image published to GHCR (`pg_trickle-ext`)
 - [x] CNPG cluster-example.yaml validated (Image Volume approach)
-- [ ] Upgrade path from v0.16.0 tested
+- [ ] Upgrade path from v0.17.0 tested
 - [ ] Semantic versioning policy in effect
 
 ---
 
-## Post-1.0 — Scale & Ecosystem
+## Post-1.0 — Scale, Ecosystem & Platform Expansion
 
-These are not gated on 1.0 but represent the longer-term horizon.
+These are not gated on 1.0 but represent the longer-term horizon. PG backward
+compatibility (PG 16–18) and native DDL syntax were moved here from v0.16.0
+to keep the pre-1.0 milestones focused on performance and correctness.
 
 ### Ecosystem expansion
 
@@ -3301,25 +3385,58 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | S2 | Citus / distributed PostgreSQL compatibility | ~6 months | [plans/infra/CITUS.md](plans/infra/CITUS.md) |
 | S3 | Multi-database support (beyond `postgres` DB) | TBD | [PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md) |
 
-### Advanced SQL
+### PG Backward Compatibility (PG 16–18)
 
-> **In plain terms:** A collection of longer-horizon features that each
-> require significant research and implementation — full circular dependency
-> execution, the remaining pieces of true in-transaction IVM (C-level
-> triggers, transition table sharing), backward-compatibility all the way to
-> PG 14/15, forward-compatibility with PostgreSQL 19, partitioned stream
-> table storage, and several query-planner improvements that reduce the cost
-> of computing incremental updates for wide tables and functions with many
-> columns. Buffer table partitioning by LSN range (A6) shipped in an earlier release.
+> **In plain terms:** pg_trickle currently only targets PostgreSQL 18. This
+> work adds support for PG 16 and PG 17 so teams that haven't yet upgraded
+> can still use the extension. Each PostgreSQL major version has subtly
+> different internal APIs — especially around query parsing and the WAL
+> format used for change-data-capture — so each version needs its own
+> feature flags, build path, and CI test run.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A2 | Transactional IVM Phase 4 remaining (ENR-based transition tables, aggregate fast-path, C-level triggers, prepared stmt reuse) | ~36–54h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
-| A3 | PostgreSQL 19 forward-compatibility | TBD | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
+| BC1 | Cargo.toml feature flags (`pg16`, `pg17`, `pg18`) + `cfg_aliases` | 4–8h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 1 |
+| BC2 | `#[cfg]` gate JSON_TABLE nodes in `parser.rs` (~250 lines, PG 17+) | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 2 |
+| BC3 | `pg_get_viewdef()` trailing-semicolon behavior verification | 2–4h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phase 3 |
+| BC4 | CI matrix expansion (PG 16, 17, 18) + parameterized Dockerfiles | 12–16h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §5.2 Phases 4–5 |
+| BC5 | WAL decoder validation against PG 16–17 `pgoutput` format | 8–12h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) §6A |
+
+> **Backward compatibility subtotal: ~38–56 hours**
+
+### Native DDL Syntax
+
+> **In plain terms:** Currently you create stream tables by calling a
+> function: `SELECT pgtrickle.create_stream_table(...)`. This adds support
+> for standard PostgreSQL DDL syntax: `CREATE MATERIALIZED VIEW my_view
+> WITH (pgtrickle.stream = true) AS SELECT ...`. That single change means
+> `pg_dump` can back them up properly, `\dm` in psql lists them, ORMs can
+> introspect them, and migration tools like Flyway treat them like ordinary
+> database objects. Stream tables finally look native to PostgreSQL tooling.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| NAT-1 | `ProcessUtility_hook` infrastructure: register in `_PG_init()`, dispatch+passthrough, hook chaining with TimescaleDB/pg_stat_statements | 3–5d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
+| NAT-2 | CREATE/DROP/REFRESH interception: parse `CreateTableAsStmt` reloptions, route to internal impls, IF EXISTS handling, CONCURRENTLY no-op | 8–13d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
+| NAT-3 | E2E tests: CREATE/DROP/REFRESH via DDL syntax, hook chaining, non-pg_trickle matview passthrough | 2–3d | [PLAN_NATIVE_SYNTAX.md](plans/sql/PLAN_NATIVE_SYNTAX.md) §Tier 2 |
+
+> **Native DDL syntax subtotal: ~13–21 days**
+
+### Advanced SQL
+
+> **In plain terms:** Longer-horizon features requiring significant research
+> — backward-compatibility to PG 14/15, partitioned stream table storage,
+> and remaining SQL coverage gaps. Several items have been pulled forward
+> to v0.16.0 and v0.17.0.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| ~~A2~~ | ~~Transactional IVM Phase 4 remaining (ENR-based transition tables, C-level triggers, prepared stmt reuse)~~ ➡️ Pulled to v0.17.0 | ~36–54h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
+| ~~A3~~ | ~~PostgreSQL 19 forward-compatibility~~ ➡️ Pulled to v0.16.0 | ~18–36h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 | A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
 | ~~A6~~ | ~~Buffer table partitioning by LSN range (`pg_trickle.buffer_partitioning` GUC)~~ | ✅ Done | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.3 |
-| A8 | `ROWS FROM()` with multiple SRF functions — very low demand, deferred | ~1–2d | [PLAN_TRANSACTIONAL_IVM_PART_2.md](plans/sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) Task 2.3 |
+| ~~A8~~ | ~~`ROWS FROM()` with multiple SRF functions~~ ➡️ Pulled to v0.17.0 | ~1–2d | [PLAN_TRANSACTIONAL_IVM_PART_2.md](plans/sql/PLAN_TRANSACTIONAL_IVM_PART_2.md) Task 2.3 |
 
 ### Parser Modularization & Shared Template Cache (G13-PRF, G14-SHC)
 
@@ -3332,7 +3449,7 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | ~~G13-PRF~~ | ~~**Modularize `src/dvm/parser.rs`.**~~ ✅ Done in v0.15.0 | ~3–4wk | [plans/performance/REPORT_OVERALL_STATUS.md §13](plans/performance/REPORT_OVERALL_STATUS.md) |
 | ~~G14-SHC~~ | ~~**Shared-memory template caching (research spike).**~~ ➡️ Pulled to v0.16.0 | ~2–3wk | [plans/performance/REPORT_OVERALL_STATUS.md §14](plans/performance/REPORT_OVERALL_STATUS.md) |
 
-> **Parser modularization & caching research: ➡️ Pulled forward to v0.15.0/v0.16.0**
+> **Parser modularization: ✅ Done in v0.15.0. Template caching: ➡️ v0.16.0**
 
 ### Convenience API Functions (G15-BC, G15-EX)
 
@@ -3370,8 +3487,10 @@ These are not gated on 1.0 but represent the longer-term horizon.
 | v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
 | v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~4–6d TUI + ~0.5d docs | — | |
 | v0.15.0 — External Test Suites & Integration | ~40–70h + ~2–3d bulk create + ~3–5d planner hints + ~2–3d cache spike + ~3–4wk parser + ~1–2wk watermark + ~2–4wk delta cost/spill | — | ✅ Released |
-| v0.16.0 — PG Backward Compatibility & Native DDL Syntax | ~38–56h (PG compat) + ~13–21d (Native DDL) + ~2–3wk MERGE alts + ~2–4wk memory budget + ~2–3wk template cache | — | |
+| v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~18–36h PG19 | — | |
+| v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM | — | |
 | v1.0.0 — Stable release | 18–27h | — | |
+| Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
 | Post-1.0 (scale) | 6+ months | — | |
 
