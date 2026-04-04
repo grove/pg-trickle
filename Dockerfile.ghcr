@@ -59,15 +59,17 @@ RUN cargo install --locked cargo-pgrx --version 0.17.0
 # Initialise pgrx for PostgreSQL 18 using the system pg_config
 RUN cargo pgrx init --pg18 /usr/bin/pg_config
 
-# ── Stage 2: Compile dependencies (cached layer) ─────────────────────────────
+# ── Stage 2: Fetch dependencies (cached layer) ───────────────────────────────
+# Cargo.toml + Cargo.lock are copied first with stub source files so that
+# dependency fetching is cached independently of source changes.  The builder
+# stage extends this stage, inheriting the populated registry cache.
 FROM build-env AS build-deps
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY pgtrickle-tui/Cargo.toml pgtrickle-tui/Cargo.toml
 
-# Minimal stubs so cargo can compile deps without the full source tree.
-# These stubs will be replaced in the build stage below.
+# Minimal stubs so cargo can resolve the dependency graph.
 RUN mkdir -p src/bin src/dvm/operators benches pgtrickle-tui/src && \
     echo '#![allow(warnings)] fn main() {}' > src/bin/pgrx_embed.rs && \
     echo '#![allow(warnings)]' > src/lib.rs && \
@@ -79,31 +81,21 @@ RUN mkdir -p src/bin src/dvm/operators benches pgtrickle-tui/src && \
     echo 'fn main() {}' > pgtrickle-tui/src/main.rs
 
 # Pre-fetch dependencies. Docker caches this layer independently.
-# If only src/ changes on the next build, this layer is skipped, saving 10–15 min.
+# If only src/ changes on the next build, this layer is reused.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     cargo fetch
 
 # ── Stage 3: Build the extension ─────────────────────────────────────────────
-FROM build-env AS builder
+# Extends build-deps so the fetched dependency cache is already warm.
+FROM build-deps AS builder
 
-WORKDIR /build
-
-# Copy source code and configuration
-COPY Cargo.toml Cargo.lock ./
-COPY pgtrickle-tui/Cargo.toml pgtrickle-tui/Cargo.toml
+# Overwrite stubs with real source code.  Cargo.toml/Cargo.lock are already
+# present from build-deps and unchanged, so that layer stays cached.
 COPY src/ src/
 COPY pg_trickle.control ./
 
-# Create placeholder bench and workspace member files (required by Cargo.toml
-# but not needed for extension package)
-RUN mkdir -p benches pgtrickle-tui/src && \
-    echo 'fn main() {}' > benches/diff_operators.rs && \
-    echo 'fn main() {}' > benches/refresh_bench.rs && \
-    echo 'fn main() {}' > pgtrickle-tui/src/main.rs
-
-# Compile the extension. Cargo will automatically use cached dependencies
-# from the build-deps stage's `cargo fetch` (stored in /root/.cargo).
+# Compile the extension.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     cargo pgrx package --pg-config /usr/bin/pg_config && \
