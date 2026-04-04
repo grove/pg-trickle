@@ -641,16 +641,26 @@ DELETE FROM employees WHERE name = 'Bob';
 
 **What happened:** The `AFTER DELETE` trigger on `employees` fired, writing a change buffer row with action type `D` and Bob's old values (`department_id=5, salary=115000`). The delta query will use these old values to compute the correct aggregate adjustment — it knows to subtract 115000 from Backend's salary sum and decrement the count.
 
-Wait about a second for the scheduler to process the DELETE, then:
+The scheduler handles this automatically — all three tables refresh within about a second. To force it synchronously, refresh in upstream-first order:
 
 ```sql
-SELECT * FROM department_stats WHERE department_name = 'Backend';
+SELECT pgtrickle.refresh_stream_table('department_stats');
+SELECT pgtrickle.refresh_stream_table('department_report');
+```
+
+> **Why call `department_stats` first?** `department_stats` is the table that directly sources from `employees`. Calling `refresh_stream_table('department_report')` only refreshes the downstream table — it does not cascade upstream. You need to explicitly refresh each table in topological order, or let the background scheduler do it automatically.
+
+Then verify the result:
+
+```sql
+SELECT department_name, headcount, total_salary, avg_salary
+FROM department_stats WHERE department_name = 'Backend';
 ```
 
 ```
- department_id | department_name | headcount | total_salary | avg_salary
----------------+-----------------+-----------+--------------+------------
-             5 | Backend         |         1 |    120000.00 |  120000.00
+ department_name | headcount | total_salary | avg_salary
+-----------------+-----------+--------------+------------
+ Backend         |         1 |    120000.00 |  120000.00
 ```
 
 Headcount dropped from 2 → 1 and the salary aggregates updated. Again, only the Backend group was touched — the other 6 department rows were untouched.
