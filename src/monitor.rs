@@ -1881,7 +1881,7 @@ fn dfs(
 /// Checks performed:
 /// - `scheduler_running`    — background worker is alive
 /// - `error_tables`         — any stream tables in ERROR/SUSPENDED status
-/// - `stale_tables`         — any stream tables with staleness > 2× schedule
+/// - `stale_tables`         — any stream tables where last_refresh_at age exceeds schedule (scheduler behind)
 /// - `needs_reinit`         — any stream tables awaiting reinitialization
 /// - `consecutive_errors`   — any stream tables accumulating errors (not yet suspended)
 /// - `buffer_growth`        — any CDC change buffer with > 10 000 pending rows
@@ -1980,7 +1980,7 @@ fn health_check() -> TableIterator<
             (
                 "WARN".to_string(),
                 format!(
-                    "{} stale stream table(s) (staleness > 2× schedule): {}",
+                    "{} stale stream table(s) (scheduler behind its schedule): {}",
                     stale_tables.len(),
                     stale_tables.join(", ")
                 ),
