@@ -1,0 +1,3 @@
+-- pg_trickle 0.15.0 -> 0.16.0 upgrade script
+--
+-- v0.16.0: Performance & Refresh Optimization
