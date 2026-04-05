@@ -16,8 +16,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         ));
 
     if state.alerts.is_empty() {
-        let paragraph =
-            Paragraph::new(Line::styled(" No alerts", theme.dim)).block(block);
+        let paragraph = Paragraph::new(Line::styled(" No alerts", theme.dim)).block(block);
         frame.render_widget(paragraph, area);
         return;
     }
@@ -38,8 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
             };
             Row::new(vec![
                 Cell::from(icon).style(sev_style),
-                Cell::from(alert.timestamp.format("%H:%M:%S").to_string())
-                    .style(theme.dim),
+                Cell::from(alert.timestamp.format("%H:%M:%S").to_string()).style(theme.dim),
                 Cell::from(alert.event.as_str()),
                 Cell::from(alert.table.as_str()).style(theme.dim),
                 Cell::from(alert.metric.as_str()),
@@ -49,12 +47,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .collect();
 
     let widths = [
-        Constraint::Length(3),   // Sev icon
-        Constraint::Length(10),  // Time HH:MM:SS
-        Constraint::Fill(2),     // Event
-        Constraint::Fill(3),     // Table
-        Constraint::Fill(2),     // Metric
-        Constraint::Fill(3),     // Context
+        Constraint::Length(3),  // Sev icon
+        Constraint::Length(10), // Time HH:MM:SS
+        Constraint::Fill(2),    // Event
+        Constraint::Fill(3),    // Table
+        Constraint::Fill(2),    // Metric
+        Constraint::Fill(3),    // Context
     ];
 
     let table = Table::new(rows, widths).header(header).block(block);
