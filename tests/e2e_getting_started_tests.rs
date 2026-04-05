@@ -456,6 +456,206 @@ async fn test_getting_started_step4c_department_rename_cascades() {
         )
         .await;
     assert_eq!(rnd_hc, 4, "'R&D' should have the same 4 employees");
+
+    // department_stats: sub-department rows Backend/Frontend/Platform must still
+    // exist after the DRed cascade — their full_path should reference R&D, not
+    // Engineering.  Regression guard for the ΔL⋈ΔR overcounting bug where
+    // sub-department rows were silently deleted from department_stats.
+    let backend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Backend'")
+        .await;
+    assert_eq!(
+        backend_path, "Company > R&D > Backend",
+        "Backend full_path must be updated to R&D after rename"
+    );
+    let backend_hc: i64 = db
+        .query_scalar(
+            "SELECT headcount::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_hc, 2,
+        "Backend headcount must be preserved after rename"
+    );
+
+    let frontend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Frontend'")
+        .await;
+    assert_eq!(frontend_path, "Company > R&D > Frontend");
+
+    let platform_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Platform'")
+        .await;
+    assert_eq!(platform_path, "Company > R&D > Platform");
+}
+
+// ── Step 4c → 4d combined (regression: G17-STBASE) ───────────────────────────
+
+/// Regression — G17-STBASE: rename a department (step 4c, which produces D+I
+/// pairs in the department_tree ST change buffer) followed immediately by
+/// deleting an employee in that department (step 4d).
+///
+/// When both changes are pending simultaneously at department_stats' refresh,
+/// Part 2 of the LEFT JOIN delta must use L₀ (pre-change left snapshot) so
+/// that right-side changes are attributed to the old group key.  The EC-02
+/// correction cancels the ΔL_D ⋈ ΔR cross-term double-counting between
+/// Part 1b and Part 2.  The final state should be Backend with headcount=1
+/// (just Alice), using DIFFERENTIAL mode — no FULL fallback needed.
+#[tokio::test]
+async fn test_getting_started_step4c_then_4d_combined_regression() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_base_tables(&db).await;
+    create_department_tree(&db).await;
+    create_department_stats(&db).await;
+    create_department_report(&db).await;
+
+    // Step 4c: rename Engineering → R&D; refresh department_tree so the DRed
+    // D+I pairs land in the ST change buffer for department_stats.
+    db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
+        .await;
+    db.refresh_st_with_retry("department_tree").await;
+
+    // Step 4d: delete Bob immediately — department_stats now has BOTH pending
+    // ST-source changes (from the DRed cascade above) and a base-table change
+    // (the employee deletion).  The L₀ fix in outer_join.rs ensures the
+    // differential formula handles this correctly without FULL fallback.
+    db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
+
+    // Refresh department_stats (DIFFERENTIAL — L₀ + EC-02 correction handles
+    // the combined ST + base-table changes correctly).
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // Backend must exist with headcount=1 (only Alice remains).
+    let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
+        "SELECT headcount::bigint,
+                round(total_salary, 2)::text,
+                round(avg_salary, 2)::text
+         FROM department_stats WHERE department_name = 'Backend'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("Backend stats row must exist after rename+delete");
+    assert_eq!(hc, 1, "headcount must be 1 after Bob's deletion");
+    assert_eq!(
+        total_sal, "120000.00",
+        "total_salary must be Alice's salary"
+    );
+    assert_eq!(avg_sal, "120000.00");
+
+    // full_path must reflect the rename.
+    let backend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Backend'")
+        .await;
+    assert_eq!(backend_path, "Company > R&D > Backend");
+
+    // R&D division in department_report: 3 employees (Alice, Charlie, Diana).
+    let rnd_hc: i64 = db
+        .query_scalar(
+            "SELECT total_headcount::bigint FROM department_report WHERE division = 'R&D'",
+        )
+        .await;
+    assert_eq!(rnd_hc, 3, "R&D headcount must be 3 after Bob's deletion");
+}
+
+// ── Step 4c → 4d sequential (regression: SF-7 __pgt_count) ──────────────────
+
+/// Regression — SF-7 __pgt_count: rename a department (step 4c) and delete an
+/// employee (step 4d) in SEPARATE refresh cycles, each processed via
+/// DIFFERENTIAL.
+///
+/// Before the SF-7 fix, the Project operator stripped __pgt_count from the
+/// aggregate delta output.  The MERGE INSERT clause didn't include __pgt_count,
+/// so newly inserted group rows (from the rename's D+I path change) got the
+/// column default (0) instead of the correct count.  On the subsequent delete
+/// step, the aggregate merge computed `new_count = 0 - 1 = -1 ≤ 0`, emitting
+/// a DELETE action that removed the Backend row entirely.
+///
+/// The fix forwards __pgt_count through the Project CTE so the MERGE writes
+/// the correct value on INSERT/UPDATE.
+#[tokio::test]
+async fn test_getting_started_step4c_then_4d_sequential_regression() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_base_tables(&db).await;
+    create_department_tree(&db).await;
+    create_department_stats(&db).await;
+    create_department_report(&db).await;
+
+    // ── Cycle 1: rename Engineering → R&D ────────────────────────────
+    db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
+        .await;
+    db.refresh_st_with_retry("department_tree").await;
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // All 7 department rows must exist with correct __pgt_count.
+    // (setup_base_tables creates 7 departments — DevOps is added in step 2.4b
+    // which this test intentionally skips.)
+    let row_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM department_stats")
+        .await;
+    assert_eq!(row_count, 7, "all 7 departments present after rename");
+
+    // Backend must have __pgt_count = 2 (Alice + Bob still there).
+    let backend_count: i64 = db
+        .query_scalar(
+            "SELECT __pgt_count::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_count, 2,
+        "Backend __pgt_count must be 2 after rename (SF-7)"
+    );
+
+    // ── Cycle 2: delete Bob ──────────────────────────────────────────
+    db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // Backend must still exist with headcount=1 (only Alice remains).
+    let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
+        "SELECT headcount::bigint,
+                round(total_salary, 2)::text,
+                round(avg_salary, 2)::text
+         FROM department_stats WHERE department_name = 'Backend'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("Backend stats row must exist after sequential rename → delete");
+    assert_eq!(hc, 1, "headcount must be 1 after Bob's deletion");
+    assert_eq!(
+        total_sal, "120000.00",
+        "total_salary must be Alice's salary"
+    );
+    assert_eq!(avg_sal, "120000.00");
+
+    // Backend __pgt_count must be 1 (one LEFT JOIN output row).
+    let backend_count: i64 = db
+        .query_scalar(
+            "SELECT __pgt_count::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_count, 1,
+        "Backend __pgt_count must be 1 after delete (SF-7)"
+    );
+
+    // All 7 rows still present (no departments vanished).
+    let row_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM department_stats")
+        .await;
+    assert_eq!(row_count, 7, "all 7 departments still present after delete");
+
+    // R&D division headcount must be 3 (Alice, Charlie, Diana).
+    let rnd_hc: i64 = db
+        .query_scalar(
+            "SELECT total_headcount::bigint FROM department_report WHERE division = 'R&D'",
+        )
+        .await;
+    assert_eq!(
+        rnd_hc, 3,
+        "R&D headcount must be 3 after sequential rename + delete"
+    );
 }
 
 // ── Step 4d ──────────────────────────────────────────────────────────────────

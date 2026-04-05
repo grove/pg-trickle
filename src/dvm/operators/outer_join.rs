@@ -20,12 +20,26 @@
 //! - Part 1b/3b: DELETEs check R₀ (deletes need pre-change right state)
 //!
 //! R₀ = R_current EXCEPT ALL ΔR_inserts UNION ALL ΔR_deletes
+//!
+//! ## L₀ fix: Pre-change left snapshot for Part 2
+//!
+//! Part 2 (left ⋈ delta_right) must use L₀ (pre-change left) instead of
+//! L₁ (current left) so that right-side changes are attributed to the
+//! correct (old) group key.  Without L₀, renaming a department while
+//! deleting an employee causes the deletion to be attributed to the NEW
+//! group key, which nets to zero and silently drops the row.
+//!
+//! ## EC-02 fix: ΔL_D ⋈ ΔR double-counting correction
+//!
+//! When both EC-01 (R₀ for Part 1b) and L₀ (Part 2) are active, the
+//! cross-term ΔL_D ⋈ ΔR appears in both Part 1b and Part 2.  Part 6
+//! cancels this by emitting ΔL_D ⋈ ΔR rows with the ΔR action flipped.
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
 use crate::dvm::operators::join::mark_leaf_delta_ctes_not_materialized;
 use crate::dvm::operators::join_common::{
-    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, rewrite_join_condition,
-    use_pre_change_snapshot,
+    build_leaf_snapshot_sql, build_snapshot_sql, is_join_child, is_simple_child,
+    rewrite_join_condition, use_pre_change_snapshot,
 };
 use crate::dvm::parser::OpTree;
 use crate::error::PgTrickleError;
@@ -203,6 +217,108 @@ pub fn diff_left_join(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
         ctx.mark_cte_not_materialized(&right_result.cte_name);
     }
 
+    // ── L₀: Pre-change snapshot for Part 2 (left side) ─────────────
+    //
+    // Standard DBSP: Δ(L ⟕ R) inner part = (ΔL ⋈ R₁) + (L₀ ⋈ ΔR)
+    //
+    // L₀ = the state of the left child BEFORE the current cycle's
+    // changes.  Without L₀, Part 2 uses L₁ (post-change), causing
+    // right-side deletions to be attributed to new group keys rather
+    // than old ones (G17-STBASE bug).
+    //
+    // Same logic as diff_inner_join: use L₀ for simple/Scan children,
+    // fall back to L₁ for SemiJoin-containing deep chains where
+    // EXCEPT ALL interacts badly.
+    let use_l0 = use_pre_change_snapshot(left, ctx.inside_semijoin, 4);
+
+    let left_part2_source = if use_l0 {
+        if is_join_child(left) {
+            let pre_change = ctx.get_or_register_snapshot_cte(left);
+            mark_leaf_delta_ctes_not_materialized(left, ctx);
+            pre_change
+        } else {
+            build_leaf_snapshot_sql(
+                left,
+                &left_result.cte_name,
+                left_cols,
+                &ctx.fallback_leaf_oids,
+            )
+        }
+    } else {
+        left_table.clone()
+    };
+
+    // When use_l0 is true and left is a Scan, the left delta CTE is
+    // referenced in both Part 1 and the L₀ EXCEPT ALL sub-selects.
+    // Mark NOT MATERIALIZED to prevent spilling.
+    if use_l0 {
+        ctx.mark_cte_not_materialized(&left_result.cte_name);
+    }
+
+    // ── EC-02 / L₁→L₀ correction term ──────────────────────────────
+    //
+    // When Part 1 is EC-01-split (use_r0) AND Part 2 uses L₀ (use_l0),
+    // the cross-term ΔL_D ⋈ ΔR appears in BOTH:
+    //   Part 1b (ΔL_D ⋈ R₀, R₀ ⊃ ΔR_D)
+    //   Part 2  (L₀ ⋈ ΔR,  L₀ ⊃ ΔL_D)
+    //
+    // EC-02 cancels the double-count by emitting ΔL_D ⋈ ΔR rows with
+    // the ΔR action flipped (z-set product: weight_L_D × weight_ΔR,
+    // then negated).
+    //
+    // When Part 2 uses L₁ (!use_l0), the error is (L₁ − L₀) ⋈ ΔR.
+    // A correction term (ΔL ⋈ ΔR with action flipping) fixes this for
+    // non-simple join children.
+    let correction_cols = [dl_cols.as_slice(), dr_cols.as_slice()].concat().join(", ");
+    let join_cond_correction = rewrite_join_condition(condition, left, "dl", right, "dr");
+    let hash_correction =
+        "pgtrickle.pg_trickle_hash_multi(ARRAY[dl.__pgt_row_id::TEXT, dr.__pgt_row_id::TEXT])"
+            .to_string();
+
+    let correction_sql = if use_l0 && use_r0 && is_simple_child(left) {
+        // EC-02: cancel ΔL_D ⋈ ΔR double-count.
+        format!(
+            "
+
+UNION ALL
+
+-- Part 6: EC-02 correction — cancel ΔL_D ⋈ ΔR double-counting.
+-- Part 1b (ΔL_D ⋈ R₀) and Part 2 (L₀ ⋈ ΔR) both include the
+-- cross-term ΔL_D ⋈ ΔR. Emit with flipped ΔR action to cancel.
+SELECT {hash_correction} AS __pgt_row_id,
+       CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END AS __pgt_action,
+       {correction_cols}
+FROM {delta_left} dl
+JOIN {delta_right} dr ON {join_cond_correction}
+WHERE dl.__pgt_action = 'D'",
+            delta_left = left_result.cte_name,
+            delta_right = right_result.cte_name,
+        )
+    } else if !use_l0 && is_join_child(left) && !is_simple_child(left) {
+        // Part 2 uses L₁: correction for (L₁ − L₀) ⋈ ΔR error.
+        // Same as inner join Part 3: ΔL_I ⋈ ΔR flipped, ΔL_D ⋈ ΔR kept.
+        format!(
+            "
+
+UNION ALL
+
+-- Part 6: L₁→L₀ correction for nested join left child.
+-- Cancels excess ΔL_I ⋈ ΔR and adds missing ΔL_D ⋈ ΔR.
+SELECT {hash_correction} AS __pgt_row_id,
+       CASE WHEN dl.__pgt_action = 'I'
+            THEN CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END
+            ELSE dr.__pgt_action
+       END AS __pgt_action,
+       {correction_cols}
+FROM {delta_left} dl
+JOIN {delta_right} dr ON {join_cond_correction}",
+            delta_left = left_result.cte_name,
+            delta_right = right_result.cte_name,
+        )
+    } else {
+        String::new()
+    };
+
     // ── G-J2: Pre-compute right-delta action flags ──────────────────
     //
     // Parts 4 and 5 each scan all current left rows joined with the right
@@ -256,11 +372,13 @@ WHERE dl.__pgt_action = 'D'
 
 UNION ALL
 
--- Part 2: current_left JOIN delta_right
+-- Part 2: pre-change left (L₀) JOIN delta_right
+-- Uses L₀ instead of L₁ so right-side changes are attributed to the
+-- correct (old) group key — fixes G17-STBASE overcounting.
 SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
-FROM {left_table} l
+FROM {left_part2} l
 JOIN {delta_right} dr ON {join_cond_part2}
 
 UNION ALL
@@ -328,10 +446,11 @@ WHERE dr.__pgt_action = 'D'
   )
   AND EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
-  )",
+  ){correction_sql}",
             delta_left = left_result.cte_name,
             delta_right = right_result.cte_name,
             r0_snapshot = r0,
+            left_part2 = left_part2_source,
             flags_cte = flags_cte,
         )
     } else {
@@ -347,11 +466,11 @@ JOIN {right_table} r ON {join_cond_part1}
 
 UNION ALL
 
--- Part 2: current_left JOIN delta_right
+-- Part 2: pre-change left (L₀) JOIN delta_right
 SELECT pgtrickle.pg_trickle_hash_multi(ARRAY[pgtrickle.pg_trickle_hash(row_to_json(l)::text)::TEXT, dr.__pgt_row_id::TEXT]) AS __pgt_row_id,
        dr.__pgt_action,
        {part2_cols}
-FROM {left_table} l
+FROM {left_part2} l
 JOIN {delta_right} dr ON {join_cond_part2}
 
 UNION ALL
@@ -394,9 +513,10 @@ WHERE dr.__pgt_action = 'D'
   )
   AND EXISTS (
     SELECT 1 FROM {r_old_snapshot} __pgt_r_old WHERE {r_old_cond}
-  )",
+  ){correction_sql}",
             delta_left = left_result.cte_name,
             delta_right = right_result.cte_name,
+            left_part2 = left_part2_source,
             flags_cte = flags_cte,
         )
     };
@@ -431,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_left_join_has_five_parts() {
+    fn test_diff_left_join_has_all_parts() {
         let mut ctx = test_ctx();
         let left = scan(1, "orders", "public", "o", &["id", "cust_id"]);
         let right = scan(2, "customers", "public", "c", &["id", "name"]);
@@ -448,6 +568,8 @@ mod tests {
         assert_sql_contains(&sql, "Part 3b");
         assert_sql_contains(&sql, "Part 4");
         assert_sql_contains(&sql, "Part 5");
+        // EC-02: Part 6 corrects ΔL_D ⋈ ΔR double-counting
+        assert_sql_contains(&sql, "Part 6");
     }
 
     #[test]
@@ -617,5 +739,54 @@ mod tests {
         assert!(result.columns.contains(&"a__region".to_string()));
         assert!(result.columns.contains(&"b__region".to_string()));
         assert!(result.columns.contains(&"b__score".to_string()));
+    }
+
+    // ── L₀ and EC-02 tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_left_join_part2_uses_l0_for_scan_children() {
+        // When left child is a simple Scan, Part 2 should use L₀ (pre-change
+        // left snapshot via NOT EXISTS) instead of L₁ (current left table).
+        let mut ctx = test_ctx();
+        let left = scan(1, "dept_tree", "public", "t", &["id", "name", "path"]);
+        let right = scan(2, "employees", "public", "e", &["id", "dept_id"]);
+        let cond = eq_cond("t", "id", "e", "dept_id");
+        let tree = left_join(cond, left, right);
+        let result = diff_left_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // Part 2 comment should mention L₀
+        assert_sql_contains(&sql, "pre-change left");
+        // L₀ uses NOT EXISTS pattern for Scan child
+        // Count NOT EXISTS occurrences — should have multiple: L₀, R₀, R_old,
+        // Part 3b, Part 4, Part 5
+        let not_exists_count = sql.matches("NOT EXISTS").count();
+        assert!(
+            not_exists_count >= 4,
+            "expected at least 4 NOT EXISTS for L₀+R₀+R_old+Parts, got {not_exists_count}"
+        );
+    }
+
+    #[test]
+    fn test_ec02_left_join_correction_for_scan_children() {
+        // When both left and right are Scan children (use_l0 && use_r0),
+        // EC-02 correction (Part 6) should be emitted to cancel ΔL_D ⋈ ΔR
+        // double-counting between Part 1b and Part 2.
+        let mut ctx = test_ctx();
+        let left = scan(1, "a", "public", "a", &["id", "key"]);
+        let right = scan(2, "b", "public", "b", &["id", "val"]);
+        let cond = eq_cond("a", "key", "b", "id");
+        let tree = left_join(cond, left, right);
+        let result = diff_left_join(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // EC-02 Part 6 should flip ΔR action
+        assert_sql_contains(&sql, "Part 6: EC-02 correction");
+        assert_sql_contains(
+            &sql,
+            "CASE WHEN dr.__pgt_action = 'I' THEN 'D' ELSE 'I' END",
+        );
+        // EC-02 only joins ΔL_D rows
+        assert_sql_contains(&sql, "dl.__pgt_action = 'D'");
     }
 }

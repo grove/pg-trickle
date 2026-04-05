@@ -123,14 +123,16 @@ SELECT pgtrickle.create_stream_table(
 Query it immediately — it was populated by the initial full refresh:
 
 ```sql
-SELECT * FROM category_summary ORDER BY category;
+SELECT category, product_count, avg_price, min_price, max_price, in_stock_count
+FROM category_summary ORDER BY category;
 ```
 
 ```
-   category    | product_count | avg_price | min_price | max_price | in_stock_count
----------------+---------------+-----------+-----------+-----------+----------------
- Books         |             3 |     16.66 |      9.99 |     24.99 |              3
- Electronics   |             2 |    174.99 |     49.99 |    299.99 |              2
+  category   | product_count | avg_price | min_price | max_price | in_stock_count
+-------------+---------------+-----------+-----------+-----------+----------------
+ Books       |             3 |     16.66 |      9.99 |     24.99 |              3
+ Electronics |             2 |    174.99 |     49.99 |    299.99 |              2
+(2 rows)
 ```
 
 ### 1.3 Watch an INSERT update one group
@@ -142,13 +144,15 @@ INSERT INTO products (category, price) VALUES ('Books', 39.99);
 Within ~1 second (or call `SELECT pgtrickle.refresh_stream_table('category_summary')` to force it):
 
 ```sql
-SELECT * FROM category_summary WHERE category = 'Books';
+SELECT category, product_count, avg_price, min_price, max_price, in_stock_count
+FROM category_summary WHERE category = 'Books';
 ```
 
 ```
  category | product_count | avg_price | min_price | max_price | in_stock_count
 ----------+---------------+-----------+-----------+-----------+----------------
  Books    |             4 |     22.49 |      9.99 |     39.99 |              4
+(1 row)
 ```
 
 The `Electronics` row was **not touched at all** — pg_trickle read exactly 1
@@ -163,13 +167,15 @@ UPDATE products SET price = 19.99 WHERE price = 299.99;
 After the next refresh:
 
 ```sql
-SELECT * FROM category_summary WHERE category = 'Electronics';
+SELECT category, product_count, avg_price, min_price, max_price, in_stock_count
+FROM category_summary WHERE category = 'Electronics';
 ```
 
 ```
   category   | product_count | avg_price | min_price | max_price | in_stock_count
 -------------+---------------+-----------+-----------+-----------+----------------
  Electronics |             2 |     34.99 |     19.99 |     49.99 |              2
+(1 row)
 ```
 
 For `AVG`, pg_trickle maintains running sum and count columns internally, so
@@ -332,21 +338,22 @@ That single function call did a lot of work atomically (all in one transaction):
 Query it immediately — it's already populated:
 
 ```sql
-SELECT * FROM department_tree ORDER BY path;
+SELECT id, name, parent_id, path, depth FROM department_tree ORDER BY path;
 ```
 
 Expected output:
 
 ```
- id |    name     | parent_id |            path             | depth
-----+-------------+-----------+-----------------------------+-------
-  1 | Company     |           | Company                     |     0
-  2 | Engineering |         1 | Company > Engineering       |     1
-  5 | Backend     |         2 | Company > Engineering > Backend  | 2
-  6 | Frontend    |         2 | Company > Engineering > Frontend | 2
-  7 | Platform    |         2 | Company > Engineering > Platform | 2
-  4 | Operations  |         1 | Company > Operations        |     1
-  3 | Sales       |         1 | Company > Sales             |     1
+ id |    name     | parent_id |               path               | depth
+----+-------------+-----------+----------------------------------+-------
+  1 | Company     |           | Company                          |     0
+  2 | Engineering |         1 | Company > Engineering            |     1
+  5 | Backend     |         2 | Company > Engineering > Backend  |     2
+  6 | Frontend    |         2 | Company > Engineering > Frontend |     2
+  7 | Platform    |         2 | Company > Engineering > Platform |     2
+  4 | Operations  |         1 | Company > Operations             |     1
+  3 | Sales       |         1 | Company > Sales                  |     1
+(7 rows)
 ```
 
 This is a **real PostgreSQL table** — you can create indexes on it, join it in other queries, reference it in views, or even use it as a source for other stream tables. pg_trickle keeps it in sync automatically.
@@ -409,15 +416,16 @@ ORDER BY full_path;
 Expected output:
 
 ```
- department_name |                 full_path                  | headcount | total_salary
------------------+--------------------------------------------+-----------+--------------
- Backend         | Company > Engineering > Backend            |         2 |    235000.00
- Frontend        | Company > Engineering > Frontend           |         1 |    110000.00
- Platform        | Company > Engineering > Platform           |         1 |    130000.00
- Engineering     | Company > Engineering                      |         0 |         0.00
- Operations      | Company > Operations                       |         1 |    100000.00
- Sales           | Company > Sales                            |         2 |    185000.00
- Company         | Company                                    |         0 |         0.00
+ department_name |            full_path             | headcount | total_salary
+-----------------+----------------------------------+-----------+--------------
+ Company         | Company                          |         0 |            0
+ Engineering     | Company > Engineering            |         0 |            0
+ Backend         | Company > Engineering > Backend  |         2 |    235000.00
+ Frontend        | Company > Engineering > Frontend |         1 |    110000.00
+ Platform        | Company > Engineering > Platform |         1 |    130000.00
+ Operations      | Company > Operations             |         1 |    100000.00
+ Sales           | Company > Sales                  |         2 |    185000.00
+(7 rows)
 ```
 
 Notice that the `full_path` column comes from `department_tree` — this data already went through one layer of incremental maintenance before landing here.
@@ -464,7 +472,7 @@ department_tree ──────────┤
 Query the report:
 
 ```sql
-SELECT * FROM department_report ORDER BY division;
+SELECT division, total_headcount, total_payroll FROM department_report ORDER BY division;
 ```
 
 ```
@@ -473,6 +481,7 @@ SELECT * FROM department_report ORDER BY division;
  Engineering |               4 |    475000.00
  Operations  |               1 |    100000.00
  Sales       |               2 |    185000.00
+(3 rows)
 ```
 
 ---
@@ -527,8 +536,9 @@ The stream tables don't know about Heidi yet. The change is in the buffer, waiti
 > ```sql
 > SELECT name, data_timestamp, staleness FROM pgtrickle.pgt_status();
 > ```
-> Or force an immediate synchronous refresh for the tutorial. Note that `refresh_stream_table` only refreshes the named table — it does not cascade upstream — so refresh in topological order:
+> To force an immediate synchronous refresh, wait a moment first (so the scheduler can finish its current tick), then call in topological order. Note that `refresh_stream_table` only refreshes the named table — it does not cascade upstream:
 > ```sql
+> SELECT pg_sleep(2);  -- let the scheduler finish any in-progress tick
 > SELECT pgtrickle.refresh_stream_table('department_stats');
 > SELECT pgtrickle.refresh_stream_table('department_report');
 > ```
@@ -569,8 +579,9 @@ INSERT INTO departments (id, name, parent_id) VALUES
 
 **What happened:** The CDC trigger on `departments` fired. The change buffer for `departments` has one new row. None of the stream tables know about it yet.
 
-> **The scheduler handles this automatically** — all three tables will refresh within a second in the correct dependency order (upstream first). To force it synchronously, refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
+> **The scheduler handles this automatically** — all three tables will refresh within a second in the correct dependency order (upstream first). To force it synchronously, wait a moment first then refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
 > ```sql
+> SELECT pg_sleep(2);
 > SELECT pgtrickle.refresh_stream_table('department_tree');
 > SELECT pgtrickle.refresh_stream_table('department_stats');
 > SELECT pgtrickle.refresh_stream_table('department_report');
@@ -594,9 +605,10 @@ SELECT id, name, depth, path FROM department_tree WHERE name = 'DevOps';
 ```
 
 ```
- id |  name  | depth |              path               
-----+--------+-------+---------------------------------
-  8 | DevOps |     2 | Company > Engineering > DevOps  
+ id |  name  | depth |              path
+----+--------+-------+--------------------------------
+  8 | DevOps |     2 | Company > Engineering > DevOps
+(1 row)
 ```
 
 The recursive CTE automatically expanded to include the new department at the correct depth and path. One inserted row in `departments` produced one new row in the stream table.
@@ -611,9 +623,10 @@ UPDATE departments SET name = 'R&D' WHERE id = 2;
 
 **What happened in the change buffer:** The CDC trigger captured the **old** row (`name='Engineering'`) and the **new** row (`name='R&D'`). Both old and new values are stored so the delta can compute what to remove and what to add.
 
-Wait a moment for the scheduler to propagate the rename through all layers. To force it synchronously, refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
+Wait a moment for the scheduler to propagate the rename through all layers. To force it synchronously, wait then refresh each table in topological order (`refresh_stream_table` does not cascade upstream):
 
 ```sql
+SELECT pg_sleep(2);
 SELECT pgtrickle.refresh_stream_table('department_tree');
 SELECT pgtrickle.refresh_stream_table('department_stats');
 SELECT pgtrickle.refresh_stream_table('department_report');
@@ -630,17 +643,18 @@ SELECT pgtrickle.refresh_stream_table('department_report');
 Query to verify the cascade:
 
 ```sql
-SELECT name, path FROM department_tree WHERE path LIKE '%R&D%' ORDER BY depth;
+SELECT name, path FROM department_tree WHERE path LIKE '%R&D%' ORDER BY depth, name;
 ```
 
 ```
-  name   |              path
----------+----------------------------------
- R&D     | Company > R&D
+   name   |           path           
+----------+--------------------------
+ R&D      | Company > R&D
  Backend  | Company > R&D > Backend
- DevOps  | Company > R&D > DevOps
+ DevOps   | Company > R&D > DevOps
  Frontend | Company > R&D > Frontend
  Platform | Company > R&D > Platform
+(5 rows)
 ```
 
 One `UPDATE` to a department name flowed through all three layers automatically — updating 5 + 5 + 2 rows across the chain.
@@ -653,14 +667,15 @@ DELETE FROM employees WHERE name = 'Bob';
 
 **What happened:** The `AFTER DELETE` trigger on `employees` fired, writing a change buffer row with action type `D` and Bob's old values (`department_id=5, salary=115000`). The delta query will use these old values to compute the correct aggregate adjustment — it knows to subtract 115000 from Backend's salary sum and decrement the count.
 
-The scheduler handles this automatically — all three tables refresh within about a second. To force it synchronously, refresh in upstream-first order:
+> **Important — refresh before querying:** The background scheduler refreshes all three tables within ~1 second, *in topological order*. To see the result immediately, wait a moment then explicitly refresh in upstream-first order:
 
 ```sql
+SELECT pg_sleep(2);
 SELECT pgtrickle.refresh_stream_table('department_stats');
 SELECT pgtrickle.refresh_stream_table('department_report');
 ```
 
-> **Why call `department_stats` first?** `department_stats` is the table that directly sources from `employees`. Calling `refresh_stream_table('department_report')` only refreshes the downstream table — it does not cascade upstream. You need to explicitly refresh each table in topological order, or let the background scheduler do it automatically.
+> **Why call `department_stats` first?** `department_stats` sources from both `employees` and `department_tree`. Refreshing in topological order ensures each layer processes its upstream changes before computing its own deltas. Even when `department_tree` has unprocessed changes from step 4c and a new employee change arrives simultaneously, pg_trickle's differential engine handles both correctly — using the pre-change left snapshot (L₀) to avoid double-counting.
 
 Then verify the result:
 
@@ -670,9 +685,10 @@ FROM department_stats WHERE department_name = 'Backend';
 ```
 
 ```
- department_name | headcount | total_salary | avg_salary
------------------+-----------+--------------+------------
- Backend         |         1 |    120000.00 |  120000.00
+ department_name | headcount | total_salary |     avg_salary
+-----------------+-----------+--------------+---------------------
+ Backend         |         1 |    120000.00 | 120000.000000000000
+(1 row)
 ```
 
 Headcount dropped from 2 → 1 and the salary aggregates updated. Again, only the Backend group was touched — the other 6 department rows were untouched.
