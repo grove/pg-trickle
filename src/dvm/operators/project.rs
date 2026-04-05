@@ -197,14 +197,30 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     // and rows become permanently stale.
     let has_count_l = child_result.columns.contains(&"__pgt_count_l".to_string());
     let has_count_r = child_result.columns.contains(&"__pgt_count_r".to_string());
-    let count_cols_select = if has_count_l && has_count_r {
-        ", \"__pgt_count_l\", \"__pgt_count_r\""
-    } else {
-        ""
-    };
+
+    // SF-7: Forward aggregate auxiliary columns (__pgt_count, __pgt_aux_*)
+    // when the child result includes them (Aggregate operator). Without
+    // this, the MERGE step inserts new aggregate rows with __pgt_count = 0
+    // (the column default), corrupting the group count used for subsequent
+    // differential refreshes.
+    let aux_cols: Vec<&String> = child_result
+        .columns
+        .iter()
+        .filter(|c| {
+            *c == "__pgt_count" || c.starts_with("__pgt_aux_") || c.starts_with("__pgt_nonnull_")
+        })
+        .collect();
+
+    let mut extra_cols_select = String::new();
+    if has_count_l && has_count_r {
+        extra_cols_select.push_str(", \"__pgt_count_l\", \"__pgt_count_r\"");
+    }
+    for col in &aux_cols {
+        extra_cols_select.push_str(&format!(", \"{}\"", col.replace('"', "\"\"")));
+    }
 
     let sql = format!(
-        "SELECT {row_id_select}, __pgt_action, {proj_cols}{count_cols_select}\n\
+        "SELECT {row_id_select}, __pgt_action, {proj_cols}{extra_cols_select}\n\
          FROM {child_cte}",
         proj_cols = proj_cols.join(", "),
         child_cte = child_result.cte_name,
@@ -216,6 +232,9 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     if has_count_l && has_count_r {
         output_cols.push("__pgt_count_l".to_string());
         output_cols.push("__pgt_count_r".to_string());
+    }
+    for col in &aux_cols {
+        output_cols.push((*col).clone());
     }
 
     Ok(DiffResult {
@@ -453,5 +472,35 @@ mod tests {
 
         assert_eq!(result.columns, vec!["id", "name"]);
         assert!(!result.columns.contains(&"__pgt_count_l".to_string()));
+    }
+
+    // ── SF-7: Aggregate auxiliary column forwarding ──────────────────
+
+    #[test]
+    fn test_diff_project_forwards_pgt_count_from_aggregate() {
+        // Project over Aggregate: __pgt_count must be forwarded.
+        let mut ctx = test_ctx_with_st("public", "my_st");
+        ctx.st_user_columns = Some(vec!["region".to_string(), "cnt".to_string()]);
+        ctx.st_has_pgt_count = true;
+
+        let child = scan(1, "orders", "public", "o", &["id", "region"]);
+        let agg = aggregate(vec![colref("region")], vec![count_star("cnt")], child);
+        let tree = project(
+            vec![colref("region"), colref("cnt")],
+            vec!["region", "cnt"],
+            agg,
+        );
+        let result = diff_project(&mut ctx, &tree).unwrap();
+        let sql = ctx.build_with_query(&result.cte_name);
+
+        // Output columns must include __pgt_count
+        assert!(
+            result.columns.contains(&"__pgt_count".to_string()),
+            "Project over Aggregate should forward __pgt_count: {:?}",
+            result.columns
+        );
+
+        // The SQL CTE should SELECT __pgt_count
+        assert_sql_contains(&sql, "__pgt_count");
     }
 }

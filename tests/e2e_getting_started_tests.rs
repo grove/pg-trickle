@@ -558,6 +558,104 @@ async fn test_getting_started_step4c_then_4d_combined_regression() {
     assert_eq!(rnd_hc, 3, "R&D headcount must be 3 after Bob's deletion");
 }
 
+// ── Step 4c → 4d sequential (regression: SF-7 __pgt_count) ──────────────────
+
+/// Regression — SF-7 __pgt_count: rename a department (step 4c) and delete an
+/// employee (step 4d) in SEPARATE refresh cycles, each processed via
+/// DIFFERENTIAL.
+///
+/// Before the SF-7 fix, the Project operator stripped __pgt_count from the
+/// aggregate delta output.  The MERGE INSERT clause didn't include __pgt_count,
+/// so newly inserted group rows (from the rename's D+I path change) got the
+/// column default (0) instead of the correct count.  On the subsequent delete
+/// step, the aggregate merge computed `new_count = 0 - 1 = -1 ≤ 0`, emitting
+/// a DELETE action that removed the Backend row entirely.
+///
+/// The fix forwards __pgt_count through the Project CTE so the MERGE writes
+/// the correct value on INSERT/UPDATE.
+#[tokio::test]
+async fn test_getting_started_step4c_then_4d_sequential_regression() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_base_tables(&db).await;
+    create_department_tree(&db).await;
+    create_department_stats(&db).await;
+    create_department_report(&db).await;
+
+    // ── Cycle 1: rename Engineering → R&D ────────────────────────────
+    db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
+        .await;
+    db.refresh_st_with_retry("department_tree").await;
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // All 8 department rows must exist with correct __pgt_count.
+    let row_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM department_stats")
+        .await;
+    assert_eq!(row_count, 8, "all 8 departments present after rename");
+
+    // Backend must have __pgt_count = 2 (Alice + Bob still there).
+    let backend_count: i64 = db
+        .query_scalar(
+            "SELECT __pgt_count::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_count, 2,
+        "Backend __pgt_count must be 2 after rename (SF-7)"
+    );
+
+    // ── Cycle 2: delete Bob ──────────────────────────────────────────
+    db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // Backend must still exist with headcount=1 (only Alice remains).
+    let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
+        "SELECT headcount::bigint,
+                round(total_salary, 2)::text,
+                round(avg_salary, 2)::text
+         FROM department_stats WHERE department_name = 'Backend'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("Backend stats row must exist after sequential rename → delete");
+    assert_eq!(hc, 1, "headcount must be 1 after Bob's deletion");
+    assert_eq!(
+        total_sal, "120000.00",
+        "total_salary must be Alice's salary"
+    );
+    assert_eq!(avg_sal, "120000.00");
+
+    // Backend __pgt_count must be 1 (one LEFT JOIN output row).
+    let backend_count: i64 = db
+        .query_scalar(
+            "SELECT __pgt_count::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_count, 1,
+        "Backend __pgt_count must be 1 after delete (SF-7)"
+    );
+
+    // All 8 rows still present (no departments vanished).
+    let row_count: i64 = db
+        .query_scalar("SELECT count(*)::bigint FROM department_stats")
+        .await;
+    assert_eq!(row_count, 8, "all 8 departments still present after delete");
+
+    // R&D division headcount must be 3 (Alice, Charlie, Diana).
+    let rnd_hc: i64 = db
+        .query_scalar(
+            "SELECT total_headcount::bigint FROM department_report WHERE division = 'R&D'",
+        )
+        .await;
+    assert_eq!(
+        rnd_hc, 3,
+        "R&D headcount must be 3 after sequential rename + delete"
+    );
+}
+
 // ── Step 4d ──────────────────────────────────────────────────────────────────
 
 /// Step 4d: DELETE Bob from Backend. Headcount drops 2→1, salary 235000→120000.
