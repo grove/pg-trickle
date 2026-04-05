@@ -2674,8 +2674,8 @@ Columns include all `pgtrickle.pgt_stream_tables` columns plus:
 
 | Column | Type | Description |
 |---|---|---|
-| `staleness` | `interval` | `now() - data_timestamp` |
-| `stale` | `bool` | `true` if `staleness > schedule` |
+| `staleness` | `interval` | `now() - last_refresh_at` |
+| `stale` | `bool` | `true` when the scheduler itself is behind (last_refresh_at age exceeds schedule); `false` when the scheduler is healthy even if source tables have had no writes |
 
 ---
 
@@ -2696,8 +2696,8 @@ Key columns:
 | `status` | `text` | INITIALIZING, ACTIVE, SUSPENDED, ERROR |
 | `refresh_mode` | `text` | FULL or DIFFERENTIAL |
 | `data_timestamp` | `timestamptz` | Timestamp of last refresh |
-| `staleness` | `interval` | Current staleness |
-| `stale` | `bool` | Whether schedule is exceeded |
+| `staleness` | `interval` | `now() - last_refresh_at` |
+| `stale` | `bool` | `true` when the scheduler is behind its schedule; `false` when the scheduler is healthy (quiet source tables do not count as stale) |
 | `total_refreshes` | `bigint` | Total refresh count |
 | `successful_refreshes` | `bigint` | Successful refresh count |
 | `failed_refreshes` | `bigint` | Failed refresh count |

@@ -14,7 +14,8 @@
 //! Operational events are emitted via PostgreSQL `NOTIFY` on the
 //! `pg_trickle_alert` channel. Clients can `LISTEN pg_trickle_alert;` to receive
 //! JSON-formatted events:
-//! - `stale` — data staleness exceeds 2× schedule
+//! - `stale_data` — scheduler is behind *and* data_timestamp is old (warning)
+//! - `no_upstream_changes` — scheduler is healthy but source tables have no new writes (info)
 //! - `auto_suspended` — ST suspended due to consecutive errors
 //! - `reinitialize_needed` — upstream DDL change detected
 //! - `buffer_growth_warning` — trigger-mode change buffers are growing
@@ -61,6 +62,9 @@ pub enum AlertEvent {
     CdcTriggerDisabled,
     /// Change buffer cleanup persistently failing for a source OID.
     CleanupFailure,
+    /// Scheduler is running normally but no upstream source rows have changed
+    /// — data_timestamp is frozen because there is genuinely nothing new.
+    NoUpstreamChanges,
 }
 
 impl AlertEvent {
@@ -80,6 +84,7 @@ impl AlertEvent {
             AlertEvent::FrozenTierSkip => "frozen_tier_skip",
             AlertEvent::CdcTriggerDisabled => "cdc_trigger_disabled",
             AlertEvent::CleanupFailure => "cleanup_failure",
+            AlertEvent::NoUpstreamChanges => "no_upstream_changes",
         }
     }
 }
@@ -156,6 +161,26 @@ pub fn alert_stale_data(
                 0.0
             },
         ),
+        skip_notify,
+    );
+}
+
+/// Emit a no-upstream-changes informational event.
+///
+/// Fired when the scheduler is healthy (last_refresh_at is recent) but
+/// data_timestamp has not advanced because no source rows changed.  This
+/// is distinct from a genuine staleness problem.
+pub fn alert_no_upstream_changes(
+    pgt_schema: &str,
+    pgt_name: &str,
+    idle_secs: f64,
+    skip_notify: bool,
+) {
+    emit_alert(
+        AlertEvent::NoUpstreamChanges,
+        pgt_schema,
+        pgt_name,
+        &format!(r#""idle_seconds":{:.1}"#, idle_secs),
         skip_notify,
     );
 }
@@ -445,8 +470,15 @@ fn st_refresh_stats() -> TableIterator<
                         CASE WHEN st.schedule IS NOT NULL AND st.data_timestamp IS NOT NULL
                                   AND st.schedule NOT LIKE '% %'
                                   AND st.schedule NOT LIKE '@%'
+                             -- Only stale when BOTH data_timestamp AND last_refresh_at
+                             -- are old: scheduler itself is falling behind.
+                             -- If last_refresh_at is recent the scheduler is healthy;
+                             -- data_timestamp is frozen because there is nothing new
+                             -- to refresh (no_upstream_changes), not a real problem.
                              THEN EXTRACT(EPOCH FROM (now() - st.data_timestamp)) >
-                                  pgtrickle.parse_duration_seconds(st.schedule)
+                                      pgtrickle.parse_duration_seconds(st.schedule)
+                                  AND EXTRACT(EPOCH FROM (now() - st.last_refresh_at)) >
+                                      pgtrickle.parse_duration_seconds(st.schedule) * 3
                         END,
                     false),
                     st.consecutive_errors::integer,
@@ -1915,7 +1947,7 @@ fn dfs(
 /// Checks performed:
 /// - `scheduler_running`    — background worker is alive
 /// - `error_tables`         — any stream tables in ERROR/SUSPENDED status
-/// - `stale_tables`         — any stream tables with staleness > 2× schedule
+/// - `stale_tables`         — any stream tables where last_refresh_at age exceeds schedule (scheduler behind)
 /// - `needs_reinit`         — any stream tables awaiting reinitialization
 /// - `consecutive_errors`   — any stream tables accumulating errors (not yet suspended)
 /// - `buffer_growth`        — any CDC change buffer with > 10 000 pending rows
@@ -2014,7 +2046,7 @@ fn health_check() -> TableIterator<
             (
                 "WARN".to_string(),
                 format!(
-                    "{} stale stream table(s) (staleness > 2× schedule): {}",
+                    "{} stale stream table(s) (scheduler behind its schedule): {}",
                     stale_tables.len(),
                     stale_tables.join(", ")
                 ),

@@ -1,13 +1,31 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::state::AppState;
 use crate::theme::Theme;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let lines: Vec<Line> = state
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Span::styled(
+            format!(" Alerts ({}) ", state.alerts.len()),
+            theme.title,
+        ));
+
+    if state.alerts.is_empty() {
+        let paragraph = Paragraph::new(Line::styled(" No alerts", theme.dim)).block(block);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let header = Row::new(vec!["Sev", "Time", "Event", "Table", "Metric", "Context"])
+        .style(theme.header)
+        .bottom_margin(1);
+
+    let rows: Vec<Row> = state
         .alerts
         .iter()
         .map(|alert| {
@@ -17,30 +35,26 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
                 "warning" => "⚠",
                 _ => "●",
             };
-            Line::from(vec![
-                Span::styled(icon, sev_style),
-                Span::raw(" "),
-                Span::styled(alert.timestamp.format("%H:%M:%S").to_string(), theme.dim),
-                Span::raw(" "),
-                Span::raw(&alert.message),
+            Row::new(vec![
+                Cell::from(icon).style(sev_style),
+                Cell::from(alert.timestamp.format("%H:%M:%S").to_string()).style(theme.dim),
+                Cell::from(alert.event.as_str()),
+                Cell::from(alert.table.as_str()).style(theme.dim),
+                Cell::from(alert.metric.as_str()),
+                Cell::from(alert.context.as_str()).style(theme.dim),
             ])
         })
         .collect();
 
-    let display = if lines.is_empty() {
-        vec![Line::styled(" No alerts", theme.dim)]
-    } else {
-        lines
-    };
+    let widths = [
+        Constraint::Length(3),  // Sev icon
+        Constraint::Length(10), // Time HH:MM:SS
+        Constraint::Fill(2),    // Event
+        Constraint::Fill(3),    // Table
+        Constraint::Fill(2),    // Metric
+        Constraint::Fill(3),    // Context
+    ];
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.border)
-        .title(Span::styled(
-            format!(" Alerts ({}) ", state.alerts.len()),
-            theme.title,
-        ));
-
-    let paragraph = Paragraph::new(display).block(block);
-    frame.render_widget(paragraph, area);
+    let table = Table::new(rows, widths).header(header).block(block);
+    frame.render_widget(table, area);
 }

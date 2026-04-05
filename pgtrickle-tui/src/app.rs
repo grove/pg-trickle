@@ -1870,6 +1870,181 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(footer), area);
 }
 
+/// Parse a `pg_trickle_alert` NOTIFY payload into an `AlertEvent`.
+///
+/// The server always emits a JSON object with at minimum an `event` field.
+/// We derive `severity` from the event type, extract `st` as the table name,
+/// and decompose the remaining fields into `metric` (primary numeric) and
+/// `context` (secondary string).
+fn parse_alert_payload(payload: &str) -> crate::state::AlertEvent {
+    let now = chrono::Utc::now();
+
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return crate::state::AlertEvent {
+            timestamp: now,
+            severity: "info".to_string(),
+            event: "unknown".to_string(),
+            table: String::new(),
+            metric: String::new(),
+            context: payload.to_string(),
+        };
+    };
+
+    let event = v
+        .get("event")
+        .and_then(|e| e.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let severity = alert_event_severity(&event).to_string();
+
+    let table = v
+        .get("st")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let schema = v.get("pgt_schema").and_then(|s| s.as_str())?;
+            let name = v.get("pgt_name").and_then(|s| s.as_str())?;
+            Some(format!("{schema}.{name}"))
+        })
+        .unwrap_or_default();
+
+    let str_field = |key: &str| -> Option<String> {
+        v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+    };
+    let f64_field = |key: &str| -> Option<f64> { v.get(key).and_then(|x| x.as_f64()) };
+    let i64_field = |key: &str| -> Option<i64> { v.get(key).and_then(|x| x.as_i64()) };
+
+    let (metric, context) = match event.as_str() {
+        "stale_data" => {
+            let metric = f64_field("ratio")
+                .map(|r| format!("ratio={r:.2}×"))
+                .unwrap_or_default();
+            let context = f64_field("staleness_seconds")
+                .map(|s| format!("staleness={s:.1}s"))
+                .unwrap_or_default();
+            (metric, context)
+        }
+        "auto_suspended" => {
+            let metric = i64_field("consecutive_errors")
+                .map(|n| format!("errors={n}"))
+                .unwrap_or_default();
+            (metric, String::new())
+        }
+        "resumed" => {
+            let context = str_field("previous_status")
+                .map(|s| format!("prev={s}"))
+                .unwrap_or_default();
+            (String::new(), context)
+        }
+        "reinitialize_needed" => {
+            let context = str_field("reason").unwrap_or_default();
+            (String::new(), context)
+        }
+        "buffer_growth_warning" => {
+            let metric = i64_field("pending_bytes")
+                .map(|b| format_bytes(b))
+                .unwrap_or_default();
+            let context = str_field("slot_name")
+                .map(|s| format!("slot={s}"))
+                .unwrap_or_default();
+            (metric, context)
+        }
+        "slot_lag_warning" => {
+            let metric = i64_field("retained_wal_bytes")
+                .map(|b| format_bytes(b))
+                .unwrap_or_default();
+            let context = str_field("slot_name")
+                .map(|s| format!("slot={s}"))
+                .unwrap_or_default();
+            (metric, context)
+        }
+        "refresh_completed" => {
+            let ins = i64_field("rows_inserted").unwrap_or(0);
+            let del = i64_field("rows_deleted").unwrap_or(0);
+            let ms = i64_field("duration_ms").unwrap_or(0);
+            let metric = format!("+{ins}/-{del} rows, {ms}ms");
+            let context = str_field("action")
+                .map(|a| format!("action={a}"))
+                .unwrap_or_default();
+            (metric, context)
+        }
+        "refresh_failed" => {
+            let context = str_field("error").unwrap_or_default();
+            let metric = str_field("action")
+                .map(|a| format!("action={a}"))
+                .unwrap_or_default();
+            (metric, context)
+        }
+        "scheduler_falling_behind" => {
+            let ratio = f64_field("ratio")
+                .map(|r| format!("ratio={r:.2}"))
+                .unwrap_or_default();
+            let elapsed = i64_field("elapsed_ms")
+                .map(|m| format!("{m}ms"))
+                .unwrap_or_default();
+            let metric = if ratio.is_empty() {
+                elapsed
+            } else if elapsed.is_empty() {
+                ratio
+            } else {
+                format!("{ratio}, {elapsed}")
+            };
+            (metric, String::new())
+        }
+        "cleanup_failure" => {
+            let context = str_field("error").unwrap_or_default();
+            (String::new(), context)
+        }
+        "no_upstream_changes" => {
+            let metric = f64_field("idle_seconds")
+                .map(|s| format!("idle={s:.0}s"))
+                .unwrap_or_default();
+            (metric, String::new())
+        }
+        _ => (String::new(), String::new()),
+    };
+
+    crate::state::AlertEvent {
+        timestamp: now,
+        severity,
+        event,
+        table,
+        metric,
+        context,
+    }
+}
+
+/// Format a byte count as a human-readable string.
+fn format_bytes(bytes: i64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.0} KiB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Infer alert severity from the event type string.
+fn alert_event_severity(event: &str) -> &'static str {
+    match event {
+        "auto_suspended" | "reinitialize_needed" | "refresh_failed" | "fuse_blown_reminder" => {
+            "critical"
+        }
+        "stale_data"
+        | "buffer_growth_warning"
+        | "slot_lag_warning"
+        | "scheduler_falling_behind"
+        | "cdc_trigger_disabled"
+        | "cleanup_failure" => "warning",
+        "no_upstream_changes" => "info",
+        _ => "info",
+    }
+}
+
 async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::AlertEvent>) {
     use tokio_postgres::AsyncMessage;
     use tokio_postgres::NoTls;
@@ -1926,27 +2101,7 @@ async fn listen_task(conn_args: ConnectionArgs, tx: mpsc::Sender<crate::state::A
             payload = notify_rx.recv() => {
                 match payload {
                     Some(payload) => {
-                        // Parse severity from JSON payload if possible
-                        let (severity, message) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                            let sev = v.get("severity")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("info")
-                                .to_string();
-                            let msg = v.get("message")
-                                .and_then(|s| s.as_str())
-                                .or_else(|| v.get("detail").and_then(|s| s.as_str()))
-                                .unwrap_or(&payload)
-                                .to_string();
-                            (sev, msg)
-                        } else {
-                            ("info".to_string(), payload)
-                        };
-
-                        let alert = crate::state::AlertEvent {
-                            timestamp: chrono::Utc::now(),
-                            severity,
-                            message,
-                        };
+                        let alert = parse_alert_payload(&payload);
                         if tx.send(alert).await.is_err() {
                             return;
                         }

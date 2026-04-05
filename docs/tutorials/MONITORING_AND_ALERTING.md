@@ -106,15 +106,18 @@ LISTEN pg_trickle_alert;
 
 | Event | Trigger | Severity |
 |-------|---------|----------|
-| `stale_data` | Staleness exceeds 2× the schedule | Warning |
+| `stale_data` | Scheduler is also behind — view is genuinely out of date | Warning |
+| `no_upstream_changes` | Scheduler is healthy but source tables have had no writes — view is correct | Info |
 | `auto_suspended` | Stream table suspended after max consecutive errors | Critical |
 | `resumed` | Stream table resumed after suspension | Info |
 | `reinitialize_needed` | Upstream DDL change detected | Warning |
 | `buffer_growth_warning` | Change buffer growing unexpectedly | Warning |
+| `slot_lag_warning` | WAL replication slot retaining excessive data | Warning |
 | `fuse_blown` | Circuit breaker tripped | Warning |
 | `refresh_completed` | Refresh completed successfully | Info |
 | `refresh_failed` | Refresh failed | Error |
 | `diamond_partial_failure` | One member of an atomic diamond group failed | Warning |
+| `scheduler_falling_behind` | Refresh duration approaching the schedule interval | Warning |
 
 ### Notification Payload
 
@@ -145,7 +148,12 @@ conn.execute("LISTEN pg_trickle_alert")
 
 for notify in conn.notifies():
     payload = json.loads(notify.payload)
-    if payload["event"] in ("auto_suspended", "fuse_blown"):
+    event = payload["event"]
+    # no_upstream_changes is informational — source tables are quiet but healthy.
+    # Only page on actionable events.
+    if event in ("auto_suspended", "fuse_blown", "refresh_failed"):
+        send_to_pagerduty(payload)
+    elif event == "stale_data":  # scheduler itself is falling behind
         send_to_pagerduty(payload)
 ```
 
