@@ -3245,9 +3245,9 @@ forward-compatibility before PG 19 reaches beta.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| TG2-WIN | **Window function DVM execution tests.** ~5 unit tests exist but 0 DVM execution tests. Add execution-level tests for ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD delta behavior across INSERT/UPDATE/DELETE cycles. | 3–5d | [TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md) |
-| TG2-JOIN | **Join multi-cycle UPDATE/DELETE correctness.** E2E join tests are INSERT-only; no UPDATE/DELETE differential cycles. Add systematic multi-cycle coverage for INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation. Risk: silent data corruption in production workloads. | 3–5d | [TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md) |
-| TG2-EQUIV | **Differential ≡ Full equivalence validation.** Only CTEs validated; joins and aggregates lack equivalence proof. Add a test harness that runs every defining query in both DIFFERENTIAL and FULL mode and asserts identical results. Critical for trusting the new optimization paths. | 3–5d | [TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md) |
+| ~~TG2-WIN~~ | ~~**Window function DVM execution tests.** ~5 unit tests exist but 0 DVM execution tests. Add execution-level tests for ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD delta behavior across INSERT/UPDATE/DELETE cycles.~~ | ~~3–5d~~ | ~~[TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md)~~ |
+| ~~TG2-JOIN~~ | ~~**Join multi-cycle UPDATE/DELETE correctness.** E2E join tests are INSERT-only; no UPDATE/DELETE differential cycles. Add systematic multi-cycle coverage for INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation. Risk: silent data corruption in production workloads.~~ | ~~3–5d~~ | ~~[TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md)~~ |
+| ~~TG2-EQUIV~~ | ~~**Differential ≡ Full equivalence validation.** Only CTEs validated; joins and aggregates lack equivalence proof. Add a test harness that runs every defining query in both DIFFERENTIAL and FULL mode and asserts identical results. Critical for trusting the new optimization paths.~~ | ~~3–5d~~ | ~~[TESTING_GAPS_2.md](plans/testing/TESTING_GAPS_2.md)~~ |
 
 #### Medium-Priority Gaps
 
@@ -3313,9 +3313,9 @@ forward-compatibility before PG 19 reaches beta.
 - [ ] G14-SHC: Shared-memory template cache eliminates cold-start; DSM + lwlock implementation validated under PgBouncer transaction mode
 - [ ] A3: PG 19 builds and passes full E2E suite (conditional on PG 19 beta availability; if beta not yet available, pgrx bump + API audit complete with CI gated on snapshot)
 - [ ] C-4: Change buffer compaction reduces buffer size by ≥50% for high-churn benchmarks; `compact_threshold` GUC respected; no correctness regressions
-- [ ] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
-- [ ] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
-- [ ] TG2-EQUIV: Differential ≡ Full equivalence validated for joins, aggregates, and window functions
+- [x] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
+- [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
+- [x] TG2-EQUIV: Differential ≡ Full equivalence validated for joins, aggregates, and window functions
 - [ ] TG2-MERGE: refresh.rs MERGE template generation has unit test coverage
 - [ ] TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks
 - [ ] TG2-SCHEMA: Source table type changes and column renames tested end-to-end

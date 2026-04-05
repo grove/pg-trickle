@@ -68,6 +68,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   (`true` for both) as they are correct for the majority of workloads.
   *(GUC-DEFAULTS)*
 
+### Tests
+
+- **JOIN multi-cycle UPDATE/DELETE tests** — 4 new E2E tests covering INNER
+  JOIN update propagation, LEFT JOIN right-side delete→NULL transition, FULL
+  JOIN both-side update (no phantom rows), and 3-table join chain middle
+  delete. *(TG2-JOIN)*
+
+- **Window function differential tests** — 3 new E2E tests for LAG, LEAD, and
+  DENSE_RANK differential correctness across INSERT/UPDATE/DELETE cycles.
+  *(TG2-WIN)*
+
+- **Differential≡Full equivalence tests** — 2 new equivalence tests for LATERAL
+  subquery and TopK (ORDER BY + LIMIT) patterns, each with 5 mutation cycles
+  and `assert_differential_mode()` validation. *(TG2-EQUIV)*
+
 ### Fixed
 
 - **`resume_stream_table()` confirmed operational** — the function referenced in
