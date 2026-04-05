@@ -4476,7 +4476,14 @@ pub fn execute_differential_refresh(
     // reverted by the heuristic check above), skip MERGE entirely and
     // use a simple INSERT … SELECT from the delta. This avoids the
     // DELETE, UPDATE, and IS DISTINCT FROM overhead of the MERGE path.
-    if is_append_only {
+    //
+    // Aggregate queries are excluded: the DVM aggregate operator remaps
+    // group-UPDATE actions to __pgt_action = 'I' in the final CTE, so
+    // source INSERTs that update existing aggregate groups would hit the
+    // UNIQUE constraint on __pgt_row_id (the bare INSERT has no NOT EXISTS
+    // guard).  The __pgt_cte_agg_ prefix is generated exclusively by the
+    // aggregate differentiation operator.
+    if is_append_only && !resolved.merge_sql.contains("__pgt_cte_agg_") {
         let t_insert_start = Instant::now();
 
         // Build INSERT SQL from the resolved MERGE SQL's USING clause.
