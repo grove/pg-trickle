@@ -49,12 +49,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .collect();
 
     let widths = [
-        Constraint::Length(4),
-        Constraint::Length(10),
-        Constraint::Length(24),
-        Constraint::Length(22),
-        Constraint::Length(16),
-        Constraint::Min(10),
+        Constraint::Length(3),   // Sev icon
+        Constraint::Length(10),  // Time HH:MM:SS
+        Constraint::Fill(2),     // Event
+        Constraint::Fill(3),     // Table
+        Constraint::Fill(2),     // Metric
+        Constraint::Fill(3),     // Context
     ];
 
     let table = Table::new(rows, widths).header(header).block(block);
