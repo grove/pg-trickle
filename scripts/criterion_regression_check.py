@@ -44,7 +44,11 @@ def find_bench_pairs(criterion_dir: Path) -> list[tuple[str, float, float]]:
     results: list[tuple[str, float, float]] = []
 
     for new_file in sorted(criterion_dir.rglob("new/estimates.json")):
-        base_file = new_file.parent.parent / "base" / "estimates.json"
+        bench_dir = new_file.parent.parent
+        base_file = bench_dir / "base" / "estimates.json"
+        if not base_file.exists():
+            # Criterion --save-baseline <name> stores under <name>/ not base/
+            base_file = bench_dir / "main" / "estimates.json"
         if not base_file.exists():
             continue
 
