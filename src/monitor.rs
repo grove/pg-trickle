@@ -14,7 +14,8 @@
 //! Operational events are emitted via PostgreSQL `NOTIFY` on the
 //! `pg_trickle_alert` channel. Clients can `LISTEN pg_trickle_alert;` to receive
 //! JSON-formatted events:
-//! - `stale` — data staleness exceeds 2× schedule
+//! - `stale_data` — scheduler is behind *and* data_timestamp is old (warning)
+//! - `no_upstream_changes` — scheduler is healthy but source tables have no new writes (info)
 //! - `auto_suspended` — ST suspended due to consecutive errors
 //! - `reinitialize_needed` — upstream DDL change detected
 //! - `buffer_growth_warning` — trigger-mode change buffers are growing
