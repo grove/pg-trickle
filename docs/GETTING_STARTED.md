@@ -675,7 +675,7 @@ SELECT pgtrickle.refresh_stream_table('department_stats');
 SELECT pgtrickle.refresh_stream_table('department_report');
 ```
 
-> **Why call `department_stats` first?** `department_stats` sources from both `employees` and `department_tree`. If `department_tree` has unprocessed changes from step 4c and a new employee change arrives at the same time, pg_trickle automatically falls back to a FULL refresh of `department_stats` to keep results correct. Calling the refreshes explicitly (in topological order) ensures each layer is fully up to date before you query.
+> **Why call `department_stats` first?** `department_stats` sources from both `employees` and `department_tree`. Refreshing in topological order ensures each layer processes its upstream changes before computing its own deltas. Even when `department_tree` has unprocessed changes from step 4c and a new employee change arrives simultaneously, pg_trickle's differential engine handles both correctly — using the pre-change left snapshot (L₀) to avoid double-counting.
 
 Then verify the result:
 

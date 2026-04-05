@@ -496,10 +496,11 @@ async fn test_getting_started_step4c_department_rename_cascades() {
 /// deleting an employee in that department (step 4d).
 ///
 /// When both changes are pending simultaneously at department_stats' refresh,
-/// the differential LEFT JOIN formula overestimates by ΔL ⋈ ΔR, causing the
-/// renamed group to net to zero and never appear.  The G17-STBASE safety check
-/// in refresh.rs detects this and falls back to FULL refresh for correctness,
-/// so the final state should be Backend with headcount=1 (just Alice).
+/// Part 2 of the LEFT JOIN delta must use L₀ (pre-change left snapshot) so
+/// that right-side changes are attributed to the old group key.  The EC-02
+/// correction cancels the ΔL_D ⋈ ΔR cross-term double-counting between
+/// Part 1b and Part 2.  The final state should be Backend with headcount=1
+/// (just Alice), using DIFFERENTIAL mode — no FULL fallback needed.
 #[tokio::test]
 async fn test_getting_started_step4c_then_4d_combined_regression() {
     let db = E2eDb::new().await.with_extension().await;
@@ -516,10 +517,12 @@ async fn test_getting_started_step4c_then_4d_combined_regression() {
 
     // Step 4d: delete Bob immediately — department_stats now has BOTH pending
     // ST-source changes (from the DRed cascade above) and a base-table change
-    // (the employee deletion).  This is the G17-STBASE combined scenario.
+    // (the employee deletion).  The L₀ fix in outer_join.rs ensures the
+    // differential formula handles this correctly without FULL fallback.
     db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
 
-    // Refresh department_stats (G17-STBASE safety check triggers FULL refresh).
+    // Refresh department_stats (DIFFERENTIAL — L₀ + EC-02 correction handles
+    // the combined ST + base-table changes correctly).
     db.refresh_st_with_retry("department_stats").await;
     db.refresh_st_with_retry("department_report").await;
 
