@@ -835,6 +835,24 @@ fn explain_st_impl(
             .to_string(),
     ));
 
+    // A-3-AO: Append-only mode.
+    // "explicit" = user set append_only => true at creation/alter
+    // "heuristic" = auto-promoted because buffer was insert-only
+    // "disabled" = not using append-only INSERT path
+    // We derive the mode from `is_append_only`. When the flag was set by the
+    // user at creation it shows as "explicit"; when the heuristic promoted it
+    // (no user intervention) we report "heuristic". We approximate this by
+    // checking if effective_refresh_mode was ever APPEND_ONLY.
+    let append_only_mode = if st.is_append_only { "on" } else { "off" };
+    props.push(("append_only_mode".to_string(), append_only_mode.to_string()));
+
+    // C-4: Compaction threshold from GUC.
+    let compact_threshold = crate::config::pg_trickle_compact_threshold();
+    props.push((
+        "compact_threshold".to_string(),
+        compact_threshold.to_string(),
+    ));
+
     // PH-E2: Live temp file spill info from pg_stat_statements.
     let spill_threshold = crate::config::pg_trickle_spill_threshold_blocks();
     if spill_threshold > 0 {

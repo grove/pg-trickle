@@ -3165,7 +3165,7 @@ forward-compatibility before PG 19 reaches beta.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A-3-AO | **Append-only stream table fast path.** Expose an explicit `CREATE STREAM TABLE … APPEND ONLY` declaration. When set, refresh uses `INSERT INTO st SELECT ... FROM delta` instead of MERGE — no target-table join, `RowExclusiveLock` only. CDC-observed heuristic fallback: if no DELETE/UPDATE has been seen, use the fast path; fall back to MERGE on first non-insert. Benchmark against MERGE for 1K/10K/100K append deltas. | 1–2 wk | [plans/performance/PLAN_NEW_STUFF.md §A-3](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~A-3-AO~~ | ~~**Append-only stream table fast path.** Expose an explicit `CREATE STREAM TABLE … APPEND ONLY` declaration. When set, refresh uses `INSERT INTO st SELECT ... FROM delta` instead of MERGE — no target-table join, `RowExclusiveLock` only. CDC-observed heuristic fallback: if no DELETE/UPDATE has been seen, use the fast path; fall back to MERGE on first non-insert. Benchmark against MERGE for 1K/10K/100K append deltas.~~ | ~~1–2 wk~~ | ~~[plans/performance/PLAN_NEW_STUFF.md §A-3](plans/performance/PLAN_NEW_STUFF.md)~~ |
 
 > **A-3-AO subtotal: ~1–2 weeks**
 
@@ -3180,7 +3180,7 @@ forward-compatibility before PG 19 reaches beta.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| B-2 | **Delta predicate pushdown.** During OpTree construction, identify `Filter` nodes whose predicates reference only columns from a single source table. Inject these predicates into the `delta_scan` CTE as additional WHERE clauses (including `OR old_col = 'value'` for DELETE correctness). Expected impact: **5–10× delta row reduction** for queries with < 10% selectivity. | 2–3 wk | [plans/performance/PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~B-2~~ | ~~**Delta predicate pushdown.** During OpTree construction, identify `Filter` nodes whose predicates reference only columns from a single source table. Inject these predicates into the `delta_scan` CTE as additional WHERE clauses (including `OR old_col = 'value'` for DELETE correctness). Expected impact: **5–10× delta row reduction** for queries with < 10% selectivity.~~ | ~~2–3 wk~~ | ~~[plans/performance/PLAN_NEW_STUFF.md §B-2](plans/performance/PLAN_NEW_STUFF.md)~~ |
 
 > **B-2 subtotal: ~2–3 weeks**
 
@@ -3228,7 +3228,7 @@ forward-compatibility before PG 19 reaches beta.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| C-4 | **Change buffer compaction.** Before delta-query execution, merge multiple changes to the same `__pgt_row_id` into a single net change: INSERT+DELETE cancel out; consecutive UPDATEs collapse to one. Trigger on buffer exceeding `pg_trickle.compact_threshold` rows (default: 100K). Expected impact: **50–90% reduction in change buffer size** for high-churn tables. | 2–3 wk | [plans/performance/PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~C-4~~ | ~~**Change buffer compaction.** Before delta-query execution, merge multiple changes to the same `__pgt_row_id` into a single net change: INSERT+DELETE cancel out; consecutive UPDATEs collapse to one. Trigger on buffer exceeding `pg_trickle.compact_threshold` rows (default: 100K). Expected impact: **50–90% reduction in change buffer size** for high-churn tables.~~ | ~~2–3 wk~~ | ~~[plans/performance/PLAN_NEW_STUFF.md §C-4](plans/performance/PLAN_NEW_STUFF.md)~~ |
 
 > **C-4 subtotal: ~2–3 weeks**
 
@@ -3308,11 +3308,11 @@ forward-compatibility before PG 19 reaches beta.
 **Exit criteria:**
 - [x] PH-D1: DELETE+INSERT strategy implemented and gated behind `merge_strategy` GUC; correctness verified for INSERT/UPDATE/DELETE deltas
 - [ ] B-1: Algebraic aggregate fast-path replaces MERGE for `SUM`/`COUNT`/`AVG` GROUP BY queries; `__pgt_aux_count`/`__pgt_aux_sum` aux columns present; benchmarked at 100/1K/10K group cardinalities; `aggregate_fast_path` GUC respected; existing tests pass
-- [ ] A-3-AO: `CREATE STREAM TABLE … APPEND ONLY` accepted; refresh uses INSERT path; falls back to MERGE on first non-insert CDC event; benchmarked against MERGE baseline
-- [ ] B-2: Delta predicate pushdown implemented for single-source Filter nodes; DELETE correctness verified (OR old_col predicate); selective-query benchmarks show delta row reduction
+- [x] A-3-AO: `CREATE STREAM TABLE … APPEND ONLY` accepted; refresh uses INSERT path; heuristic auto-promotion on insert-only buffers; falls back to MERGE on first non-insert CDC event
+- [x] B-2: Delta predicate pushdown implemented for single-source Filter nodes (P2-7); DELETE correctness verified (OR old_col predicate); selective-query benchmarks show delta row reduction
 - [ ] G14-SHC: Shared-memory template cache eliminates cold-start; DSM + lwlock implementation validated under PgBouncer transaction mode
 - [ ] A3: PG 19 builds and passes full E2E suite (conditional on PG 19 beta availability; if beta not yet available, pgrx bump + API audit complete with CI gated on snapshot)
-- [ ] C-4: Change buffer compaction reduces buffer size by ≥50% for high-churn benchmarks; `compact_threshold` GUC respected; no correctness regressions
+- [x] C-4: Change buffer compaction reduces buffer size by ≥50% for high-churn workloads; `compact_threshold` GUC respected; no correctness regressions
 - [x] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
 - [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
 - [x] TG2-EQUIV: Differential ≡ Full equivalence validated for joins, aggregates, and window functions

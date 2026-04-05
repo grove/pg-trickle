@@ -3665,6 +3665,54 @@ pub fn execute_differential_refresh(
         }
     }
 
+    // ── A-3-AO: Append-only heuristic auto-promotion ────────────────
+    // When the stream table is NOT marked append-only, check whether the
+    // current change buffer batch is INSERT-only. If so, opportunistically
+    // use the INSERT fast path for this refresh cycle. The flag is set in
+    // the catalog so subsequent refreshes also use the fast path until a
+    // DELETE/UPDATE is detected (handled by the revert block above).
+    if !is_append_only && !st.has_keyless_source {
+        let has_non_insert = catalog_source_oids.iter().any(|oid| {
+            let prev_lsn = prev_frontier.get_lsn(*oid);
+            let new_lsn = new_frontier.get_lsn(*oid);
+            match Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   AND action IN ('D', 'U') \
+                   LIMIT 1\
+                 )",
+            )) {
+                Ok(Some(v)) => v,
+                Ok(None) => false,
+                Err(_) => true, // SPI failure: safe default (skip heuristic)
+            }
+        });
+
+        if !has_non_insert {
+            pgrx::debug1!(
+                "[pg_trickle] A-3-AO: heuristic append-only promotion for {}.{} — \
+                 current batch is INSERT-only",
+                schema,
+                name,
+            );
+            is_append_only = true;
+            // Persist the flag so subsequent refreshes also use the fast path.
+            // If a DELETE/UPDATE appears later, the revert block above will
+            // clear it and emit a WARNING + NOTIFY.
+            if let Err(e) = StreamTableMeta::update_append_only(st.pgt_id, true) {
+                pgrx::debug1!(
+                    "[pg_trickle] A-3-AO: failed to set is_append_only for {}.{}: {}",
+                    schema,
+                    name,
+                    e,
+                );
+                is_append_only = false; // revert on failure
+            }
+        }
+    }
+
     // ── S2: TRUNCATE detection ───────────────────────────────────────
     // If any source table was TRUNCATEd, the change buffer contains a
     // marker row with action='T'. Differential deltas cannot represent

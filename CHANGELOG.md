@@ -66,6 +66,16 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   avoiding the MERGE join cost for sub-1% deltas against large tables.
   `explain_st()` now exposes `merge_strategy`. *(PH-D1)*
 
+- **Append-only heuristic auto-promotion** — stream tables that receive only
+  INSERT changes are now automatically promoted to the append-only INSERT fast
+  path, skipping the MERGE join entirely. If a DELETE or UPDATE is later
+  detected, the system reverts to MERGE with a WARNING and NOTIFY alert.
+  `explain_st()` now exposes `append_only_mode`. *(A-3-AO)*
+
+- **Compaction stats in explain_st()** — `explain_st()` now exposes
+  `compact_threshold`, showing the configured change buffer compaction
+  threshold. *(C-4)*
+
 ### Changed
 
 - **GUC defaults reviewed** — added detailed tuning guidance for

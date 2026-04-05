@@ -16,3 +16,8 @@
 --   Registered via pgrx GUC infrastructure (auto-available after upgrade).
 --   merge_strategy: 'auto' (default), 'merge', 'delete_insert'
 --   merge_strategy_threshold: 0.01 (default) — delta ratio threshold for auto mode
+
+-- A-3-AO: Append-only heuristic auto-promotion
+--   No schema changes required. The heuristic automatically promotes
+--   stream tables to append-only mode when change buffers contain only
+--   INSERT actions. Uses the existing is_append_only catalog column.
