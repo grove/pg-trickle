@@ -6,3 +6,8 @@
 --   Registered via pgrx GUC infrastructure (auto-available after upgrade).
 --   Hard limit on change buffer rows per source table (default: 1,000,000).
 --   Forces FULL refresh + truncate when exceeded.
+
+-- AUTO-IDX: auto_index GUC
+--   Registered via pgrx GUC infrastructure (auto-available after upgrade).
+--   Controls automatic index creation on GROUP BY/DISTINCT columns and
+--   covering __pgt_row_id index (default: true).

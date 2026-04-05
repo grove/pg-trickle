@@ -3287,10 +3287,10 @@ forward-compatibility before PG 19 reaches beta.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| AUTO-IDX-1 | **Auto-create indexes on GROUP BY / DISTINCT columns.** At `create_stream_table()` time, analyze the defining query's GROUP BY and DISTINCT ON expressions. Create `CREATE INDEX IF NOT EXISTS` for each grouping key set. Skip for expressions that aren't simple column references. | 1–2d | [docs/research/PG_IVM_COMPARISON.md](docs/research/PG_IVM_COMPARISON.md) |
-| AUTO-IDX-2 | **Covering index on `__pgt_row_id`.** For stream tables with ≤ 8 output columns, create a covering index `INCLUDE (col1, col2, ...)` on `__pgt_row_id` to enable index-only scans during MERGE. Gate behind `pg_trickle.auto_index` GUC (default `true`). | 1d | [plans/performance/PLAN_NEW_STUFF.md §A-4](plans/performance/PLAN_NEW_STUFF.md) |
+| ~~AUTO-IDX-1~~ | ~~**Auto-create indexes on GROUP BY / DISTINCT columns.**~~ ✅ GROUP BY composite index (existing) and DISTINCT composite index (new) auto-created at `create_stream_table()` time. Gated behind `pg_trickle.auto_index` GUC. | — | [src/api.rs](src/api.rs) |
+| ~~AUTO-IDX-2~~ | ~~**Covering index on `__pgt_row_id`.**~~ ✅ Already implemented (A-4). Now gated behind `pg_trickle.auto_index` GUC (default `true`). | — | [src/api.rs](src/api.rs) |
 
-> **AUTO-IDX subtotal: ~2–3 days**
+> **AUTO-IDX: ✅ Done**
 
 ### Quick Wins
 
@@ -3320,7 +3320,7 @@ forward-compatibility before PG 19 reaches beta.
 - [ ] TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks
 - [ ] TG2-SCHEMA: Source table type changes and column renames tested end-to-end
 - [ ] BENCH-CI: Performance regression CI runs on every PR; 10% regression threshold blocks merge; scenario coverage includes scan/filter/aggregate/join/window/CTE/TopK
-- [ ] AUTO-IDX: Stream tables auto-create indexes on GROUP BY / DISTINCT columns; `__pgt_row_id` covering index for ≤ 8-column tables; `auto_index` GUC respected; existing tests pass
+- [x] AUTO-IDX: Stream tables auto-create indexes on GROUP BY / DISTINCT columns; `__pgt_row_id` covering index for ≤ 8-column tables; `auto_index` GUC respected
 - [x] C2-BUG: `resume_stream_table()` verified operational (present since v0.2.0)
 - [x] ERR-REF: Error reference doc published with all 20 PgTrickleError variants, common causes, and suggested fixes
 - [x] GUC-DEFAULTS: `planner_aggressive` and `cleanup_use_truncate` defaults reviewed; trade-offs documented in CONFIGURATION.md

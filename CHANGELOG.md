@@ -49,6 +49,16 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   pg_trickle forces a FULL refresh and truncates the buffer, emitting a WARNING.
   *(BUF-LIMIT)*
 
+- **Automatic index creation GUC** — new `pg_trickle.auto_index` GUC (default:
+  `true`) gates automatic creation of GROUP BY, DISTINCT, and covering
+  `__pgt_row_id` indexes on stream tables. Previously these indexes were always
+  created with no way to disable them. *(AUTO-IDX)*
+
+- **DISTINCT column indexing** — stream tables backed by `SELECT DISTINCT`
+  queries now automatically receive a composite index on the distinct columns
+  (up to 8 columns), improving deduplication lookup performance during MERGE.
+  *(AUTO-IDX-1)*
+
 ### Changed
 
 - **GUC defaults reviewed** — added detailed tuning guidance for

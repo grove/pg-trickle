@@ -39,6 +39,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.buffer\_alert\_threshold](#pg_tricklebuffer_alert_threshold)
     - [pg\_trickle.compact\_threshold](#pg_tricklecompact_threshold)
     - [pg\_trickle.max\_buffer\_rows](#pg_tricklemax_buffer_rows)
+    - [pg\_trickle.auto\_index](#pg_trickleauto_index)
     - [pg\_trickle.buffer\_partitioning](#pg_tricklebuffer_partitioning)
     - [pg\_trickle.max\_grouping\_set\_branches](#pg_tricklemax_grouping_set_branches)
     - [pg\_trickle.max\_parse\_depth](#pg_tricklemax_parse_depth)
@@ -945,6 +946,47 @@ SET pg_trickle.max_buffer_rows = 5000000;
 
 -- Disable the limit (not recommended)
 SET pg_trickle.max_buffer_rows = 0;
+```
+
+---
+
+### pg_trickle.auto_index
+
+*Added in v0.16.0.* Controls whether `create_stream_table()` automatically
+creates performance indexes on stream tables.
+
+| Property | Value |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+When enabled, the following indexes are created automatically:
+
+1. **GROUP BY composite index** — for aggregate queries in DIFFERENTIAL mode,
+   a composite index on the GROUP BY columns is created to speed up group
+   lookups during MERGE.
+
+2. **DISTINCT composite index** — for DISTINCT queries with ≤ 8 output columns,
+   a composite index on all output columns is created.
+
+3. **Covering `__pgt_row_id` index** — for stream tables with ≤ 8 output
+   columns, the `__pgt_row_id` index includes all user columns via `INCLUDE`,
+   enabling index-only scans during MERGE (20–50% faster for small deltas
+   against large targets).
+
+The `__pgt_row_id` index itself is always created regardless of this setting
+(it is required for correctness).
+
+**Tuning Guidance:**
+- **Most workloads**: Leave at `true`.
+- **Custom index strategies**: Set to `false` if you prefer to manage indexes
+  manually or if the auto-created indexes conflict with your workload patterns.
+
+```sql
+-- Disable automatic index creation
+SET pg_trickle.auto_index = false;
 ```
 
 ---

@@ -1619,6 +1619,19 @@ impl OpTree {
         }
     }
 
+    /// Returns `true` if the top-level operator (after transparent wrappers)
+    /// is a `Distinct` node. Used by AUTO-IDX-1 to decide whether to create
+    /// an index on the DISTINCT output columns.
+    pub fn has_distinct(&self) -> bool {
+        match self {
+            OpTree::Distinct { .. } => true,
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. } => child.has_distinct(),
+            _ => false,
+        }
+    }
+
     /// Return the column names that should be hashed to produce `__pgt_row_id`.
     ///
     /// This mirrors the hash generation in each operator's diff function:

@@ -1321,23 +1321,26 @@ fn setup_storage_table(
 
     // Create index on __pgt_row_id (EC-06: non-unique for keyless sources)
     //
-    // A-4: When the output schema has <= 8 user columns, create a covering
-    // index with INCLUDE clause to enable index-only scans during MERGE.
-    // This eliminates the heap fetch for matched rows, giving 20-50%
-    // MERGE time reduction for small-delta / large-target scenarios.
+    // A-4 / AUTO-IDX-2: When auto_index is enabled and the output schema has
+    // <= 8 user columns, create a covering index with INCLUDE clause to enable
+    // index-only scans during MERGE. This eliminates the heap fetch for matched
+    // rows, giving 20-50% MERGE time reduction for small-delta / large-target
+    // scenarios.
     //
     // A1-1: PostgreSQL does not support global UNIQUE indexes on partitioned
     // tables. Force a non-unique index when the storage table is partitioned.
+    let auto_index = crate::config::pg_trickle_auto_index();
     const COVERING_INDEX_MAX_COLUMNS: usize = 8;
-    let include_clause = if columns.len() <= COVERING_INDEX_MAX_COLUMNS && !columns.is_empty() {
-        let include_cols: Vec<String> = columns
-            .iter()
-            .map(|c| quote_identifier(&c.name).to_string())
-            .collect();
-        format!(" INCLUDE ({})", include_cols.join(", "))
-    } else {
-        String::new()
-    };
+    let include_clause =
+        if auto_index && columns.len() <= COVERING_INDEX_MAX_COLUMNS && !columns.is_empty() {
+            let include_cols: Vec<String> = columns
+                .iter()
+                .map(|c| quote_identifier(&c.name).to_string())
+                .collect();
+            format!(" INCLUDE ({})", include_cols.join(", "))
+        } else {
+            String::new()
+        };
     let is_partitioned = partition_key.is_some();
     let index_sql = if has_keyless_source || is_partitioned {
         format!(
@@ -1358,25 +1361,53 @@ fn setup_storage_table(
     // DML guard trigger
     install_dml_guard_trigger(schema, table_name)?;
 
-    // GROUP BY composite index for aggregate queries in DIFFERENTIAL mode
-    if refresh_mode == RefreshMode::Differential
-        && let Some(pr) = parsed_tree
-        && let Some(group_cols) = pr.tree.group_by_columns()
-        && !group_cols.is_empty()
-    {
-        let quoted_cols: Vec<String> = group_cols
-            .iter()
-            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-            .collect();
-        let group_index_sql = format!(
-            "CREATE INDEX ON {}.{} ({})",
-            quote_identifier(schema),
-            quote_identifier(table_name),
-            quoted_cols.join(", "),
-        );
-        Spi::run(&group_index_sql).map_err(|e| {
-            PgTrickleError::SpiError(format!("Failed to create group-by index: {}", e))
-        })?;
+    // AUTO-IDX-1: Auto-create indexes on GROUP BY / DISTINCT columns.
+    // Gated behind pg_trickle.auto_index GUC (default true).
+    if auto_index {
+        // GROUP BY composite index for aggregate queries in DIFFERENTIAL mode
+        if refresh_mode == RefreshMode::Differential
+            && let Some(pr) = parsed_tree
+            && let Some(group_cols) = pr.tree.group_by_columns()
+            && !group_cols.is_empty()
+        {
+            let quoted_cols: Vec<String> = group_cols
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect();
+            let group_index_sql = format!(
+                "CREATE INDEX ON {}.{} ({})",
+                quote_identifier(schema),
+                quote_identifier(table_name),
+                quoted_cols.join(", "),
+            );
+            Spi::run(&group_index_sql).map_err(|e| {
+                PgTrickleError::SpiError(format!("Failed to create group-by index: {}", e))
+            })?;
+        }
+
+        // DISTINCT composite index: when a DISTINCT query has no GROUP BY,
+        // index the output columns to speed up deduplication lookups.
+        if let Some(pr) = parsed_tree
+            && pr.tree.group_by_columns().is_none()
+            && pr.tree.has_distinct()
+        {
+            let distinct_cols = pr.tree.output_columns();
+            if !distinct_cols.is_empty() && distinct_cols.len() <= COVERING_INDEX_MAX_COLUMNS {
+                let quoted_cols: Vec<String> = distinct_cols
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                    .collect();
+                let distinct_index_sql = format!(
+                    "CREATE INDEX ON {}.{} ({})",
+                    quote_identifier(schema),
+                    quote_identifier(table_name),
+                    quoted_cols.join(", "),
+                );
+                Spi::run(&distinct_index_sql).map_err(|e| {
+                    PgTrickleError::SpiError(format!("Failed to create distinct index: {}", e))
+                })?;
+            }
+        }
     }
 
     Ok(pgt_relid)

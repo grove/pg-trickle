@@ -224,6 +224,13 @@ pub static PGS_COMPACT_THRESHOLD: GucSetting<i32> = GucSetting::<i32>::new(100_0
 /// Set to 0 to disable the limit. Default: 1,000,000 rows.
 pub static PGS_MAX_BUFFER_ROWS: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
 
+/// AUTO-IDX: Automatic index creation on stream tables.
+///
+/// When enabled, `create_stream_table()` automatically creates indexes on
+/// GROUP BY keys, DISTINCT columns, and adds INCLUDE clauses to the
+/// `__pgt_row_id` index for stream tables with ≤ 8 output columns.
+pub static PGS_AUTO_INDEX: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 /// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
 pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
@@ -904,6 +911,18 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // AUTO-IDX: Automatic index creation on stream tables.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.auto_index",
+        c"Automatically create indexes on stream tables at creation time.",
+        c"When true (default), create_stream_table() auto-creates indexes on GROUP BY keys, \
+           DISTINCT columns, and adds INCLUDE clauses to the __pgt_row_id index for small \
+           stream tables. Set to false to manage indexes manually.",
+        &PGS_AUTO_INDEX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_trickle.max_grouping_set_branches",
         c"Maximum allowed grouping set branches in CUBE/ROLLUP queries.",
@@ -1417,6 +1436,11 @@ pub fn pg_trickle_compact_threshold() -> i64 {
 /// Returns 0 when the limit is disabled.
 pub fn pg_trickle_max_buffer_rows() -> i64 {
     PGS_MAX_BUFFER_ROWS.get() as i64
+}
+
+/// Returns whether automatic index creation is enabled.
+pub fn pg_trickle_auto_index() -> bool {
+    PGS_AUTO_INDEX.get()
 }
 
 /// Returns the buffer partitioning mode: `"off"`, `"on"`, or `"auto"`.
