@@ -474,10 +474,13 @@ pub fn generate_delta_query_cached(
     // G14-SHC: L2 cache — check the catalog-backed template cache.
     // ~1 ms SPI lookup, vs ~45 ms full DVM parse+differentiate.
     if let Some(ct) = crate::template_cache::lookup(pgt_id, query_hash) {
-        // Track L2 hit.
-        crate::shmem::TEMPLATE_CACHE_L2_HITS
-            .get()
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Track L2 hit (only when shmem is initialized; skipped in
+        // Light E2E mode where shared_preload_libraries is not set).
+        if crate::shmem::is_shmem_available() {
+            crate::shmem::TEMPLATE_CACHE_L2_HITS
+                .get()
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let entry = CachedDeltaTemplate {
             defining_query_hash: query_hash,
@@ -509,10 +512,12 @@ pub fn generate_delta_query_cached(
     }
 
     // Cache miss — parse, differentiate with placeholder mode, and cache.
-    // Track full miss.
-    crate::shmem::TEMPLATE_CACHE_MISSES
-        .get()
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Track full miss (only when shmem is initialized).
+    if crate::shmem::is_shmem_available() {
+        crate::shmem::TEMPLATE_CACHE_MISSES
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 
     let result = parse_defining_query_full(defining_query)?;
 
