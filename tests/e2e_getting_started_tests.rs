@@ -588,11 +588,13 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
     db.refresh_st_with_retry("department_stats").await;
     db.refresh_st_with_retry("department_report").await;
 
-    // All 8 department rows must exist with correct __pgt_count.
+    // All 7 department rows must exist with correct __pgt_count.
+    // (setup_base_tables creates 7 departments — DevOps is added in step 2.4b
+    // which this test intentionally skips.)
     let row_count: i64 = db
         .query_scalar("SELECT count(*)::bigint FROM department_stats")
         .await;
-    assert_eq!(row_count, 8, "all 8 departments present after rename");
+    assert_eq!(row_count, 7, "all 7 departments present after rename");
 
     // Backend must have __pgt_count = 2 (Alice + Bob still there).
     let backend_count: i64 = db
@@ -638,11 +640,11 @@ async fn test_getting_started_step4c_then_4d_sequential_regression() {
         "Backend __pgt_count must be 1 after delete (SF-7)"
     );
 
-    // All 8 rows still present (no departments vanished).
+    // All 7 rows still present (no departments vanished).
     let row_count: i64 = db
         .query_scalar("SELECT count(*)::bigint FROM department_stats")
         .await;
-    assert_eq!(row_count, 8, "all 8 departments still present after delete");
+    assert_eq!(row_count, 7, "all 7 departments still present after delete");
 
     // R&D division headcount must be 3 (Alice, Charlie, Diana).
     let rnd_hc: i64 = db
