@@ -3669,6 +3669,38 @@ pub fn execute_differential_refresh(
                     true
                 }
             }
+        })
+        // Also check ST (stream table) source change buffers.
+        // Without this, ST-on-ST cascades with empty catalog_source_oids
+        // would vacuously miss DELETE/UPDATE actions from the upstream ST.
+        || st_source_pgt_ids.iter().any(|&pgt_id| {
+            if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+                return false;
+            }
+            let key = format!("pgt_{pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            match Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_pgt_{pgt_id} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   AND action IN ('D', 'U') \
+                   LIMIT 1\
+                 )",
+            )) {
+                Ok(Some(v)) => v,
+                Ok(None) => false,
+                Err(_) => true, // SPI failure: safe default
+            }
         });
 
         if has_non_insert {
@@ -3733,6 +3765,39 @@ pub fn execute_differential_refresh(
                 Ok(Some(v)) => v,
                 Ok(None) => false,
                 Err(_) => true, // SPI failure: safe default (skip heuristic)
+            }
+        })
+        // Also check ST source change buffers for DELETE/UPDATE actions.
+        // Without this, ST-on-ST cascades (catalog_source_oids is empty)
+        // would vacuously find no non-INSERT actions and incorrectly
+        // promote to append-only, causing duplicate rows.
+        || st_source_pgt_ids.iter().any(|&pgt_id| {
+            if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+                return false;
+            }
+            let key = format!("pgt_{pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            match Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_pgt_{pgt_id} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   AND action IN ('D', 'U') \
+                   LIMIT 1\
+                 )",
+            )) {
+                Ok(Some(v)) => v,
+                Ok(None) => false,
+                Err(_) => true, // SPI failure: safe default
             }
         });
 
