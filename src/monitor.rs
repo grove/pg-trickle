@@ -846,6 +846,28 @@ fn explain_st_impl(
     let append_only_mode = if st.is_append_only { "on" } else { "off" };
     props.push(("append_only_mode".to_string(), append_only_mode.to_string()));
 
+    // B-1: Aggregate fast-path status.
+    // Detect whether the defining query has all-algebraic aggregates.
+    let agg_fast_path_guc = crate::config::pg_trickle_aggregate_fast_path();
+    let is_all_algebraic = if matches!(
+        st.refresh_mode,
+        crate::dag::RefreshMode::Differential | crate::dag::RefreshMode::Immediate
+    ) {
+        crate::dvm::parse_defining_query_full(&st.defining_query)
+            .map(|pr| pr.tree.is_all_algebraic_agg())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let aggregate_path = if is_all_algebraic && agg_fast_path_guc {
+        "explicit_dml"
+    } else if is_all_algebraic {
+        "merge (fast-path disabled)"
+    } else {
+        "merge"
+    };
+    props.push(("aggregate_path".to_string(), aggregate_path.to_string()));
+
     // C-4: Compaction threshold from GUC.
     let compact_threshold = crate::config::pg_trickle_compact_threshold();
     props.push((

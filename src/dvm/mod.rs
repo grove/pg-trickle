@@ -95,6 +95,8 @@ struct CachedDeltaTemplate {
     is_deduplicated: bool,
     /// A-2: Whether the delta includes `__pgt_key_changed` boolean column.
     has_key_changed: bool,
+    /// B-1: Whether all aggregates are algebraically invertible.
+    is_all_algebraic: bool,
 }
 
 thread_local! {
@@ -299,6 +301,10 @@ pub struct DeltaQueryResult {
     /// rows for value-only UPDATEs, halving MERGE source rows and converting
     /// DELETE+INSERT to a single UPDATE.
     pub has_key_changed: bool,
+    /// B-1: When true, all aggregates in the query are algebraically invertible
+    /// (COUNT, SUM, AVG, STDDEV, etc.), enabling the explicit DML fast-path
+    /// at refresh time instead of MERGE.
+    pub is_all_algebraic: bool,
 }
 
 /// Generate the full delta SQL query for a defining query.
@@ -377,6 +383,7 @@ pub fn generate_delta_query(
         source_oids,
         is_deduplicated: diff_dedup,
         has_key_changed: diff_has_key_changed,
+        is_all_algebraic: result.tree.is_all_algebraic_agg(),
     })
 }
 
@@ -460,6 +467,7 @@ pub fn generate_delta_query_cached(
             source_oids: entry.source_oids,
             is_deduplicated: entry.is_deduplicated,
             has_key_changed: entry.has_key_changed,
+            is_all_algebraic: entry.is_all_algebraic,
         });
     }
 
@@ -499,6 +507,8 @@ pub fn generate_delta_query_cached(
     let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;
 
+    let is_all_algebraic = result.tree.is_all_algebraic_agg();
+
     // Store in cache.
     let entry = CachedDeltaTemplate {
         defining_query_hash: query_hash,
@@ -507,6 +517,7 @@ pub fn generate_delta_query_cached(
         source_oids: source_oids.clone(),
         is_deduplicated: diff_dedup,
         has_key_changed: diff_has_key_changed,
+        is_all_algebraic,
     };
     DELTA_TEMPLATE_CACHE.with(|cache| {
         cache.borrow_mut().insert(pgt_id, entry);
@@ -522,6 +533,7 @@ pub fn generate_delta_query_cached(
         source_oids,
         is_deduplicated: diff_dedup,
         has_key_changed: diff_has_key_changed,
+        is_all_algebraic,
     })
 }
 
@@ -1450,6 +1462,7 @@ mod tests {
             source_oids: vec![42],
             is_deduplicated: true,
             has_key_changed: false,
+            is_all_algebraic: false,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);
@@ -1474,6 +1487,7 @@ mod tests {
             source_oids: vec![],
             is_deduplicated: false,
             has_key_changed: false,
+            is_all_algebraic: false,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);
@@ -1500,6 +1514,7 @@ mod tests {
             source_oids: vec![],
             is_deduplicated: true,
             has_key_changed: true,
+            is_all_algebraic: false,
         };
         DELTA_TEMPLATE_CACHE.with(|cache| {
             cache.borrow_mut().insert(pgt_id, entry);

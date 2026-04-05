@@ -231,6 +231,13 @@ pub static PGS_MAX_BUFFER_ROWS: GucSetting<i32> = GucSetting::<i32>::new(1_000_0
 /// `__pgt_row_id` index for stream tables with ≤ 8 output columns.
 pub static PGS_AUTO_INDEX: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// B-1: Aggregate fast-path — use explicit DML instead of MERGE for
+/// GROUP BY queries where all aggregates are algebraically invertible
+/// (COUNT, SUM, AVG, etc.).  The explicit DML path (DELETE+UPDATE+INSERT)
+/// avoids the MERGE hash-join cost, which is the dominant overhead for
+/// aggregate stream tables with many groups.
+pub static PGS_AGGREGATE_FAST_PATH: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 /// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
 pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
@@ -970,6 +977,19 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // B-1: Aggregate fast-path.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.aggregate_fast_path",
+        c"Use explicit DML instead of MERGE for all-algebraic aggregate stream tables.",
+        c"When true (default), stream tables whose aggregates are all algebraically invertible \
+           (COUNT, SUM, AVG, STDDEV, etc.) use the targeted DELETE+UPDATE+INSERT path instead \
+           of MERGE, avoiding the hash-join cost. Set to false to force MERGE for all stream \
+           tables.",
+        &PGS_AGGREGATE_FAST_PATH,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_trickle.max_grouping_set_branches",
         c"Maximum allowed grouping set branches in CUBE/ROLLUP queries.",
@@ -1516,6 +1536,12 @@ pub fn pg_trickle_max_buffer_rows() -> i64 {
 /// Returns whether automatic index creation is enabled.
 pub fn pg_trickle_auto_index() -> bool {
     PGS_AUTO_INDEX.get()
+}
+
+/// B-1: Returns whether the aggregate fast-path (explicit DML for
+/// all-algebraic aggregate queries) is enabled.
+pub fn pg_trickle_aggregate_fast_path() -> bool {
+    PGS_AGGREGATE_FAST_PATH.get()
 }
 
 /// Returns the buffer partitioning mode: `"off"`, `"on"`, or `"auto"`.

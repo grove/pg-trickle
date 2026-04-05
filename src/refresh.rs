@@ -121,6 +121,9 @@ struct CachedMergeTemplate {
     /// predicate injection. Only populated when `st_partition_key` is set,
     /// but stored for all STs to keep the struct layout consistent.
     delta_sql_template: String,
+    /// B-1: When true, all aggregates are algebraically invertible and the
+    /// explicit DML fast-path can be used instead of MERGE.
+    is_all_algebraic: bool,
 }
 
 thread_local! {
@@ -2099,6 +2102,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
                 trigger_insert_template,
                 trigger_using_template: using_clause.clone(),
                 delta_sql_template: delta_sql_template.clone(),
+                is_all_algebraic: delta_result.is_all_algebraic,
             },
         );
     });
@@ -4066,6 +4070,8 @@ pub fn execute_differential_refresh(
         /// LSN values). Used to compute partition key range for A1-3 predicate
         /// injection on partitioned stream tables.
         resolved_delta_sql: String,
+        /// B-1: Whether all aggregates are algebraically invertible.
+        is_all_algebraic: bool,
     }
 
     let mut resolved = if let Some(entry) = cached {
@@ -4101,6 +4107,7 @@ pub fn execute_differential_refresh(
                 new_frontier,
                 &zero_change_oids,
             ),
+            is_all_algebraic: entry.is_all_algebraic,
         }
     } else {
         // ── Cache miss: full pipeline + PREPARE + cache ──────────────
@@ -4306,6 +4313,7 @@ pub fn execute_differential_refresh(
                         trigger_insert_template: trigger_insert_template.clone(),
                         trigger_using_template: template_using.clone(),
                         delta_sql_template: delta_sql_template.clone(),
+                        is_all_algebraic: delta_result.is_all_algebraic,
                     },
                 );
             });
@@ -4339,6 +4347,7 @@ pub fn execute_differential_refresh(
                 new_frontier,
                 &zero_change_oids,
             ),
+            is_all_algebraic: delta_result.is_all_algebraic,
         }
     };
 
@@ -4607,6 +4616,26 @@ pub fn execute_differential_refresh(
     // decomposed DML.  Also skip for partitioned STs (hash-merge path).
     let use_delete_insert = use_delete_insert && !use_explicit_dml && st.st_partition_key.is_none();
 
+    // ── B-1: Aggregate fast-path ─────────────────────────────────────
+    // When the GUC is on and ALL aggregates are algebraically invertible
+    // (COUNT, SUM, AVG, etc.), use explicit DML (DELETE+UPDATE+INSERT)
+    // instead of MERGE. The explicit DML path does targeted row-level
+    // operations via a materialized temp table, avoiding the hash-join
+    // cost of MERGE which dominates for aggregate queries with many groups.
+    let use_agg_fast_path = resolved.is_all_algebraic
+        && crate::config::pg_trickle_aggregate_fast_path()
+        && !use_explicit_dml
+        && !use_delete_insert
+        && st.st_partition_key.is_none();
+    if use_agg_fast_path {
+        pgrx::debug1!(
+            "[pg_trickle] B-1: aggregate fast-path enabled for {}.{} \
+             (all aggregates algebraically invertible)",
+            schema,
+            name,
+        );
+    }
+
     // ── A1-2/A1-3: Partition-key range predicate injection ───────────
     // For partitioned stream tables, compute the MIN/MAX of the partition
     // key across the current delta and inject it as a literal range
@@ -4740,6 +4769,66 @@ pub fn execute_differential_refresh(
         );
 
         (del_count + ins_count, "delete_insert")
+    } else if use_agg_fast_path {
+        // ── B-1: Aggregate fast-path ────────────────────────────────
+        // For all-algebraic aggregate queries, use explicit DML
+        // (DELETE+UPDATE+INSERT) to avoid the MERGE hash-join cost.
+        let t_mat_start = Instant::now();
+
+        let materialize_sql = format!(
+            "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
+             SELECT * FROM {using_clause} AS d",
+            pgt_id = st.pgt_id,
+            using_clause = resolved.trigger_using_sql,
+        );
+        Spi::run(&materialize_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let t_mat = t_mat_start.elapsed();
+
+        // Step 1: DELETE rows marked for removal
+        let t_del_start = Instant::now();
+        let del_count = Spi::connect_mut(|client| {
+            let result = client
+                .update(&resolved.trigger_delete_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })?;
+        let t_del = t_del_start.elapsed();
+
+        // Step 2: UPDATE existing rows where values changed
+        let t_upd_start = Instant::now();
+        let upd_count = Spi::connect_mut(|client| {
+            let result = client
+                .update(&resolved.trigger_update_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })?;
+        let t_upd = t_upd_start.elapsed();
+
+        // Step 3: INSERT genuinely new rows
+        let t_ins_start = Instant::now();
+        let ins_count = Spi::connect_mut(|client| {
+            let result = client
+                .update(&resolved.trigger_insert_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+            Ok::<usize, PgTrickleError>(result.len())
+        })?;
+        let t_ins = t_ins_start.elapsed();
+
+        pgrx::info!(
+            "[PGS_PROFILE] agg_fast_path: materialize={:.2}ms delete={:.2}ms({}) \
+             update={:.2}ms({}) insert={:.2}ms({}) for {}.{}",
+            t_mat.as_secs_f64() * 1000.0,
+            t_del.as_secs_f64() * 1000.0,
+            del_count,
+            t_upd.as_secs_f64() * 1000.0,
+            upd_count,
+            t_ins.as_secs_f64() * 1000.0,
+            ins_count,
+            schema,
+            name,
+        );
+
+        (del_count + upd_count + ins_count, "agg_fast_path")
     } else if use_explicit_dml {
         // ── User-trigger path: explicit DML ─────────────────────────
         // Decompose the MERGE into DELETE + UPDATE + INSERT so that
@@ -5704,6 +5793,7 @@ mod tests {
                     trigger_insert_template: String::new(),
                     trigger_using_template: String::new(),
                     delta_sql_template: String::new(),
+                    is_all_algebraic: false,
                 },
             );
         });
@@ -5734,6 +5824,7 @@ mod tests {
                     trigger_insert_template: String::new(),
                     trigger_using_template: String::new(),
                     delta_sql_template: String::new(),
+                    is_all_algebraic: false,
                 },
             );
         });
