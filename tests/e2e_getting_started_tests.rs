@@ -456,6 +456,103 @@ async fn test_getting_started_step4c_department_rename_cascades() {
         )
         .await;
     assert_eq!(rnd_hc, 4, "'R&D' should have the same 4 employees");
+
+    // department_stats: sub-department rows Backend/Frontend/Platform must still
+    // exist after the DRed cascade — their full_path should reference R&D, not
+    // Engineering.  Regression guard for the ΔL⋈ΔR overcounting bug where
+    // sub-department rows were silently deleted from department_stats.
+    let backend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Backend'")
+        .await;
+    assert_eq!(
+        backend_path, "Company > R&D > Backend",
+        "Backend full_path must be updated to R&D after rename"
+    );
+    let backend_hc: i64 = db
+        .query_scalar(
+            "SELECT headcount::bigint FROM department_stats WHERE department_name = 'Backend'",
+        )
+        .await;
+    assert_eq!(
+        backend_hc, 2,
+        "Backend headcount must be preserved after rename"
+    );
+
+    let frontend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Frontend'")
+        .await;
+    assert_eq!(frontend_path, "Company > R&D > Frontend");
+
+    let platform_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Platform'")
+        .await;
+    assert_eq!(platform_path, "Company > R&D > Platform");
+}
+
+// ── Step 4c → 4d combined (regression: G17-STBASE) ───────────────────────────
+
+/// Regression — G17-STBASE: rename a department (step 4c, which produces D+I
+/// pairs in the department_tree ST change buffer) followed immediately by
+/// deleting an employee in that department (step 4d).
+///
+/// When both changes are pending simultaneously at department_stats' refresh,
+/// the differential LEFT JOIN formula overestimates by ΔL ⋈ ΔR, causing the
+/// renamed group to net to zero and never appear.  The G17-STBASE safety check
+/// in refresh.rs detects this and falls back to FULL refresh for correctness,
+/// so the final state should be Backend with headcount=1 (just Alice).
+#[tokio::test]
+async fn test_getting_started_step4c_then_4d_combined_regression() {
+    let db = E2eDb::new().await.with_extension().await;
+    setup_base_tables(&db).await;
+    create_department_tree(&db).await;
+    create_department_stats(&db).await;
+    create_department_report(&db).await;
+
+    // Step 4c: rename Engineering → R&D; refresh department_tree so the DRed
+    // D+I pairs land in the ST change buffer for department_stats.
+    db.execute("UPDATE departments SET name = 'R&D' WHERE id = 2")
+        .await;
+    db.refresh_st_with_retry("department_tree").await;
+
+    // Step 4d: delete Bob immediately — department_stats now has BOTH pending
+    // ST-source changes (from the DRed cascade above) and a base-table change
+    // (the employee deletion).  This is the G17-STBASE combined scenario.
+    db.execute("DELETE FROM employees WHERE name = 'Bob'").await;
+
+    // Refresh department_stats (G17-STBASE safety check triggers FULL refresh).
+    db.refresh_st_with_retry("department_stats").await;
+    db.refresh_st_with_retry("department_report").await;
+
+    // Backend must exist with headcount=1 (only Alice remains).
+    let (hc, total_sal, avg_sal): (i64, String, String) = sqlx::query_as(
+        "SELECT headcount::bigint,
+                round(total_salary, 2)::text,
+                round(avg_salary, 2)::text
+         FROM department_stats WHERE department_name = 'Backend'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("Backend stats row must exist after rename+delete");
+    assert_eq!(hc, 1, "headcount must be 1 after Bob's deletion");
+    assert_eq!(
+        total_sal, "120000.00",
+        "total_salary must be Alice's salary"
+    );
+    assert_eq!(avg_sal, "120000.00");
+
+    // full_path must reflect the rename.
+    let backend_path: String = db
+        .query_scalar("SELECT full_path FROM department_stats WHERE department_name = 'Backend'")
+        .await;
+    assert_eq!(backend_path, "Company > R&D > Backend");
+
+    // R&D division in department_report: 3 employees (Alice, Charlie, Diana).
+    let rnd_hc: i64 = db
+        .query_scalar(
+            "SELECT total_headcount::bigint FROM department_report WHERE division = 'R&D'",
+        )
+        .await;
+    assert_eq!(rnd_hc, 3, "R&D headcount must be 3 after Bob's deletion");
 }
 
 // ── Step 4d ──────────────────────────────────────────────────────────────────

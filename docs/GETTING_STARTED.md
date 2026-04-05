@@ -630,17 +630,18 @@ SELECT pgtrickle.refresh_stream_table('department_report');
 Query to verify the cascade:
 
 ```sql
-SELECT name, path FROM department_tree WHERE path LIKE '%R&D%' ORDER BY depth;
+SELECT name, path FROM department_tree WHERE path LIKE '%R&D%' ORDER BY depth, name;
 ```
 
 ```
-  name   |              path
----------+----------------------------------
- R&D     | Company > R&D
+   name   |              path
+----------+----------------------------------
+ R&D      | Company > R&D
  Backend  | Company > R&D > Backend
- DevOps  | Company > R&D > DevOps
+ DevOps   | Company > R&D > DevOps
  Frontend | Company > R&D > Frontend
  Platform | Company > R&D > Platform
+(5 rows)
 ```
 
 One `UPDATE` to a department name flowed through all three layers automatically — updating 5 + 5 + 2 rows across the chain.
@@ -653,14 +654,14 @@ DELETE FROM employees WHERE name = 'Bob';
 
 **What happened:** The `AFTER DELETE` trigger on `employees` fired, writing a change buffer row with action type `D` and Bob's old values (`department_id=5, salary=115000`). The delta query will use these old values to compute the correct aggregate adjustment — it knows to subtract 115000 from Backend's salary sum and decrement the count.
 
-The scheduler handles this automatically — all three tables refresh within about a second. To force it synchronously, refresh in upstream-first order:
+> **Important — refresh before querying:** The background scheduler refreshes all three tables within ~1 second, *in topological order*. To see the result immediately, explicitly refresh in upstream-first order:
 
 ```sql
 SELECT pgtrickle.refresh_stream_table('department_stats');
 SELECT pgtrickle.refresh_stream_table('department_report');
 ```
 
-> **Why call `department_stats` first?** `department_stats` is the table that directly sources from `employees`. Calling `refresh_stream_table('department_report')` only refreshes the downstream table — it does not cascade upstream. You need to explicitly refresh each table in topological order, or let the background scheduler do it automatically.
+> **Why call `department_stats` first?** `department_stats` sources from both `employees` and `department_tree`. If `department_tree` has unprocessed changes from step 4c and a new employee change arrives at the same time, pg_trickle automatically falls back to a FULL refresh of `department_stats` to keep results correct. Calling the refreshes explicitly (in topological order) ensures each layer is fully up to date before you query.
 
 Then verify the result:
 

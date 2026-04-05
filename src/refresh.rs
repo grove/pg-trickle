@@ -3601,6 +3601,78 @@ pub fn execute_differential_refresh(
         return Ok((0, 0));
     }
 
+    // ── G17-STBASE: Combined ST + base table changes safety fallback ──
+    // When both an upstream ST source (changes_pgt_{id}) AND a base table
+    // source (changes_{oid}) have pending changes in the same refresh cycle,
+    // the differential LEFT JOIN formula overcounts by the second-order term
+    // ΔL ⋈ ΔR.  Concretely: Part 2 of the LEFT JOIN delta uses L₁ (the
+    // post-change left snapshot) instead of L₀ (pre-change), so right-side
+    // deletions are attributed to the NEW left-side group key rather than
+    // the old one.  The overcounting cancels new-group insertions, causing
+    // rows to silently disappear from aggregate stream tables.
+    //
+    // Classic example: rename a department (ST path update, ΔL) while
+    // simultaneously deleting an employee in that department (ΔR).  The
+    // renamed group nets to 0 deltas and is never inserted.
+    //
+    // FULL refresh is always correct and is the safe fallback here.
+    if any_changes && !st_source_pgt_ids.is_empty() {
+        let has_pending_st_changes = st_source_pgt_ids.iter().any(|&pgt_id| {
+            if !crate::cdc::has_st_change_buffer(pgt_id, &change_schema) {
+                return false;
+            }
+            let key = format!("pgt_{pgt_id}");
+            let prev_lsn = prev_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            let new_lsn = new_frontier
+                .sources
+                .get(&key)
+                .map(|sv| sv.lsn.clone())
+                .unwrap_or_else(|| "0/0".to_string());
+            // nosemgrep: semgrep.rust.spi.query.dynamic-format — pgt_id is a plain i64
+            Spi::get_one::<bool>(&format!(
+                "SELECT EXISTS(\
+                   SELECT 1 FROM \"{change_schema}\".changes_pgt_{pgt_id} \
+                   WHERE lsn > '{prev_lsn}'::pg_lsn \
+                   AND lsn <= '{new_lsn}'::pg_lsn \
+                   LIMIT 1\
+                 )",
+            ))
+            .unwrap_or(Some(false))
+            .unwrap_or(false)
+        });
+
+        if has_pending_st_changes {
+            pgrx::warning!(
+                "[pg_trickle] G17-STBASE: {}.{} has simultaneous changes from both \
+                 stream-table and base-table sources — falling back to FULL refresh \
+                 to avoid ΔL ⋈ ΔR overcounting in the differential LEFT JOIN formula.",
+                schema,
+                name,
+            );
+            let t_full_start = Instant::now();
+            let result = execute_full_refresh(st);
+            let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
+            if let Err(e) = StreamTableMeta::update_adaptive_threshold(
+                st.pgt_id,
+                st.auto_threshold,
+                Some(full_ms),
+            ) {
+                pgrx::debug1!(
+                    "[pg_trickle] G17-STBASE: failed to update adaptive threshold: {}",
+                    e
+                );
+            }
+            if result.is_ok() {
+                post_full_refresh_cleanup(st);
+            }
+            return result;
+        }
+    }
+
     // ── A-3a: Append-only heuristic fallback ─────────────────────────
     // When the stream table is marked append-only, check whether any
     // DELETE or UPDATE actions appeared in the change buffers. If so,
