@@ -397,7 +397,7 @@ jobs:
           restore-keys: criterion-baseline-
 
       - name: Run benchmarks (create new/ data)
-        run: ./scripts/run_benchmarks.sh
+        run: ./scripts/run_benchmarks.sh -- --baseline main
         env:
           BENCH_QUICK: "1"
 
