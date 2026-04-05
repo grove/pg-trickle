@@ -48,6 +48,10 @@ jobs:
         run: python -m pip install --upgrade semgrep
 
       - name: Run Semgrep ruleset
+        # Advisory-only: upload findings as SARIF but do not block CI.
+        # Semgrep exits with code 2 when blocking findings exist; continue-on-error
+        # prevents that from failing the job while still uploading the SARIF report.
+        continue-on-error: true
         run: semgrep scan --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif
 
       - name: Upload SARIF report

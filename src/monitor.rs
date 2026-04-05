@@ -240,8 +240,7 @@ fn collect_slot_health_rows() -> Vec<(String, i64, bool, i64, String)> {
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("slot_health: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("slot_health: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -481,8 +480,7 @@ fn st_refresh_stats() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("st_refresh_stats: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("st_refresh_stats: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -594,8 +592,7 @@ fn get_refresh_history(
                 None,
                 &[schema.into(), table_name.into(), max_rows.into()],
             )
-            .map_err(|e| pgrx::error!("get_refresh_history: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("get_refresh_history: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         let epoch_zero = TimestampWithTimeZone::try_from(0i64).unwrap_or_else(|_| {
@@ -1498,8 +1495,7 @@ fn change_buffer_sizes() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("change_buffer_sizes: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("change_buffer_sizes: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -1571,8 +1567,7 @@ fn list_sources(
                 None,
                 &[schema.into(), table_name.into()],
             )
-            .map_err(|e| pgrx::error!("list_sources: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("list_sources: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -1632,8 +1627,7 @@ fn dependency_tree() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("dependency_tree: failed to load stream tables: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("dependency_tree: failed to load stream tables: {e}"));
 
         let mut m = std::collections::HashMap::new();
         for row in result {
@@ -1685,8 +1679,7 @@ fn dependency_tree() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("dependency_tree: failed to load dependencies: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("dependency_tree: failed to load dependencies: {e}"));
 
         for row in result {
             let consumer = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
@@ -2198,8 +2191,7 @@ fn refresh_timeline(
                 None,
                 &[max_rows.into()],
             )
-            .map_err(|e| pgrx::error!("refresh_timeline: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("refresh_timeline: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -2281,8 +2273,7 @@ fn trigger_inventory() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("trigger_inventory: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("trigger_inventory: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
