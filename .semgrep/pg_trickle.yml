@@ -40,12 +40,12 @@ rules:
       and intercept calls made by the privileged function.
     paths:
       include:
-        - src/**
-        - sql/**
+        - /src/**
+        - /sql/**
       exclude:
         - "**/*.md"
-        - plans/**
-        - docs/**
+        - /plans/**
+        - /docs/**
     pattern-regex: SECURITY\s+DEFINER
 
   # ── Phase 2: Extension-specific privilege-context rules ─────────────────────
@@ -62,12 +62,12 @@ rules:
       via the extension API.
     paths:
       include:
-        - src/**
-        - sql/**
+        - /src/**
+        - /sql/**
       exclude:
         - "**/*.md"
-        - plans/**
-        - docs/**
+        - /plans/**
+        - /docs/**
     pattern-regex: 'SET\s+LOCAL\s+row_security\s*=\s*off'
 
   - id: sql.set-role.present
@@ -82,12 +82,12 @@ rules:
       the one you intend.
     paths:
       include:
-        - src/**
-        - sql/**
+        - /src/**
+        - /sql/**
       exclude:
         - "**/*.md"
-        - plans/**
-        - docs/**
+        - /plans/**
+        - /docs/**
     pattern-regex: '(SET\s+ROLE\b|RESET\s+ROLE\b)'
 
   - id: rust.panic-in-sql-path
@@ -106,23 +106,26 @@ rules:
           - pattern: $X.unwrap()
           - pattern: $X.expect($MSG)
           - pattern: panic!(...)
-      # Exclude unit test functions — panics in #[test] / #[pg_test] bodies are
-      # expected and do not run inside the PostgreSQL backend process.
+      # Exclude test code — panics in test bodies are expected and do not run
+      # inside the PostgreSQL backend process.
+      #
+      # IMPORTANT: Semgrep's Rust AST does not support matching attribute annotations
+      # (#[test], #[cfg(test)]) combined with fn/mod declarations in pattern-not-inside.
+      # The reliable approach is to match the *named* test module bodies directly.
+      # All test modules in this codebase use the well-known names `tests` or `pg_tests`.
       - pattern-not-inside: |
-          #[test]
-          fn $FN($$$) {
+          mod tests {
             ...
           }
       - pattern-not-inside: |
-          #[pg_test]
-          fn $FN($$$) {
+          mod pg_tests {
             ...
           }
     paths:
       include:
-        - src/**
+        - /src/**
       exclude:
         # DVM engine is internal computation; not a direct SQL entry point.
-        - src/dvm/**
+        - /src/dvm/**
         # Standalone CLI binary — not loaded into the PostgreSQL process
-        - src/bin/**
+        - /src/bin/**

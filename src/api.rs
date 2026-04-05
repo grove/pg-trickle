@@ -4348,8 +4348,7 @@ fn pgt_status() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("st_list: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("st_list: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -4404,8 +4403,7 @@ fn pgt_scc_status() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("pgt_scc_status: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("pgt_scc_status: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
@@ -4483,8 +4481,7 @@ fn explain_refresh_mode_impl(name: &str) -> Vec<(String, Option<String>, Option<
                 None,
                 &[schema.as_str().into(), table_name.as_str().into()],
             )
-            .map_err(|e| pgrx::error!("explain_refresh_mode: SPI error: {e}"))
-            .expect("unreachable after error!")
+            .unwrap_or_else(|e| pgrx::error!("explain_refresh_mode: SPI error: {e}"))
             .first()
             .get_two::<String, String>()
             .unwrap_or((None, None))
@@ -5195,8 +5192,7 @@ fn bootstrap_gate_status_fn() -> TableIterator<
                 None,
                 &[],
             )
-            .map_err(|e| pgrx::error!("bootstrap_gate_status: SPI select failed: {e}"))
-            .expect("unreachable after error!()");
+            .unwrap_or_else(|e| pgrx::error!("bootstrap_gate_status: SPI select failed: {e}"));
 
         let mut out = Vec::new();
         for row in result {
