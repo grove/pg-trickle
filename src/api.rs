@@ -16,6 +16,7 @@ use crate::dag::{
 use crate::error::PgTrickleError;
 use crate::refresh;
 use crate::shmem;
+use crate::template_cache;
 use crate::version;
 use crate::wal_decoder;
 
@@ -2038,6 +2039,7 @@ fn alter_stream_table_query(
     }
 
     // Invalidate caches
+    template_cache::invalidate(st.pgt_id);
     shmem::bump_cache_generation();
 
     // Flush MERGE template cache and deallocate prepared statements
@@ -2276,6 +2278,7 @@ fn alter_stream_table_query(
 
     // Signal DAG rebuild and cache invalidation
     shmem::signal_dag_invalidation(st.pgt_id);
+    template_cache::invalidate(st.pgt_id);
     shmem::bump_cache_generation();
 
     // ── Phase 5: Repopulate ──
@@ -2410,6 +2413,7 @@ fn alter_stream_table_partition_key(
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
     // Invalidate caches.
+    template_cache::invalidate(st.pgt_id);
     shmem::bump_cache_generation();
     refresh::invalidate_merge_cache(st.pgt_id);
 
@@ -3367,6 +3371,8 @@ fn alter_stream_table_impl(
     }
 
     shmem::signal_dag_invalidation(st.pgt_id);
+    // G14-SHC: Remove from catalog-backed template cache.
+    template_cache::invalidate(st.pgt_id);
     // G8.1: Notify other backends to flush delta/MERGE template caches.
     shmem::bump_cache_generation();
 
@@ -3543,6 +3549,8 @@ fn drop_stream_table_impl_inner(
 
     // Signal scheduler
     shmem::signal_dag_invalidation(st.pgt_id);
+    // G14-SHC: Remove from catalog-backed template cache.
+    template_cache::invalidate(st.pgt_id);
     // G8.1: Notify other backends to flush delta/MERGE template caches.
     shmem::bump_cache_generation();
 

@@ -898,6 +898,24 @@ fn explain_st_impl(
         }
     }
 
+    // G14-SHC: Template cache stats.
+    props.push((
+        "template_cache".to_string(),
+        crate::config::pg_trickle_template_cache_enabled().to_string(),
+    ));
+    if crate::shmem::is_shmem_available() {
+        let l2_hits = crate::shmem::TEMPLATE_CACHE_L2_HITS
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let misses = crate::shmem::TEMPLATE_CACHE_MISSES
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed);
+        props.push((
+            "template_cache_stats".to_string(),
+            format!("{{\"l2_hits\":{},\"full_misses\":{}}}", l2_hits, misses),
+        ));
+    }
+
     Ok(props)
 }
 

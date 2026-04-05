@@ -35,6 +35,7 @@ mod monitor;
 mod refresh;
 pub mod scheduler;
 mod shmem;
+mod template_cache;
 pub mod version;
 mod wal_decoder;
 

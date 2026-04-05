@@ -471,7 +471,49 @@ pub fn generate_delta_query_cached(
         });
     }
 
+    // G14-SHC: L2 cache — check the catalog-backed template cache.
+    // ~1 ms SPI lookup, vs ~45 ms full DVM parse+differentiate.
+    if let Some(ct) = crate::template_cache::lookup(pgt_id, query_hash) {
+        // Track L2 hit.
+        crate::shmem::TEMPLATE_CACHE_L2_HITS
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let entry = CachedDeltaTemplate {
+            defining_query_hash: query_hash,
+            delta_sql_template: ct.delta_sql_template.clone(),
+            output_columns: ct.output_columns.clone(),
+            source_oids: ct.source_oids.clone(),
+            is_deduplicated: ct.is_deduplicated,
+            has_key_changed: ct.has_key_changed,
+            is_all_algebraic: ct.is_all_algebraic,
+        };
+        // Promote to L1 (thread-local) for subsequent calls.
+        DELTA_TEMPLATE_CACHE.with(|cache| {
+            cache.borrow_mut().insert(pgt_id, entry);
+        });
+        let delta_sql = resolve_delta_template(
+            &ct.delta_sql_template,
+            &ct.source_oids,
+            prev_frontier,
+            new_frontier,
+        );
+        return Ok(DeltaQueryResult {
+            delta_sql,
+            output_columns: ct.output_columns,
+            source_oids: ct.source_oids,
+            is_deduplicated: ct.is_deduplicated,
+            has_key_changed: ct.has_key_changed,
+            is_all_algebraic: ct.is_all_algebraic,
+        });
+    }
+
     // Cache miss — parse, differentiate with placeholder mode, and cache.
+    // Track full miss.
+    crate::shmem::TEMPLATE_CACHE_MISSES
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let result = parse_defining_query_full(defining_query)?;
 
     let mut source_oids: Vec<u32> = result.tree.source_oids();
@@ -522,6 +564,20 @@ pub fn generate_delta_query_cached(
     DELTA_TEMPLATE_CACHE.with(|cache| {
         cache.borrow_mut().insert(pgt_id, entry);
     });
+
+    // G14-SHC: Persist to L2 (catalog table) for cross-backend sharing.
+    let _ = crate::template_cache::store(
+        pgt_id,
+        query_hash,
+        &crate::template_cache::CachedTemplate {
+            delta_sql_template: template_sql.clone(),
+            output_columns: output_columns.clone(),
+            source_oids: source_oids.clone(),
+            is_deduplicated: diff_dedup,
+            has_key_changed: diff_has_key_changed,
+            is_all_algebraic,
+        },
+    );
 
     // Resolve placeholders for this invocation.
     let delta_sql =

@@ -21,3 +21,20 @@
 --   No schema changes required. The heuristic automatically promotes
 --   stream tables to append-only mode when change buffers contain only
 --   INSERT actions. Uses the existing is_append_only catalog column.
+
+-- G14-SHC: Shared template cache — catalog-backed cross-backend cache
+--   Eliminates cold-start latency when new backends connect (e.g., PgBouncer
+--   transaction mode). Templates are persisted in an UNLOGGED table and
+--   loaded on first cache miss (~1ms vs ~45ms for full re-parse).
+CREATE UNLOGGED TABLE IF NOT EXISTS pgtrickle.pgt_template_cache (
+    pgt_id       BIGINT PRIMARY KEY
+                 REFERENCES pgtrickle.pgt_stream_tables(pgt_id) ON DELETE CASCADE,
+    query_hash   BIGINT NOT NULL,
+    delta_sql    TEXT NOT NULL,
+    columns      TEXT[] NOT NULL,
+    source_oids  INTEGER[] NOT NULL,
+    is_dedup     BOOLEAN NOT NULL DEFAULT FALSE,
+    key_changed  BOOLEAN NOT NULL DEFAULT FALSE,
+    all_algebraic BOOLEAN NOT NULL DEFAULT FALSE,
+    cached_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

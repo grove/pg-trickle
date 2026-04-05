@@ -84,6 +84,15 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `compact_threshold`, showing the configured change buffer compaction
   threshold. *(C-4)*
 
+- **Cross-backend template cache** — new `pg_trickle.template_cache` GUC
+  (default: `true`) enables a catalog-backed delta SQL template cache. Delta
+  templates are persisted in an UNLOGGED table (`pgtrickle.pgt_template_cache`)
+  so that new backends skip the ~45 ms DVM parse+differentiate step on their
+  first refresh of each stream table (down to ~1 ms SPI lookup). Templates are
+  automatically invalidated on ALTER QUERY, DROP, and reinitialize. `explain_st()`
+  exposes `template_cache` and `template_cache_stats` (L2 hits / full misses).
+  *(G14-SHC)*
+
 ### Changed
 
 - **GUC defaults reviewed** — added detailed tuning guidance for

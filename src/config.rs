@@ -238,6 +238,12 @@ pub static PGS_AUTO_INDEX: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// aggregate stream tables with many groups.
 pub static PGS_AGGREGATE_FAST_PATH: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// G14-SHC: Enable the cross-backend template cache backed by an UNLOGGED
+/// catalog table (`pgtrickle.pgt_template_cache`).  When enabled, delta SQL
+/// templates are persisted so that new backends avoid the ~45 ms DVM
+/// parse+differentiate cost on their first refresh of each stream table.
+pub static PGS_TEMPLATE_CACHE: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 /// Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02).
 pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::new(64);
 
@@ -990,6 +996,18 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
+    // G14-SHC: Cross-backend template cache.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.template_cache",
+        c"Enable the cross-backend delta template cache.",
+        c"When true (default), delta SQL templates are persisted in an UNLOGGED catalog table \
+           so that new backends skip the ~45 ms DVM parse+differentiate step. \
+           Set to false to always regenerate templates from scratch.",
+        &PGS_TEMPLATE_CACHE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_trickle.max_grouping_set_branches",
         c"Maximum allowed grouping set branches in CUBE/ROLLUP queries.",
@@ -1542,6 +1560,11 @@ pub fn pg_trickle_auto_index() -> bool {
 /// all-algebraic aggregate queries) is enabled.
 pub fn pg_trickle_aggregate_fast_path() -> bool {
     PGS_AGGREGATE_FAST_PATH.get()
+}
+
+/// G14-SHC: Returns whether the cross-backend template cache is enabled.
+pub fn pg_trickle_template_cache_enabled() -> bool {
+    PGS_TEMPLATE_CACHE.get()
 }
 
 /// Returns the buffer partitioning mode: `"off"`, `"on"`, or `"auto"`.
