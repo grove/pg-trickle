@@ -388,6 +388,19 @@ jobs:
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
 
+      # Separate release-mode build cache for bench binaries.
+      # Other CI jobs use debug mode, so setup-pgrx's target/ cache never
+      # contains target/release artifacts — without this the bench job does a
+      # full 15-20 min release compile on every run.  A restore-key prefix
+      # allows a partial hit on Cargo.lock changes (recompiles new deps only).
+      - name: Cache bench release build artifacts
+        uses: actions/cache@v5
+        with:
+          path: target/release
+          key: v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
+
       - name: Restore Criterion baseline
         id: restore-baseline
         uses: actions/cache/restore@v4
@@ -421,6 +434,14 @@ jobs:
 
       - name: Setup pgrx environment
         uses: ./.github/actions/setup-pgrx
+
+      - name: Cache bench release build artifacts
+        uses: actions/cache@v5
+        with:
+          path: target/release
+          key: v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            v3-cargo-bench-release-${{ runner.os }}-${{ env.ImageOS || 'unknown' }}-
 
       - name: Restore existing baseline (for comparison output)
         uses: actions/cache/restore@v4
