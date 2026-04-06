@@ -21,11 +21,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, se
         .flat_map(|s| s.members.split(", ").map(move |m| (m, s.scc_id)))
         .collect();
 
-    // Freshness lookup: name -> StreamTableInfo
-    let st_lookup: std::collections::HashMap<&str, &crate::state::StreamTableInfo> = state
+    // Freshness lookup: schema.name -> StreamTableInfo
+    // dag_edges use schema-qualified node names (e.g. "public.category_summary").
+    let st_lookup: std::collections::HashMap<String, &crate::state::StreamTableInfo> = state
         .stream_tables
         .iter()
-        .map(|st| (st.name.as_str(), st))
+        .map(|st| (format!("{}.{}", st.schema, st.name), st))
         .collect();
 
     let chunks = Layout::default()

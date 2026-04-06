@@ -4,11 +4,11 @@ expression: output
 ---
 ┌ Dependency Graph (6 nodes) ──────────────────────────────────────────────────┐
 │orders (source)                                                               │
-│├── orders_live  ✓                                                            │
-││   └── revenue_daily  ✗                                                      │
-││       └── customer_agg  2m ⚠                                                │
+│├── orders_live                                                               │
+││   └── revenue_daily                                                         │
+││       └── customer_agg                                                      │
 │inventory (source)                                                            │
-│└── inventory_snap  ✓                                                         │
+│└── inventory_snap                                                            │
 │                                                                              │
 │                                                                              │
 │                                                                              │

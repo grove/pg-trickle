@@ -186,7 +186,7 @@ fn render_table(
         "Mode",
         "Effective",
         "Stale",
-        "Last Refresh",
+        "Refreshed",
     ];
     if show_eff {
         header_cells.push("Tier");
@@ -271,7 +271,7 @@ fn render_table(
             Constraint::Length(12), // Mode    (DIFFERENTIAL = 12)
             Constraint::Fill(2),    // Effective
             Constraint::Length(5),  // Stale
-            Constraint::Length(10), // Last Refresh (relative)
+            Constraint::Length(12), // Refreshed (relative)
             Constraint::Length(6),  // Tier
             Constraint::Length(8),  // Avg ms
             Constraint::Length(10), // Refreshes
@@ -284,7 +284,7 @@ fn render_table(
             Constraint::Length(12), // Mode
             Constraint::Fill(2),    // Effective
             Constraint::Length(5),  // Stale
-            Constraint::Length(10), // Last Refresh (relative)
+            Constraint::Length(12), // Refreshed (relative)
         ]
     };
 
@@ -420,11 +420,12 @@ fn render_dag_minimap(
     focused: bool,
     scroll: usize,
 ) {
-    // Build name → StreamTableInfo lookup for freshness badges.
-    let st_lookup: std::collections::HashMap<&str, &crate::state::StreamTableInfo> = state
+    // Build schema.name → StreamTableInfo lookup for freshness badges.
+    // dag_edges use schema-qualified node names (e.g. "public.category_summary").
+    let st_lookup: std::collections::HashMap<String, &crate::state::StreamTableInfo> = state
         .stream_tables
         .iter()
-        .map(|st| (st.name.as_str(), st))
+        .map(|st| (format!("{}.{}", st.schema, st.name), st))
         .collect();
 
     let lines: Vec<Line> = state
