@@ -4616,12 +4616,52 @@ pub fn execute_differential_refresh(
             // We extract the delta subquery and wrap it in INSERT INTO.
             let insert_sql = build_append_only_insert_sql(schema, name, &resolved.merge_sql);
 
+            // A-3a: If user_triggers = 'off' and the ST has user triggers,
+            // suppress them around the INSERT (same as the normal MERGE path).
+            // The trigger-suppression block runs AFTER the append-only early
+            // return in the normal flow, so we must handle it here.
+            let ao_triggers_mode = crate::config::pg_trickle_user_triggers_mode();
+            let ao_suppress = ao_triggers_mode == crate::config::UserTriggersMode::Off
+                && crate::cdc::has_user_triggers(st.pgt_relid).unwrap_or(false);
+            let ao_quoted_table = format!(
+                "\"{}\".\"{}\"",
+                schema.replace('"', "\"\""),
+                name.replace('"', "\"\""),
+            );
+            if ao_suppress
+                && let Err(e) = Spi::run(&format!(
+                    "ALTER TABLE {} DISABLE TRIGGER USER",
+                    ao_quoted_table
+                ))
+            {
+                pgrx::debug1!(
+                    "[pg_trickle] A-3a: failed to disable triggers for {}.{}: {}",
+                    schema,
+                    name,
+                    e
+                );
+            }
+
             let rows_inserted = Spi::connect_mut(|client| {
                 let result = client
                     .update(&insert_sql, None, &[])
                     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
                 Ok::<i64, PgTrickleError>(result.len() as i64)
             })?;
+
+            if ao_suppress
+                && let Err(e) = Spi::run(&format!(
+                    "ALTER TABLE {} ENABLE TRIGGER USER",
+                    ao_quoted_table
+                ))
+            {
+                pgrx::debug1!(
+                    "[pg_trickle] A-3a: failed to re-enable triggers for {}.{}: {}",
+                    schema,
+                    name,
+                    e
+                );
+            }
 
             let t_insert = t_insert_start.elapsed();
             pgrx::debug1!(
@@ -4653,6 +4693,11 @@ pub fn execute_differential_refresh(
 
             // G12-ERM-1: Record the effective mode for this execution path.
             set_effective_mode("APPEND_ONLY");
+
+            // G14-MDED: Count this as a differential refresh. The normal
+            // record_diff_refresh() call is below the append-only early return,
+            // so we must record it here before returning.
+            crate::shmem::record_diff_refresh(crate::dvm::is_delta_deduplicated(st.pgt_id));
 
             return Ok((rows_inserted, 0));
         }
@@ -4859,6 +4904,12 @@ pub fn execute_differential_refresh(
         // temp table, then applied as two targeted statements.
         let t_mat_start = Instant::now();
 
+        // Drop any stale delta table from a prior refresh in the same
+        // transaction (e.g. two refresh_stream_table calls in one batch_execute).
+        // ON COMMIT DROP normally handles cleanup, but that only fires at
+        // transaction commit, so subsequent calls within the same transaction
+        // would otherwise see "relation already exists".
+        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
         let materialize_sql = format!(
             "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
              SELECT * FROM {using_clause} AS d",
@@ -4908,6 +4959,9 @@ pub fn execute_differential_refresh(
         // (DELETE+UPDATE+INSERT) to avoid the MERGE hash-join cost.
         let t_mat_start = Instant::now();
 
+        // Drop any stale delta table from a prior refresh in the same
+        // transaction (same-transaction multiple refresh edge case).
+        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
         let materialize_sql = format!(
             "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
              SELECT * FROM {using_clause} AS d",
@@ -4971,6 +5025,9 @@ pub fn execute_differential_refresh(
         // This avoids evaluating the delta query three times.
         let t_mat_start = Instant::now();
 
+        // Drop any stale delta table from a prior refresh in the same
+        // transaction (same-transaction multiple refresh edge case).
+        let _ = Spi::run(&format!("DROP TABLE IF EXISTS __pgt_delta_{}", st.pgt_id)); // nosemgrep: rust.spi.run.dynamic-format — st.pgt_id is a plain i64, not user-supplied input.
         let materialize_sql = format!(
             "CREATE TEMP TABLE __pgt_delta_{pgt_id} ON COMMIT DROP AS \
              SELECT * FROM {using_clause} AS d",
