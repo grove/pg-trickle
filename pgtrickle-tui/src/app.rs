@@ -613,6 +613,8 @@ async fn run_app(
                         std::mem::take(&mut app.state.refresh_history_cache);
                     let auxiliary_columns_cache =
                         std::mem::take(&mut app.state.auxiliary_columns_cache);
+                    let change_activity_cache =
+                        std::mem::take(&mut app.state.change_activity_cache);
                     app.state = *new_state;
                     app.state.alerts = alerts;
                     app.state.delta_sql_cache = delta_sql_cache;
@@ -622,6 +624,7 @@ async fn run_app(
                     app.state.source_detail_cache = source_detail_cache;
                     app.state.refresh_history_cache = refresh_history_cache;
                     app.state.auxiliary_columns_cache = auxiliary_columns_cache;
+                    app.state.change_activity_cache = change_activity_cache;
                     app.state.poll_interval_ms = app.poll_interval * 1000;
                     app.clamp_selection();
                     // Pre-fetch explain mode for all tables so Dashboard's
