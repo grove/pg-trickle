@@ -171,7 +171,7 @@ fn render_table(
         "Schema",
         "Status",
         "Mode",
-        "EFF",
+        "Effective",
         "Stale",
         "Last Refresh",
     ];
@@ -242,25 +242,25 @@ fn render_table(
 
     let widths = if show_eff {
         vec![
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(14),
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(22),
-            Constraint::Length(8),
-            Constraint::Length(10),
+            Constraint::Fill(3),    // Name
+            Constraint::Fill(2),    // Schema
+            Constraint::Length(11), // Status  (INITIALIZING = 11)
+            Constraint::Length(12), // Mode    (DIFFERENTIAL = 12)
+            Constraint::Length(13), // Effective (⚠ NO_DATA↓ = 11)
+            Constraint::Length(5),  // Stale
+            Constraint::Fill(2),    // Last Refresh
+            Constraint::Length(8),  // Avg ms
+            Constraint::Length(10), // Refreshes
         ]
     } else {
         vec![
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(14),
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(22),
+            Constraint::Fill(3),    // Name
+            Constraint::Fill(2),    // Schema
+            Constraint::Length(11), // Status
+            Constraint::Length(12), // Mode
+            Constraint::Length(13), // Effective
+            Constraint::Length(5),  // Stale
+            Constraint::Fill(2),    // Last Refresh
         ]
     };
 

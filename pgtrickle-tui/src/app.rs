@@ -617,6 +617,16 @@ async fn run_app(
                     app.state.auxiliary_columns_cache = auxiliary_columns_cache;
                     app.state.poll_interval_ms = app.poll_interval * 1000;
                     app.clamp_selection();
+                    // Pre-fetch explain mode for all tables so Dashboard's
+                    // Effective column is populated without needing to visit Detail.
+                    if let Some(ref tx) = app.action_tx {
+                        for st in &app.state.stream_tables {
+                            if !app.state.explain_mode_cache.contains_key(&st.name) {
+                                let _ =
+                                    tx.try_send(ActionRequest::FetchExplainMode(st.name.clone()));
+                            }
+                        }
+                    }
                 }
                 PollMsg::Error(e) => {
                     app.state.error_message = Some(e);
