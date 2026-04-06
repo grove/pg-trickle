@@ -35,17 +35,13 @@ pub fn render(
             .iter()
             .any(|b| b.stream_table == st.name && b.source_table == h.source_table)
     });
-    let has_change_activity = state.change_activity_cache.contains_key(&st.name)
-        || state.cdc_buffers.iter().any(|b| b.stream_table == st.name);
 
     // Build constraints based on available data
     let mut constraints = vec![Constraint::Length(12)]; // Properties (expanded for explain mode)
     if has_sources {
         constraints.push(Constraint::Length(8)); // Sources
     }
-    if has_change_activity {
-        constraints.push(Constraint::Length(8)); // Change activity
-    }
+    constraints.push(Constraint::Length(8)); // Change activity (always shown)
     constraints.push(Constraint::Length(10)); // Stats + efficiency
     if has_history {
         constraints.push(Constraint::Length(10)); // Rich refresh history
@@ -72,10 +68,8 @@ pub fn render(
         render_sources(frame, chunks[idx], st, state, theme);
         idx += 1;
     }
-    if has_change_activity {
-        render_change_activity(frame, chunks[idx], st, state, theme);
-        idx += 1;
-    }
+    render_change_activity(frame, chunks[idx], st, state, theme);
+    idx += 1;
     render_stats(frame, chunks[idx], st, state, theme);
     idx += 1;
     if has_history {
@@ -536,6 +530,11 @@ fn render_change_activity(
             Span::styled(" Row count:        ", theme.header),
             Span::raw(format!("~{count_str}")),
             Span::styled("  (estimated)", theme.dim),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(" Row count:        ", theme.header),
+            Span::styled("…", theme.dim),
         ]));
     }
 
