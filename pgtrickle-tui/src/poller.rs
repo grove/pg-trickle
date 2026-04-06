@@ -710,10 +710,11 @@ async fn poll_gucs_query(client: &Client) -> Option<Vec<GucParam>> {
 async fn poll_refresh_log_query(client: &Client) -> Option<Vec<RefreshLogEntry>> {
     let rows = client
         .query(
-            "SELECT refreshed_at::text, pgt_name::text, action::text,
-                    status::text, duration_ms, rows_affected
+            "SELECT start_time::text, stream_table::text, action::text,
+                    status::text, duration_ms,
+                    (rows_inserted + rows_deleted)::bigint AS rows_affected
              FROM pgtrickle.refresh_timeline()
-             ORDER BY refreshed_at DESC
+             ORDER BY start_time DESC
              LIMIT 200",
             &[],
         )
