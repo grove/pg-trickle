@@ -9,6 +9,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.16.0 — 2026-04-06](#0160--2026-04-06)
 - [0.15.0 — 2026-04-03](#0150--2026-04-03)
 - [0.14.0 — 2026-04-02](#0140--2026-04-02)
 - [0.13.0 — 2026-03-31](#0130--2026-03-31)
@@ -35,6 +36,39 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.16.0] — 2026-04-06
+
+0.16.0 is the **Performance & Refresh Optimization** milestone. Every refresh
+path has been made faster: sub-1% deltas bypass the MERGE join entirely via a
+DELETE+INSERT strategy, append-only stream tables get a lock-free INSERT fast
+path, algebraically-invertible aggregates use explicit DML instead of MERGE,
+and a cross-backend template cache cuts first-refresh latency by ~45×. A
+continuous benchmark regression gate now enforces that no future PR silently
+regresses throughput by more than 10%.
+
+### Highlights
+
+- **MERGE strategy alternatives** — sub-1% deltas against large tables skip the
+  MERGE join and use DELETE+INSERT instead, reducing CPU by up to 40% on
+  high-cardinality targets. *(PH-D1)*
+
+- **Append-only fast path** — stream tables driven by INSERT-only sources skip
+  the MERGE join entirely. Automatic heuristic detection requires no API change.
+  *(A-3-AO)*
+
+- **Aggregate fast-path** — COUNT/SUM/AVG/STDDEV stream tables apply deltas with
+  targeted per-row DML, avoiding the MERGE hash-join cost. *(B-1)*
+
+- **Cross-backend template cache** — delta SQL templates are persisted to an
+  UNLOGGED catalog table; subsequent backends skip the ~45 ms
+  parse+differentiate step, cold-start latency drops to ~1 ms. *(G14-SHC)*
+
+- **Benchmark regression CI** — every PR now fails automatically if any
+  Criterion benchmark mean regresses more than 10% vs the main baseline.
+  *(BENCH-CI)*
 
 ### Added
 
