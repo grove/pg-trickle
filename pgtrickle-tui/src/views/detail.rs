@@ -428,13 +428,6 @@ fn render_rich_refresh_history(
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(format!("-{del}"), theme.error));
             }
-            if let Some(delta) = e.delta_row_count {
-                spans.push(Span::raw(format!("  ({delta} Δ)")));
-            }
-
-            if e.was_full_fallback {
-                spans.push(Span::styled(" (fallback)", theme.warning));
-            }
 
             let icon = if e.status == "success" || e.status == "ok" {
                 Span::styled(" ✓", theme.ok)

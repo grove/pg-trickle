@@ -324,26 +324,28 @@ pub struct JobQueueEntry {
 #[derive(Clone, Serialize)]
 pub struct FuseInfo {
     pub stream_table: String,
+    pub fuse_mode: String,
     pub fuse_state: String,
-    pub consecutive_errors: i64,
-    pub last_error: Option<String>,
+    pub fuse_ceiling: Option<i64>,
     pub blown_at: Option<String>,
+    pub blow_reason: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 pub struct WatermarkGroup {
     pub group_name: String,
-    pub member_count: i64,
-    pub min_watermark: Option<String>,
-    pub max_watermark: Option<String>,
-    pub gated: bool,
+    pub source_count: i32,
+    pub tolerance_secs: f64,
+    pub created_at: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 pub struct TriggerInfo {
     pub source_table: String,
     pub trigger_name: String,
-    pub firing_events: String,
+    pub trigger_type: String,
+    pub present: bool,
+    pub enabled: bool,
 }
 
 // ── New types for SQL API surface expansion ──────────────────────
@@ -450,9 +452,7 @@ pub struct RefreshHistoryEntry {
     pub status: String,
     pub rows_inserted: Option<i64>,
     pub rows_deleted: Option<i64>,
-    pub delta_row_count: Option<i64>,
     pub duration_ms: Option<f64>,
-    pub was_full_fallback: bool,
     pub start_time: String,
     pub error_message: Option<String>,
 }
@@ -626,12 +626,9 @@ impl AppState {
                 issues.push(Issue {
                     severity: "error".to_string(),
                     category: "Blown Fuse".to_string(),
-                    summary: format!(
-                        "{} — {} consecutive errors",
-                        fuse.stream_table, fuse.consecutive_errors
-                    ),
+                    summary: format!("{} — fuse blown", fuse.stream_table),
                     detail: fuse
-                        .last_error
+                        .blow_reason
                         .clone()
                         .unwrap_or_else(|| "No error detail".to_string()),
                     affected_table: Some(fuse.stream_table.clone()),
@@ -943,10 +940,11 @@ mod tests {
         let mut state = AppState {
             fuses: vec![FuseInfo {
                 stream_table: "fused".to_string(),
+                fuse_mode: "auto".to_string(),
                 fuse_state: "BLOWN".to_string(),
-                consecutive_errors: 10,
-                last_error: Some("timeout".to_string()),
+                fuse_ceiling: Some(10),
                 blown_at: Some("2026-04-01".to_string()),
+                blow_reason: Some("timeout".to_string()),
             }],
             ..AppState::default()
         };
@@ -992,10 +990,11 @@ mod tests {
             ],
             fuses: vec![FuseInfo {
                 stream_table: "broken_one".to_string(),
+                fuse_mode: "auto".to_string(),
                 fuse_state: "BLOWN".to_string(),
-                consecutive_errors: 5,
-                last_error: Some("fail".to_string()),
+                fuse_ceiling: Some(5),
                 blown_at: None,
+                blow_reason: Some("fail".to_string()),
             }],
             ..AppState::default()
         };
@@ -1041,10 +1040,11 @@ mod tests {
         let mut state = AppState {
             fuses: vec![FuseInfo {
                 stream_table: "ok_fuse".to_string(),
+                fuse_mode: "off".to_string(),
                 fuse_state: "OK".to_string(),
-                consecutive_errors: 0,
-                last_error: None,
+                fuse_ceiling: None,
                 blown_at: None,
+                blow_reason: None,
             }],
             ..AppState::default()
         };

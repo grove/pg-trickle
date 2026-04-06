@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
 use crate::state::AppState;
 use crate::theme::Theme;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -76,6 +77,7 @@ fn filtered_sorted_indices(state: &AppState, filter: Option<&str>) -> Vec<usize>
     indices
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_wide(
     frame: &mut Frame,
     area: Rect,
@@ -542,7 +544,10 @@ mod tests {
             !result.starts_with("2020"),
             "ago() should return relative time, not raw timestamp; got: {result}"
         );
-        assert!(result.contains('h'), "expected hours in result; got: {result}");
+        assert!(
+            result.contains('h'),
+            "expected hours in result; got: {result}"
+        );
     }
 
     #[test]

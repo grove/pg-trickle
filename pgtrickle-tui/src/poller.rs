@@ -404,8 +404,7 @@ pub async fn execute_action(client: &Client, action: &ActionRequest) -> ActionRe
             match client
                 .query(
                     "SELECT action::text, status::text, rows_inserted, rows_deleted,
-                            delta_row_count, duration_ms, was_full_fallback,
-                            start_time::text, error_message::text
+                            duration_ms, start_time::text, error_message::text
                      FROM pgtrickle.get_refresh_history($1, 10)
                      ORDER BY start_time DESC",
                     &[name],
@@ -422,11 +421,9 @@ pub async fn execute_action(client: &Client, action: &ActionRequest) -> ActionRe
                                     "status": row.get::<_, String>(1),
                                     "rows_inserted": row.get::<_, Option<i64>>(2),
                                     "rows_deleted": row.get::<_, Option<i64>>(3),
-                                    "delta_row_count": row.get::<_, Option<i64>>(4),
-                                    "duration_ms": row.get::<_, Option<f64>>(5),
-                                    "was_full_fallback": row.get::<_, bool>(6),
-                                    "start_time": row.get::<_, String>(7),
-                                    "error_message": row.get::<_, Option<String>>(8),
+                                    "duration_ms": row.get::<_, Option<f64>>(4),
+                                    "start_time": row.get::<_, String>(5),
+                                    "error_message": row.get::<_, Option<String>>(6),
                                 })
                             })
                             .collect::<Vec<_>>(),
@@ -792,9 +789,8 @@ async fn poll_workers_query(client: &Client) -> Option<(Option<WorkerInfo>, Vec<
 async fn poll_fuses_query(client: &Client) -> Option<Vec<FuseInfo>> {
     let rows = client
         .query(
-            "SELECT pgt_name::text, fuse_state::text,
-                    consecutive_errors, last_error_message::text,
-                    blown_at::text
+            "SELECT stream_table::text, fuse_mode::text, fuse_state::text,
+                    fuse_ceiling, blown_at::text, blow_reason::text
              FROM pgtrickle.fuse_status()
              ORDER BY CASE fuse_state WHEN 'BLOWN' THEN 1 WHEN 'TRIPPED' THEN 2 ELSE 3 END",
             &[],
@@ -805,10 +801,11 @@ async fn poll_fuses_query(client: &Client) -> Option<Vec<FuseInfo>> {
         rows.iter()
             .map(|row| FuseInfo {
                 stream_table: row.get(0),
-                fuse_state: row.get(1),
-                consecutive_errors: row.get(2),
-                last_error: row.get(3),
+                fuse_mode: row.get(1),
+                fuse_state: row.get(2),
+                fuse_ceiling: row.get(3),
                 blown_at: row.get(4),
+                blow_reason: row.get(5),
             })
             .collect(),
     )
@@ -817,8 +814,7 @@ async fn poll_fuses_query(client: &Client) -> Option<Vec<FuseInfo>> {
 async fn poll_watermarks_query(client: &Client) -> Option<Vec<WatermarkGroup>> {
     let rows = client
         .query(
-            "SELECT group_name::text, member_count, min_watermark::text,
-                    max_watermark::text, gated
+            "SELECT group_name::text, source_count, tolerance_secs, created_at::text
              FROM pgtrickle.watermark_groups()
              ORDER BY group_name",
             &[],
@@ -829,10 +825,9 @@ async fn poll_watermarks_query(client: &Client) -> Option<Vec<WatermarkGroup>> {
         rows.iter()
             .map(|row| WatermarkGroup {
                 group_name: row.get(0),
-                member_count: row.get(1),
-                min_watermark: row.get(2),
-                max_watermark: row.get(3),
-                gated: row.get(4),
+                source_count: row.get(1),
+                tolerance_secs: row.get(2),
+                created_at: row.get(3),
             })
             .collect(),
     )
@@ -841,7 +836,7 @@ async fn poll_watermarks_query(client: &Client) -> Option<Vec<WatermarkGroup>> {
 async fn poll_triggers_query(client: &Client) -> Option<Vec<TriggerInfo>> {
     let rows = client
         .query(
-            "SELECT source_table::text, trigger_name::text, firing_events::text
+            "SELECT source_table::text, trigger_name::text, trigger_type::text, present, enabled
              FROM pgtrickle.trigger_inventory()
              ORDER BY source_table, trigger_name",
             &[],
@@ -853,7 +848,9 @@ async fn poll_triggers_query(client: &Client) -> Option<Vec<TriggerInfo>> {
             .map(|row| TriggerInfo {
                 source_table: row.get(0),
                 trigger_name: row.get(1),
-                firing_events: row.get(2),
+                trigger_type: row.get(2),
+                present: row.get(3),
+                enabled: row.get(4),
             })
             .collect(),
     )

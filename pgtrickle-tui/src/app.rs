@@ -739,14 +739,7 @@ async fn run_app(
                                     status: v.get("status")?.as_str()?.to_string(),
                                     rows_inserted: v.get("rows_inserted").and_then(|s| s.as_i64()),
                                     rows_deleted: v.get("rows_deleted").and_then(|s| s.as_i64()),
-                                    delta_row_count: v
-                                        .get("delta_row_count")
-                                        .and_then(|s| s.as_i64()),
                                     duration_ms: v.get("duration_ms").and_then(|s| s.as_f64()),
-                                    was_full_fallback: v
-                                        .get("was_full_fallback")
-                                        .and_then(|s| s.as_bool())
-                                        .unwrap_or(false),
                                     start_time: v.get("start_time")?.as_str()?.to_string(),
                                     error_message: v
                                         .get("error_message")
@@ -2006,7 +1999,7 @@ fn parse_alert_payload(payload: &str) -> crate::state::AlertEvent {
         }
         "buffer_growth_warning" => {
             let metric = i64_field("pending_bytes")
-                .map(|b| format_bytes(b))
+                .map(format_bytes)
                 .unwrap_or_default();
             let context = str_field("slot_name")
                 .map(|s| format!("slot={s}"))
@@ -2015,7 +2008,7 @@ fn parse_alert_payload(payload: &str) -> crate::state::AlertEvent {
         }
         "slot_lag_warning" => {
             let metric = i64_field("retained_wal_bytes")
-                .map(|b| format_bytes(b))
+                .map(format_bytes)
                 .unwrap_or_default();
             let context = str_field("slot_name")
                 .map(|s| format!("slot={s}"))
