@@ -52,32 +52,30 @@ differential refresh is the default mode, and full refresh is a fallback of
 last resort. All 13 design phases are complete. This roadmap tracks the path
 from the v0.1.x series to 1.0 and beyond.
 
-```
-                                                                   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-                                                                   │ 0.1.x  │ │ 0.2.0  │ │ 0.2.1  │ │ 0.2.2  │ │ 0.2.3  │ │ 0.3.0  │ │ 0.4.0  │ │ 0.5.0  │ │ 0.6.0  │ │ 0.7.0  │
-                                                                   │Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│─│Released│
-                                                                   │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │ │ ✅      │
-                                                                   └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘
-                                                                     │
-                                                                     └─ ┌────────┐ ┌────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-                                                                        │ 0.8.0  │ │ 0.9.0  │ │ 0.10.0  │ │ 0.11.0  │ │ 0.12.0  │ │ 0.13.0  │ │ 0.14.0  │
-                                                                        │Released│─│Released│─│Released │─│Released │─│Released │─│Released │─│Released │
-                                                                        │ ✅      │ │ ✅      │ │ ✅       │ │ ✅       │ │ ✅       │ │ ✅       │ │ ✅       │
-                                                                        └────────┘ └────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
-                                                                        └─ ┌─────────┐ ┌─────────┐
-                                                                           │ 0.15.0  │ │ 0.16.0  │
-                                                                           │Released │─│Released │
-                                                                           │ ✅       │ │ ✅       │
-                                                                           └─────────┘ └─────────┘
-         We are here
-              │
-              ▼
-              └─ ┌─────────┐ ┌────────┐ ┌────────┐
-                 │ 0.17.0  │ │ 1.0.0  │ │ 1.x+   │
-                 │Query    │─│Stable  │─│Scale & │
-                 │Intel.   │ │Release │ │Ecosys. │
-                 └─────────┘ └────────┘ └────────┘
-```
+| Version | Theme | Status |
+|---------|-------|--------|
+| v0.1.x | Core engine, DVM, CDC, scheduling, monitoring | ✅ Released |
+| v0.2.0 | TopK, diamond consistency, transactional IVM | ✅ Released |
+| v0.2.1 | Upgrade infrastructure & documentation | ✅ Released |
+| v0.2.2 | OFFSET, AUTO mode, ALTER QUERY, CDC hardening | ✅ Released |
+| v0.2.3 | Non-determinism, CDC/mode gaps, operational polish | ✅ Released |
+| v0.3.0 | DVM correctness, SAST & test coverage | ✅ Released |
+| v0.4.0 | Parallel refresh & performance hardening | ✅ Released |
+| v0.5.0 | Row-level security & operational controls | ✅ Released |
+| v0.6.0 | Partitioning, idempotent DDL, circular dependency foundation | ✅ Released |
+| v0.7.0 | Performance, watermarks, circular DAG, observability | ✅ Released |
+| v0.8.0 | pg_dump support & test hardening | ✅ Released |
+| v0.9.0 | Incremental aggregate maintenance | ✅ Released |
+| v0.10.0 | DVM hardening, connection pooler compat, refresh optimizations | ✅ Released |
+| v0.11.0 | Partitioned stream tables, Prometheus/Grafana, safety hardening | ✅ Released |
+| v0.12.0 | Correctness, reliability & developer tooling | ✅ Released |
+| v0.13.0 | Scalability foundations, MERGE profiling, multi-tenant scheduling | ✅ Released |
+| v0.14.0 | Tiered scheduling, UNLOGGED buffers & diagnostics | ✅ Released |
+| v0.15.0 | External test suites & integration | ✅ Released |
+| **v0.16.0** | **Performance & refresh optimization** | **✅ Released** |
+| v0.17.0 | Query intelligence & stability | 🚧 Next |
+| v0.18.0 | PostgreSQL 19 compatibility | Planned |
+| v1.0.0 | Stable release | Planned |
 
 ---
 
@@ -151,8 +149,6 @@ multiple mutation cycles (`just test-tpch`, SF=0.01).
 
 > *Queries are derived from the TPC-H Benchmark specification; results are not
 > comparable to published TPC results. TPC Benchmark™ is a trademark of TPC.*
-
-</details>
 
 ### ORDER BY / LIMIT / OFFSET — TopK Support ✅
 
@@ -247,6 +243,8 @@ See [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md).
 - [x] Window functions, LATERAL, scalar subqueries work in IMMEDIATE mode
 - [x] Cascading IMMEDIATE stream tables (ST_A → ST_B) propagate correctly
 - [x] Concurrent transaction tests pass
+
+</details>
 
 ---
 
@@ -3410,8 +3408,6 @@ coverage gaps to validate these new paths.
 > **v0.16.0 total: ~1–2 weeks (MERGE alts) + ~4–6 weeks (aggregate fast-path) + ~1–2 weeks (append-only) + ~2–3 weeks (predicate pushdown) + ~2–3 weeks (template cache) + ~2–3 weeks (buffer compaction) + ~3–6 weeks (test coverage) + ~1–2 weeks (bench CI) + ~2–3 days (auto-indexing) + ~2–4 hours (quick wins)**
 > *Note: PG 19 compatibility (A3, ~18–36h) moved to v0.18.0.*
 
-</details>
-
 **Exit criteria:**
 - [x] PH-D1: DELETE+INSERT strategy implemented and gated behind `merge_strategy` GUC; correctness verified for INSERT/UPDATE/DELETE deltas
 - [x] B-1: Algebraic aggregate fast-path replaces MERGE for `SUM`/`COUNT`/`AVG` GROUP BY queries; `aggregate_fast_path` GUC respected; explicit DML path (DELETE+UPDATE+INSERT) used instead of MERGE for all-algebraic aggregates; `explain_st()` exposes `aggregate_path`; existing tests pass — ✅ Done in v0.16.0 Phase 8
@@ -3434,6 +3430,8 @@ coverage gaps to validate these new paths.
 - [x] BUF-LIMIT: `max_buffer_rows` GUC prevents unbounded change buffer growth; triggers FULL + truncation when exceeded
 - [x] Extension upgrade path tested (`0.15.0 → 0.16.0`)
 - [x] `just check-version-sync` passes
+
+</details>
 
 </details>
 
