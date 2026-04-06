@@ -129,7 +129,7 @@ fn render_properties(
 
     // Explain refresh mode (if cached)
     if let Some(explain) = state.explain_mode_cache.get(&st.name) {
-        let downgraded = explain.configured_mode != explain.effective_mode;
+        let downgraded = explain.configured_mode != explain.effective_mode && explain.effective_mode != "NO_DATA";
         let mode_style = if downgraded { theme.warning } else { theme.ok };
         let mut mode_spans = vec![
             Span::styled(" Effective: ", theme.header),
