@@ -294,10 +294,14 @@ WHERE NOT EXISTS (
 UNION ALL
 
 -- Part 7a: Delete stale NULL-padded right rows when new left matches appear
+-- Use r0_snapshot (pre-change right) so that right rows deleted in the SAME
+-- cycle as a matching left INSERT are still found here. If we used right_table
+-- (post-change), a simultaneously-deleted right row would be absent and the
+-- stale right-only ST row would never be cleaned up.
 SELECT 0::BIGINT AS __pgt_row_id,
        'D'::TEXT AS __pgt_action,
        {null_left_r_padded}
-FROM {right_table} r
+FROM {r0_snapshot} r
 JOIN {delta_left} dl ON {join_cond_antijoin_l}
 WHERE dl.__pgt_action = 'I'
   AND (SELECT has_ins FROM {left_flags_cte})
