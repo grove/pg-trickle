@@ -734,36 +734,34 @@ async fn poll_refresh_log_query(client: &Client) -> Option<Vec<RefreshLogEntry>>
     )
 }
 
-/// Returns (workers, job_queue).
-async fn poll_workers_query(client: &Client) -> Option<(Vec<WorkerInfo>, Vec<JobQueueEntry>)> {
-    let workers = client
+/// Returns (pool_summary, recent_jobs).
+async fn poll_workers_query(client: &Client) -> Option<(Option<WorkerInfo>, Vec<JobQueueEntry>)> {
+    // Single-row pool summary
+    let pool = client
         .query(
-            "SELECT worker_id, state::text, table_name::text,
-                    started_at::text, duration_ms
-             FROM pgtrickle.worker_pool_status()
-             ORDER BY worker_id",
+            "SELECT active_workers, max_workers, per_db_cap, parallel_mode::text
+             FROM pgtrickle.worker_pool_status()",
             &[],
         )
         .await
         .ok()
-        .map(|rows| {
-            rows.iter()
-                .map(|row| WorkerInfo {
-                    worker_id: row.get(0),
-                    state: row.get(1),
-                    table_name: row.get(2),
-                    started_at: row.get(3),
-                    duration_ms: row.get(4),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .and_then(|rows| rows.into_iter().next())
+        .map(|row| WorkerInfo {
+            active_workers: row.get(0),
+            max_workers: row.get(1),
+            per_db_cap: row.get(2),
+            parallel_mode: row.get(3),
+        });
 
-    let queue = client
+    // Recent parallel jobs (last 300 s)
+    let jobs = client
         .query(
-            "SELECT position, table_name::text, priority, queued_at::text, wait_ms
+            "SELECT job_id, unit_key::text, unit_kind::text, status::text,
+                    member_count, attempt_no, scheduler_pid, worker_pid,
+                    enqueued_at::text, started_at::text, finished_at::text, duration_ms
              FROM pgtrickle.parallel_job_status()
-             ORDER BY position",
+             ORDER BY enqueued_at DESC
+             LIMIT 200",
             &[],
         )
         .await
@@ -771,17 +769,24 @@ async fn poll_workers_query(client: &Client) -> Option<(Vec<WorkerInfo>, Vec<Job
         .map(|rows| {
             rows.iter()
                 .map(|row| JobQueueEntry {
-                    position: row.get(0),
-                    table_name: row.get(1),
-                    priority: row.get(2),
-                    queued_at: row.get(3),
-                    wait_ms: row.get(4),
+                    job_id: row.get(0),
+                    unit_key: row.get(1),
+                    unit_kind: row.get(2),
+                    status: row.get(3),
+                    member_count: row.get(4),
+                    attempt_no: row.get(5),
+                    scheduler_pid: row.get(6),
+                    worker_pid: row.get(7),
+                    enqueued_at: row.get(8),
+                    started_at: row.get(9),
+                    finished_at: row.get(10),
+                    duration_ms: row.get(11),
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    Some((workers, queue))
+    Some((pool, jobs))
 }
 
 async fn poll_fuses_query(client: &Client) -> Option<Vec<FuseInfo>> {

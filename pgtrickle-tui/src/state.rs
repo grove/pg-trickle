@@ -143,7 +143,7 @@ pub struct AppState {
     pub error_message: Option<String>,
     /// Sparkline data: st_name -> last N refresh durations
     pub sparkline_data: HashMap<String, Vec<f64>>,
-    pub workers: Vec<WorkerInfo>,
+    pub workers: Option<WorkerInfo>,
     pub job_queue: Vec<JobQueueEntry>,
     pub fuses: Vec<FuseInfo>,
     pub watermark_groups: Vec<WatermarkGroup>,
@@ -299,20 +299,26 @@ pub struct RefreshLogEntry {
 
 #[derive(Clone, Serialize)]
 pub struct WorkerInfo {
-    pub worker_id: i32,
-    pub state: String,
-    pub table_name: Option<String>,
-    pub started_at: Option<String>,
-    pub duration_ms: Option<f64>,
+    pub active_workers: i32,
+    pub max_workers: i32,
+    pub per_db_cap: i32,
+    pub parallel_mode: String,
 }
 
 #[derive(Clone, Serialize)]
 pub struct JobQueueEntry {
-    pub position: i32,
-    pub table_name: String,
-    pub priority: i32,
-    pub queued_at: String,
-    pub wait_ms: Option<f64>,
+    pub job_id: i64,
+    pub unit_key: String,
+    pub unit_kind: String,
+    pub status: String,
+    pub member_count: i32,
+    pub attempt_no: i32,
+    pub scheduler_pid: Option<i32>,
+    pub worker_pid: Option<i32>,
+    pub enqueued_at: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub duration_ms: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]

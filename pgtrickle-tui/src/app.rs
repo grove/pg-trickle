@@ -456,16 +456,15 @@ impl App {
 
     fn filtered_workers_len(&self) -> usize {
         if self.filter.is_none() {
-            return self.state.workers.len();
+            return self.state.job_queue.len();
         }
         self.state
-            .workers
+            .job_queue
             .iter()
-            .filter(|w| {
-                w.table_name
-                    .as_deref()
-                    .is_some_and(|n| self.filter_matches(n))
-                    || self.filter_matches(&w.state)
+            .filter(|j| {
+                self.filter_matches(&j.unit_key)
+                    || self.filter_matches(&j.status)
+                    || self.filter_matches(&j.unit_kind)
             })
             .count()
     }
