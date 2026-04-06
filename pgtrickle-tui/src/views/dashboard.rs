@@ -412,6 +412,13 @@ fn render_dag_minimap(
     focused: bool,
     scroll: usize,
 ) {
+    // Build name → StreamTableInfo lookup for freshness badges.
+    let st_lookup: std::collections::HashMap<&str, &crate::state::StreamTableInfo> = state
+        .stream_tables
+        .iter()
+        .map(|st| (st.name.as_str(), st))
+        .collect();
+
     let lines: Vec<Line> = state
         .dag_edges
         .iter()
@@ -422,7 +429,26 @@ fn render_dag_minimap(
                 .as_deref()
                 .map(|s| theme.status_style(s))
                 .unwrap_or_default();
-            Line::from(Span::styled(e.tree_line.as_str(), status_style))
+
+            let mut spans = vec![Span::styled(e.tree_line.as_str(), status_style)];
+
+            if let Some(st) = st_lookup.get(e.node.as_str()) {
+                let (icon, badge_style) = if st.status == "ERROR" || st.status == "SUSPENDED" {
+                    ("✗", theme.error)
+                } else if st.cascade_stale || st.stale {
+                    ("⚠", theme.warning)
+                } else {
+                    ("✓", theme.ok)
+                };
+                let age = st
+                    .staleness
+                    .as_deref()
+                    .map(|s| format!(" {} {}", format_age(s), icon))
+                    .unwrap_or_else(|| format!(" {icon}"));
+                spans.push(Span::styled(age, badge_style));
+            }
+
+            Line::from(spans)
         })
         .collect();
 
@@ -442,4 +468,16 @@ fn render_dag_minimap(
         .block(block)
         .scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
+}
+
+/// Convert a raw seconds string (e.g. "49253s") to a compact human-readable age.
+fn format_age(staleness: &str) -> String {
+    let secs: f64 = staleness.trim_end_matches('s').parse().unwrap_or(0.0);
+    if secs >= 3600.0 {
+        format!("{:.0}h", secs / 3600.0)
+    } else if secs >= 60.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else {
+        format!("{:.0}s", secs)
+    }
 }
