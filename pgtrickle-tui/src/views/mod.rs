@@ -14,6 +14,20 @@ pub mod refresh_log;
 pub mod watermarks;
 pub mod workers;
 
+/// Translate server-side refresh action/mode names into user-friendly labels.
+pub fn friendly_mode(mode: &str) -> &str {
+    match mode {
+        "NO_DATA" => "no changes",
+        "DIFFERENTIAL" => "differential",
+        "FULL" => "full",
+        "REINITIALIZE" => "reinitializing",
+        "SKIP" => "skipped",
+        "APPEND_ONLY" => "append-only",
+        "TOP_K" => "top-k",
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod snapshot_tests {
     use ratatui::Terminal;
@@ -175,7 +189,7 @@ mod snapshot_tests {
             .unwrap();
         let output = buffer_to_string(terminal.backend());
         assert!(
-            output.contains("NO_DATA \u{2193}"),
+            output.contains("no changes \u{2193}"),
             "downgraded EFF should show effective mode with space+arrow; got:\n{output}"
         );
     }

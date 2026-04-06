@@ -204,7 +204,10 @@ fn render_table(
                 ("⚠ cascade".to_string(), theme.warning)
             } else if let Some(explain) = state.explain_mode_cache.get(&st.name) {
                 if explain.configured_mode != explain.effective_mode {
-                    (format!("{} ↓", explain.effective_mode), theme.warning)
+                    (
+                        format!("{} ↓", super::friendly_mode(&explain.effective_mode)),
+                        theme.warning,
+                    )
                 } else {
                     ("✓ ok".to_string(), theme.ok)
                 }

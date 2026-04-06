@@ -133,7 +133,7 @@ fn render_properties(
         let mode_style = if downgraded { theme.warning } else { theme.ok };
         let mut mode_spans = vec![
             Span::styled(" Effective: ", theme.header),
-            Span::styled(&explain.effective_mode, mode_style),
+            Span::styled(super::friendly_mode(&explain.effective_mode), mode_style),
         ];
         if downgraded {
             mode_spans.push(Span::styled(" ↓ downgraded", theme.warning));
