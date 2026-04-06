@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -161,7 +161,11 @@ fn render_buffers(
         .title(Span::styled(title, theme.title));
 
     let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+    let mut ts = TableState::default();
+    if focused {
+        ts.select(Some(sel));
+    }
+    frame.render_stateful_widget(table, area, &mut ts);
 }
 
 fn render_triggers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, sel: usize, focused: bool) {
@@ -212,7 +216,11 @@ fn render_triggers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Them
         .title(Span::styled(title, theme.title));
 
     let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+    let mut ts = TableState::default();
+    if focused {
+        ts.select(Some(sel));
+    }
+    frame.render_stateful_widget(table, area, &mut ts);
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -311,7 +319,11 @@ fn render_cdc_health(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         .title(Span::styled(title, theme.title));
 
     let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+    let mut ts = TableState::default();
+    if focused {
+        ts.select(Some(sel));
+    }
+    frame.render_stateful_widget(table, area, &mut ts);
 }
 
 fn render_dedup_stats(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -410,5 +422,9 @@ fn render_shared_buffer_stats(frame: &mut Frame, area: Rect, state: &AppState, t
         .title(Span::styled(title, theme.title));
 
     let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+    let mut ts = TableState::default();
+    if focused {
+        ts.select(Some(sel));
+    }
+    frame.render_stateful_widget(table, area, &mut ts);
 }
