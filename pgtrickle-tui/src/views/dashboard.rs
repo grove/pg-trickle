@@ -189,6 +189,7 @@ fn render_table(
         "Last Refresh",
     ];
     if show_eff {
+        header_cells.push("Tier");
         header_cells.push("Avg ms");
         header_cells.push("Refreshes");
     }
@@ -235,10 +236,16 @@ fn render_table(
                 Cell::from(st.refresh_mode.as_str()),
                 Cell::from(eff_str).style(eff_style),
                 Cell::from(stale_str).style(stale_style),
-                Cell::from(st.last_refresh_at.as_deref().unwrap_or("-").to_string()),
+                Cell::from(
+                    st.last_refresh_at
+                        .as_deref()
+                        .map(ago)
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
             ];
 
             if show_eff {
+                cells.push(Cell::from(st.tier.as_deref().unwrap_or("-")));
                 cells.push(Cell::from(
                     st.avg_duration_ms
                         .map(|ms| format!("{ms:.1}"))
@@ -264,7 +271,8 @@ fn render_table(
             Constraint::Length(12), // Mode    (DIFFERENTIAL = 12)
             Constraint::Fill(2),    // Effective
             Constraint::Length(5),  // Stale
-            Constraint::Fill(2),    // Last Refresh
+            Constraint::Length(10), // Last Refresh (relative)
+            Constraint::Length(6),  // Tier
             Constraint::Length(8),  // Avg ms
             Constraint::Length(10), // Refreshes
         ]
@@ -276,7 +284,7 @@ fn render_table(
             Constraint::Length(12), // Mode
             Constraint::Fill(2),    // Effective
             Constraint::Length(5),  // Stale
-            Constraint::Fill(2),    // Last Refresh
+            Constraint::Length(10), // Last Refresh (relative)
         ]
     };
 
@@ -479,5 +487,29 @@ fn format_age(staleness: &str) -> String {
         format!("{:.0}m", secs / 60.0)
     } else {
         format!("{:.0}s", secs)
+    }
+}
+
+/// Format a PostgreSQL timestamptz string as a human-readable age relative to now.
+/// Returns strings like "43s", "4m 21s", "1h 21m 32s".
+fn ago(ts: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let Ok(dt) =
+        DateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f%z").map(|d| d.with_timezone(&Utc))
+    else {
+        return ts.to_string();
+    };
+    let secs = Utc::now().signed_duration_since(dt).num_seconds().max(0) as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}m {s}s")
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        format!("{h}h {m}m {s}s")
     }
 }

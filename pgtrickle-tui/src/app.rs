@@ -1335,21 +1335,33 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             if app.current_view == View::Detail {
                 fetch_detail_data(app);
             }
+            if app.current_view == View::DeltaInspector {
+                fetch_delta_sql(app);
+            }
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.move_up();
             if app.current_view == View::Detail {
                 fetch_detail_data(app);
             }
+            if app.current_view == View::DeltaInspector {
+                fetch_delta_sql(app);
+            }
         }
         KeyCode::PageDown => {
             for _ in 0..20 {
                 app.move_down();
             }
+            if app.current_view == View::DeltaInspector {
+                fetch_delta_sql(app);
+            }
         }
         KeyCode::PageUp => {
             for _ in 0..20 {
                 app.move_up();
+            }
+            if app.current_view == View::DeltaInspector {
+                fetch_delta_sql(app);
             }
         }
         KeyCode::Enter => {
