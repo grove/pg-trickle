@@ -65,6 +65,13 @@ runs:
           ~/.cargo/.crates2.json
           ~/.cargo/.crates.toml
         key: v3-cargo-pgrx-bin-0.17.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS || 'unknown' }}
+        # Fall back to a binary built on a prior runner image (same version,
+        # different ImageOS). cargo-pgrx is a statically-linked CLI tool so
+        # a binary from an older ubuntu image works fine on a newer one.
+        # Without this, every runner-image refresh triggers a 20-25 min
+        # cold compile and risks the light-E2E 30-minute job timeout.
+        restore-keys: |
+          v3-cargo-pgrx-bin-0.17.0-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Cache pgrx home directory (~/.pgrx)
       id: cache-pgrx-home
