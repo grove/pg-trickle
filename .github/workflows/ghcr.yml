@@ -134,7 +134,7 @@ jobs:
 
     steps:
       - name: Download amd64 digest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: digest-amd64
           path: ${{ runner.temp }}/digests
@@ -267,7 +267,7 @@ jobs:
             org.opencontainers.image.documentation=https://github.com/grove/pg-trickle/blob/main/docs/GETTING_STARTED.md
 
       - name: Download all digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
