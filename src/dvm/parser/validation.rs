@@ -250,8 +250,7 @@ fn collect_raw_expr_volatility(raw_sql: &str, worst: &mut char) -> Result<(), Pg
         }
     };
     for raw_stmt in list.iter_ptr() {
-        // SAFETY: raw_stmt is a valid pointer from parse_query.
-        let stmt = unsafe { (*raw_stmt).stmt };
+        let stmt = pg_deref!(raw_stmt).stmt;
         if !stmt.is_null() {
             walk_node_for_volatility(stmt, worst)?;
         }

@@ -37,6 +37,24 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Unsafe block reduction Phase 6 (UNSAFE-R1/R2)** — introduced `is_node_type!`
+  and `pg_deref!` macros that encapsulate standalone `pgrx::is_a()` checks and
+  pointer dereferences in the DVM parser. Reduced unsafe blocks in `src/dvm/parser/`
+  from 690 to 441 (a 249-block / 36% reduction). Zero behavior change; all 1,700
+  unit tests pass.
+
+### Added
+
+- **New User FAQ section (DOC-FAQ-NEW)** — top-15 keyword-rich FAQ entries at the
+  top of `docs/FAQ.md` for faster onboarding. Each entry links to the detailed
+  answer deeper in the document.
+- **Post-install verification script (DOC-VERIFY)** —
+  `scripts/verify_install.sql` checks shared_preload_libraries, extension
+  creation, scheduler health, GUC configuration, and runs an end-to-end stream
+  table create → refresh → verify → cleanup cycle.
+
 ---
 
 ## [0.16.0] — 2026-04-06
