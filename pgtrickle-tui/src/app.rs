@@ -1324,7 +1324,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // ── CDC Health section focus ──────────────────────────────
         KeyCode::Tab if app.current_view == View::Cdc => {
             let sections = app.cdc_visible_sections();
-            let pos = sections.iter().position(|&s| s == app.cdc_section).unwrap_or(0);
+            let pos = sections
+                .iter()
+                .position(|&s| s == app.cdc_section)
+                .unwrap_or(0);
             app.cdc_section = sections[(pos + 1) % sections.len()];
         }
         KeyCode::Esc if app.current_view == View::Cdc => {
@@ -1901,7 +1904,15 @@ fn render_view(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         View::Diagnostics => {
             views::diagnostics::render(frame, area, &app.state, &app.theme, app.selected, filter)
         }
-        View::Cdc => views::cdc::render(frame, area, &app.state, &app.theme, app.cdc_section, &app.cdc_sel, filter),
+        View::Cdc => views::cdc::render(
+            frame,
+            area,
+            &app.state,
+            &app.theme,
+            app.cdc_section,
+            &app.cdc_sel,
+            filter,
+        ),
         View::Config => {
             views::config::render(frame, area, &app.state, &app.theme, app.selected, filter)
         }

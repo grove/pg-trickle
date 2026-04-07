@@ -45,14 +45,36 @@ pub fn render(
             .split(area);
 
         let mut idx = 0;
-        render_buffers(frame, chunks[idx], state, theme, sel[SECT_BUFFERS], focused_section == SECT_BUFFERS, filter);
+        render_buffers(
+            frame,
+            chunks[idx],
+            state,
+            theme,
+            sel[SECT_BUFFERS],
+            focused_section == SECT_BUFFERS,
+            filter,
+        );
         idx += 1;
         if has_health {
-            render_cdc_health(frame, chunks[idx], state, theme, sel[SECT_HEALTH], focused_section == SECT_HEALTH);
+            render_cdc_health(
+                frame,
+                chunks[idx],
+                state,
+                theme,
+                sel[SECT_HEALTH],
+                focused_section == SECT_HEALTH,
+            );
             idx += 1;
         }
         if has_sbs {
-            render_shared_buffer_stats(frame, chunks[idx], state, theme, sel[SECT_SBS], focused_section == SECT_SBS);
+            render_shared_buffer_stats(
+                frame,
+                chunks[idx],
+                state,
+                theme,
+                sel[SECT_SBS],
+                focused_section == SECT_SBS,
+            );
             idx += 1;
         }
 
@@ -63,9 +85,23 @@ pub fn render(
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(chunks[idx]);
             render_dedup_stats(frame, bottom[0], state, theme);
-            render_triggers(frame, bottom[1], state, theme, sel[SECT_TRIGGERS], focused_section == SECT_TRIGGERS);
+            render_triggers(
+                frame,
+                bottom[1],
+                state,
+                theme,
+                sel[SECT_TRIGGERS],
+                focused_section == SECT_TRIGGERS,
+            );
         } else {
-            render_triggers(frame, chunks[idx], state, theme, sel[SECT_TRIGGERS], focused_section == SECT_TRIGGERS);
+            render_triggers(
+                frame,
+                chunks[idx],
+                state,
+                theme,
+                sel[SECT_TRIGGERS],
+                focused_section == SECT_TRIGGERS,
+            );
         }
     } else {
         // Original 2-section layout
@@ -74,8 +110,23 @@ pub fn render(
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
-        render_buffers(frame, chunks[0], state, theme, sel[SECT_BUFFERS], focused_section == SECT_BUFFERS, filter);
-        render_triggers(frame, chunks[1], state, theme, sel[SECT_TRIGGERS], focused_section == SECT_TRIGGERS);
+        render_buffers(
+            frame,
+            chunks[0],
+            state,
+            theme,
+            sel[SECT_BUFFERS],
+            focused_section == SECT_BUFFERS,
+            filter,
+        );
+        render_triggers(
+            frame,
+            chunks[1],
+            state,
+            theme,
+            sel[SECT_TRIGGERS],
+            focused_section == SECT_TRIGGERS,
+        );
     }
 }
 
@@ -168,7 +219,14 @@ fn render_buffers(
     frame.render_stateful_widget(table, area, &mut ts);
 }
 
-fn render_triggers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, sel: usize, focused: bool) {
+fn render_triggers(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    sel: usize,
+    focused: bool,
+) {
     let header = Row::new(
         ["Source Table", "Trigger Name", "Type", "Present", "Enabled"]
             .iter()
@@ -185,14 +243,19 @@ fn render_triggers(frame: &mut Frame, area: Rect, state: &AppState, theme: &Them
             let present_style = if t.present { theme.ok } else { theme.warning };
             let enabled_icon = if t.enabled { "✓" } else { "✗" };
             let enabled_style = if t.enabled { theme.ok } else { theme.warning };
-            let row_style = if focused && i == sel { theme.selected } else { Style::default() };
+            let row_style = if focused && i == sel {
+                theme.selected
+            } else {
+                Style::default()
+            };
             Row::new(vec![
                 Cell::from(t.source_table.as_str()),
                 Cell::from(t.trigger_name.as_str()),
                 Cell::from(t.trigger_type.as_str()),
                 Cell::from(present_icon).style(present_style),
                 Cell::from(enabled_icon).style(enabled_style),
-            ]).style(row_style)
+            ])
+            .style(row_style)
         })
         .collect();
 
@@ -233,7 +296,14 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
-fn render_cdc_health(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, sel: usize, focused: bool) {
+fn render_cdc_health(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    sel: usize,
+    focused: bool,
+) {
     if state.cdc_health.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -272,7 +342,11 @@ fn render_cdc_health(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
             } else {
                 theme.dim
             };
-            let row_style = if focused && i == sel { theme.selected } else { Style::default() };
+            let row_style = if focused && i == sel {
+                theme.selected
+            } else {
+                Style::default()
+            };
             Row::new(vec![
                 Cell::from(h.source_table.as_str()),
                 Cell::from(h.cdc_mode.as_str()),
@@ -280,7 +354,8 @@ fn render_cdc_health(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
                 Cell::from(lag_str).style(lag_style),
                 Cell::from(h.confirmed_lsn.as_deref().unwrap_or("-")),
                 Cell::from(h.alert.as_deref().unwrap_or("-")).style(alert_style),
-            ]).style(row_style)
+            ])
+            .style(row_style)
         })
         .collect();
 
@@ -370,7 +445,14 @@ fn render_dedup_stats(frame: &mut Frame, area: Rect, state: &AppState, theme: &T
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn render_shared_buffer_stats(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, sel: usize, focused: bool) {
+fn render_shared_buffer_stats(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    sel: usize,
+    focused: bool,
+) {
     let header = Row::new(
         [
             "Source",
@@ -390,7 +472,11 @@ fn render_shared_buffer_stats(frame: &mut Frame, area: Rect, state: &AppState, t
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let row_style = if focused && i == sel { theme.selected } else { Style::default() };
+            let row_style = if focused && i == sel {
+                theme.selected
+            } else {
+                Style::default()
+            };
             Row::new(vec![
                 Cell::from(s.source_table.as_str()),
                 Cell::from(format!("{} ({})", s.consumer_count, s.consumers)),
@@ -398,7 +484,8 @@ fn render_shared_buffer_stats(frame: &mut Frame, area: Rect, state: &AppState, t
                 Cell::from(s.safe_frontier_lsn.as_deref().unwrap_or("-")),
                 Cell::from(s.buffer_rows.to_string()),
                 Cell::from(if s.is_partitioned { "yes" } else { "no" }),
-            ]).style(row_style)
+            ])
+            .style(row_style)
         })
         .collect();
 
@@ -412,9 +499,15 @@ fn render_shared_buffer_stats(frame: &mut Frame, area: Rect, state: &AppState, t
     ];
 
     let title = if focused {
-        format!(" ▶ Shared Buffer Stats ({}) ", state.shared_buffer_stats.len())
+        format!(
+            " ▶ Shared Buffer Stats ({}) ",
+            state.shared_buffer_stats.len()
+        )
     } else {
-        format!(" Shared Buffer Stats ({}) ", state.shared_buffer_stats.len())
+        format!(
+            " Shared Buffer Stats ({}) ",
+            state.shared_buffer_stats.len()
+        )
     };
     let block = Block::default()
         .borders(Borders::ALL)
