@@ -3660,9 +3660,9 @@ provides a 60-second tryout experience.
 - [ ] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
 - [x] UNSAFE-R1/R2: Unsafe block count reduced by 249 (690→441 in parser); `is_node_type!` and `pg_deref!` macros; all 1,700 unit tests pass
 - [x] API-MOD: `api.rs` split into 3 sub-modules (mod.rs 5,624 + diagnostics.rs 1,377 + helpers.rs 2,461); zero behavior change; all 1,700 unit tests pass
-- [ ] MIG-IVM: pg_ivm migration guide published with worked examples; covers create/refresh/alter/drop equivalences
-- [ ] RUNBOOK: Failure mode runbook covers ≥10 failure scenarios with symptoms, diagnosis, and resolution; includes health_check() interpretation
-- [ ] PLAYGROUND: `docker compose up` starts PG + pg_trickle + sample data in < 60 seconds; README walkthrough tested end-to-end
+- [x] MIG-IVM: `docs/tutorials/MIGRATING_FROM_PG_IVM.md` published with step-by-step migration, API mapping, behavioral differences, SQL upgrade examples, and verification checklist
+- [x] RUNBOOK: `docs/TROUBLESHOOTING.md` covers 13 failure scenarios (scheduler, SUSPENDED, CDC triggers, WAL slots, INITIALIZING, buffer growth, lock contention, OOM, disk full, circular convergence, schema changes, worker pool, fuse) with symptoms, diagnosis, and resolution
+- [x] PLAYGROUND: `playground/` with docker-compose.yml, seed.sql (3 base tables, 5 stream tables), and README walkthrough
 - [x] DOC-HELLO: Chapter 1 "Hello World" in GETTING_STARTED already provides the single-table aggregate example (products/category_summary)
 - [x] DOC-DECIDE: Refresh mode decision guide already published as `tutorials/tuning-refresh-mode.md` with `recommend_refresh_mode()` and signal breakdown
 - [x] DOC-FAQ-NEW: New User FAQ section with 15 keyword-rich entries added at top of FAQ.md

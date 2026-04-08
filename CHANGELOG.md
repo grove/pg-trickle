@@ -60,6 +60,20 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `scripts/verify_install.sql` checks shared_preload_libraries, extension
   creation, scheduler health, GUC configuration, and runs an end-to-end stream
   table create → refresh → verify → cleanup cycle.
+- **pg_ivm migration guide (MIG-IVM)** —
+  `docs/tutorials/MIGRATING_FROM_PG_IVM.md` provides step-by-step migration
+  from pg_ivm IMMVs to pg_trickle stream tables, covering API mapping,
+  behavioral differences, SQL upgrade examples, and a verification checklist.
+- **Troubleshooting & failure mode runbook (RUNBOOK)** —
+  `docs/TROUBLESHOOTING.md` documents 13 failure scenarios (scheduler down,
+  SUSPENDED status, CDC triggers missing, WAL slot issues, OOM, disk full,
+  circular convergence, schema changes, worker pool exhaustion, fuse trips)
+  with symptoms, diagnosis SQL, and resolution steps.
+- **Docker quickstart playground (PLAYGROUND)** —
+  `playground/` directory with `docker-compose.yml`, seed SQL, and README.
+  One-command `docker compose up` starts PostgreSQL 18 + pg_trickle with
+  pre-loaded sample data and 5 stream tables demonstrating aggregates, window
+  functions, joins, time-series, and EXISTS subqueries.
 
 ---
 

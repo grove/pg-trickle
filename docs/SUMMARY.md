@@ -52,12 +52,14 @@
 - [Circular Dependencies](tutorials/CIRCULAR_DEPENDENCIES.md)
 - [Monitoring & Alerting](tutorials/MONITORING_AND_ALERTING.md)
 - [ETL & Bulk Load Patterns](tutorials/ETL_BULK_LOAD.md)
+- [Migrating from pg_ivm](tutorials/MIGRATING_FROM_PG_IVM.md)
 
 ---
 
 # Reference
 
 - [FAQ](FAQ.md)
+- [Troubleshooting & Runbook](TROUBLESHOOTING.md)
 - [Error Reference](ERRORS.md)
 - [Changelog](changelog.md)
 - [Roadmap](roadmap.md)
