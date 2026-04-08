@@ -191,13 +191,16 @@ async fn test_high_frequency_mutations() {
     )
     .await;
 
-    // 100 rapid updates collapsed into a single SQL statement to avoid
-    // 100 sequential round-trips to the test container. The test only
-    // verifies the final value, so individual round-trips add no coverage.
+    // 100 rapid updates via a PL/pgSQL DO block: one round-trip to the
+    // container, 100 sequential CDC events (one per UPDATE), deterministic
+    // final value of 100. Avoids 100 individual round-trips while preserving
+    // the original intent of testing CDC event coalescing on refresh.
     db.execute(
-        "UPDATE hf_src SET counter = v.i \
-         FROM (SELECT generate_series(1,100) AS i) v \
-         WHERE hf_src.id = 1",
+        "DO $$ BEGIN \
+           FOR i IN 1..100 LOOP \
+             UPDATE hf_src SET counter = i WHERE id = 1; \
+           END LOOP; \
+         END $$",
     )
     .await;
 

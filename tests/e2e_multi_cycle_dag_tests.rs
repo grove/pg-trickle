@@ -415,14 +415,19 @@ async fn test_mc_dag_bulk_mutation_stress() {
     setup_3_layer_pipeline(&db).await;
     assert_pipeline_correct(&db).await;
 
-    // Bulk INSERT: 100 rows spread across 5 groups in a single statement
-    // to avoid 100 sequential round-trips to the test container.
+    // Bulk INSERT: 100 rows spread across 5 groups via a PL/pgSQL DO block.
+    // Each iteration is a separate INSERT statement producing a separate CDC
+    // event, so the change buffer receives 100 individual entries — which is
+    // the stress condition being tested. One round-trip instead of 100.
     db.execute(
-        "INSERT INTO mc_src (grp, val) \
-         SELECT CASE ((i-1)%5) WHEN 0 THEN 'a' WHEN 1 THEN 'b' \
-                WHEN 2 THEN 'c' WHEN 3 THEN 'd' ELSE 'e' END, \
-                i-1 \
-         FROM generate_series(1,100) s(i)",
+        "DO $$ \
+         DECLARE grps TEXT[] := ARRAY['a','b','c','d','e']; \
+         BEGIN \
+           FOR i IN 0..99 LOOP \
+             INSERT INTO mc_src (grp, val) \
+             VALUES (grps[(i%5)+1], i); \
+           END LOOP; \
+         END $$",
     )
     .await;
 
