@@ -51,6 +51,19 @@ cd playground && docker compose up -d
 psql postgresql://postgres:playground@localhost:5432/playground
 ```
 
+Or launch the **terminal UI** for a live monitoring dashboard:
+
+```bash
+# Install the TUI (requires Rust toolchain)
+cargo install --path pgtrickle-tui
+
+# Connect to the playground
+pgtrickle --url postgresql://postgres:playground@localhost:5432/playground
+```
+
+Press `1`–`9` to switch between views (Dashboard, Dependencies, Refresh Log, CDC Health, …),
+`r` to trigger a manual refresh, `/` to filter by name, and `?` for the full keybindings overlay.
+
 The [`playground/`](playground/) directory is a self-contained Docker environment with sample
 tables, pre-loaded data, and five stream tables demonstrating key pg_trickle patterns — basic
 aggregates, window functions, multi-table joins, time-series, and EXISTS subqueries. See
