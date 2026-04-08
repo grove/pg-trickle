@@ -191,11 +191,15 @@ async fn test_high_frequency_mutations() {
     )
     .await;
 
-    // Rapid mutations: 100 updates
-    for i in 1..=100 {
-        db.execute(&format!("UPDATE hf_src SET counter = {} WHERE id = 1", i))
-            .await;
-    }
+    // 100 rapid updates collapsed into a single SQL statement to avoid
+    // 100 sequential round-trips to the test container. The test only
+    // verifies the final value, so individual round-trips add no coverage.
+    db.execute(
+        "UPDATE hf_src SET counter = v.i \
+         FROM (SELECT generate_series(1,100) AS i) v \
+         WHERE hf_src.id = 1",
+    )
+    .await;
 
     db.refresh_st("hf_st").await;
 
