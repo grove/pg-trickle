@@ -410,11 +410,18 @@ jobs:
           restore-keys: criterion-baseline-
 
       - name: Run benchmarks (create new/ data)
+        # continue-on-error so that Criterion's own statistical regression
+        # detection (exit code 1) does not skip the Python gate step below.
+        # The Python script is the authoritative 10% threshold gate.
+        continue-on-error: true
         run: ./scripts/run_benchmarks.sh -- --baseline main
         env:
           BENCH_QUICK: "1"
 
       - name: Check for regressions
+        # Always run so the Python script can make the final pass/fail
+        # decision even if Criterion flagged a statistical regression above.
+        if: always()
         run: |
           python3 scripts/criterion_regression_check.py
         env:
