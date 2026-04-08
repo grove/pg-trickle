@@ -18,8 +18,6 @@
 
 pg_trickle brings declarative, automatically-refreshing materialized views to PostgreSQL, inspired by the [DBSP](https://arxiv.org/abs/2203.16684) differential dataflow framework ([comparison](docs/research/DBSP_COMPARISON.md)). Define a SQL query and a schedule bound (or cron schedule); the extension handles the rest.
 
-## History and Motivation
-
 ### Try it in 30 seconds — no installation needed
 
 ```bash
