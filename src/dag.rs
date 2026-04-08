@@ -309,6 +309,7 @@ pub struct DagNode {
 }
 
 /// In-memory dependency graph of stream tables and their sources.
+#[derive(Clone)]
 pub struct StDag {
     /// Forward edges: source → list of downstream ST node IDs.
     edges: HashMap<NodeId, Vec<NodeId>>,

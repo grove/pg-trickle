@@ -23,6 +23,7 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.slot\_lag\_critical\_threshold\_mb](#pg_trickleslot_lag_critical_threshold_mb)
   - [Refresh Performance](#refresh-performance)
     - [pg\_trickle.differential\_max\_change\_ratio](#pg_trickledifferential_max_change_ratio)
+    - [pg\_trickle.refresh\_strategy](#pg_tricklerefresh_strategy)
     - [pg\_trickle.max\_delta\_estimate\_rows](#pg_tricklemax_delta_estimate_rows)
     - [pg\_trickle.planner\_aggressive](#pg_trickleplanner_aggressive)
     - [pg\_trickle.merge\_join\_strategy](#pg_tricklemerge_join_strategy)
@@ -423,6 +424,44 @@ SET pg_trickle.differential_max_change_ratio = 0.10;
 
 -- Disable adaptive fallback
 SET pg_trickle.differential_max_change_ratio = 0.0;
+```
+
+---
+
+### pg_trickle.refresh_strategy
+
+Cluster-wide refresh strategy override.
+
+| Property | Value |
+|---|---|
+| Type | `string` |
+| Default | `'auto'` |
+| Values | `'auto'`, `'differential'`, `'full'` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+Controls the FULL vs. DIFFERENTIAL decision for all stream tables whose `refresh_mode` is `DIFFERENTIAL`:
+
+- **`'auto'`** (default): Use the adaptive cost-based heuristic that considers `differential_max_change_ratio`, per-ST `auto_threshold`, refresh history, and spill detection to pick the optimal strategy per refresh cycle.
+- **`'differential'`**: Always use DIFFERENTIAL refresh — skip the adaptive ratio check entirely. The BUF-LIMIT safety check (`max_buffer_rows`) still applies.
+- **`'full'`**: Always use FULL refresh regardless of change volume. Useful for debugging or when you know DIFFERENTIAL is consistently slower for your workload.
+
+**Important:** Per-ST `refresh_mode` in the catalog takes precedence. Stream tables explicitly configured as `refresh_mode = 'FULL'` always use FULL regardless of this GUC.
+
+**Tuning Guidance:**
+- **Most workloads**: Leave at `'auto'` — the adaptive heuristic learns from refresh history.
+- **Known-low-churn workloads**: Set to `'differential'` to eliminate the per-source capped-count query overhead.
+- **Debugging delta issues**: Temporarily set to `'full'` to compare behavior.
+
+```sql
+-- Force DIFFERENTIAL for all stream tables (skip ratio check)
+SET pg_trickle.refresh_strategy = 'differential';
+
+-- Force FULL for all stream tables (debugging)
+SET pg_trickle.refresh_strategy = 'full';
+
+-- Reset to adaptive heuristic
+SET pg_trickle.refresh_strategy = 'auto';
 ```
 
 ---

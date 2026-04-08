@@ -3657,7 +3657,7 @@ provides a 60-second tryout experience.
 - [ ] A2-PS: Prepared statement reuse across refresh cycles; parse/plan overhead eliminated on steady-state workloads
 - [x] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
 - [ ] SQLANCER: Fuzzing environment operational; crash-test oracle finds zero panics on seed corpus; equivalence oracle validates DIFFERENTIAL ≡ FULL for fuzzed queries; stateful DML fuzzing runs clean for 10K+ mutation sequences
-- [ ] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
+- [x] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
 - [x] UNSAFE-R1/R2: Unsafe block count reduced by 249 (690→441 in parser); `is_node_type!` and `pg_deref!` macros; all 1,700 unit tests pass
 - [x] API-MOD: `api.rs` split into 3 sub-modules (mod.rs 5,624 + diagnostics.rs 1,377 + helpers.rs 2,461); zero behavior change; all 1,700 unit tests pass
 - [x] MIG-IVM: `docs/tutorials/MIGRATING_FROM_PG_IVM.md` published with step-by-step migration, API mapping, behavioral differences, SQL upgrade examples, and verification checklist

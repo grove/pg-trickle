@@ -57,6 +57,13 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   covering MERGE SQL generation, column formatting, trigger templates,
   `has_non_monotonic_cte` marker detection, and `build_hash_child_merge`
   partition handling. Total unit tests: 1,729.
+- **`refresh_strategy` GUC (B-4 Phase 1)** — new `pg_trickle.refresh_strategy`
+  GUC (`'auto'`/`'differential'`/`'full'`) allows operators to override the
+  adaptive FULL/DIFFERENTIAL cost heuristic cluster-wide. `'differential'`
+  skips the per-source ratio check; `'full'` forces FULL refresh unconditionally.
+  Per-ST `refresh_mode` takes precedence. Documented in CONFIGURATION.md.
+- **`StDag` is now `Clone` (C-2)** — added `#[derive(Clone)]` to `StDag` to
+  enable benchmark cloning.
 
 ### Added
 
@@ -96,6 +103,14 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `test_no_resource_leak_after_timeout` (FR-8): verifies no orphaned
   `__pgt_delta_*` temp tables or stale catalog state remain after a
   `statement_timeout`-induced failure.
+- **Incremental DAG rebuild benchmark (C-2)** — added `bench_dag_incremental`
+  with `remove_readd_single` and `full_rebuild_comparison` scenarios at
+  100/500/1000 nodes. Results: incremental single-node rebuild is ~10µs at
+  100 nodes, ~116µs at 1000 nodes (5.2× faster than full rebuild), well under
+  the 5ms exit criterion.
+- **`refresh_strategy` normalizer tests (B-4)** — 4 unit tests for
+  `normalize_refresh_strategy` covering defaults, all variants, `as_str()`,
+  and roundtrip. Total unit tests: 1,733.
 
 ---
 

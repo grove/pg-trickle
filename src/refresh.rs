@@ -3963,10 +3963,15 @@ pub fn execute_differential_refresh(
     // exceeds the adaptive fallback threshold.  This heavier query is
     // skipped entirely for the no-data case (handled above).
     //
-    // Session 7: per-ST adaptive threshold takes priority over global GUC.
+    // B-4: Check the refresh_strategy GUC first. If it's 'full', force
+    // fallback unconditionally. If it's 'differential', skip the adaptive
+    // threshold check entirely (never fall back). 'auto' uses the existing
+    // adaptive heuristic.
+    let strategy = crate::config::pg_trickle_refresh_strategy();
     let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
     let max_ratio = st.auto_threshold.unwrap_or(global_ratio);
-    let mut should_fallback = false;
+    let mut should_fallback = strategy == crate::config::RefreshStrategy::Full;
+    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
     // DI-2: Collect per-source (change_count, table_size) for the per-leaf
@@ -4041,8 +4046,13 @@ pub fn execute_differential_refresh(
         }
 
         if change_count > threshold_rows {
-            should_fallback = true;
-            break; // No need to check remaining sources
+            // B-4: When refresh_strategy = 'differential', skip the ratio
+            // check — the user explicitly wants DIFFERENTIAL regardless of
+            // change volume. The BUF-LIMIT safety check still applies below.
+            if !skip_ratio_check {
+                should_fallback = true;
+                break; // No need to check remaining sources
+            }
         }
     }
 
