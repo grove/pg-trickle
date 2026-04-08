@@ -20,6 +20,74 @@ use std::time::Instant;
 
 use crate::catalog::{StDependency, StreamTableMeta};
 
+// ── B-4: Query complexity classification ────────────────────────────────
+
+/// Complexity class for a stream table's defining query.
+///
+/// Used by the cost model to apply per-class cost coefficients.  Higher
+/// complexity classes have steeper differential cost curves (more joins /
+/// aggregates → more work per delta row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryComplexityClass {
+    /// Simple scan: `SELECT cols FROM single_table`
+    Scan,
+    /// Scan with filter: `SELECT cols FROM single_table WHERE ...`
+    Filter,
+    /// Aggregate: `SELECT ... GROUP BY ...` (no joins)
+    Aggregate,
+    /// Join(s) without aggregation
+    Join,
+    /// Join(s) with GROUP BY aggregation (most expensive differential path)
+    JoinAggregate,
+}
+
+impl QueryComplexityClass {
+    /// Default differential cost scaling factor per class.
+    ///
+    /// The factor represents the per-delta-row cost multiplier relative to
+    /// a plain scan.  Joins and aggregates make each delta row more
+    /// expensive to process incrementally.
+    pub(crate) fn diff_cost_factor(self) -> f64 {
+        match self {
+            Self::Scan => 1.0,
+            Self::Filter => 1.1,
+            Self::Aggregate => 1.5,
+            Self::Join => 2.5,
+            Self::JoinAggregate => 4.0,
+        }
+    }
+}
+
+/// Classify a defining query's complexity from its SQL text.
+///
+/// Uses lightweight keyword analysis (no parsing or SPI).  This is
+/// intentionally conservative: false positives (over-classifying) are
+/// preferable to false negatives because a higher class merely biases
+/// the cost model toward FULL at lower change rates, which is always safe.
+pub(crate) fn classify_query_complexity(defining_query: &str) -> QueryComplexityClass {
+    let upper = defining_query.to_ascii_uppercase();
+    let has_join = upper.contains(" JOIN ")
+        || upper.contains(" INNER JOIN ")
+        || upper.contains(" LEFT JOIN ")
+        || upper.contains(" RIGHT JOIN ")
+        || upper.contains(" FULL JOIN ")
+        || upper.contains(" CROSS JOIN ");
+    let has_group_by = upper.contains("GROUP BY");
+
+    match (has_join, has_group_by) {
+        (true, true) => QueryComplexityClass::JoinAggregate,
+        (true, false) => QueryComplexityClass::Join,
+        (false, true) => QueryComplexityClass::Aggregate,
+        (false, false) => {
+            if upper.contains(" WHERE ") {
+                QueryComplexityClass::Filter
+            } else {
+                QueryComplexityClass::Scan
+            }
+        }
+    }
+}
+
 // ── G12-ERM-1: Effective refresh mode tracking ──────────────────────────
 
 // Thread-local that records the mode actually used for the current refresh.
@@ -1907,6 +1975,147 @@ fn build_append_only_insert_sql(schema: &str, name: &str, merge_sql: &str) -> St
     )
 }
 
+// ── TG2-MERGE: Extracted pure template builders ─────────────────────
+//
+// These functions are the core MERGE/DML template assembly logic, extracted
+// from prewarm_merge_cache() and execute_differential_refresh() so they can
+// be unit-tested without a database.
+
+/// Format a quoted column list: `"col1", "col2", "col3"`.
+fn format_col_list(user_cols: &[String]) -> String {
+    user_cols
+        .iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Format a prefixed quoted column list: `d."col1", d."col2"`.
+fn format_prefixed_col_list(prefix: &str, user_cols: &[String]) -> String {
+    user_cols
+        .iter()
+        .map(|c| format!("{prefix}.\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Format an UPDATE SET clause: `"col1" = d."col1", "col2" = d."col2"`.
+fn format_update_set(user_cols: &[String]) -> String {
+    user_cols
+        .iter()
+        .map(|c| {
+            let qc = format!("\"{}\"", c.replace('"', "\"\""));
+            format!("{qc} = d.{qc}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build the core MERGE SQL template for differential refresh.
+///
+/// This is the primary delta-application statement: it merges incoming
+/// delta rows (with `__pgt_action` = 'I' or 'D') into the stream table,
+/// performing DELETE, UPDATE, or INSERT as appropriate.
+///
+/// Extracted as a pure function for unit testability (TG2-MERGE).
+fn build_merge_sql(
+    quoted_table: &str,
+    using_clause: &str,
+    user_cols: &[String],
+    has_partition_key: bool,
+) -> String {
+    let user_col_list = format_col_list(user_cols);
+    let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    let update_set_clause = format_update_set(user_cols);
+    let is_distinct_clause = build_is_distinct_clause(user_cols);
+
+    format!(
+        "MERGE INTO {quoted_table} AS st \
+         USING {using_clause} AS d \
+         ON st.__pgt_row_id = d.__pgt_row_id{part} \
+         WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
+         WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct_clause}) THEN \
+           UPDATE SET {update_set_clause} \
+         WHEN NOT MATCHED AND d.__pgt_action = 'I' THEN \
+           INSERT (__pgt_row_id, {user_col_list}) \
+           VALUES (d.__pgt_row_id, {d_user_col_list})",
+        part = if has_partition_key {
+            " __PGT_PART_PRED__"
+        } else {
+            ""
+        },
+    )
+}
+
+/// Build the trigger-path DELETE template.
+///
+/// For keyless sources, uses counted DELETE via ROW_NUMBER to avoid
+/// removing all rows with a matching row_id. For keyed sources, uses
+/// a simple equi-join DELETE.
+fn build_trigger_delete_sql(quoted_table: &str, pgt_id: i64, use_keyless: bool) -> String {
+    if use_keyless {
+        build_keyless_delete_template(quoted_table, pgt_id)
+    } else {
+        format!(
+            "DELETE FROM {quoted_table} AS st \
+             USING __pgt_delta_{pgt_id} AS d \
+             WHERE st.__pgt_row_id = d.__pgt_row_id \
+               AND d.__pgt_action = 'D'",
+        )
+    }
+}
+
+/// Build the trigger-path UPDATE template.
+///
+/// Updates existing rows where the delta action is 'I' and values changed
+/// (IS DISTINCT FROM guard prevents no-op writes).
+fn build_trigger_update_sql(quoted_table: &str, pgt_id: i64, user_cols: &[String]) -> String {
+    let update_set_clause = format_update_set(user_cols);
+    let is_distinct_clause = build_is_distinct_clause(user_cols);
+    format!(
+        "UPDATE {quoted_table} AS st \
+         SET {update_set_clause} \
+         FROM __pgt_delta_{pgt_id} AS d \
+         WHERE st.__pgt_row_id = d.__pgt_row_id \
+           AND d.__pgt_action = 'I' \
+           AND ({is_distinct_clause})",
+    )
+}
+
+/// Build the trigger-path INSERT template.
+///
+/// For keyless sources, uses plain INSERT (no NOT EXISTS check since
+/// duplicate row_ids are expected). For keyed sources, uses NOT EXISTS
+/// to avoid inserting rows that already exist in the stream table.
+fn build_trigger_insert_sql(
+    quoted_table: &str,
+    pgt_id: i64,
+    user_cols: &[String],
+    use_keyless: bool,
+) -> String {
+    let user_col_list = format_col_list(user_cols);
+    let d_user_col_list = format_prefixed_col_list("d", user_cols);
+    if use_keyless {
+        format!(
+            "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
+             SELECT d.__pgt_row_id, {d_user_col_list} \
+             FROM __pgt_delta_{pgt_id} AS d \
+             WHERE d.__pgt_action = 'I'",
+        )
+    } else {
+        format!(
+            "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
+             SELECT d.__pgt_row_id, {d_user_col_list} \
+             FROM __pgt_delta_{pgt_id} AS d \
+             WHERE d.__pgt_action = 'I' \
+               AND NOT EXISTS (\
+                 SELECT 1 FROM {quoted_table} AS st \
+                 WHERE st.__pgt_row_id = d.__pgt_row_id\
+               )",
+        )
+    }
+}
+
 /// Pre-warm the delta SQL + MERGE template caches for a stream table.
 ///
 /// Called after `create_stream_table()` to avoid a cold-start penalty on
@@ -1965,26 +2174,7 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         name.replace('"', "\"\""),
     );
 
-    let user_col_list: String = user_cols
-        .iter()
-        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let d_user_col_list: String = user_cols
-        .iter()
-        .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let update_set_clause: String = user_cols
-        .iter()
-        .map(|c| {
-            let qc = format!("\"{}\"", c.replace('"', "\"\""));
-            format!("{qc} = d.{qc}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let user_col_list = format_col_list(user_cols);
 
     let delta_sql_template =
         dvm::get_delta_sql_template(st.pgt_id).unwrap_or(delta_result.delta_sql);
@@ -2019,24 +2209,11 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         build_weight_agg_using(&delta_sql_template, &user_col_list)
     };
 
-    // B-1: IS DISTINCT FROM guard to skip no-op UPDATEs.
-    let is_distinct_clause: String = build_is_distinct_clause(user_cols);
-
-    let merge_template = format!(
-        "MERGE INTO {quoted_table} AS st \
-         USING {using_clause} AS d \
-         ON st.__pgt_row_id = d.__pgt_row_id{part_pred_placeholder} \
-         WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
-         WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct_clause}) THEN \
-           UPDATE SET {update_set_clause} \
-         WHEN NOT MATCHED AND d.__pgt_action = 'I' THEN \
-           INSERT (__pgt_row_id, {user_col_list}) \
-           VALUES (d.__pgt_row_id, {d_user_col_list})",
-        part_pred_placeholder = if st.st_partition_key.is_some() {
-            " __PGT_PART_PRED__"
-        } else {
-            ""
-        },
+    let merge_template = build_merge_sql(
+        &quoted_table,
+        &using_clause,
+        user_cols,
+        st.st_partition_key.is_some(),
     );
 
     // Build cleanup template.
@@ -2067,17 +2244,8 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // __pgt_row_id values are expected. The UPDATE step is a no-op
     // because the scan-level net counting decomposes updates into
     // separate D + I rows.
-    let trigger_delete_template = if st.has_keyless_source {
-        build_keyless_delete_template(&quoted_table, st.pgt_id)
-    } else {
-        format!(
-            "DELETE FROM {quoted_table} AS st \
-             USING __pgt_delta_{pgt_id} AS d \
-             WHERE st.__pgt_row_id = d.__pgt_row_id \
-               AND d.__pgt_action = 'D'",
-            pgt_id = st.pgt_id,
-        )
-    };
+    let trigger_delete_template =
+        build_trigger_delete_sql(&quoted_table, st.pgt_id, st.has_keyless_source);
 
     // EC-06: For keyless sources, the scan-level delta decomposes UPDATEs
     // into D+I pairs (different content hashes), so the UPDATE template
@@ -2085,39 +2253,10 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // the aggregate delta produces 'I' actions for changed groups that
     // need real UPDATEs. Using the normal UPDATE template handles both
     // cases correctly.
-    let trigger_update_template = format!(
-        "UPDATE {quoted_table} AS st \
-         SET {update_set_clause} \
-         FROM __pgt_delta_{pgt_id} AS d \
-         WHERE st.__pgt_row_id = d.__pgt_row_id \
-           AND d.__pgt_action = 'I' \
-           AND ({is_distinct_clause})",
-        pgt_id = st.pgt_id,
-    );
+    let trigger_update_template = build_trigger_update_sql(&quoted_table, st.pgt_id, user_cols);
 
-    let trigger_insert_template = if st.has_keyless_source {
-        // Plain INSERT — no NOT EXISTS check since duplicate row_ids
-        // are expected for keyless sources.
-        format!(
-            "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
-             SELECT d.__pgt_row_id, {d_user_col_list} \
-             FROM __pgt_delta_{pgt_id} AS d \
-             WHERE d.__pgt_action = 'I'",
-            pgt_id = st.pgt_id,
-        )
-    } else {
-        format!(
-            "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
-             SELECT d.__pgt_row_id, {d_user_col_list} \
-             FROM __pgt_delta_{pgt_id} AS d \
-             WHERE d.__pgt_action = 'I' \
-               AND NOT EXISTS (\
-                 SELECT 1 FROM {quoted_table} AS st \
-                 WHERE st.__pgt_row_id = d.__pgt_row_id\
-               )",
-            pgt_id = st.pgt_id,
-        )
-    };
+    let trigger_insert_template =
+        build_trigger_insert_sql(&quoted_table, st.pgt_id, user_cols, st.has_keyless_source);
 
     // Cache the MERGE template with LSN placeholder tokens.
     // Each refresh resolves the tokens to concrete LSN values
@@ -3892,10 +4031,15 @@ pub fn execute_differential_refresh(
     // exceeds the adaptive fallback threshold.  This heavier query is
     // skipped entirely for the no-data case (handled above).
     //
-    // Session 7: per-ST adaptive threshold takes priority over global GUC.
+    // B-4: Check the refresh_strategy GUC first. If it's 'full', force
+    // fallback unconditionally. If it's 'differential', skip the adaptive
+    // threshold check entirely (never fall back). 'auto' uses the existing
+    // adaptive heuristic.
+    let strategy = crate::config::pg_trickle_refresh_strategy();
     let global_ratio = crate::config::pg_trickle_differential_max_change_ratio();
     let max_ratio = st.auto_threshold.unwrap_or(global_ratio);
-    let mut should_fallback = false;
+    let mut should_fallback = strategy == crate::config::RefreshStrategy::Full;
+    let skip_ratio_check = strategy == crate::config::RefreshStrategy::Differential;
     let mut total_change_count: i64 = 0;
     let mut _total_table_size: i64 = 0;
     // DI-2: Collect per-source (change_count, table_size) for the per-leaf
@@ -3970,8 +4114,13 @@ pub fn execute_differential_refresh(
         }
 
         if change_count > threshold_rows {
-            should_fallback = true;
-            break; // No need to check remaining sources
+            // B-4: When refresh_strategy = 'differential', skip the ratio
+            // check — the user explicitly wants DIFFERENTIAL regardless of
+            // change volume. The BUF-LIMIT safety check still applies below.
+            if !skip_ratio_check {
+                should_fallback = true;
+                break; // No need to check remaining sources
+            }
         }
     }
 
@@ -3995,6 +4144,34 @@ pub fn execute_differential_refresh(
                 should_fallback = true;
                 break;
             }
+        }
+    }
+
+    // ── B-4: Pre-refresh cost-model prediction ──────────────────────
+    // When strategy = 'auto' and the ratio check didn't trigger, query
+    // historical refresh timings and use the cost model to predict
+    // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
+    if !should_fallback && !skip_ratio_check && total_change_count > 0 {
+        let complexity = classify_query_complexity(&st.defining_query);
+        if let Some(hist) = query_refresh_history_stats(st.pgt_id)
+            && cost_model_prefers_full(
+                hist.avg_ms_per_delta,
+                hist.avg_full_ms,
+                total_change_count,
+                complexity,
+            )
+        {
+            pgrx::debug1!(
+                "[pg_trickle] B-4 cost model: FULL preferred for {}.{} \
+                 (est_diff={:.1}ms > est_full×margin={:.1}ms, class={:?}, Δ={})",
+                st.pgt_schema,
+                st.pgt_name,
+                hist.avg_ms_per_delta * complexity.diff_cost_factor() * total_change_count as f64,
+                hist.avg_full_ms * crate::config::pg_trickle_cost_model_safety_margin(),
+                complexity,
+                total_change_count,
+            );
+            should_fallback = true;
         }
     }
 
@@ -4257,26 +4434,7 @@ pub fn execute_differential_refresh(
             name.replace('"', "\"\""),
         );
 
-        let user_col_list: String = user_cols
-            .iter()
-            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let d_user_col_list: String = user_cols
-            .iter()
-            .map(|c| format!("d.\"{}\"", c.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let update_set_clause: String = user_cols
-            .iter()
-            .map(|c| {
-                let qc = format!("\"{}\"", c.replace('"', "\"\""));
-                format!("{qc} = d.{qc}")
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let user_col_list = format_col_list(&user_cols);
 
         // Build cleanup SQL templates — plain DELETE statements (no DO block).
         let cleanup_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
@@ -4316,28 +4474,11 @@ pub fn execute_differential_refresh(
             build_weight_agg_using(&delta_sql_template, &user_col_list)
         };
 
-        // ── B-1: IS DISTINCT FROM guard to skip no-op UPDATEs ───────
-        // When a group's aggregate value hasn't actually changed, the
-        // MERGE would still perform an UPDATE (writing an identical
-        // tuple).  Adding an IS DISTINCT FROM check on the WHEN MATCHED
-        // clause lets PostgreSQL skip the heap write entirely.
-        let is_distinct_clause: String = build_is_distinct_clause(&user_cols);
-
-        let merge_template = format!(
-            "MERGE INTO {quoted_table} AS st \
-             USING {template_using} AS d \
-             ON st.__pgt_row_id = d.__pgt_row_id{part_pred_placeholder} \
-             WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE \
-             WHEN MATCHED AND d.__pgt_action = 'I' AND ({is_distinct_clause}) THEN \
-               UPDATE SET {update_set_clause} \
-             WHEN NOT MATCHED AND d.__pgt_action = 'I' THEN \
-               INSERT (__pgt_row_id, {user_col_list}) \
-               VALUES (d.__pgt_row_id, {d_user_col_list})",
-            part_pred_placeholder = if st.st_partition_key.is_some() {
-                " __PGT_PART_PRED__"
-            } else {
-                ""
-            },
+        let merge_template = build_merge_sql(
+            &quoted_table,
+            &template_using,
+            &user_cols,
+            st.st_partition_key.is_some(),
         );
         // QF-1: Log at LOG level only when pg_trickle.log_merge_sql = on.
         if crate::config::pg_trickle_log_merge_sql() {
@@ -4354,51 +4495,17 @@ pub fn execute_differential_refresh(
         // EC-06: Keyless sources use counted DELETE + plain INSERT.
         // But if is_dedup is true, the ST itself has a unique row ID
         // so we must use standard keyed templates.
-        let trigger_delete_template = if st.has_keyless_source && !is_dedup {
-            build_keyless_delete_template(&quoted_table, st.pgt_id)
-        } else {
-            format!(
-                "DELETE FROM {quoted_table} AS st \
-                 USING __pgt_delta_{pgt_id} AS d \
-                 WHERE st.__pgt_row_id = d.__pgt_row_id \
-                   AND d.__pgt_action = 'D'",
-                pgt_id = st.pgt_id,
-            )
-        };
+        let use_keyless = st.has_keyless_source && !is_dedup;
+        let trigger_delete_template =
+            build_trigger_delete_sql(&quoted_table, st.pgt_id, use_keyless);
 
         // EC-06: Use normal UPDATE template for keyless sources — see
         // prewarm_merge_cache comment for full rationale.
-        let trigger_update_template = format!(
-            "UPDATE {quoted_table} AS st \
-             SET {update_set_clause} \
-             FROM __pgt_delta_{pgt_id} AS d \
-             WHERE st.__pgt_row_id = d.__pgt_row_id \
-               AND d.__pgt_action = 'I' \
-               AND ({is_distinct_clause})",
-            pgt_id = st.pgt_id,
-        );
+        let trigger_update_template =
+            build_trigger_update_sql(&quoted_table, st.pgt_id, &user_cols);
 
-        let trigger_insert_template = if st.has_keyless_source && !is_dedup {
-            format!(
-                "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
-                 SELECT d.__pgt_row_id, {d_user_col_list} \
-                 FROM __pgt_delta_{pgt_id} AS d \
-                 WHERE d.__pgt_action = 'I'",
-                pgt_id = st.pgt_id,
-            )
-        } else {
-            format!(
-                "INSERT INTO {quoted_table} (__pgt_row_id, {user_col_list}) \
-                 SELECT d.__pgt_row_id, {d_user_col_list} \
-                 FROM __pgt_delta_{pgt_id} AS d \
-                 WHERE d.__pgt_action = 'I' \
-                   AND NOT EXISTS (\
-                     SELECT 1 FROM {quoted_table} AS st \
-                     WHERE st.__pgt_row_id = d.__pgt_row_id\
-                   )",
-                pgt_id = st.pgt_id,
-            )
-        };
+        let trigger_insert_template =
+            build_trigger_insert_sql(&quoted_table, st.pgt_id, &user_cols, use_keyless);
 
         let _ = std::fs::write(
             "/tmp/pgtrickle_debug.sql",
@@ -5348,11 +5455,13 @@ pub fn execute_differential_refresh(
         let ratio_threshold =
             compute_adaptive_threshold(current_threshold, incr_total_ms, last_full);
 
-        // ── D-3: Cost-based threshold from historical data ──────────
+        // ── D-3 / B-4: Cost-based threshold from historical data ────
         // Blend the ratio-based threshold with a cost-model estimate
         // derived from recent refresh history.  The cost model computes
-        // the crossover delta ratio where INCR cost equals FULL cost.
-        let new_threshold = match estimate_cost_based_threshold(st.pgt_id) {
+        // the crossover delta ratio where INCR cost equals FULL cost,
+        // adjusted for query complexity class.
+        let complexity = classify_query_complexity(&st.defining_query);
+        let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.
                 let blended = ratio_threshold * 0.6 + cost_threshold * 0.4;
@@ -5420,20 +5529,90 @@ pub fn execute_differential_refresh(
     Ok((effective_count, 0))
 }
 
-/// D-3: Estimate a cost-based fallback threshold from refresh history.
+/// B-4: Aggregated refresh history statistics for cost-model prediction.
+struct RefreshHistoryStats {
+    /// Average milliseconds per delta row across recent DIFFERENTIAL refreshes.
+    avg_ms_per_delta: f64,
+    /// Average FULL refresh time in milliseconds.
+    avg_full_ms: f64,
+}
+
+/// B-4: Query recent refresh history stats for a stream table.
+///
+/// Returns `None` when insufficient history exists (fewer than 3
+/// completed DIFFERENTIAL refreshes or no completed FULL refresh).
+fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryStats> {
+    let stats: Option<(f64, f64)> = Spi::connect(|client| {
+        let sql = format!(
+            "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms \
+             FROM ( \
+               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 \
+                          / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, \
+                      COUNT(*)::int AS cnt \
+               FROM ( \
+                 SELECT end_time, start_time, delta_row_count \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = {pgt_id} \
+                   AND action = 'DIFFERENTIAL' \
+                   AND status = 'COMPLETED' \
+                   AND delta_row_count > 0 \
+                   AND end_time IS NOT NULL \
+                 ORDER BY refresh_id DESC LIMIT 10 \
+               ) __pgt_incr \
+             ) incr, ( \
+               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0) AS avg_full_ms \
+               FROM ( \
+                 SELECT end_time, start_time \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = {pgt_id} \
+                   AND action = 'FULL' \
+                   AND status = 'COMPLETED' \
+                   AND end_time IS NOT NULL \
+                 ORDER BY refresh_id DESC LIMIT 5 \
+               ) __pgt_full \
+             ) full_r \
+             WHERE incr.cnt >= 3 \
+               AND full_r.avg_full_ms IS NOT NULL \
+               AND full_r.avg_full_ms > 0 \
+               AND incr.avg_ms_per_delta IS NOT NULL \
+               AND incr.avg_ms_per_delta > 0",
+        );
+
+        let result: Option<(f64, f64)> = (|| {
+            let row = client.select(&sql, None, &[]).ok()?.first();
+            let avg_ms_per_delta: f64 = row.get::<f64>(1).ok()??;
+            let avg_full_ms: f64 = row.get::<f64>(2).ok()??;
+            Some((avg_ms_per_delta, avg_full_ms))
+        })();
+        Ok::<_, pgrx::spi::SpiError>(result)
+    })
+    .unwrap_or(None);
+
+    let (avg_ms_per_delta, avg_full_ms) = stats?;
+    Some(RefreshHistoryStats {
+        avg_ms_per_delta,
+        avg_full_ms,
+    })
+}
+
+/// D-3 / B-4: Estimate a cost-based fallback threshold from refresh history.
 ///
 /// Queries the last N DIFFERENTIAL and FULL refreshes for a stream table
 /// and computes the crossover delta ratio where incremental cost equals
-/// full cost.  Returns `None` if insufficient history is available (fewer
+/// full cost.  The `complexity` class adjusts the per-delta-row cost
+/// via a multiplicative factor (joins and aggregates are more expensive
+/// per delta row than plain scans).
+///
+/// Returns `None` if insufficient history is available (fewer
 /// than 3 DIFFERENTIAL or no FULL refresh recorded).
 ///
 /// The model:
-///   incr_cost(delta_ratio) ≈ avg_incr_cost_per_delta_row × delta_ratio × table_size
+///   incr_cost(delta_ratio) ≈ avg_incr_cost_per_delta_row × complexity_factor × delta_ratio × table_size
 ///   full_cost              ≈ avg_full_ms
-///   crossover_ratio        = avg_full_ms / (avg_cost_per_delta_row × table_size)
+///   crossover_ratio        = avg_full_ms / (avg_cost_per_delta_row × complexity_factor × table_size)
 ///
 /// Clamped to [0.01, 0.80].
-fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
+fn estimate_cost_based_threshold(pgt_id: i64, complexity: QueryComplexityClass) -> Option<f64> {
     // Query recent completed DIFFERENTIAL refreshes with non-zero delta.
     let stats: Option<(f64, f64, f64)> = Spi::connect(|client| {
         // avg_ms_per_delta: average milliseconds per delta row
@@ -5490,12 +5669,12 @@ fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
 
     let (avg_ms_per_delta, avg_full_ms, avg_delta) = stats?;
 
-    // crossover_delta = avg_full_ms / avg_ms_per_delta
-    // Simplified: if we know the average delta and the crossover delta,
-    // the threshold ratio is crossover_delta / source_table_size.
-    // Since we don't have source_table_size here, we use the ratio of
-    // crossover_delta to the historical average delta as a scaling factor.
-    let crossover_delta = avg_full_ms / avg_ms_per_delta;
+    // crossover_delta = avg_full_ms / (avg_ms_per_delta × complexity_factor)
+    // The complexity factor scales the per-delta-row cost: join_agg queries
+    // have 4× the cost per delta row compared to a plain scan, so their
+    // crossover point is lower (smaller change ratio triggers FULL).
+    let factor = complexity.diff_cost_factor();
+    let crossover_delta = avg_full_ms / (avg_ms_per_delta * factor);
     if avg_delta <= 0.0 {
         return None;
     }
@@ -5508,6 +5687,29 @@ fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
     let suggested: f64 = (global_ratio * scaling).clamp(0.01, 0.80);
 
     Some(suggested)
+}
+
+/// B-4: Pre-refresh predictive cost comparison.
+///
+/// **Before** executing a refresh, estimate the DIFFERENTIAL and FULL costs
+/// from historical data and the current delta size.  Returns `true` if the
+/// cost model recommends FULL refresh.
+///
+/// When insufficient history exists (cold start), returns `None` to let the
+/// caller fall through to the fixed-threshold heuristic.
+///
+/// Pure decision logic — called from the refresh decision path.
+fn cost_model_prefers_full(
+    avg_ms_per_delta: f64,
+    avg_full_ms: f64,
+    current_delta_rows: i64,
+    complexity: QueryComplexityClass,
+) -> bool {
+    let safety_margin = crate::config::pg_trickle_cost_model_safety_margin();
+    let factor = complexity.diff_cost_factor();
+    let estimated_diff = avg_ms_per_delta * factor * current_delta_rows as f64;
+    let estimated_full = avg_full_ms * safety_margin;
+    estimated_diff >= estimated_full
 }
 
 /// Compute a new adaptive fallback threshold based on observed performance.
@@ -6501,6 +6703,261 @@ mod tests {
             "Double quotes in column names must be escaped; got: {sql}"
         );
     }
+
+    // ── TG2-MERGE: build_merge_sql() unit tests ────────────────────
+
+    #[test]
+    fn test_build_merge_sql_single_column() {
+        let cols = vec!["amount".to_string()];
+        let sql = build_merge_sql("\"public\".\"totals\"", "(delta_query)", &cols, false);
+        assert!(sql.starts_with("MERGE INTO \"public\".\"totals\" AS st"));
+        assert!(sql.contains("USING (delta_query) AS d"));
+        assert!(sql.contains("ON st.__pgt_row_id = d.__pgt_row_id"));
+        assert!(sql.contains("WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE"));
+        assert!(sql.contains("UPDATE SET \"amount\" = d.\"amount\""));
+        assert!(sql.contains("INSERT (__pgt_row_id, \"amount\")"));
+        assert!(sql.contains("VALUES (d.__pgt_row_id, d.\"amount\")"));
+        assert!(!sql.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_build_merge_sql_multiple_columns() {
+        let cols = vec!["region".to_string(), "total".to_string(), "cnt".to_string()];
+        let sql = build_merge_sql(
+            "\"pgtrickle\".\"sales\"",
+            "(SELECT * FROM delta)",
+            &cols,
+            false,
+        );
+        assert!(sql.contains(
+            "UPDATE SET \"region\" = d.\"region\", \"total\" = d.\"total\", \"cnt\" = d.\"cnt\""
+        ));
+        assert!(sql.contains("INSERT (__pgt_row_id, \"region\", \"total\", \"cnt\")"));
+        assert!(sql.contains("VALUES (d.__pgt_row_id, d.\"region\", d.\"total\", d.\"cnt\")"));
+    }
+
+    #[test]
+    fn test_build_merge_sql_with_partition_key() {
+        let cols = vec!["val".to_string()];
+        let sql = build_merge_sql("\"public\".\"partitioned\"", "(delta)", &cols, true);
+        assert!(sql.contains("ON st.__pgt_row_id = d.__pgt_row_id __PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_build_merge_sql_without_partition_key() {
+        let cols = vec!["val".to_string()];
+        let sql = build_merge_sql("\"public\".\"simple\"", "(delta)", &cols, false);
+        assert!(!sql.contains("__PGT_PART_PRED__"));
+    }
+
+    #[test]
+    fn test_build_merge_sql_column_quoting() {
+        let cols = vec!["my \"col\"".to_string(), "normal".to_string()];
+        let sql = build_merge_sql("\"public\".\"t\"", "(delta)", &cols, false);
+        assert!(sql.contains("\"my \"\"col\"\"\""));
+    }
+
+    #[test]
+    fn test_build_merge_sql_is_distinct_from_guard() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let sql = build_merge_sql("\"public\".\"t\"", "(delta)", &cols, false);
+        assert!(sql.contains("IS DISTINCT FROM"));
+        assert!(sql.contains("st.\"a\"::text IS DISTINCT FROM d.\"a\"::text"));
+    }
+
+    // ── TG2-MERGE: format helpers ───────────────────────────────────
+
+    #[test]
+    fn test_format_col_list_basic() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(format_col_list(&cols), "\"a\", \"b\"");
+    }
+
+    #[test]
+    fn test_format_col_list_quoting() {
+        let cols = vec!["my \"col\"".to_string()];
+        assert_eq!(format_col_list(&cols), "\"my \"\"col\"\"\"");
+    }
+
+    #[test]
+    fn test_format_prefixed_col_list_basic() {
+        let cols = vec!["x".to_string(), "y".to_string()];
+        assert_eq!(format_prefixed_col_list("d", &cols), "d.\"x\", d.\"y\"");
+    }
+
+    #[test]
+    fn test_format_update_set_basic() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(format_update_set(&cols), "\"a\" = d.\"a\", \"b\" = d.\"b\"");
+    }
+
+    // ── TG2-MERGE: trigger template unit tests ──────────────────────
+
+    #[test]
+    fn test_build_trigger_delete_keyed() {
+        let sql = build_trigger_delete_sql("\"public\".\"t\"", 42, false);
+        assert!(sql.contains("DELETE FROM \"public\".\"t\" AS st"));
+        assert!(sql.contains("USING __pgt_delta_42 AS d"));
+        assert!(sql.contains("d.__pgt_action = 'D'"));
+    }
+
+    #[test]
+    fn test_build_trigger_delete_keyless() {
+        let sql = build_trigger_delete_sql("\"public\".\"t\"", 42, true);
+        assert!(sql.contains("ROW_NUMBER()"));
+        assert!(sql.contains("__pgt_delta_42"));
+    }
+
+    #[test]
+    fn test_build_trigger_update_sql_basic() {
+        let cols = vec!["val".to_string()];
+        let sql = build_trigger_update_sql("\"public\".\"t\"", 7, &cols);
+        assert!(sql.contains("UPDATE \"public\".\"t\" AS st"));
+        assert!(sql.contains("SET \"val\" = d.\"val\""));
+        assert!(sql.contains("FROM __pgt_delta_7 AS d"));
+        assert!(sql.contains("d.__pgt_action = 'I'"));
+        assert!(sql.contains("IS DISTINCT FROM"));
+    }
+
+    #[test]
+    fn test_build_trigger_insert_keyed() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let sql = build_trigger_insert_sql("\"public\".\"t\"", 10, &cols, false);
+        assert!(sql.contains("INSERT INTO \"public\".\"t\""));
+        assert!(sql.contains("NOT EXISTS"));
+        assert!(sql.contains("__pgt_delta_10"));
+    }
+
+    #[test]
+    fn test_build_trigger_insert_keyless() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let sql = build_trigger_insert_sql("\"public\".\"t\"", 10, &cols, true);
+        assert!(sql.contains("INSERT INTO \"public\".\"t\""));
+        assert!(!sql.contains("NOT EXISTS"));
+        assert!(sql.contains("__pgt_delta_10"));
+    }
+
+    // ── TG2-MERGE: has_non_monotonic_cte() unit tests ───────────────
+
+    #[test]
+    fn test_has_non_monotonic_cte_plain_scan() {
+        assert!(!has_non_monotonic_cte(
+            "SELECT * FROM changes_42 WHERE lsn > $1",
+        ));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_aggregate() {
+        assert!(has_non_monotonic_cte(
+            "WITH __pgt_cte_agg_1 AS (SELECT ...) SELECT * FROM __pgt_cte_agg_1",
+        ));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_left_join() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_left_join_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_full_join() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_full_join_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_anti_join() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_anti_join_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_semi_join() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_semi_join_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_distinct() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_dist_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_window() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_win_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_recursive() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_rc_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_intersect() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_isect_1 ..."));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_except() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_exct_1 ..."));
+    }
+
+    // ── TG2-MERGE: build_hash_child_merge() unit tests ──────────────
+
+    #[test]
+    fn test_build_hash_child_merge_replaces_target() {
+        let original = "MERGE INTO \"public\".\"parent\" AS st \
+                        USING (SELECT * FROM delta) AS d \
+                        ON st.__pgt_row_id = d.__pgt_row_id \
+                        WHEN MATCHED AND d.__pgt_action = 'D' THEN DELETE";
+        let result = build_hash_child_merge(
+            "\"public\".\"child_p0\"",
+            "__pgt_delta_mat_42",
+            "\"key\"",
+            pg_sys::Oid::from(12345u32),
+            4,
+            0,
+            original,
+            "\"public\".\"parent\"",
+        );
+        assert!(result.contains("ONLY \"public\".\"child_p0\""));
+        assert!(!result.contains("\"public\".\"parent\""));
+    }
+
+    #[test]
+    fn test_build_hash_child_merge_filters_with_satisfies_hash() {
+        let original = "MERGE INTO \"public\".\"parent\" AS st \
+                        USING (SELECT * FROM delta) AS d \
+                        ON st.__pgt_row_id = d.__pgt_row_id \
+                        WHEN MATCHED THEN DELETE";
+        let result = build_hash_child_merge(
+            "\"public\".\"child_p1\"",
+            "__pgt_mat",
+            "\"hash_col\"",
+            pg_sys::Oid::from(99u32),
+            8,
+            3,
+            original,
+            "\"public\".\"parent\"",
+        );
+        assert!(result.contains("satisfies_hash_partition(99::oid, 8, 3, \"hash_col\")"));
+        assert!(result.contains("__pgt_mat"));
+    }
+
+    #[test]
+    fn test_build_hash_child_merge_strips_part_pred() {
+        let original = "MERGE INTO \"public\".\"parent\" AS st \
+                        USING (SELECT * FROM delta) AS d \
+                        ON st.__pgt_row_id = d.__pgt_row_id __PGT_PART_PRED__ \
+                        WHEN MATCHED THEN DELETE";
+        let result = build_hash_child_merge(
+            "\"public\".\"child\"",
+            "__pgt_mat",
+            "\"k\"",
+            pg_sys::Oid::from(1u32),
+            2,
+            1,
+            original,
+            "\"public\".\"parent\"",
+        );
+        assert!(!result.contains("__PGT_PART_PRED__"));
+    }
 }
 
 #[cfg(feature = "pg_test")]
@@ -7335,5 +7792,125 @@ mod pg_tests {
             }
         };
         assert!(union_result.is_none());
+    }
+
+    // ── B-4: classify_query_complexity() ────────────────────────────
+
+    #[test]
+    fn test_classify_scan() {
+        let q = "SELECT id, name FROM users";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Scan);
+    }
+
+    #[test]
+    fn test_classify_filter() {
+        let q = "SELECT id, name FROM users WHERE active = true";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Filter);
+    }
+
+    #[test]
+    fn test_classify_aggregate() {
+        let q = "SELECT region, SUM(amount) FROM orders GROUP BY region";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::Aggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_join() {
+        let q = "SELECT o.id, u.name FROM orders o JOIN users u ON o.user_id = u.id";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Join);
+    }
+
+    #[test]
+    fn test_classify_join_aggregate() {
+        let q = "SELECT u.name, SUM(o.amount) FROM orders o JOIN users u ON o.user_id = u.id GROUP BY u.name";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::JoinAggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_left_join() {
+        let q = "SELECT * FROM a LEFT JOIN b ON a.id = b.a_id";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Join);
+    }
+
+    #[test]
+    fn test_classify_case_insensitive() {
+        let q = "select id from users where active group by id";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::Aggregate
+        );
+    }
+
+    // ── B-4: cost_model_prefers_full() ──────────────────────────────
+
+    #[test]
+    fn test_cost_model_prefers_full_large_delta() {
+        // avg_ms_per_delta=1.0, avg_full=100ms, delta=200 rows, scan class
+        // est_diff = 1.0 * 1.0 * 200 = 200ms > 100 * 0.8 = 80ms → FULL
+        assert!(cost_model_prefers_full(
+            1.0,
+            100.0,
+            200,
+            QueryComplexityClass::Scan
+        ));
+    }
+
+    #[test]
+    fn test_cost_model_prefers_diff_small_delta() {
+        // avg_ms_per_delta=1.0, avg_full=100ms, delta=10 rows, scan class
+        // est_diff = 1.0 * 1.0 * 10 = 10ms < 100 * 0.8 = 80ms → DIFF
+        assert!(!cost_model_prefers_full(
+            1.0,
+            100.0,
+            10,
+            QueryComplexityClass::Scan
+        ));
+    }
+
+    #[test]
+    fn test_cost_model_complexity_affects_decision() {
+        // Same delta count, but JoinAggregate has 4× factor
+        // Scan: est_diff = 0.5 * 1.0 * 100 = 50ms < 100 * 0.8 = 80ms → DIFF
+        assert!(!cost_model_prefers_full(
+            0.5,
+            100.0,
+            100,
+            QueryComplexityClass::Scan
+        ));
+        // JoinAgg: est_diff = 0.5 * 4.0 * 100 = 200ms > 80ms → FULL
+        assert!(cost_model_prefers_full(
+            0.5,
+            100.0,
+            100,
+            QueryComplexityClass::JoinAggregate
+        ));
+    }
+
+    // ── B-4: diff_cost_factor() ─────────────────────────────────────
+
+    #[test]
+    fn test_diff_cost_factors_ordering() {
+        assert!(
+            QueryComplexityClass::Scan.diff_cost_factor()
+                < QueryComplexityClass::Filter.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Filter.diff_cost_factor()
+                < QueryComplexityClass::Aggregate.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Aggregate.diff_cost_factor()
+                < QueryComplexityClass::Join.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Join.diff_cost_factor()
+                < QueryComplexityClass::JoinAggregate.diff_cost_factor()
+        );
     }
 }

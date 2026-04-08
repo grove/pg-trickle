@@ -333,6 +333,111 @@ fn bench_dag_operations(c: &mut Criterion) {
     group.finish();
 }
 
+// ── C-2: Incremental DAG rebuild benchmark ─────────────────────────────────
+
+/// Build a DAG with `n` stream tables in a wide fan-out topology (each ST
+/// depends on one shared base table), then benchmark the cost of removing
+/// and re-adding a single node — simulating what `rebuild_incremental` does
+/// without the SPI catalog lookup.
+fn bench_dag_incremental(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dag_incremental");
+
+    for n_nodes in [100, 500, 1000] {
+        // Setup: build a fan-out DAG (base → st_1, base → st_2, …).
+        group.bench_with_input(
+            BenchmarkId::new("remove_readd_single", n_nodes),
+            &n_nodes,
+            |b, &n| {
+                // Build the DAG once, then clone it for each iteration.
+                let mut template = StDag::new();
+                for id in 1..=n as i64 {
+                    template.add_st_node(DagNode {
+                        id: NodeId::StreamTable(id),
+                        schedule: Some(Duration::from_secs(60)),
+                        effective_schedule: Duration::from_secs(60),
+                        name: format!("st_{id}"),
+                        status: StStatus::Active,
+                        schedule_raw: None,
+                    });
+                    // Each ST depends on base table OID 10000
+                    template.add_edge(NodeId::BaseTable(10000), NodeId::StreamTable(id));
+                }
+                // Also add some inter-ST edges to simulate cascading deps
+                for id in 1..n as i64 / 2 {
+                    template.add_edge(
+                        NodeId::StreamTable(id),
+                        NodeId::StreamTable(id + n as i64 / 2),
+                    );
+                }
+                template.detect_cycles().unwrap();
+                template.topological_order().unwrap();
+
+                b.iter(|| {
+                    let mut dag = template.clone();
+                    let target_id = n as i64 / 2; // middle node
+
+                    // Phase 1: Remove the node (simulates rebuild_incremental Phase 1)
+                    dag.remove_st_node(target_id);
+
+                    // Phase 2: Re-add the node (simulates catalog re-query result)
+                    dag.add_st_node(DagNode {
+                        id: NodeId::StreamTable(target_id),
+                        schedule: Some(Duration::from_secs(60)),
+                        effective_schedule: Duration::from_secs(60),
+                        name: format!("st_{target_id}"),
+                        status: StStatus::Active,
+                        schedule_raw: None,
+                    });
+                    dag.add_edge(NodeId::BaseTable(10000), NodeId::StreamTable(target_id));
+                    if target_id <= n as i64 / 2 {
+                        dag.add_edge(
+                            NodeId::StreamTable(target_id),
+                            NodeId::StreamTable(target_id + n as i64 / 2),
+                        );
+                    }
+
+                    // Phase 3: Re-resolve CALCULATED schedules
+                    dag.resolve_calculated_schedule(60);
+
+                    black_box(&dag);
+                });
+            },
+        );
+
+        // Benchmark: full rebuild from scratch at same scale (for comparison)
+        group.bench_with_input(
+            BenchmarkId::new("full_rebuild_comparison", n_nodes),
+            &n_nodes,
+            |b, &n| {
+                b.iter(|| {
+                    let mut dag = StDag::new();
+                    for id in 1..=n as i64 {
+                        dag.add_st_node(DagNode {
+                            id: NodeId::StreamTable(id),
+                            schedule: Some(Duration::from_secs(60)),
+                            effective_schedule: Duration::from_secs(60),
+                            name: format!("st_{id}"),
+                            status: StStatus::Active,
+                            schedule_raw: None,
+                        });
+                        dag.add_edge(NodeId::BaseTable(10000), NodeId::StreamTable(id));
+                    }
+                    for id in 1..n as i64 / 2 {
+                        dag.add_edge(
+                            NodeId::StreamTable(id),
+                            NodeId::StreamTable(id + n as i64 / 2),
+                        );
+                    }
+                    dag.detect_cycles().unwrap();
+                    dag.topological_order().unwrap();
+                    black_box(&dag);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // ── XXH64 hash benchmark ──────────────────────────────────────────────────
 
 fn bench_xxh64(c: &mut Criterion) {
@@ -365,6 +470,7 @@ criterion_group!(
     bench_frontier_json,
     bench_canonical_period,
     bench_dag_operations,
+    bench_dag_incremental,
     bench_xxh64,
 );
 criterion_main!(benches);

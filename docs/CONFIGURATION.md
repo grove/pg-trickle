@@ -23,6 +23,8 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.slot\_lag\_critical\_threshold\_mb](#pg_trickleslot_lag_critical_threshold_mb)
   - [Refresh Performance](#refresh-performance)
     - [pg\_trickle.differential\_max\_change\_ratio](#pg_trickledifferential_max_change_ratio)
+    - [pg\_trickle.refresh\_strategy](#pg_tricklerefresh_strategy)
+    - [pg\_trickle.cost\_model\_safety\_margin](#pg_tricklecost_model_safety_margin)
     - [pg\_trickle.max\_delta\_estimate\_rows](#pg_tricklemax_delta_estimate_rows)
     - [pg\_trickle.planner\_aggressive](#pg_trickleplanner_aggressive)
     - [pg\_trickle.merge\_join\_strategy](#pg_tricklemerge_join_strategy)
@@ -423,6 +425,82 @@ SET pg_trickle.differential_max_change_ratio = 0.10;
 
 -- Disable adaptive fallback
 SET pg_trickle.differential_max_change_ratio = 0.0;
+```
+
+---
+
+### pg_trickle.refresh_strategy
+
+Cluster-wide refresh strategy override.
+
+| Property | Value |
+|---|---|
+| Type | `string` |
+| Default | `'auto'` |
+| Values | `'auto'`, `'differential'`, `'full'` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+Controls the FULL vs. DIFFERENTIAL decision for all stream tables whose `refresh_mode` is `DIFFERENTIAL`:
+
+- **`'auto'`** (default): Use the adaptive cost-based heuristic that considers `differential_max_change_ratio`, per-ST `auto_threshold`, refresh history, and spill detection to pick the optimal strategy per refresh cycle.
+- **`'differential'`**: Always use DIFFERENTIAL refresh — skip the adaptive ratio check entirely. The BUF-LIMIT safety check (`max_buffer_rows`) still applies.
+- **`'full'`**: Always use FULL refresh regardless of change volume. Useful for debugging or when you know DIFFERENTIAL is consistently slower for your workload.
+
+**Important:** Per-ST `refresh_mode` in the catalog takes precedence. Stream tables explicitly configured as `refresh_mode = 'FULL'` always use FULL regardless of this GUC.
+
+**Tuning Guidance:**
+- **Most workloads**: Leave at `'auto'` — the adaptive heuristic learns from refresh history.
+- **Known-low-churn workloads**: Set to `'differential'` to eliminate the per-source capped-count query overhead.
+- **Debugging delta issues**: Temporarily set to `'full'` to compare behavior.
+
+```sql
+-- Force DIFFERENTIAL for all stream tables (skip ratio check)
+SET pg_trickle.refresh_strategy = 'differential';
+
+-- Force FULL for all stream tables (debugging)
+SET pg_trickle.refresh_strategy = 'full';
+
+-- Reset to adaptive heuristic
+SET pg_trickle.refresh_strategy = 'auto';
+```
+
+---
+
+### pg_trickle.cost_model_safety_margin
+
+*Added in v0.17.0.* Safety margin for the predictive cost model that decides FULL vs. DIFFERENTIAL.
+
+| Property | Value |
+|---|---|
+| Type | `float` |
+| Default | `0.8` |
+| Range | `0.1` – `2.0` |
+| Context | `SUSET` |
+| Restart Required | No |
+
+When `refresh_strategy = 'auto'`, the cost model estimates DIFFERENTIAL and FULL costs from recent refresh history. DIFFERENTIAL is chosen when:
+
+```
+estimated_diff_cost < estimated_full_cost × safety_margin
+```
+
+A value below 1.0 biases toward DIFFERENTIAL (which has lower lock contention and is generally preferred). A value above 1.0 biases toward FULL.
+
+The cost model also classifies each stream table's query complexity (scan, filter, aggregate, join, or join+aggregate) and uses per-class coefficients learned from historical data.
+
+**Tuning Guidance:**
+- **`0.8`** (default): Prefer DIFFERENTIAL unless it's nearly as expensive as FULL.
+- **`0.5`**: Strongly prefer DIFFERENTIAL — only fall back when it's clearly more expensive.
+- **`1.0`**: Neutral — pick whichever is estimated to be cheaper.
+- **`1.2`**: Slightly prefer FULL — useful when FULL is very fast and DIFFERENTIAL lock contention is a concern.
+
+```sql
+-- Strongly prefer DIFFERENTIAL
+SET pg_trickle.cost_model_safety_margin = 0.5;
+
+-- Neutral (pick the estimated cheapest)
+SET pg_trickle.cost_model_safety_margin = 1.0;
 ```
 
 ---

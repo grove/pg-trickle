@@ -150,7 +150,40 @@ fn parse_first_select(_sql: &str) -> Result<Option<*const pg_sys::SelectStmt>, P
     ))
 }
 
-// Sub-modules (declared after `cast_node!` macro so it is in scope).
+/// Check whether a `*mut pg_sys::Node` has a specific `NodeTag` without downcasting.
+///
+/// Returns `true` if the pointer is non-null and the node's tag matches.
+/// This is the safe counterpart for standalone `pgrx::is_a()` checks that
+/// are not followed by a pointer cast (those should use `cast_node!` instead).
+macro_rules! is_node_type {
+    ($node:expr, $tag:ident) => {{
+        let __n = $node;
+        // SAFETY: `pgrx::is_a` reads the node tag field, which is valid
+        // for any non-null `Node*` allocated by the PostgreSQL parser.
+        !__n.is_null() && unsafe { pgrx::is_a(__n, pg_sys::NodeTag::$tag) }
+    }};
+}
+
+/// Safely dereference a non-null pointer to a PostgreSQL parse-tree node.
+///
+/// Returns `&T` after a null check. Panics if the pointer is null.
+/// Use this for struct field pointers that are known to be non-null from
+/// prior checks (e.g., `withClause`, `alias`, `larg`, `rarg`).
+macro_rules! pg_deref {
+    ($ptr:expr) => {{
+        let __p = $ptr;
+        assert!(
+            !(__p as *const u8).is_null(),
+            "pg_deref: unexpected NULL pointer"
+        );
+        // SAFETY: Caller verified non-null via assertion. The pointer is
+        // from a PostgreSQL parse-tree node allocated in a valid memory context.
+        unsafe { &*__p }
+    }};
+}
+
+// Sub-modules (declared after `cast_node!` / `is_node_type!` / `pg_deref!`
+// macros so they are in scope).
 mod rewrites;
 mod sublinks;
 pub mod types;

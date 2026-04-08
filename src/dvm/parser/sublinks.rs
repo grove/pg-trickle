@@ -40,7 +40,7 @@ fn extract_where_sublinks(
 ) -> Result<(Vec<SublinkWrapper>, Option<Expr>), PgTrickleError> {
     // Case 1: The node itself is a SubLink
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_SubLink) } {
+    if is_node_type!(node, T_SubLink) {
         let wrapper = parse_sublink_to_wrapper(node, false, cte_ctx)?;
         return Ok((vec![wrapper], None));
     }
@@ -54,7 +54,7 @@ fn extract_where_sublinks(
                 // INVARIANT: args.len() == 1 guarantees head() returns Some.
                 let arg = args.head().unwrap();
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if unsafe { pgrx::is_a(arg, pg_sys::NodeTag::T_SubLink) } {
+                if is_node_type!(arg, T_SubLink) {
                     let wrapper = parse_sublink_to_wrapper(arg, true, cte_ctx)?;
                     return Ok((vec![wrapper], None));
                 }
@@ -73,7 +73,7 @@ fn extract_where_sublinks(
                 }
 
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if unsafe { pgrx::is_a(arg_ptr, pg_sys::NodeTag::T_SubLink) } {
+                if is_node_type!(arg_ptr, T_SubLink) {
                     // Direct SubLink under AND
                     let wrapper = parse_sublink_to_wrapper(arg_ptr, false, cte_ctx)?;
                     wrappers.push(wrapper);
@@ -85,7 +85,7 @@ fn extract_where_sublinks(
                             // INVARIANT: inner_args.len() == 1 guarantees head() returns Some.
                             let inner_arg = inner_args.head().unwrap();
                             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                            if unsafe { pgrx::is_a(inner_arg, pg_sys::NodeTag::T_SubLink) } {
+                            if is_node_type!(inner_arg, T_SubLink) {
                                 let wrapper = parse_sublink_to_wrapper(inner_arg, true, cte_ctx)?;
                                 wrappers.push(wrapper);
                                 continue;
@@ -161,7 +161,7 @@ pub(crate) fn node_tree_contains_sublink(node: *mut pg_sys::Node) -> bool {
         return false;
     }
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_SubLink) } {
+    if is_node_type!(node, T_SubLink) {
         return true;
     }
     if let Some(boolexpr) = cast_node!(node, T_BoolExpr, pg_sys::BoolExpr)
@@ -214,11 +214,11 @@ pub(crate) fn and_contains_or_with_sublink(node: *mut pg_sys::Node) -> bool {
         return false;
     }
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if !unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_BoolExpr) } {
+    if !is_node_type!(node, T_BoolExpr) {
         return false;
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let boolexpr = unsafe { &*(node as *const pg_sys::BoolExpr) };
+    let boolexpr = pg_deref!(node as *const pg_sys::BoolExpr);
     if boolexpr.boolop != pg_sys::BoolExprType::AND_EXPR {
         return false;
     }
@@ -228,9 +228,9 @@ pub(crate) fn and_contains_or_with_sublink(node: *mut pg_sys::Node) -> bool {
     flatten_and_conjuncts(node, &mut conjuncts);
     for conj in conjuncts {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !conj.is_null() && unsafe { pgrx::is_a(conj, pg_sys::NodeTag::T_BoolExpr) } {
+        if !conj.is_null() && is_node_type!(conj, T_BoolExpr) {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let inner = unsafe { &*(conj as *const pg_sys::BoolExpr) };
+            let inner = pg_deref!(conj as *const pg_sys::BoolExpr);
             if inner.boolop == pg_sys::BoolExprType::OR_EXPR && node_tree_contains_sublink(conj) {
                 return true;
             }
@@ -259,14 +259,14 @@ pub(crate) fn deparse_select_to_sql(
 
     // Check if it's a SelectStmt
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if !unsafe { pgrx::is_a(select_node, pg_sys::NodeTag::T_SelectStmt) } {
+    if !is_node_type!(select_node, T_SelectStmt) {
         return Err(PgTrickleError::QueryParseError(
             "Expected SelectStmt in deparse_select_to_sql".into(),
         ));
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let select = unsafe { &*(select_node as *const pg_sys::SelectStmt) };
+    let select = pg_deref!(select_node as *const pg_sys::SelectStmt);
     let mut sql = String::from("SELECT ");
 
     // Deparse target list
@@ -376,7 +376,7 @@ fn deparse_from_item(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> 
         }
         if !rv.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let alias_node = unsafe { &*rv.alias };
+            let alias_node = pg_deref!(rv.alias);
             if !alias_node.aliasname.is_null() {
                 let alias = pg_cstr_to_str(alias_node.aliasname).unwrap_or("?");
                 sql.push_str(&format!(" \"{alias}\""));
@@ -403,7 +403,7 @@ fn deparse_from_item(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> 
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-            || !unsafe { pgrx::is_a(sub.subquery, pg_sys::NodeTag::T_SelectStmt) }
+            || !is_node_type!(sub.subquery, T_SelectStmt)
         {
             return Err(PgTrickleError::UnsupportedOperator(
                 "RangeSubselect with non-SelectStmt subquery is not supported".into(),
@@ -414,7 +414,7 @@ fn deparse_from_item(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> 
         let mut result = format!("{lateral_kw}({inner_sql})");
         if !sub.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(sub.alias) };
+            let a = pg_deref!(sub.alias);
             if !a.aliasname.is_null() {
                 let alias = pg_cstr_to_str(a.aliasname).unwrap_or("?");
                 result.push_str(&format!(" \"{}\"", alias.replace('"', "\"\"")));
@@ -438,7 +438,7 @@ fn parse_sublink_to_wrapper(
     cte_ctx: &mut CteParseContext,
 ) -> Result<SublinkWrapper, PgTrickleError> {
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let sublink = unsafe { &*(node as *const pg_sys::SubLink) };
+    let sublink = pg_deref!(node as *const pg_sys::SubLink);
 
     match sublink.subLinkType {
         pg_sys::SubLinkType::EXISTS_SUBLINK => parse_exists_sublink(sublink, negated, cte_ctx),
@@ -505,7 +505,7 @@ fn parse_exists_sublink(
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
+    let inner_select = pg_deref!(sublink.subselect as *const pg_sys::SelectStmt);
 
     // Parse the inner FROM clause into an OpTree
     let from_list = pg_list::<pg_sys::Node>(inner_select.fromClause);
@@ -857,7 +857,7 @@ fn parse_any_sublink(
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
+    let inner_select = pg_deref!(sublink.subselect as *const pg_sys::SelectStmt);
 
     // Parse the inner FROM clause
     let from_list = pg_list::<pg_sys::Node>(inner_select.fromClause);
@@ -1166,7 +1166,7 @@ fn parse_all_sublink(
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
+    let inner_select = pg_deref!(sublink.subselect as *const pg_sys::SelectStmt);
 
     // Parse the inner FROM clause
     let from_list = pg_list::<pg_sys::Node>(inner_select.fromClause);
@@ -1314,22 +1314,21 @@ unsafe fn parse_defining_query_inner(query: &str) -> Result<ParseResult, PgTrick
         .head()
         .ok_or_else(|| PgTrickleError::QueryParseError("Empty parse list".into()))?;
 
-    // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-    let stmt_ptr = unsafe { (*raw_stmt).stmt as *const pg_sys::SelectStmt };
+    let stmt_ptr = pg_deref!(raw_stmt).stmt as *const pg_sys::SelectStmt;
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if !unsafe { pgrx::is_a(stmt_ptr as *mut pg_sys::Node, pg_sys::NodeTag::T_SelectStmt) } {
+    if !is_node_type!(stmt_ptr as *mut pg_sys::Node, T_SelectStmt) {
         return Err(PgTrickleError::QueryParseError(
             "Defining query must be a SELECT statement".into(),
         ));
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let select = unsafe { &*stmt_ptr };
+    let select = pg_deref!(stmt_ptr);
 
     // ── Extract CTE definitions (if any) ─────────────────────────────
     let has_recursion = if !select.withClause.is_null() {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let wc = unsafe { &*select.withClause };
+        let wc = pg_deref!(select.withClause);
         wc.recursive
     } else {
         false
@@ -1531,7 +1530,7 @@ unsafe fn parse_set_op_child(
         ));
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let child = unsafe { &*child_ptr };
+    let child = pg_deref!(child_ptr);
     if child.op != pg_sys::SetOperation::SETOP_NONE {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         unsafe { parse_set_operation(child, cte_ctx) }
@@ -2019,12 +2018,12 @@ unsafe fn parse_appended_scalar_target_subqueries(
 
     for node_ptr in target_list.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if node_ptr.is_null() || !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if node_ptr.is_null() || !is_node_type!(node_ptr, T_ResTarget) {
             continue;
         }
 
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if rt.val.is_null() {
             continue;
         }
@@ -2097,7 +2096,7 @@ unsafe fn parse_scalar_target_subquery(
         }
         if sublink.subselect.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-            || !unsafe { pgrx::is_a(sublink.subselect, pg_sys::NodeTag::T_SelectStmt) }
+            || !is_node_type!(sublink.subselect, T_SelectStmt)
         {
             return Err(PgTrickleError::QueryParseError(
                 "Scalar subquery target must contain a SELECT".into(),
@@ -2105,7 +2104,7 @@ unsafe fn parse_scalar_target_subquery(
         }
 
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let inner_select = unsafe { &*(sublink.subselect as *const pg_sys::SelectStmt) };
+        let inner_select = pg_deref!(sublink.subselect as *const pg_sys::SelectStmt);
         // If the inner SELECT contains constructs that the DVM pipeline cannot
         // parse fully (e.g. LIMIT/OFFSET, correlated sub-expressions with OR),
         // fall back to `Ok(None)` so the caller's `node_to_expr` path deparsed
@@ -2145,7 +2144,7 @@ unsafe fn parse_scalar_target_subquery(
 
     let inner_select = match parse_first_select(inner_sql.as_str())? {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        Some(s) => unsafe { &*s },
+        Some(s) => pg_deref!(s),
         None => {
             return Err(PgTrickleError::QueryParseError(
                 "Scalar subquery target must parse to a SELECT".into(),
@@ -2218,7 +2217,7 @@ unsafe fn parse_from_item_inner(
         let table_name = pg_cstr_to_str(rv.relname)?.to_string();
         let alias = if !rv.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rv.alias) };
+            let a = pg_deref!(rv.alias);
             pg_cstr_to_str(a.aliasname)
                 .unwrap_or(&table_name)
                 .to_string()
@@ -2233,7 +2232,7 @@ unsafe fn parse_from_item_inner(
         {
             let self_alias = if !rv.alias.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let a = unsafe { &*(rv.alias) };
+                let a = pg_deref!(rv.alias);
                 pg_cstr_to_str(a.aliasname)
                     .unwrap_or(&table_name)
                     .to_string()
@@ -2252,7 +2251,7 @@ unsafe fn parse_from_item_inner(
             // Extract column aliases from the RangeVar's alias, if any
             let col_aliases = if !rv.alias.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let a = unsafe { &*(rv.alias) };
+                let a = pg_deref!(rv.alias);
                 extract_alias_colnames(a)?
             } else {
                 Vec::new()
@@ -2277,7 +2276,7 @@ unsafe fn parse_from_item_inner(
                 // Check `op` field to handle UNION ALL CTE bodies (e.g.,
                 // non-recursive CTEs that happen to use UNION ALL).
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let cte_stmt = unsafe { &*cte_ctx.raw_map[&table_name] };
+                let cte_stmt = pg_deref!(cte_ctx.raw_map[&table_name]);
                 let cte_tree = if cte_stmt.op != pg_sys::SetOperation::SETOP_NONE {
                     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
                     unsafe { parse_set_operation(cte_stmt, cte_ctx)? }
@@ -2551,19 +2550,19 @@ unsafe fn parse_from_item_inner(
 
         // The subquery must be a SelectStmt
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(sub.subquery, pg_sys::NodeTag::T_SelectStmt) } {
+        if !is_node_type!(sub.subquery, T_SelectStmt) {
             return Err(PgTrickleError::QueryParseError(
                 "Subquery in FROM must be a SELECT statement".into(),
             ));
         }
 
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let sub_stmt = unsafe { &*(sub.subquery as *const pg_sys::SelectStmt) };
+        let sub_stmt = pg_deref!(sub.subquery as *const pg_sys::SelectStmt);
 
         // Extract alias name
         let alias = if !sub.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(sub.alias) };
+            let a = pg_deref!(sub.alias);
             pg_cstr_to_str(a.aliasname)
                 .unwrap_or("subquery")
                 .to_string()
@@ -2574,7 +2573,7 @@ unsafe fn parse_from_item_inner(
         // Extract column aliases from the alias, if any
         let col_aliases = if !sub.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(sub.alias) };
+            let a = pg_deref!(sub.alias);
             extract_alias_colnames(a)?
         } else {
             Vec::new()
@@ -2670,7 +2669,7 @@ unsafe fn parse_from_item_inner(
 
         let func_node = inner_list.head().unwrap();
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(func_node, pg_sys::NodeTag::T_FuncCall) } {
+        if !is_node_type!(func_node, T_FuncCall) {
             return Err(PgTrickleError::QueryParseError(
                 "RangeFunction does not contain a FuncCall node".into(),
             ));
@@ -2683,7 +2682,7 @@ unsafe fn parse_from_item_inner(
         // Extract alias name
         let alias = if !rf.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rf.alias) };
+            let a = pg_deref!(rf.alias);
             pg_cstr_to_str(a.aliasname).unwrap_or("srf").to_string()
         } else {
             "srf".to_string()
@@ -2692,7 +2691,7 @@ unsafe fn parse_from_item_inner(
         // Extract column aliases (e.g., AS child(key, value))
         let column_aliases = if !rf.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rf.alias) };
+            let a = pg_deref!(rf.alias);
             extract_alias_colnames(a)?
         } else {
             Vec::new()
@@ -2723,7 +2722,7 @@ unsafe fn parse_from_item_inner(
         // Extract alias
         let alias = if !jt.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(jt.alias) };
+            let a = pg_deref!(jt.alias);
             pg_cstr_to_str(a.aliasname).unwrap_or("jt").to_string()
         } else {
             "jt".to_string()
@@ -2732,7 +2731,7 @@ unsafe fn parse_from_item_inner(
         // Extract column aliases from the alias node
         let column_aliases = if !jt.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(jt.alias) };
+            let a = pg_deref!(jt.alias);
             extract_alias_colnames(a)?
         } else {
             Vec::new()
@@ -2756,7 +2755,7 @@ unsafe fn parse_from_item_inner(
             }),
         })
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    } else if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_RangeTableSample) } {
+    } else if is_node_type!(node, T_RangeTableSample) {
         // TABLESAMPLE: SELECT * FROM t TABLESAMPLE BERNOULLI(10)
         // Stream tables materialize complete result sets; sampling at parse
         // time is not meaningful or supported.
@@ -2769,8 +2768,7 @@ unsafe fn parse_from_item_inner(
     } else {
         Err(PgTrickleError::UnsupportedOperator(format!(
             "Unsupported FROM item node type: {:?}",
-            // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-            unsafe { (*node).type_ },
+            pg_deref!(node).type_,
         )))
     }
 }
@@ -2804,7 +2802,7 @@ unsafe fn extract_cte_map_with_recursive(
     with_clause: *const pg_sys::WithClause,
 ) -> Result<RecursiveCteMapResult, PgTrickleError> {
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let wc = unsafe { &*with_clause };
+    let wc = pg_deref!(with_clause);
     let cte_list = pg_list::<pg_sys::Node>(wc.ctes);
     let mut map = HashMap::new();
     let mut def_aliases_map = HashMap::new();
@@ -2812,12 +2810,12 @@ unsafe fn extract_cte_map_with_recursive(
 
     for node_ptr in cte_list.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_CommonTableExpr) } {
+        if !is_node_type!(node_ptr, T_CommonTableExpr) {
             continue;
         }
 
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let cte = unsafe { &*(node_ptr as *const pg_sys::CommonTableExpr) };
+        let cte = pg_deref!(node_ptr as *const pg_sys::CommonTableExpr);
 
         // Extract CTE name
         let cte_name = pg_cstr_to_str(cte.ctename)?.to_string();
@@ -2829,7 +2827,7 @@ unsafe fn extract_cte_map_with_recursive(
             )));
         }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(cte.ctequery, pg_sys::NodeTag::T_SelectStmt) } {
+        if !is_node_type!(cte.ctequery, T_SelectStmt) {
             return Err(PgTrickleError::QueryParseError(format!(
                 "CTE '{cte_name}' body is not a SELECT statement",
             )));
@@ -2847,7 +2845,7 @@ unsafe fn extract_cte_map_with_recursive(
         // clause has the RECURSIVE keyword (wc.recursive), AND
         // (b) the CTE body is a UNION or UNION ALL (op == SETOP_UNION).
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let body = unsafe { &*(cte.ctequery as *const pg_sys::SelectStmt) };
+        let body = pg_deref!(cte.ctequery as *const pg_sys::SelectStmt);
         let is_recursive =
             cte.cterecursive || (wc.recursive && body.op == pg_sys::SetOperation::SETOP_UNION);
 
@@ -3040,7 +3038,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let field = fields.head().unwrap();
                 // Bare `SELECT *` arrives as ColumnRef with a single A_Star field.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if unsafe { pgrx::is_a(field, pg_sys::NodeTag::T_A_Star) } {
+                if is_node_type!(field, T_A_Star) {
                     return Ok(Expr::Star { table_alias: None });
                 }
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
@@ -3058,7 +3056,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 // T_A_Star is not a T_String, so node_to_string falls back to
                 // "node_T_A_Star" — check explicitly before calling it.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if unsafe { pgrx::is_a(last, pg_sys::NodeTag::T_A_Star) } {
+                if is_node_type!(last, T_A_Star) {
                     return Ok(Expr::Star {
                         table_alias: Some(table_alias),
                     });
@@ -3079,7 +3077,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let last = fields.get_ptr(2).unwrap();
                 // `schema.table.*` — same T_A_Star guard as the 2-field case.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if unsafe { pgrx::is_a(last, pg_sys::NodeTag::T_A_Star) } {
+                if is_node_type!(last, T_A_Star) {
                     return Ok(Expr::Star {
                         table_alias: Some(table_alias),
                     });
@@ -3096,7 +3094,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             ))),
         }
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    } else if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_A_Const) } {
+    } else if is_node_type!(node, T_A_Const) {
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         Ok(Expr::Raw(unsafe { deparse_node(node) }))
     } else if let Some(aexpr) = cast_node!(node, T_A_Expr, pg_sys::A_Expr) {
@@ -3407,7 +3405,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         // Window functions: FuncCall with non-null .over → emit full OVER clause
         if !fcall.over.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let over = unsafe { &*fcall.over };
+            let over = pg_deref!(fcall.over);
             let mut over_parts = Vec::new();
 
             // PARTITION BY
@@ -3489,7 +3487,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let when_list = pg_list::<pg_sys::Node>(case_expr.args);
         for w in when_list.iter_ptr() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let case_when = unsafe { &*(w as *const pg_sys::CaseWhen) };
+            let case_when = pg_deref!(w as *const pg_sys::CaseWhen);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             let cond = unsafe { node_to_expr(case_when.expr as *mut pg_sys::Node)? };
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
@@ -3643,7 +3641,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let field_name = pg_cstr_to_str(s.sval).unwrap_or("");
                 sql = format!("({sql}).{field_name}");
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-            } else if unsafe { pgrx::is_a(ind_node, pg_sys::NodeTag::T_A_Star) } {
+            } else if is_node_type!(ind_node, T_A_Star) {
                 sql = format!("({sql}).*");
             }
         }
@@ -3698,7 +3696,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let key = unsafe { node_to_expr(kv.key as *mut pg_sys::Node)? };
                 let val = if !kv.value.is_null() {
                     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                    let jve = unsafe { &*kv.value };
+                    let jve = pg_deref!(kv.value);
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
                 } else {
@@ -3752,7 +3750,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
     } else if let Some(jpe) = cast_node!(node, T_JsonParseExpr, pg_sys::JsonParseExpr) {
         let arg = if !jpe.expr.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let jve = unsafe { &*jpe.expr };
+            let jve = pg_deref!(jpe.expr);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
         } else {
@@ -3772,7 +3770,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
     } else if let Some(jse) = cast_node!(node, T_JsonSerializeExpr, pg_sys::JsonSerializeExpr) {
         let arg = if !jse.expr.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let jve = unsafe { &*jse.expr };
+            let jve = pg_deref!(jse.expr);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
         } else {
@@ -3786,12 +3784,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut parts = Vec::new();
         if !joa.arg.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let kv = unsafe { &*joa.arg };
+            let kv = pg_deref!(joa.arg);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             let key = unsafe { node_to_expr(kv.key as *mut pg_sys::Node)? };
             let val = if !kv.value.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let jve = unsafe { &*kv.value };
+                let jve = pg_deref!(kv.value);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                 unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
             } else {
@@ -3813,7 +3811,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
     } else if let Some(jaa) = cast_node!(node, T_JsonArrayAgg, pg_sys::JsonArrayAgg) {
         let arg = if !jaa.arg.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let jve = unsafe { &*jaa.arg };
+            let jve = pg_deref!(jaa.arg);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
         } else {
@@ -3829,8 +3827,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         Ok(Expr::Raw(sql))
     } else {
         // Catch-all: reject with clear error instead of silently producing broken SQL
-        // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        let tag = unsafe { (*node).type_ };
+        let tag = pg_deref!(node).type_;
         Err(PgTrickleError::UnsupportedOperator(format!(
             "Expression type {tag:?} is not supported in defining queries",
         )))
@@ -3846,7 +3843,7 @@ unsafe fn append_json_output(sql: &mut String, output: *const pg_sys::JsonOutput
         return;
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let out = unsafe { &*output };
+    let out = pg_deref!(output);
     if !out.typeName.is_null() {
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let type_name = unsafe { deparse_typename(out.typeName) };
@@ -3868,7 +3865,7 @@ unsafe fn append_json_agg_clauses(
         return;
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let ctor = unsafe { &*constructor };
+    let ctor = pg_deref!(constructor);
 
     // ORDER BY
     let order_list = pg_list::<pg_sys::Node>(ctor.agg_order);
@@ -3911,12 +3908,12 @@ unsafe fn append_json_agg_clauses(
 /// `jt` must point to a valid `pg_sys::JsonTable` node.
 unsafe fn deparse_json_table(jt: *const pg_sys::JsonTable) -> Result<String, PgTrickleError> {
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let jt_ref = unsafe { &*jt };
+    let jt_ref = pg_deref!(jt);
 
     // Context item (the input expression)
     let context_sql = if !jt_ref.context_item.is_null() {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let jve = unsafe { &*jt_ref.context_item };
+        let jve = pg_deref!(jt_ref.context_item);
         if !jve.raw_expr.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             let expr = unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? };
@@ -3931,7 +3928,7 @@ unsafe fn deparse_json_table(jt: *const pg_sys::JsonTable) -> Result<String, PgT
     // Path specification
     let path_sql = if !jt_ref.pathspec.is_null() {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let ps = unsafe { &*jt_ref.pathspec };
+        let ps = pg_deref!(jt_ref.pathspec);
         if !ps.string.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             let expr = unsafe { node_to_expr(ps.string)? };
@@ -4016,13 +4013,13 @@ unsafe fn deparse_json_table_columns(columns: *mut pg_sys::List) -> Result<Strin
 /// `node` must point to a valid `pg_sys::JsonTableColumn`.
 unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if !unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_JsonTableColumn) } {
+    if !is_node_type!(node, T_JsonTableColumn) {
         return Err(PgTrickleError::QueryParseError(
             "Expected JsonTableColumn node".into(),
         ));
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let col = unsafe { &*(node as *const pg_sys::JsonTableColumn) };
+    let col = pg_deref!(node as *const pg_sys::JsonTableColumn);
 
     let name = if !col.name.is_null() {
         pg_cstr_to_str(col.name).unwrap_or("col").to_string()
@@ -4040,7 +4037,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
             // FORMAT JSON
             if !col.format.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let fmt = unsafe { &*col.format };
+                let fmt = pg_deref!(col.format);
                 if fmt.format_type == pg_sys::JsonFormatType::JS_FORMAT_JSON {
                     s.push_str(" FORMAT JSON");
                 }
@@ -4049,7 +4046,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
             // PATH 'spec'
             if !col.pathspec.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ps = unsafe { &*col.pathspec };
+                let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     let path_expr = unsafe { node_to_expr(ps.string)? };
@@ -4094,7 +4091,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
 
             if !col.pathspec.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ps = unsafe { &*col.pathspec };
+                let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     let path_expr = unsafe { node_to_expr(ps.string)? };
@@ -4118,7 +4115,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
 
             if !col.pathspec.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ps = unsafe { &*col.pathspec };
+                let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     let path_expr = unsafe { node_to_expr(ps.string)? };
@@ -4144,7 +4141,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
             let mut s = String::from("NESTED");
             if !col.pathspec.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ps = unsafe { &*col.pathspec };
+                let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     let path_expr = unsafe { node_to_expr(ps.string)? };
@@ -4174,7 +4171,7 @@ unsafe fn deparse_json_behavior(behavior: *const pg_sys::JsonBehavior, suffix: &
         return String::new();
     }
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let beh = unsafe { &*behavior };
+    let beh = pg_deref!(behavior);
     match beh.btype {
         pg_sys::JsonBehaviorType::JSON_BEHAVIOR_NULL => format!("NULL {suffix}"),
         pg_sys::JsonBehaviorType::JSON_BEHAVIOR_ERROR => format!("ERROR {suffix}"),
@@ -4244,7 +4241,7 @@ pub(crate) unsafe fn deparse_func_call(
     fcall: *const pg_sys::FuncCall,
 ) -> Result<String, PgTrickleError> {
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-    let fcall_ref = unsafe { &*fcall };
+    let fcall_ref = pg_deref!(fcall);
     // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
     let func_name = unsafe { extract_func_name(fcall_ref.funcname)? };
 
@@ -4275,7 +4272,7 @@ pub(crate) unsafe fn deparse_select_stmt_to_sql(
     stmt: *const pg_sys::SelectStmt,
 ) -> Result<String, PgTrickleError> {
     // SAFETY: caller guarantees stmt is valid.
-    let s = unsafe { &*stmt };
+    let s = pg_deref!(stmt);
     let mut parts = Vec::new();
 
     // DISTINCT
@@ -4362,11 +4359,11 @@ pub(crate) unsafe fn deparse_target_list(
     let mut items = Vec::new();
     for node_ptr in targets.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if rt.val.is_null() {
             continue;
         }
@@ -4398,12 +4395,12 @@ unsafe fn extract_target_list_column_names(target_list: *mut pg_sys::List) -> Ve
     let mut cols = Vec::new();
     for (i, node_ptr) in targets.iter_ptr().enumerate() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             cols.push(format!("_col_{}", i + 1));
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if !rt.name.is_null() {
             let alias = pg_cstr_to_str(rt.name).unwrap_or("").to_string();
             if alias.is_empty() {
@@ -4459,7 +4456,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         }
         if !rv.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rv.alias) };
+            let a = pg_deref!(rv.alias);
             let alias_name = pg_cstr_to_str(a.aliasname).unwrap_or("");
             if alias_name != name {
                 name.push_str(&format!(" {alias_name}"));
@@ -4489,20 +4486,20 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect) {
         if sub.subquery.is_null()
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-            || !unsafe { pgrx::is_a(sub.subquery, pg_sys::NodeTag::T_SelectStmt) }
+            || !is_node_type!(sub.subquery, T_SelectStmt)
         {
             return Err(PgTrickleError::QueryParseError(
                 "RangeSubselect without valid SelectStmt".into(),
             ));
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let sub_stmt = unsafe { &*(sub.subquery as *const pg_sys::SelectStmt) };
+        let sub_stmt = pg_deref!(sub.subquery as *const pg_sys::SelectStmt);
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let inner_sql = unsafe { deparse_select_stmt_to_sql(sub_stmt)? };
         let mut result = format!("({inner_sql})");
         if !sub.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(sub.alias) };
+            let a = pg_deref!(sub.alias);
             let alias_name = pg_cstr_to_str(a.aliasname).unwrap_or("");
             result.push_str(&format!(" AS {alias_name}"));
         }
@@ -4527,7 +4524,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         let mut result = func_sql;
         if !rf.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rf.alias) };
+            let a = pg_deref!(rf.alias);
             let alias_name = pg_cstr_to_str(a.aliasname).unwrap_or("");
             result.push_str(&format!(" AS {alias_name}"));
         }
@@ -4537,7 +4534,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
         let mut result = unsafe { deparse_json_table(jt as *const pg_sys::JsonTable)? };
         if !jt.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(jt.alias) };
+            let a = pg_deref!(jt.alias);
             let alias_name = pg_cstr_to_str(a.aliasname).unwrap_or("");
             result.push_str(&format!(" AS {alias_name}"));
         }
@@ -4572,7 +4569,7 @@ pub(crate) unsafe fn deparse_sort_clause(
 /// Caller must ensure `node` points to a valid `pg_sys::SortBy`.
 unsafe fn deparse_sort_by(node: *const pg_sys::SortBy) -> Result<String, PgTrickleError> {
     // SAFETY: caller guarantees node is valid.
-    let sb = unsafe { &*node };
+    let sb = pg_deref!(node);
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
     let expr = unsafe { node_to_expr(sb.node)? };
     let dir = match sb.sortby_dir {
@@ -4604,12 +4601,12 @@ unsafe fn extract_select_output_cols(
     let mut cols = Vec::new();
     for (i, node_ptr) in targets.iter_ptr().enumerate() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             cols.push(format!("column{}", i + 1));
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if !rt.name.is_null() {
             let name = pg_cstr_to_str(rt.name).unwrap_or("");
             cols.push(name.to_string());
@@ -4700,10 +4697,10 @@ unsafe fn collect_from_item_oids(
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect)
         && !sub.subquery.is_null()
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        && unsafe { pgrx::is_a(sub.subquery, pg_sys::NodeTag::T_SelectStmt) }
+        && is_node_type!(sub.subquery, T_SelectStmt)
     {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let sub_stmt = unsafe { &*(sub.subquery as *const pg_sys::SelectStmt) };
+        let sub_stmt = pg_deref!(sub.subquery as *const pg_sys::SelectStmt);
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         let inner_oids = unsafe { extract_from_oids(sub_stmt.fromClause)? };
         oids.extend(inner_oids);
@@ -4753,7 +4750,7 @@ unsafe fn collect_from_item_alias_oids(
         // Effective alias: explicit alias > table name
         let alias = if !rv.alias.is_null() {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let a = unsafe { &*(rv.alias) };
+            let a = pg_deref!(rv.alias);
             pg_cstr_to_str(a.aliasname)
                 .unwrap_or(&table_name)
                 .to_string()
@@ -4915,8 +4912,7 @@ unsafe fn node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleErr
     if let Some(s) = cast_node!(node, T_String, pg_sys::String) {
         Ok(pg_cstr_to_str(s.sval).unwrap_or("").to_string())
     } else {
-        // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        Ok(format!("node_{:?}", unsafe { (*node).type_ }))
+        Ok(format!("node_{:?}", pg_deref!(node).type_))
     }
 }
 
@@ -4931,27 +4927,27 @@ unsafe fn deparse_node(node: *mut pg_sys::Node) -> String {
         }
         let val_ptr = &aconst.val as *const _ as *const pg_sys::Node;
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if unsafe { pgrx::is_a(val_ptr as *mut _, pg_sys::NodeTag::T_String) } {
+        if is_node_type!(val_ptr as *mut pg_sys::Node, T_String) {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let s = unsafe { &*(val_ptr as *const pg_sys::String) };
+            let s = pg_deref!(val_ptr as *const pg_sys::String);
             return format!("'{}'", pg_cstr_to_str(s.sval).unwrap_or(""));
         }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if unsafe { pgrx::is_a(val_ptr as *mut _, pg_sys::NodeTag::T_Integer) } {
+        if is_node_type!(val_ptr as *mut pg_sys::Node, T_Integer) {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let i = unsafe { &*(val_ptr as *const pg_sys::Integer) };
+            let i = pg_deref!(val_ptr as *const pg_sys::Integer);
             return i.ival.to_string();
         }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if unsafe { pgrx::is_a(val_ptr as *mut _, pg_sys::NodeTag::T_Float) } {
+        if is_node_type!(val_ptr as *mut pg_sys::Node, T_Float) {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let f = unsafe { &*(val_ptr as *const pg_sys::Float) };
+            let f = pg_deref!(val_ptr as *const pg_sys::Float);
             return pg_cstr_to_str(f.fval).unwrap_or("0").to_string();
         }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if unsafe { pgrx::is_a(val_ptr as *mut _, pg_sys::NodeTag::T_Boolean) } {
+        if is_node_type!(val_ptr as *mut pg_sys::Node, T_Boolean) {
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let b = unsafe { &*(val_ptr as *const pg_sys::Boolean) };
+            let b = pg_deref!(val_ptr as *const pg_sys::Boolean);
             return if b.boolval {
                 "TRUE".to_string()
             } else {
@@ -4960,7 +4956,7 @@ unsafe fn deparse_node(node: *mut pg_sys::Node) -> String {
         }
         "?".to_string()
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    } else if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_ColumnRef) } {
+    } else if is_node_type!(node, T_ColumnRef) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
         if let Ok(e) = unsafe { node_to_expr(node) } {
             e.to_sql()
@@ -4968,8 +4964,7 @@ unsafe fn deparse_node(node: *mut pg_sys::Node) -> String {
             "?".to_string()
         }
     } else {
-        // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        format!("/* node {:?} */", unsafe { (*node).type_ })
+        format!("/* node {:?} */", pg_deref!(node).type_)
     }
 }
 
@@ -5273,9 +5268,9 @@ pub(crate) unsafe fn collect_all_window_func_nodes(
             let when_list = pg_list::<pg_sys::Node>(case.args);
             for w in when_list.iter_ptr() {
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-                if !w.is_null() && unsafe { pgrx::is_a(w, pg_sys::NodeTag::T_CaseWhen) } {
+                if !w.is_null() && is_node_type!(w, T_CaseWhen) {
                     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                    let cw = unsafe { &*(w as *const pg_sys::CaseWhen) };
+                    let cw = pg_deref!(w as *const pg_sys::CaseWhen);
                     if !cw.expr.is_null() {
                         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
                         unsafe {
@@ -5385,11 +5380,11 @@ unsafe fn extract_window_exprs(
 
     for node_ptr in target_list.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if rt.val.is_null() {
             continue;
         }
@@ -5463,7 +5458,7 @@ unsafe fn parse_window_func_call(
 
     // Parse the WindowDef (OVER clause)
     // SAFETY: caller guarantees fcall.over is non-null
-    let wdef = unsafe { &*fcall.over };
+    let wdef = pg_deref!(fcall.over);
 
     // Resolve named window reference: OVER w → look up from WINDOW clause
     let resolved_wdef = if !wdef.refname.is_null() && !window_clause.is_null() {
@@ -5684,9 +5679,9 @@ unsafe fn is_agg_node(node: *mut pg_sys::Node) -> bool {
     }
     // SQL/JSON standard aggregates
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-    if unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_JsonObjectAgg) }
+    if is_node_type!(node, T_JsonObjectAgg)
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        || unsafe { pgrx::is_a(node, pg_sys::NodeTag::T_JsonArrayAgg) }
+        || is_node_type!(node, T_JsonArrayAgg)
     {
         return true;
     }
@@ -5871,11 +5866,11 @@ unsafe fn extract_aggregates(
 
     for node_ptr in target_list.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
         if rt.val.is_null() {
             continue;
         }
@@ -6136,7 +6131,7 @@ unsafe fn extract_aggregates(
                 non_aggs.push(expr);
             }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        } else if unsafe { pgrx::is_a(rt.val, pg_sys::NodeTag::T_JsonObjectAgg) } {
+        } else if is_node_type!(rt.val, T_JsonObjectAgg) {
             // ── F11: SQL/JSON standard JSON_OBJECTAGG(key: value ...) ──
             // This node type is separate from T_FuncCall, so we handle it
             // explicitly. Deparse to SQL and store as AggFunc::JsonObjectAggStd.
@@ -6145,7 +6140,7 @@ unsafe fn extract_aggregates(
             let raw_sql = raw_expr.to_sql();
 
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let joa = unsafe { &*(rt.val as *const pg_sys::JsonObjectAgg) };
+            let joa = pg_deref!(rt.val as *const pg_sys::JsonObjectAgg);
             let alias = if !rt.name.is_null() {
                 pg_cstr_to_str(rt.name)
                     .unwrap_or("json_objectagg")
@@ -6158,7 +6153,7 @@ unsafe fn extract_aggregates(
             // so agg_delta_exprs can apply the filter to change tracking).
             let filter = if !joa.constructor.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ctor = unsafe { &*joa.constructor };
+                let ctor = pg_deref!(joa.constructor);
                 if !ctor.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     Some(unsafe { node_to_expr(ctor.agg_filter)? })
@@ -6179,14 +6174,14 @@ unsafe fn extract_aggregates(
                 order_within_group: None,
             });
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        } else if unsafe { pgrx::is_a(rt.val, pg_sys::NodeTag::T_JsonArrayAgg) } {
+        } else if is_node_type!(rt.val, T_JsonArrayAgg) {
             // ── F11: SQL/JSON standard JSON_ARRAYAGG(expr ...) ──
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
             let raw_expr = unsafe { node_to_expr(rt.val)? };
             let raw_sql = raw_expr.to_sql();
 
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-            let jaa = unsafe { &*(rt.val as *const pg_sys::JsonArrayAgg) };
+            let jaa = pg_deref!(rt.val as *const pg_sys::JsonArrayAgg);
             let alias = if !rt.name.is_null() {
                 pg_cstr_to_str(rt.name)
                     .unwrap_or("json_arrayagg")
@@ -6197,7 +6192,7 @@ unsafe fn extract_aggregates(
 
             let filter = if !jaa.constructor.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-                let ctor = unsafe { &*jaa.constructor };
+                let ctor = pg_deref!(jaa.constructor);
                 if !ctor.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
                     Some(unsafe { node_to_expr(ctor.agg_filter)? })
@@ -6263,11 +6258,11 @@ unsafe fn parse_target_list(
 
     for node_ptr in target_list.iter_ptr() {
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
-        if !unsafe { pgrx::is_a(node_ptr, pg_sys::NodeTag::T_ResTarget) } {
+        if !is_node_type!(node_ptr, T_ResTarget) {
             continue;
         }
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
-        let rt = unsafe { &*(node_ptr as *const pg_sys::ResTarget) };
+        let rt = pg_deref!(node_ptr as *const pg_sys::ResTarget);
 
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         let alias = unsafe { target_alias_for_res_target(rt, expressions.len()) };

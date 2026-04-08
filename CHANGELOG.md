@@ -37,6 +37,115 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Unsafe block reduction Phase 6 (UNSAFE-R1/R2)** — introduced `is_node_type!`
+  and `pg_deref!` macros that encapsulate standalone `pgrx::is_a()` checks and
+  pointer dereferences in the DVM parser. Reduced unsafe blocks in `src/dvm/parser/`
+  from 690 to 441 (a 249-block / 36% reduction). Zero behavior change; all 1,700
+  unit tests pass.
+- **`api.rs` modularization (API-MOD)** — split the 9,432-line `src/api.rs` into
+  a directory module with three files: `api/mod.rs` (5,624 lines — create, alter,
+  refresh core), `api/diagnostics.rs` (1,377 lines — status views, explain, fuse,
+  gates, watermarks, refresh groups), and `api/helpers.rs` (2,461 lines — CDC
+  setup/teardown, validation, cycle detection, DDL generation, auxiliary column
+  injection). Zero behavior change; all 1,700 unit tests pass.
+- **MERGE template extraction (TG2-MERGE)** — extracted 7 pure functions from
+  `refresh.rs` MERGE template assembly (`format_col_list`, `format_prefixed_col_list`,
+  `format_update_set`, `build_merge_sql`, `build_trigger_delete_sql`,
+  `build_trigger_update_sql`, `build_trigger_insert_sql`). Added 29 unit tests
+  covering MERGE SQL generation, column formatting, trigger templates,
+  `has_non_monotonic_cte` marker detection, and `build_hash_child_merge`
+  partition handling. Total unit tests: 1,729.
+- **`refresh_strategy` GUC (B-4 Phase 1)** — new `pg_trickle.refresh_strategy`
+  GUC (`'auto'`/`'differential'`/`'full'`) allows operators to override the
+  adaptive FULL/DIFFERENTIAL cost heuristic cluster-wide. `'differential'`
+  skips the per-source ratio check; `'full'` forces FULL refresh unconditionally.
+  Per-ST `refresh_mode` takes precedence. Documented in CONFIGURATION.md.
+- **Predictive cost model (B-4 Phase 2)** — the `refresh_strategy = 'auto'`
+  mode now uses a predictive cost model that classifies each stream table's
+  query into one of five complexity classes (scan, filter, aggregate, join,
+  join+aggregate) with per-class differential cost factors. Before each refresh,
+  the model estimates `diff_cost = avg_ms_per_delta × complexity_factor × Δ_rows`
+  and compares against `full_cost × safety_margin`.  New
+  `pg_trickle.cost_model_safety_margin` GUC (default 0.8) controls the bias
+  toward DIFFERENTIAL. Historical refresh timing data is queried from
+  `pgt_refresh_history` (last 10 DIFFERENTIAL + last 5 FULL refreshes).
+- **Columnar change tracking (A-2-COL)** — end-to-end `changed_cols` VARBIT
+  bitmask pipeline now fully active: COL-1 (CDC trigger computes per-column
+  `IS DISTINCT FROM` bitmask), COL-2 (scan operator skips UPDATE rows where
+  no referenced column changed via `changed_cols & mask != 0` filter),
+  COL-3 (aggregate operator emits single 'V' correction row for value-only
+  UPDATEs instead of D+I pair, halving row volume for aggregates).
+- **`StDag` is now `Clone` (C-2)** — added `#[derive(Clone)]` to `StDag` to
+  enable benchmark cloning.
+
+### Added
+
+- **New User FAQ section (DOC-FAQ-NEW)** — top-15 keyword-rich FAQ entries at the
+  top of `docs/FAQ.md` for faster onboarding. Each entry links to the detailed
+  answer deeper in the document.
+- **Post-install verification script (DOC-VERIFY)** —
+  `scripts/verify_install.sql` checks shared_preload_libraries, extension
+  creation, scheduler health, GUC configuration, and runs an end-to-end stream
+  table create → refresh → verify → cleanup cycle.
+- **pg_ivm migration guide (MIG-IVM)** —
+  `docs/tutorials/MIGRATING_FROM_PG_IVM.md` provides step-by-step migration
+  from pg_ivm IMMVs to pg_trickle stream tables, covering API mapping,
+  behavioral differences, SQL upgrade examples, and a verification checklist.
+- **Troubleshooting & failure mode runbook (RUNBOOK)** —
+  `docs/TROUBLESHOOTING.md` documents 13 failure scenarios (scheduler down,
+  SUSPENDED status, CDC triggers missing, WAL slot issues, OOM, disk full,
+  circular convergence, schema changes, worker pool exhaustion, fuse trips)
+  with symptoms, diagnosis SQL, and resolution steps.
+- **Docker quickstart playground (PLAYGROUND)** —
+  `playground/` directory with `docker-compose.yml`, seed SQL, and README.
+  One-command `docker compose up` starts PostgreSQL 18 + pg_trickle with
+  pre-loaded sample data and 5 stream tables demonstrating aggregates, window
+  functions, joins, time-series, and EXISTS subqueries.
+
+### Tests
+
+- **`ROWS FROM()` differential UPDATE test (A8)** — added
+  `test_rows_from_dual_unnest_differential_update` to cover UPDATE propagation
+  through the `ROWS FROM()` rewrite pass. INSERT/UPDATE/DELETE differential
+  coverage now complete.
+- **`pg_cancel_backend()` recovery test (TG2-CANCEL)** — added
+  `test_cancel_backend_during_refresh_recovers` (FR-7): starts a refresh on
+  one connection, cancels it via `pg_cancel_backend()` from a second, and
+  verifies the stream table recovers on the next refresh.
+- **Resource leak verification after timeout (TG2-CANCEL)** — added
+  `test_no_resource_leak_after_timeout` (FR-8): verifies no orphaned
+  `__pgt_delta_*` temp tables or stale catalog state remain after a
+  `statement_timeout`-induced failure.
+- **Incremental DAG rebuild benchmark (C-2)** — added `bench_dag_incremental`
+  with `remove_readd_single` and `full_rebuild_comparison` scenarios at
+  100/500/1000 nodes. Results: incremental single-node rebuild is ~10µs at
+  100 nodes, ~116µs at 1000 nodes (5.2× faster than full rebuild), well under
+  the 5ms exit criterion.
+- **`refresh_strategy` normalizer tests (B-4)** — 4 unit tests for
+  `normalize_refresh_strategy` covering defaults, all variants, `as_str()`,
+  and roundtrip. Total unit tests: 1,733.
+- **Cost model unit tests (B-4 Phase 2)** — 10 unit tests for
+  `classify_query_complexity` (scan, filter, aggregate, join, join_agg,
+  left join, case-insensitive), `cost_model_prefers_full` (large delta,
+  small delta, complexity affects decision), and `diff_cost_factor` ordering.
+- **SQLANCER-3: DIFFERENTIAL ≡ FULL oracle after DML** — new
+  `test_sqlancer_diff_vs_full_oracle` (and `run_diff_vs_full_oracle` fn) in
+  `tests/e2e_sqlancer_tests.rs`. For each fuzzed query, creates both a
+  DIFFERENTIAL and a FULL stream table, applies 4 random DML mutations, then
+  asserts their row counts agree. Catches semantic bugs in the delta pipeline
+  that only surface after UPDATE/DELETE.
+- **SQLANCER-4: Stateful DML soak** — new `test_sqlancer_stateful_dml` (and
+  `run_stateful_dml_fuzzing` fn). Finds the first DIFFERENTIAL-supported query
+  in the seed corpus, runs `SQLANCER_MUTATIONS` (default 100, nightly 10 000)
+  random INSERT/UPDATE/DELETE mutations, checkpointing every 50 to compare
+  DIFFERENTIAL vs FULL counts. Wired into CI via `weekly-sqlancer-stateful`
+  job with `SQLANCER_MUTATIONS=10000`.
+- **`test_sqlancer_ci_combined` extended** — now runs SQLANCER-1 + SQLANCER-2
+  + SQLANCER-3 (crash + equivalence + diff-vs-full). SQLANCER-4 soak runs
+  separately via `just sqlancer-stateful[-fast]`.
+
 ---
 
 ## [0.16.0] — 2026-04-06

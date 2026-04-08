@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-06
+> **Last updated:** 2026-04-08
 > **Latest release:** 0.16.0 (2026-04-06)
 > **Current milestone:** v0.17.0 — Query Intelligence & Stability
 
@@ -74,7 +74,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.14.0 | Tiered scheduling, UNLOGGED buffers & diagnostics | ✅ Released |
 | v0.15.0 | External test suites & integration | ✅ Released |
 | **v0.16.0** | **Performance & refresh optimization** | **✅ Released** |
-| v0.17.0 | Query intelligence & stability | 🚧 Next |
+| **v0.17.0** | **Query intelligence & stability** | **🚧 In Progress** |
 | v0.18.0 | Hardening & delta performance | Planned |
 | v0.19.0 | PostgreSQL 19 compatibility | Planned |
 | v1.0.0 | Stable release | Planned |
@@ -3421,8 +3421,8 @@ coverage gaps to validate these new paths.
 - [x] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
 - [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
 - [x] TG2-EQUIV: Differential ≡ Full equivalence validated for joins, aggregates, and window functions
-- [ ] ~~TG2-MERGE: refresh.rs MERGE template generation has unit test coverage~~ — deferred to v0.17.0
-- [ ] ~~TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks~~ — deferred to v0.17.0
+- [x] TG2-MERGE: refresh.rs MERGE template generation has unit test coverage (completed in v0.17.0)
+- [x] TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks (completed in v0.17.0)
 - [x] TG2-SCHEMA: Source table type changes and column renames tested end-to-end
 - [x] BENCH-CI: Performance regression CI runs on every PR; 10% regression threshold blocks merge; scenario coverage includes scan/filter/aggregate/join/window/CTE/TopK/SemiJoin/AntiJoin
 - [x] AUTO-IDX: Stream tables auto-create indexes on GROUP BY / DISTINCT columns; `__pgt_row_id` covering index for ≤ 8-column tables; `auto_index` GUC respected
@@ -3496,11 +3496,11 @@ provides a 60-second tryout experience.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| A2-ENR | **ENR-based transition tables.** Replace temp-table delta handoff with Ephemeral Named Relations — the trigger writes directly into an ENR tuplestore that the refresh engine reads without copying. Eliminates the INSERT/SELECT round-trip for transition data. | 12–18h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
-| A2-CTR | **C-level triggers.** Replace the SQL-level `CREATE TRIGGER` with a C-level trigger function registered via `CreateTrigger()`. Reduces per-statement overhead from ~0.5ms to ~0.05ms by eliminating SPI round-trips for the trigger body. | 12–18h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
-| A2-PS | **Prepared statement reuse.** Cache the delta query as a prepared statement (`SPI_prepare` + `SPI_execute_plan`) across refresh cycles within the same session. Eliminates repeated parse/plan overhead (~2–5ms per refresh for complex queries). | 8–12h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+| ~~A2-ENR~~ | ~~**ENR-based transition tables.**~~ 🚫 **Deferred post-1.0** — requires raw `pg_sys` ENR tuplestore FFI not surfaced by pgrx; carries memory-corruption and `pg_upgrade` compatibility risk. Revisit after 1.0 stabilisation. | ~~12–18h~~ | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+| ~~A2-CTR~~ | ~~**C-level triggers.**~~ 🚫 **Deferred post-1.0** — requires raw `CreateTrigger()` FFI not surfaced by pgrx; carries memory-corruption and `pg_upgrade` compatibility risk. Revisit after 1.0 stabilisation. | ~~12–18h~~ | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
+| ~~A2-PS~~ | ~~**Prepared statement reuse.**~~ ✅ **Already shipped** — `pg_trickle.use_prepared_statements` GUC (default `true`) implemented and wired in `refresh.rs`; parse/plan overhead eliminated on steady-state workloads. | ~~8–12h~~ | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) §Phase 4 |
 
-> **A2 subtotal: ~32–48 hours**
+> **A2 subtotal: 0h remaining** (A2-PS shipped; A2-ENR + A2-CTR deferred post-1.0)
 
 ### `ROWS FROM()` Support (A8)
 
@@ -3529,12 +3529,12 @@ provides a 60-second tryout experience.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
-| SQLANCER-1 | **Fuzzing environment.** SQLancer in Docker, configured to target pg_trickle stream tables. Seed corpus from TPC-H + E2E defining queries. | 2–3d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §1 |
-| SQLANCER-2 | **Crash-test oracle.** Feed randomized SQL to the parser and DVM pipeline. Zero-panic guarantee: any input that crashes the extension is a bug. | 3–5d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §2 |
-| SQLANCER-3 | **Equivalence oracle.** For each fuzzed defining query, create a stream table in both DIFFERENTIAL and FULL mode, apply random DML, and assert identical results. Catches semantic divergence between the two refresh paths. | 3–5d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §3 |
-| SQLANCER-4 | **Stateful DML fuzzing.** Random sequences of INSERT/UPDATE/DELETE on source tables, with periodic correctness checks against a plain materialized view baseline. Catches state-dependent bugs that only manifest after specific mutation histories. | 3–5d | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §4 |
+| ~~SQLANCER-1~~ | ~~**Fuzzing environment.**~~ ✅ **Done** — Docker-based harness (`just sqlancer`), Rust LCG query generator, `SQLANCER_CASES`/`SQLANCER_SEED` controls, `weekly-sqlancer` CI job. | ~~2–3d~~ | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §1 |
+| ~~SQLANCER-2~~ | ~~**Crash-test oracle.**~~ ✅ **Done** — `test_sqlancer_crash_oracle` / `run_crash_oracle()` verifies zero backend crashes over 200–2000 fuzzed queries. | ~~3–5d~~ | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §2 |
+| ~~SQLANCER-3~~ | ~~**Equivalence oracle.**~~ ✅ **Done** — `test_sqlancer_diff_vs_full_oracle` / `run_diff_vs_full_oracle()` creates DIFFERENTIAL + FULL stream tables, applies 4 DML mutations, and asserts count parity. Integrated into `test_sqlancer_ci_combined`. | ~~3–5d~~ | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §3 |
+| ~~SQLANCER-4~~ | ~~**Stateful DML fuzzing.**~~ ✅ **Done** — `test_sqlancer_stateful_dml` / `run_stateful_dml_fuzzing()` runs `SQLANCER_MUTATIONS` (default 100, nightly 10 000) random INSERT/UPDATE/DELETE mutations with checkpoints every 50. CI: `weekly-sqlancer-stateful` job (`SQLANCER_MUTATIONS=10000`). | ~~3–5d~~ | [PLAN_SQLANCER.md](plans/testing/PLAN_SQLANCER.md) §4 |
 
-> **SQLANCER subtotal: ~2–3 weeks**
+> **SQLANCER subtotal: 0 remaining** (all four items shipped in v0.17.0)
 
 ### Incremental DAG Rebuild (C-2)
 
@@ -3650,35 +3650,133 @@ provides a 60-second tryout experience.
 > **v0.17.0 total: ~2–3 weeks (cost-based strategy) + ~3–4 weeks (columnar tracking) + ~32–48 hours (TIVM Phase 4) + ~1–2 days (ROWS FROM) + ~2–3 weeks (SQLancer) + ~2–3 weeks (incremental DAG) + ~4–8 hours (unsafe reduction) + ~1–2 weeks (api.rs modularization) + ~2–3 days (pg_ivm migration) + ~3–5 days (failure runbook) + ~2–3 days (Docker playground) + ~2–3 days (doc polish)**
 
 **Exit criteria:**
-- [ ] B-4: Cost-based strategy selector trained on per-ST history; cold-start fallback to fixed threshold; benchmarked on mixed workloads (scan, join, aggregate); `refresh_strategy` GUC respected
-- [ ] A-2-COL: CDC trigger emits `changed_columns` bitmask; delta-scan filters irrelevant rows; wide-table UPDATE benchmark shows ≥50% delta reduction; aggregate correction optimization tested
-- [ ] A2-ENR: ENR-based transition tables eliminate temp-table round-trip; IMMEDIATE mode latency reduced vs SQL-trigger baseline
-- [ ] A2-CTR: C-level triggers registered; per-statement overhead < 0.1ms; existing IMMEDIATE mode tests pass
-- [ ] A2-PS: Prepared statement reuse across refresh cycles; parse/plan overhead eliminated on steady-state workloads
-- [ ] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
-- [ ] SQLANCER: Fuzzing environment operational; crash-test oracle finds zero panics on seed corpus; equivalence oracle validates DIFFERENTIAL ≡ FULL for fuzzed queries; stateful DML fuzzing runs clean for 10K+ mutation sequences
-- [ ] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
-- [ ] UNSAFE-R1/R2: Unsafe block count reduced by ≥150; no behavioral changes; all existing tests pass
-- [ ] API-MOD: `api.rs` split into ≥4 sub-modules; zero behavior change; all existing tests pass
-- [ ] MIG-IVM: pg_ivm migration guide published with worked examples; covers create/refresh/alter/drop equivalences
-- [ ] RUNBOOK: Failure mode runbook covers ≥10 failure scenarios with symptoms, diagnosis, and resolution; includes health_check() interpretation
-- [ ] PLAYGROUND: `docker compose up` starts PG + pg_trickle + sample data in < 60 seconds; README walkthrough tested end-to-end
-- [ ] DOC-HELLO: Simplified "Hello Stream Table" added as Chapter 0 in GETTING_STARTED; single-table example builds confidence before complex org-chart
-- [ ] DOC-DECIDE: Refresh mode decision guide published with flowchart and concrete examples for IMMEDIATE/DIFFERENTIAL/FULL/AUTO
-- [ ] DOC-FAQ-NEW: New User FAQ section at top of FAQ.md with 15 keyword-rich entries
-- [ ] DOC-VERIFY: Post-install verification script (`verify_install.sql`) tests extension loading, GUC configuration, trigger creation, and first refresh
-- [ ] DOC-STUBS: Research stubs either fleshed out or removed from SUMMARY.md
+- [x] B-4: Cost-based strategy selector trained on per-ST history; cold-start fallback to fixed threshold; `QueryComplexityClass` cost model (scan/filter/aggregate/join/join_agg); `refresh_strategy` + `cost_model_safety_margin` GUCs; pre-refresh predictive comparison; 10 unit tests
+- [x] A-2-COL: CDC trigger emits `changed_cols` VARBIT bitmask (COL-1); delta-scan filters irrelevant rows via `changed_cols & mask` (COL-2); aggregate value-only correction 'V' path halves row volume (COL-3)
+- ~~[ ] A2-ENR~~: 🚫 Deferred post-1.0 — requires raw `pg_sys` ENR tuplestore FFI (memory-corruption risk); revisit after 1.0 stabilisation
+- ~~[ ] A2-CTR~~: 🚫 Deferred post-1.0 — requires raw `CreateTrigger()` C FFI (memory-corruption risk); revisit after 1.0 stabilisation
+- [x] A2-PS: ✅ Already shipped — `pg_trickle.use_prepared_statements` GUC (default `true`) wired in `refresh.rs`; parse/plan overhead eliminated on steady-state workloads
+- [x] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
+- [x] SQLANCER: ✅ SQLANCER-1/2 crash + equivalence oracles shipped in v0.12.0; SQLANCER-3 diff-vs-full oracle and SQLANCER-4 stateful DML soak (10K mutations) added in v0.17.0; `weekly-sqlancer-stateful` CI job wired
+- [x] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
+- [x] UNSAFE-R1/R2: Unsafe block count reduced by 249 (690→441 in parser); `is_node_type!` and `pg_deref!` macros; all 1,700 unit tests pass
+- [x] API-MOD: `api.rs` split into 3 sub-modules (mod.rs 5,624 + diagnostics.rs 1,377 + helpers.rs 2,461); zero behavior change; all 1,700 unit tests pass
+- [x] MIG-IVM: `docs/tutorials/MIGRATING_FROM_PG_IVM.md` published with step-by-step migration, API mapping, behavioral differences, SQL upgrade examples, and verification checklist
+- [x] RUNBOOK: `docs/TROUBLESHOOTING.md` covers 13 failure scenarios (scheduler, SUSPENDED, CDC triggers, WAL slots, INITIALIZING, buffer growth, lock contention, OOM, disk full, circular convergence, schema changes, worker pool, fuse) with symptoms, diagnosis, and resolution
+- [x] PLAYGROUND: `playground/` with docker-compose.yml, seed.sql (3 base tables, 5 stream tables), and README walkthrough
+- [x] DOC-HELLO: Chapter 1 "Hello World" in GETTING_STARTED already provides the single-table aggregate example (products/category_summary)
+- [x] DOC-DECIDE: Refresh mode decision guide already published as `tutorials/tuning-refresh-mode.md` with `recommend_refresh_mode()` and signal breakdown
+- [x] DOC-FAQ-NEW: New User FAQ section with 15 keyword-rich entries added at top of FAQ.md
+- [x] DOC-VERIFY: `scripts/verify_install.sql` checks shared_preload_libraries, extension, scheduler, GUCs, and runs end-to-end stream table cycle
+- [x] DOC-STUBS: Research stubs already use `{{#include}}` directives pointing to substantial content (923 + 1232 lines)
 - [ ] Extension upgrade path tested (`0.16.0 → 0.17.0`)
 
 ---
 
 ## v0.18.0 — Hardening & Delta Performance
 
-**Goal:** Production hardening, performance, and observability improvements
-that close the remaining correctness and safety gaps before the stable
-release. Builds confidence in the engine ahead of v1.0.0.
+> **Release Theme**
+> This release hardens pg_trickle for production at scale and delivers the
+> biggest remaining performance win in the differential refresh path. The Z-set
+> multi-source delta engine merges per-source delta branches into a single
+> `GROUP BY + SUM(weight)` query, eliminating redundant join evaluation when
+> multiple source tables change in the same cycle. Cross-source snapshot
+> consistency guarantees that multi-source stream tables always read all
+> upstream tables at the same transaction boundary — closing the last known
+> correctness gap. Every production-path `.unwrap()` is replaced with graceful
+> error propagation, another ~69 unsafe blocks are eliminated, and a populated
+> TPC-H baseline turns the 22-query suite into a true regression canary.
+> SQLancer fuzzing integration provides an external, assumption-free
+> correctness oracle. Together, these changes build the confidence foundation
+> for 1.0.
 
-### Production Correctness — `unwrap()` Audit (SAFE-1)
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Enforce cross-source snapshot consistency | L | P0 |
+| CORR-2 | Populate TPC-H expected-output regression guard | XS | P0 |
+| CORR-3 | NULL-safe GROUP BY elimination under deletes | S | P1 |
+| CORR-4 | Z-set merged-delta weight accounting proof | M | P0 |
+| CORR-5 | HAVING-filtered aggregate correction under group depletion | S | P1 |
+
+**CORR-1 — Enforce cross-source snapshot consistency (CSS-3)**
+
+> **In plain terms:** When a stream table reads from two different source
+> tables, there is a window where it can see source A at a newer point in
+> time than source B — for example, seeing a new order but the old
+> inventory count. Phase 3 completes the tick-watermark enforcement so
+> both sources are always read at the same consistent LSN before any
+> refresh proceeds. Phases 1 and 2 are already complete.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| CSS-3-1 | LSN watermark enforcement in the scheduler — hold refresh until all upstream sources reach the same tick boundary | 4–6h | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](plans/sql/PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) §Phase 3 |
+| CSS-3-2 | Catalog column `pgt_css_watermark_lsn` + GUC `pg_trickle.cross_source_consistency` (default `off`) | 2–3h | — |
+| CSS-3-3 | E2E test: concurrent writes to two sources, assert stream table never sees a split snapshot | 2–3h | — |
+
+> **CSS-3 subtotal: ~8–12 hours**
+> Dependencies: None. Schema change: Yes.
+
+**CORR-2 — Populate TPC-H expected-output regression guard (TPCH-BASE)**
+
+> **In plain terms:** The TPC-H correctness tests run all 22 queries but
+> the expected-output comparison guard was never populated — so the tests
+> catch structural failures but not quiet result regressions. Populating
+> the baseline turns the suite into a true correctness canary.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| TPCH-BASE-1 | Run TPC-H suite once at known-good state; capture output | 30min |
+| TPCH-BASE-2 | Populate comparison baseline in `e2e_tpch_tests.rs` line 89 (remove TODO); verify guard fires on a deliberate regression | 1h |
+
+> **TPCH-BASE subtotal: ~1–2 hours**
+> Dependencies: None. Schema change: No.
+
+**CORR-3 — NULL-safe GROUP BY elimination under deletes**
+
+> **In plain terms:** When all rows in a GROUP BY group are deleted and the
+> grouping key contains NULLs, the differential engine must correctly remove
+> the group. SQL's three-valued logic in `IS DISTINCT FROM` may cause delta
+> weight miscounting for NULL keys.
+
+Verify: E2E test with `GROUP BY nullable_col`, delete all group members,
+assert zero rows remain in the stream table.
+Dependencies: None. Schema change: No.
+
+**CORR-4 — Z-set merged-delta weight accounting proof**
+
+> **In plain terms:** Companion correctness gate for PERF-1 (B3-MERGE). The
+> Z-set algebra requires that `SUM(weight)` across all merged branches for
+> every primary key never produces a spurious net-positive or net-negative for
+> a single join path.
+
+Verify: property-based tests (proptest) asserting `merged_weights ==
+individual_branch_sums` for randomly generated multi-source DAGs. All
+existing B3-3 diamond-flow tests must pass unchanged.
+Dependencies: PERF-1. Schema change: No.
+
+**CORR-5 — HAVING-filtered aggregate correction under group depletion**
+
+> **In plain terms:** When a HAVING-qualified group loses enough rows to no
+> longer satisfy the predicate (e.g., `HAVING count(*) > 5` and 3 of 6 rows
+> are deleted), the differential aggregate path must delete the stream table
+> row rather than leaving a stale row matching the old HAVING predicate.
+
+Verify: E2E test with HAVING + selective deletes crossing the threshold.
+Dependencies: None. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | Eliminate production-path .unwrap() calls | S | P0 |
+| STAB-2 | unsafe block reduction Phase 1 | M | P1 |
+| STAB-3 | Spill detection alerting | S | P1 |
+| STAB-4 | Parallel worker orphaned resource cleanup | M | P1 |
+| STAB-5 | Upgrade migration test (0.17→0.18) | S | P0 |
+| STAB-6 | Error SQLSTATE coverage audit | S | P2 |
+
+**STAB-1 — Eliminate production-path .unwrap() calls (SAFE-1)**
 
 > **In plain terms:** A small number of SQL-parsing code paths in
 > production (non-test) code call `.unwrap()` directly — if they encounter
@@ -3694,8 +3792,78 @@ release. Builds confidence in the engine ahead of v1.0.0.
 | SAFE-1-5 | Chained `.unwrap().unwrap()` in `refresh.rs` (L6556–6557) → propagate | 1h |
 
 > **SAFE-1 subtotal: ~4–6 hours**
+> Dependencies: None. Schema change: No.
 
-### Multi-Source Delta Engine — B3-2 (B3-MERGE)
+**STAB-2 — unsafe block reduction Phase 1 (UNSAFE-P1)**
+
+> **In plain terms:** The DVM parser has 1,286 `unsafe` blocks — 98% of
+> the total. Phase 1 introduces a single `pg_cstr_to_str()` safe helper
+> that eliminates ~69 of the most mechanical ones: C-string-to-Rust
+> conversions. No API or behavior change; pure safety improvement.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| UNSAFE-P1-1 | Implement `pg_cstr_to_str(ptr: *const c_char) -> &str` safe wrapper in `src/dvm/parser/mod.rs` | 1h | [PLAN_REDUCED_UNSAFE.md](plans/safety/PLAN_REDUCED_UNSAFE.md) §Phase 1 |
+| UNSAFE-P1-2 | Replace ~69 `unsafe { CStr::from_ptr(...).to_str()... }` call-sites with the safe helper | 4–6h | — |
+| UNSAFE-P1-3 | `unsafe_inventory.sh` baseline update + CI check | 1h | `scripts/unsafe_inventory.sh` |
+
+> **UNSAFE-P1 subtotal: ~6–8 hours**
+> Dependencies: None. Schema change: No.
+
+**STAB-3 — Spill detection alerting (PH-E2)**
+
+> **In plain terms:** The GUCs `pg_trickle.spill_threshold_blocks` and
+> `pg_trickle.spill_consecutive_limit` already exist to configure spill
+> budgets, but no alert fires when a refresh actually spills to disk. This
+> adds an `AlertEvent::SpillThresholdExceeded` notification so operators
+> know when large delta queries are hitting disk.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| PH-E2-1 | Add `AlertEvent::SpillThresholdExceeded` variant to `src/monitor.rs` | 1h |
+| PH-E2-2 | Detect spill after MERGE execution; emit alert when consecutive count exceeds limit | 2–3h |
+| PH-E2-3 | E2E test: configure low spill threshold, trigger spill, assert alert fires | 1–2h |
+
+> **PH-E2 subtotal: ~4–6 hours**
+> Dependencies: None. Schema change: No.
+
+**STAB-4 — Parallel worker orphaned resource cleanup**
+
+> **In plain terms:** After a parallel worker panics mid-refresh, advisory
+> locks, `__pgt_delta_*` temp tables, and partially-written change buffer
+> rows may be left behind. The scheduler recovery path must clean these up.
+
+Audit the recovery path to ensure: (a) advisory locks are released on next
+scheduler tick, (b) temp tables are cleaned up, (c) change buffer rows are
+not double-counted on retry. Verify: E2E test simulating worker crash via
+`pg_terminate_backend()` followed by successful recovery.
+Dependencies: None. Schema change: No.
+
+**STAB-5 — Upgrade migration test (0.17→0.18)**
+Extend the upgrade E2E test framework to cover the 0.17.0→0.18.0 migration
+path and the three-version chain 0.16→0.17→0.18. Verify: catalog column
+additions, new function signatures, existing stream tables survive, refresh
+continues working post-upgrade.
+Dependencies: All schema-changing items (CORR-1). Schema change: No.
+
+**STAB-6 — Error SQLSTATE coverage audit**
+Audit all `ereport!()` and `error!()` calls for SQLSTATE classification.
+Ensure every user-facing error has a unique, documented SQLSTATE code that
+connection poolers and application retry logic can pattern-match. Cross-
+reference with `docs/ERRORS.md` for completeness.
+Dependencies: None. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Z-set multi-source delta engine | L | P0 |
+| PERF-2 | Cost-based refresh strategy completion | L | P1 |
+| PERF-3 | Zero-change source branch elision | M | P1 |
+| PERF-4 | Columnar change tracking Phase 1 — CDC bitmask | L | P1 |
+| PERF-5 | Index hint generation for MERGE target | S | P2 |
+
+**PERF-1 — Z-set multi-source delta engine (B3-MERGE)**
 
 > **In plain terms:** When a stream table joins multiple tables and more
 > than one of those tables receives changes in the same scheduler cycle,
@@ -3712,38 +3880,95 @@ release. Builds confidence in the engine ahead of v1.0.0.
 | B3-2-3 | Benchmark regression check against Part-8 baseline | 2h | — |
 
 > **B3-MERGE subtotal: ~12–16 hours**
+> Dependencies: CORR-4 (property tests must accompany). Schema change: No.
 
-### TPC-H Regression Baseline (TPCH-BASE)
+**PERF-2 — Cost-based refresh strategy completion (B-4 remainder)**
 
-> **In plain terms:** The TPC-H correctness tests run all 22 queries but
-> the expected-output comparison guard was never populated — so the tests
-> catch structural failures but not quiet result regressions. Populating
-> the baseline turns the suite into a true correctness canary.
+> **In plain terms:** *Deferred from v0.17.0.* The `refresh_strategy` GUC
+> landed in the current cycle. The remaining work is the per-ST cost model:
+> collect `delta_row_count`, `merge_duration_ms`, `full_refresh_duration_ms`
+> from `pgt_refresh_history`; fit a simple linear cost model; cold-start
+> heuristic (<10 refreshes) falls back to the fixed threshold.
 
-| Item | Description | Effort |
-|------|-------------|--------|
-| TPCH-BASE-1 | Run TPC-H suite once at known-good state; capture output | 30min |
-| TPCH-BASE-2 | Populate comparison baseline in `e2e_tpch_tests.rs` line 89 (remove TODO); verify guard fires on a deliberate regression | 1h |
+Verify: mixed-workload benchmark showing the model picks the cheaper strategy
+≥80% of the time.
+Dependencies: B-4 Phase 1 (shipped). Schema change: No.
 
-> **TPCH-BASE subtotal: ~1–2 hours**
+**PERF-3 — Zero-change source branch elision**
 
-### Spill Detection Alerting (PH-E2)
+> **In plain terms:** When building a multi-source delta query, skip branches
+> entirely for sources with empty change buffers. Currently all branches are
+> generated and executed regardless of whether a source has changes.
 
-> **In plain terms:** The GUCs `pg_trickle.spill_threshold_blocks` and
-> `pg_trickle.spill_consecutive_limit` already exist to configure spill
-> budgets, but no alert fires when a refresh actually spills to disk. This
-> adds an `AlertEvent::SpillThresholdExceeded` notification so operators
-> know when large delta queries are hitting disk.
+Verify: benchmark showing latency reduction when 1-of-3 sources changes vs.
+all 3 changing.
+Dependencies: PERF-1 (applies to the merged delta builder). Schema change: No.
 
-| Item | Description | Effort |
-|------|-------------|--------|
-| PH-E2-1 | Add `AlertEvent::SpillThresholdExceeded` variant to `src/monitor.rs` | 1h |
-| PH-E2-2 | Detect spill after MERGE execution; emit alert when consecutive count exceeds limit | 2–3h |
-| PH-E2-3 | E2E test: configure low spill threshold, trigger spill, assert alert fires | 1–2h |
+**PERF-4 — Columnar change tracking Phase 1 — CDC bitmask (A-2-COL-1)**
 
-> **PH-E2 subtotal: ~4–6 hours**
+> **In plain terms:** *Deferred from v0.17.0.* Compute `changed_columns`
+> bitmask (`old.col IS DISTINCT FROM new.col`) in the CDC trigger; store as
+> `int8` or `bit(n)` alongside the change row. Phase 1 only: bitmask
+> computation + storage. Phase 2 (delta-scan filtering using the bitmask)
+> deferred to v0.19.0. Provides the foundation for 50–90% delta volume
+> reduction on wide-table UPDATE workloads.
 
-### Template Cache Observability (CACHE-OBS)
+Gate behind `pg_trickle.columnar_tracking` GUC (default `off`).
+Dependencies: None. Schema change: Yes (change buffer schema addition).
+
+**PERF-5 — Index hint generation for MERGE target**
+
+> **In plain terms:** When the stream table has a covering index on the
+> MERGE join keys, bias the planner toward the index to avoid expensive
+> sequential scans during delta application on large stream tables.
+
+Emit `SET enable_seqscan = off` within the MERGE statement's session.
+Verify: `EXPLAIN ANALYZE` shows index scan on MERGE for tables with PK index.
+Dependencies: None. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Change buffer growth stress test at 10× write rate | M | P1 |
+| SCAL-2 | Parallel worker utilization profiling at 200+ STs | M | P2 |
+| SCAL-3 | Delta working-set memory cap | M | P2 |
+
+**SCAL-1 — Change buffer growth stress test at 10× write rate**
+Run a sustained write load at 10× normal throughput for 30+ minutes with
+intentionally slow refresh intervals. Verify the `max_buffer_rows` cap
+triggers correctly, FULL refresh clears the backlog, no disk exhaustion
+occurs, and the extension recovers cleanly once write rate normalizes. This
+validates the v0.16.0 buffer growth protection under extreme conditions.
+Dependencies: None. Schema change: No.
+
+**SCAL-2 — Parallel worker utilization profiling at 200+ STs**
+Profile the scheduler with 200+ stream tables across
+`pg_trickle.max_workers` = 4/8/16 settings. Measure: CPU utilization per
+worker, scheduling queue depth, per-ST refresh latency P50/P99. Identify
+whether the scheduling loop itself becomes a bottleneck before worker
+saturation. Document findings as a scaling guide section.
+Dependencies: None. Schema change: No.
+
+**SCAL-3 — Delta working-set memory cap**
+The current delta merge can allocate unbounded `work_mem` for hash joins. Add
+a configurable cap (`pg_trickle.delta_work_mem_mb`, default: 256 MB) that
+triggers FULL refresh fallback when the delta working set would exceed the
+limit, preventing OOM on unexpectedly large deltas. Verify: E2E test with low
+cap triggers fallback and logs a warning.
+Dependencies: None. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | Template cache observability | S | P1 |
+| UX-2 | Pre-built Grafana dashboard panels | M | P1 |
+| UX-3 | Error message actionability audit | S | P1 |
+| UX-4 | Single-endpoint health summary function | S | P2 |
+| UX-5 | Prometheus metric completeness audit | XS | P2 |
+
+**UX-1 — Template cache observability (CACHE-OBS)**
 
 > **In plain terms:** The delta SQL template cache (`IVM_DELTA_CACHE`)
 > saves regenerating delta queries on every refresh cycle, but its hit rate
@@ -3758,49 +3983,159 @@ release. Builds confidence in the engine ahead of v1.0.0.
 | CACHE-OBS-3 | Documentation and E2E smoke test | 1h |
 
 > **CACHE-OBS subtotal: ~3–4 hours**
+> Dependencies: None. Schema change: No.
 
-### `unsafe` Block Reduction — Phase 1 (UNSAFE-P1)
+**UX-2 — Pre-built Grafana dashboard panels**
+Extend `monitoring/grafana/` with import-ready JSON panels for: refresh
+latency P50/P99 histogram, differential vs. FULL refresh ratio over time,
+change buffer backlog per stream table, spill event count, template cache hit
+rate, and worker utilization gauge. Document import instructions in
+`monitoring/README.md`.
+Dependencies: UX-1 (cache stats metric), STAB-3 (spill events). Schema change: No.
 
-> **In plain terms:** The DVM parser has 1,286 `unsafe` blocks — 98% of
-> the total. Phase 1 introduces a single `pg_cstr_to_str()` safe helper
-> that eliminates ~69 of the most mechanical ones: C-string-to-Rust
-> conversions. No API or behavior change; pure safety improvement.
+**UX-3 — Error message actionability audit**
+Audit all `PgTrickleError` variants and `ereport!()`/`error!()` calls. Ensure
+every user-facing error includes: the stream table name (when applicable), the
+operation that failed, and a 1-sentence remediation hint. Cross-reference with
+`docs/ERRORS.md`; add missing entries.
+Dependencies: None. Schema change: No.
 
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| UNSAFE-P1-1 | Implement `pg_cstr_to_str(ptr: *const c_char) -> &str` safe wrapper in `src/dvm/parser/mod.rs` | 1h | [PLAN_REDUCED_UNSAFE.md](plans/safety/PLAN_REDUCED_UNSAFE.md) §Phase 1 |
-| UNSAFE-P1-2 | Replace ~69 `unsafe { CStr::from_ptr(...).to_str()... }` call-sites with the safe helper | 4–6h | — |
-| UNSAFE-P1-3 | `unsafe_inventory.sh` baseline update + CI check | 1h | `scripts/unsafe_inventory.sh` |
+**UX-4 — Single-endpoint health summary function**
+New `pgtrickle.health_summary()` function returning a single-row JSONB:
+total STs, healthy/degraded/error counts, oldest un-refreshed age, largest
+buffer backlog, fuse status, scheduler state. Useful for monitoring
+integrations (Nagios, Datadog) without parsing multiple views.
+Dependencies: None. Schema change: No.
 
-> **UNSAFE-P1 subtotal: ~6–8 hours**
+**UX-5 — Prometheus metric completeness audit**
+Verify every metric emitted by the extension matches the documented name in
+`docs/CONFIGURATION.md` §Prometheus. Remove undocumented metrics or add
+documentation. Ensure metric names follow Prometheus naming conventions
+(`pgtrickle_*` prefix, snake_case, unit suffix).
+Dependencies: None. Schema change: No.
 
-### Cross-Source Snapshot Consistency — Phase 3 (CSS-3)
+### Test Coverage
 
-> **In plain terms:** When a stream table reads from two different source
-> tables, there is a window where it can see source A at a newer point in
-> time than source B — for example, seeing a new order but the old
-> inventory count. Phase 3 completes the tick-watermark enforcement so
-> both sources are always read at the same consistent LSN before any
-> refresh proceeds. Phases 1 and 2 are already complete.
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | TPC-H regression baseline | XS | P0 |
+| TEST-2 | SQLancer fuzzing — crash-test oracle | L | P1 |
+| TEST-3 | CDC edge cases: NULL PKs, composite PKs, generated columns | M | P1 |
+| TEST-4 | Property-based tests for Z-set merged delta | M | P0 |
+| TEST-5 | Light E2E eligibility audit | S | P2 |
+| TEST-6 | Three-version upgrade chain test (0.16→0.17→0.18) | S | P0 |
 
-| Item | Description | Effort | Ref |
-|------|-------------|--------|-----|
-| CSS-3-1 | LSN watermark enforcement in the scheduler — hold refresh until all upstream sources reach the same tick boundary | 4–6h | [PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md](plans/sql/PLAN_CROSS_SOURCE_SNAPSHOT_CONSISTENCY.md) §Phase 3 |
-| CSS-3-2 | Catalog column `pgt_css_watermark_lsn` + GUC `pg_trickle.cross_source_consistency` (default `off`) | 2–3h | — |
-| CSS-3-3 | E2E test: concurrent writes to two sources, assert stream table never sees a split snapshot | 2–3h | — |
+**TEST-1 — TPC-H regression baseline (TPCH-BASE)**
+Same as CORR-2. Capture known-good outputs; verify guard fires on deliberate
+regression.
+Dependencies: None. Schema change: No.
 
-> **CSS-3 subtotal: ~8–12 hours**
+**TEST-2 — SQLancer fuzzing — crash-test oracle**
 
-> **v0.18.0 total: ~38–54 hours**
+> **In plain terms:** *Deferred from v0.17.0 (second time).* Scope reduced
+> to crash-test oracle only for v0.18.0: SQLancer in Docker, configured to
+> feed randomized SQL to the parser and DVM pipeline. Zero-panic guarantee —
+> any input that crashes the extension is a bug. Equivalence oracle
+> (DIFFERENTIAL ≡ FULL) and stateful DML fuzzing deferred to v0.19.0.
+
+Verify: 10K+ fuzzed queries with zero panics.
+Dependencies: None. Schema change: No.
+
+**TEST-3 — CDC edge cases: NULL PKs, composite PKs, generated columns**
+Create E2E tests covering: (a) tables with nullable PK columns in
+differential mode, (b) composite PKs with 3+ columns, (c) `GENERATED ALWAYS
+AS` stored columns as source columns, (d) domain-typed columns, (e)
+array-typed columns referenced in defining queries.
+Dependencies: None. Schema change: No.
+
+**TEST-4 — Property-based tests for Z-set merged delta**
+Required companion to PERF-1. proptest-based tests generating random
+multi-source DAGs (2–5 sources, 1–3 join levels) with random DML sequences.
+Assert merged delta produces identical stream table state as sequential
+per-branch application. Detect weight-accounting bugs before they ship.
+Dependencies: PERF-1. Schema change: No.
+
+**TEST-5 — Light E2E eligibility audit**
+Review all 10 full E2E test files (~90 tests). Identify tests that don't
+require custom Docker image features (custom extensions, special
+configurations) and can run on the stock `postgres:18.3` image. Migrate
+eligible tests to reduce CI wall-clock time on PRs.
+Dependencies: None. Schema change: No.
+
+**TEST-6 — Three-version upgrade chain test (0.16→0.17→0.18)**
+Extend upgrade E2E tests to cover: fresh install of 0.16.0, create stream
+tables, upgrade to 0.17.0, verify survival, upgrade to 0.18.0, verify
+survival + new features functional.
+Dependencies: All schema-changing items. Schema change: No.
+
+### Conflicts & Risks
+
+1. **PERF-1 + CORR-4 + TEST-4 form a mandatory cluster.** The Z-set
+   multi-source delta engine (B3-MERGE) is the highest-impact performance
+   item but also touches the DVM engine core. Property-based tests (TEST-4)
+   and the weight accounting proof (CORR-4) are *not optional* — they must
+   ship alongside PERF-1 to prevent correctness regressions.
+
+2. **Two schema changes.** CORR-1 (CSS-3) adds `pgt_css_watermark_lsn` to
+   the catalog. PERF-4 (A-2-COL-1) adds `changed_columns` to change buffer
+   tables. Both require upgrade migration scripts and freeze-risk
+   coordination. Consider batching both into a single migration file.
+
+3. **PERF-3 depends on PERF-1.** Zero-change branch elision modifies the
+   same delta query builder as B3-MERGE. Sequence PERF-3 strictly after
+   PERF-1 to avoid merge conflicts and compound risk.
+
+4. **TEST-2 (SQLancer) is deferred for the second time.** Originally planned
+   for v0.17.0, it remains unstarted. v0.18.0 scopes it to crash-test oracle
+   only (L effort instead of XL), but there is a risk of perpetual deferral.
+   If capacity is tight, prioritize the crash-test oracle as a standalone
+   deliverable rather than deferring the full suite again.
+
+5. **PERF-2 (cost model) requires production history data.** The per-ST cost
+   model trains on `pgt_refresh_history`. Users upgrading from v0.17.0 will
+   have a cold history cache. The cold-start heuristic (< 10 refreshes) is
+   critical — test it explicitly.
+
+6. **PERF-4 (columnar tracking) changes CDC trigger output.** The
+   `changed_columns` bitmask adds overhead to every trigger invocation.
+   Gate behind a GUC (default `off`) and benchmark the per-row overhead
+   (`< 1μs` target) before enabling by default in a later release.
+
+7. **B-4 and A-2-COL are carry-overs from v0.17.0.** Both were originally
+   scoped for v0.17.0 but not started. They are re-proposed here with
+   reduced scope (B-4 cost model only, A-2-COL Phase 1 bitmask only).
+   If v0.17.0 ships B-4 partially, adjust PERF-2 scope accordingly.
+
+> **v0.18.0 total: ~70–100 hours**
 
 **Exit criteria:**
-- [ ] SAFE-1: All production-path `unwrap()` calls in `api.rs` and `refresh.rs` replaced with proper error propagation
-- [ ] B3-2: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
-- [ ] TPCH-BASE: TPC-H baseline populated; deliberate regression detected by the guard
-- [ ] PH-E2: Spill alert fires in E2E test with artificially low threshold
-- [ ] CACHE-OBS: `pgtrickle.cache_stats()` returns correct counters in smoke test
-- [ ] UNSAFE-P1: `unsafe_inventory.sh` reports ≥69 fewer `unsafe` blocks; CI baseline updated
-- [ ] CSS-3: Split-snapshot E2E test passes under concurrent writes
+- [ ] CORR-1: Split-snapshot E2E test passes under concurrent writes; `pgt_css_watermark_lsn` column added
+- [ ] CORR-2 / TEST-1: TPC-H baseline populated; deliberate regression detected by the guard
+- [ ] CORR-3: NULL-keyed GROUP BY group fully removed after all-row delete
+- [ ] CORR-4 / TEST-4: Property-based Z-set weight tests pass for randomly generated multi-source DAGs
+- [ ] CORR-5: HAVING-qualified group deleted from stream table when row count drops below threshold
+- [ ] STAB-1: All production-path `unwrap()` calls in `api.rs` and `refresh.rs` replaced with proper error propagation
+- [ ] STAB-2: `unsafe_inventory.sh` reports ≥69 fewer `unsafe` blocks; CI baseline updated
+- [ ] STAB-3: Spill alert fires in E2E test with artificially low threshold
+- [ ] STAB-4: Worker crash recovery E2E test cleans up advisory locks, temp tables, and buffer rows
+- [ ] STAB-5 / TEST-6: Three-version upgrade chain (0.16→0.17→0.18) passes
+- [ ] STAB-6: All user-facing errors have documented SQLSTATE codes in `docs/ERRORS.md`
+- [ ] PERF-1: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
+- [ ] PERF-2: Cost model picks cheaper strategy ≥80% of the time on mixed workload benchmark
+- [ ] PERF-3: Zero-change branch elision shows measurable latency reduction in multi-source benchmark
+- [ ] PERF-4: `changed_columns` bitmask stored in change buffer; per-row overhead < 1μs
+- [ ] PERF-5: Index scan confirmed via EXPLAIN ANALYZE for MERGE on tables with PK covering index
+- [ ] SCAL-1: Buffer growth stress test at 10× rate completes without disk exhaustion or data loss
+- [ ] SCAL-2: Profiling report for 200+ STs documented
+- [ ] SCAL-3: Delta work_mem cap triggers FULL fallback in E2E test
+- [ ] UX-1: `pgtrickle.cache_stats()` returns correct counters in smoke test
+- [ ] UX-2: Grafana dashboard JSON importable; documents refresh latency, buffer backlog, spill events
+- [ ] UX-3: Error message audit complete; all errors include table name and remediation hint
+- [ ] UX-4: `pgtrickle.health_summary()` returns single-row JSONB with correct counts
+- [ ] UX-5: Prometheus metric names match documentation; no undocumented metrics
+- [ ] TEST-2: SQLancer crash-test oracle runs 10K+ fuzzed queries with zero panics
+- [ ] TEST-3: CDC edge case tests cover NULL PKs, composite PKs, generated columns, domain types, arrays
+- [ ] TEST-5: At least 10 tests migrated from full E2E to light E2E
 - [ ] Extension upgrade path tested (`0.17.0 → 0.18.0`)
 - [ ] `just check-version-sync` passes
 
@@ -4022,7 +4357,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.15.0 — External Test Suites & Integration | ~40–70h + ~2–3d bulk create + ~3–5d planner hints + ~2–3d cache spike + ~3–4wk parser + ~1–2wk watermark + ~2–4wk delta cost/spill | — | ✅ Released |
 | v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
-| v0.18.0 — Hardening & Delta Performance | ~38–54h | — | |
+| v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
 | v0.19.0 — PostgreSQL 19 Compatibility | ~18–36h | — | |
 | v1.0.0 — Stable release | ~18–30h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |

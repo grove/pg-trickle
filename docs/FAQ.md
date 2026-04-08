@@ -4,6 +4,112 @@ This FAQ covers everything from core concepts and getting started, through SQL
 support details, to operational topics like deployment, monitoring, and
 troubleshooting. Use the table of contents below to jump to a specific topic.
 
+---
+
+## New User FAQ — Top 15 Questions
+
+New to pg_trickle? Start here. Each answer is a short summary with a link to
+the full explanation further down.
+
+### 1. What is pg_trickle?
+
+A PostgreSQL 18 extension that adds **stream tables** — materialized views that
+refresh themselves incrementally, processing only changed rows instead of
+re-running the entire query. [Full answer →](#what-is-pg_trickle)
+
+### 2. How is this different from a materialized view?
+
+Stream tables refresh automatically on a schedule, support incremental
+(differential) refresh, track changes via CDC triggers, and propagate updates
+through dependency chains — none of which `REFRESH MATERIALIZED VIEW` provides.
+[Full answer →](#what-is-the-difference-between-a-stream-table-and-a-regular-materialized-view-in-practice)
+
+### 3. How do I install pg_trickle?
+
+Install from the Docker image, PGXN, or build from source. Add
+`shared_preload_libraries = 'pg_trickle'` to `postgresql.conf`, then
+`CREATE EXTENSION pg_trickle;` in each database. [Full answer →](#how-do-i-install-pg_trickle)
+
+### 4. How do I create my first stream table?
+
+One function call: `SELECT pgtrickle.create_stream_table(name => 'my_st', query => 'SELECT ...', schedule => '5s');`
+See the [Getting Started guide](GETTING_STARTED.md) for a walkthrough.
+[Full answer →](#how-do-i-create-a-stream-table)
+
+### 5. What is the difference between FULL and DIFFERENTIAL refresh?
+
+**FULL** re-runs the entire defining query. **DIFFERENTIAL** reads only the
+changed rows from the change buffer and computes the delta — orders of magnitude
+faster for small changes on large tables. AUTO mode picks the best strategy per
+cycle. [Full answer →](#what-is-the-difference-between-full-and-differential-refresh-mode)
+
+### 6. Which refresh mode should I use?
+
+Use **AUTO** (the default) — it selects DIFFERENTIAL when possible and falls
+back to FULL when needed. Use **IMMEDIATE** for same-transaction consistency.
+Use **FULL** only when the defining query uses volatile functions or is not
+IVM-eligible. [Full answer →](#when-should-i-use-full-vs-differential-vs-immediate)
+
+### 7. What SQL features are supported?
+
+Joins (INNER, LEFT, RIGHT, FULL OUTER, CROSS, LATERAL), aggregates (60+
+functions including SUM, COUNT, AVG, array_agg, jsonb_agg), CTEs (including
+recursive), window functions, UNION/INTERSECT/EXCEPT, subqueries, CASE, COALESCE,
+DISTINCT, GROUP BY with ROLLUP/CUBE/GROUPING SETS, and more.
+[Full answer →](#what-sql-features-are-supported-in-defining-queries)
+
+### 8. How fresh is my stream table data?
+
+As fresh as the refresh schedule allows. With a `1s` schedule, data is typically
+< 2 seconds stale. With IMMEDIATE mode, data is updated within the same
+transaction as the source write. [Full answer →](#how-stale-can-a-stream-table-be)
+
+### 9. Can I chain stream tables (ST reads from another ST)?
+
+Yes — stream tables can reference other stream tables. pg_trickle builds a
+dependency DAG and refreshes them in topological order automatically.
+[Full answer →](#can-a-stream-table-reference-another-stream-table)
+
+### 10. How does change data capture work?
+
+Lightweight row-level AFTER triggers capture every INSERT, UPDATE, and DELETE
+into per-table change buffers. If `wal_level = logical` is available,
+pg_trickle can automatically transition to WAL-based CDC for near-zero
+write-path overhead. [Full answer →](#change-data-capture-cdc)
+
+### 11. Do I need `wal_level = logical`?
+
+No. pg_trickle works with the default `wal_level = replica` using trigger-based
+CDC. WAL-based CDC is optional and provides lower write-path overhead.
+[Full answer →](#does-pg_trickle-require-wal_level--logical)
+
+### 12. Can I use pg_trickle with PgBouncer / connection poolers?
+
+Yes. pg_trickle's background workers use direct connections, not pooled ones.
+Your application can use any pooler for reads and writes — the scheduler
+operates independently. [Full answer →](#interoperability)
+
+### 13. How do I monitor stream table health?
+
+Built-in views (`pgtrickle.pgt_status`, `pgtrickle.pgt_refresh_history`),
+Prometheus metrics endpoint, Grafana dashboard, NOTIFY-based alerts, and
+a TUI tool. [Full answer →](#monitoring--alerting)
+
+### 14. What happens if a refresh fails?
+
+The stream table is marked SUSPENDED after exceeding the fuse threshold (default
+5 consecutive failures). Data in the change buffer is preserved. Use
+`pgtrickle.reset_fuse('my_st')` to resume after fixing the issue.
+[Full answer →](#troubleshooting)
+
+### 15. Can I use pg_trickle with dbt?
+
+Yes — the `dbt-pgtrickle` package provides a `stream_table` materialization.
+`dbt run` creates/alters stream tables, `dbt source freshness` checks staleness.
+[Full answer →](#dbt-integration)
+
+---
+
 ## Table of Contents
 
 **Getting started**

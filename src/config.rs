@@ -657,6 +657,64 @@ fn normalize_merge_strategy(value: Option<String>) -> MergeStrategy {
     }
 }
 
+/// B-4: Refresh strategy override.
+///
+/// Controls the FULL vs. DIFFERENTIAL decision for all stream tables:
+/// - `"auto"` (default): Use the adaptive cost-based heuristic that
+///   considers `differential_max_change_ratio`, per-ST `auto_threshold`,
+///   refresh history, and spill detection to pick the optimal strategy.
+/// - `"differential"`: Always use DIFFERENTIAL refresh (skip the adaptive
+///   threshold check). Useful when operators know their workload has low
+///   change rates and want to avoid any overhead from the ratio check.
+/// - `"full"`: Always use FULL refresh. Useful for debugging or when
+///   differential refresh is known to be slower for a specific workload.
+///
+/// This GUC is a cluster-wide override. Per-ST `refresh_mode` in the
+/// catalog takes precedence: if a stream table is configured as
+/// `refresh_mode = 'FULL'`, it will always use FULL regardless of this GUC.
+/// This GUC only affects stream tables with `refresh_mode = 'DIFFERENTIAL'`.
+pub static PGS_REFRESH_STRATEGY: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
+
+/// B-4: Cost-model safety margin for the FULL vs. DIFFERENTIAL decision.
+///
+/// When `refresh_strategy = 'auto'`, the cost model compares the estimated
+/// DIFFERENTIAL cost against `estimated_full_cost × safety_margin`.
+/// A value below 1.0 biases toward DIFFERENTIAL (which has lower lock
+/// contention), while a value above 1.0 biases toward FULL.
+///
+/// Default 0.8 — DIFFERENTIAL is chosen unless it's estimated to cost
+/// more than 80% of FULL.
+pub static PGS_COST_MODEL_SAFETY_MARGIN: GucSetting<f64> = GucSetting::<f64>::new(0.8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshStrategy {
+    /// Adaptive cost-based heuristic (existing behavior).
+    Auto,
+    /// Always use DIFFERENTIAL (skip adaptive fallback to FULL).
+    Differential,
+    /// Always fall back to FULL refresh.
+    Full,
+}
+
+impl RefreshStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefreshStrategy::Auto => "auto",
+            RefreshStrategy::Differential => "differential",
+            RefreshStrategy::Full => "full",
+        }
+    }
+}
+
+fn normalize_refresh_strategy(value: Option<String>) -> RefreshStrategy {
+    match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("differential") => RefreshStrategy::Differential,
+        Some("full") => RefreshStrategy::Full,
+        _ => RefreshStrategy::Auto,
+    }
+}
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -744,6 +802,34 @@ pub fn register_gucs() {
         &PGS_DIFFERENTIAL_MAX_CHANGE_RATIO,
         0.0,  // min
         1.0,  // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // B-4: Refresh strategy override.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.refresh_strategy",
+        c"Refresh strategy override: auto, differential, or full.",
+        c"Controls the FULL vs. DIFFERENTIAL decision for all stream tables. \
+           'auto' (default) uses the adaptive cost-based heuristic. \
+           'differential' always uses DIFFERENTIAL (skips ratio check). \
+           'full' always uses FULL refresh. Per-ST refresh_mode takes precedence.",
+        &PGS_REFRESH_STRATEGY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // B-4: Cost-model safety margin.
+    GucRegistry::define_float_guc(
+        c"pg_trickle.cost_model_safety_margin",
+        c"Safety margin for the cost-model FULL vs DIFFERENTIAL decision.",
+        c"When refresh_strategy = 'auto', DIFFERENTIAL is chosen unless its \
+           estimated cost exceeds estimated_full_cost × this margin. Values \
+           below 1.0 bias toward DIFFERENTIAL (lower lock contention). \
+           Default 0.8.",
+        &PGS_COST_MODEL_SAFETY_MARGIN,
+        0.1, // min
+        2.0, // max
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1432,6 +1518,20 @@ pub fn pg_trickle_differential_max_change_ratio() -> f64 {
     PGS_DIFFERENTIAL_MAX_CHANGE_RATIO.get()
 }
 
+/// B-4: Returns the refresh strategy override.
+pub fn pg_trickle_refresh_strategy() -> RefreshStrategy {
+    normalize_refresh_strategy(
+        PGS_REFRESH_STRATEGY
+            .get()
+            .and_then(|cs| cs.to_str().ok().map(str::to_owned)),
+    )
+}
+
+/// B-4: Returns the cost-model safety margin (default 0.8).
+pub fn pg_trickle_cost_model_safety_margin() -> f64 {
+    PGS_COST_MODEL_SAFETY_MARGIN.get()
+}
+
 /// PH-E1: Returns the max estimated delta output rows before FULL fallback.
 /// Returns 0 when disabled.
 pub fn pg_trickle_max_delta_estimate_rows() -> i32 {
@@ -1752,10 +1852,11 @@ pub fn pg_trickle_merge_strategy_threshold() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CdcTriggerMode, MergeJoinStrategy, MergeStrategy, ParallelRefreshMode, UserTriggersMode,
-        VolatileFunctionPolicy, normalize_cdc_trigger_mode, normalize_merge_join_strategy,
-        normalize_merge_strategy, normalize_parallel_refresh_mode, normalize_recursive_max_depth,
-        normalize_user_triggers_mode, normalize_volatile_function_policy, threshold_mb_to_bytes,
+        CdcTriggerMode, MergeJoinStrategy, MergeStrategy, ParallelRefreshMode, RefreshStrategy,
+        UserTriggersMode, VolatileFunctionPolicy, normalize_cdc_trigger_mode,
+        normalize_merge_join_strategy, normalize_merge_strategy, normalize_parallel_refresh_mode,
+        normalize_recursive_max_depth, normalize_refresh_strategy, normalize_user_triggers_mode,
+        normalize_volatile_function_policy, threshold_mb_to_bytes,
     };
 
     #[test]
@@ -2100,6 +2201,62 @@ mod tests {
         ] {
             assert_eq!(
                 normalize_merge_strategy(Some(strategy.as_str().to_string())),
+                strategy
+            );
+        }
+    }
+
+    // ── B-4: RefreshStrategy normalizer tests ───────────────────────
+
+    #[test]
+    fn test_normalize_refresh_strategy_defaults_to_auto() {
+        assert_eq!(normalize_refresh_strategy(None), RefreshStrategy::Auto);
+        assert_eq!(
+            normalize_refresh_strategy(Some("auto".to_string())),
+            RefreshStrategy::Auto
+        );
+        assert_eq!(
+            normalize_refresh_strategy(Some("unexpected".to_string())),
+            RefreshStrategy::Auto
+        );
+    }
+
+    #[test]
+    fn test_normalize_refresh_strategy_all_variants() {
+        assert_eq!(
+            normalize_refresh_strategy(Some("differential".to_string())),
+            RefreshStrategy::Differential
+        );
+        assert_eq!(
+            normalize_refresh_strategy(Some("DIFFERENTIAL".to_string())),
+            RefreshStrategy::Differential
+        );
+        assert_eq!(
+            normalize_refresh_strategy(Some("full".to_string())),
+            RefreshStrategy::Full
+        );
+        assert_eq!(
+            normalize_refresh_strategy(Some("FULL".to_string())),
+            RefreshStrategy::Full
+        );
+    }
+
+    #[test]
+    fn test_refresh_strategy_as_str() {
+        assert_eq!(RefreshStrategy::Auto.as_str(), "auto");
+        assert_eq!(RefreshStrategy::Differential.as_str(), "differential");
+        assert_eq!(RefreshStrategy::Full.as_str(), "full");
+    }
+
+    #[test]
+    fn test_normalize_refresh_strategy_roundtrip_via_as_str() {
+        for strategy in [
+            RefreshStrategy::Auto,
+            RefreshStrategy::Differential,
+            RefreshStrategy::Full,
+        ] {
+            assert_eq!(
+                normalize_refresh_strategy(Some(strategy.as_str().to_string())),
                 strategy
             );
         }

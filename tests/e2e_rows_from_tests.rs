@@ -188,6 +188,37 @@ async fn test_rows_from_dual_unnest_differential_delete() {
     db.assert_st_matches_query("rf_del_view", query).await;
 }
 
+#[tokio::test]
+async fn test_rows_from_dual_unnest_differential_update() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE rf_upd (id INT PRIMARY KEY, xs INT[], ys INT[])")
+        .await;
+    db.execute(
+        "INSERT INTO rf_upd VALUES \
+         (1, ARRAY[10, 20], ARRAY[100, 200]), \
+         (2, ARRAY[30], ARRAY[300, 400])",
+    )
+    .await;
+
+    let query = "SELECT d.id, u.x, u.y \
+         FROM rf_upd d, \
+         ROWS FROM(unnest(d.xs), unnest(d.ys)) AS u(x, y)";
+
+    db.create_st("rf_upd_view", query, "1m", "DIFFERENTIAL")
+        .await;
+
+    db.assert_st_matches_query("rf_upd_view", query).await;
+
+    // Update: change array contents (different lengths to verify padding)
+    db.execute("UPDATE rf_upd SET xs = ARRAY[50, 60, 70], ys = ARRAY[500] WHERE id = 1")
+        .await;
+    db.refresh_st("rf_upd_view").await;
+
+    // id=1 now has 3 rows (longest array), id=2 still has 2 rows
+    db.assert_st_matches_query("rf_upd_view", query).await;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Single-function ROWS FROM (no rewrite needed — pass-through)
 // ═══════════════════════════════════════════════════════════════════════════
