@@ -111,6 +111,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 - **`refresh_strategy` normalizer tests (B-4)** — 4 unit tests for
   `normalize_refresh_strategy` covering defaults, all variants, `as_str()`,
   and roundtrip. Total unit tests: 1,733.
+- **SQLANCER-3: DIFFERENTIAL ≡ FULL oracle after DML** — new
+  `test_sqlancer_diff_vs_full_oracle` (and `run_diff_vs_full_oracle` fn) in
+  `tests/e2e_sqlancer_tests.rs`. For each fuzzed query, creates both a
+  DIFFERENTIAL and a FULL stream table, applies 4 random DML mutations, then
+  asserts their row counts agree. Catches semantic bugs in the delta pipeline
+  that only surface after UPDATE/DELETE.
+- **SQLANCER-4: Stateful DML soak** — new `test_sqlancer_stateful_dml` (and
+  `run_stateful_dml_fuzzing` fn). Finds the first DIFFERENTIAL-supported query
+  in the seed corpus, runs `SQLANCER_MUTATIONS` (default 100, nightly 10 000)
+  random INSERT/UPDATE/DELETE mutations, checkpointing every 50 to compare
+  DIFFERENTIAL vs FULL counts. Wired into CI via `weekly-sqlancer-stateful`
+  job with `SQLANCER_MUTATIONS=10000`.
+- **`test_sqlancer_ci_combined` extended** — now runs SQLANCER-1 + SQLANCER-2
+  + SQLANCER-3 (crash + equivalence + diff-vs-full). SQLANCER-4 soak runs
+  separately via `just sqlancer-stateful[-fast]`.
 
 ---
 

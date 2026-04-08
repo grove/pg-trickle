@@ -29,10 +29,13 @@ E2E_IMAGE="${PGT_E2E_IMAGE:-pg_trickle_e2e:latest}"
 SQLANCER_CASES="${SQLANCER_CASES:-200}"
 JAVA_BIN="${SQLANCER_JAVA:-java}"
 
+SQLANCER_MUTATIONS="${SQLANCER_MUTATIONS:-100}"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  pg_trickle SQLancer fuzzing harness"
 echo "  image        : ${E2E_IMAGE}"
 echo "  cases        : ${SQLANCER_CASES}"
+echo "  mutations    : ${SQLANCER_MUTATIONS}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 cd "${REPO_ROOT}"
@@ -121,6 +124,29 @@ else
     echo "▶ Phase 2 — Java SQLancer oracle skipped (SQLANCER_JAR not set)"
     echo "  To enable: set SQLANCER_JAR=/path/to/sqlancer.jar"
     echo "  Download:  https://github.com/sqlancer/sqlancer/releases"
+fi
+
+# ── Phase 3: Stateful DML fuzzing (SQLANCER-4) ────────────────────────────
+if [[ "${SKIP_STATEFUL_ORACLE:-0}" != "1" ]]; then
+    echo ""
+    echo "▶ Phase 3 — Stateful DML fuzzing (SQLANCER-4)"
+    echo "  (SQLANCER_MUTATIONS=${SQLANCER_MUTATIONS})"
+
+    export SQLANCER_MUTATIONS
+    if [[ -n "${SQLANCER_SEED:-}" ]]; then
+        export SQLANCER_SEED
+    fi
+
+    cargo nextest run \
+        --test e2e_sqlancer_tests \
+        --run-ignored all \
+        --no-capture \
+        -E 'test(test_sqlancer_stateful_dml)'
+
+    echo "✔ Phase 3 complete"
+else
+    echo ""
+    echo "▶ Phase 3 — Stateful DML fuzzing skipped (SKIP_STATEFUL_ORACLE=1)"
 fi
 
 echo ""

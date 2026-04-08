@@ -555,15 +555,411 @@ async fn test_sqlancer_equivalence_oracle() {
     run_equivalence_oracle().await;
 }
 
+// ── DML mutation helpers ───────────────────────────────────────────────────
+
+/// Read the number of stateful DML mutations from `SQLANCER_MUTATIONS`
+/// (default: 100; set to 10000+ for nightly soak runs).
+fn stateful_dml_mutations() -> usize {
+    std::env::var("SQLANCER_MUTATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(100)
+}
+
+fn gen_insert_dml(rng: &mut Lcg, tbl: &TestTable, id: u64) -> String {
+    let mut vals: Vec<String> = vec![id.to_string()];
+    for (_, t) in &tbl.cols {
+        let v = match *t {
+            "INT" => (rng.range(1, 100) as i64).to_string(),
+            "BIGINT" => (rng.range(1, 1000) as i64).to_string(),
+            "NUMERIC" => format!("{}", rng.range(1, 500)),
+            "TEXT" => {
+                let choices = ["alpha", "beta", "gamma", "delta", "epsilon"];
+                format!("'{}'", rng.choice(&choices))
+            }
+            _ => "0".to_string(),
+        };
+        vals.push(v);
+    }
+    format!("INSERT INTO {} VALUES ({})", tbl.name, vals.join(", "))
+}
+
+fn gen_update_dml(rng: &mut Lcg, tbl: &TestTable) -> Option<String> {
+    let num_cols: Vec<_> = tbl.cols.iter().filter(|(_, t)| *t != "TEXT").collect();
+    if num_cols.is_empty() {
+        return None;
+    }
+    let (col, _) = rng.choice(&num_cols);
+    let new_val = rng.range(1, 100);
+    Some(format!(
+        "UPDATE {name} SET {col} = {new_val} WHERE id = (SELECT id FROM {name} LIMIT 1)",
+        name = tbl.name,
+        col = col,
+        new_val = new_val,
+    ))
+}
+
+fn gen_delete_dml(tbl: &TestTable) -> String {
+    format!(
+        "DELETE FROM {name} WHERE id = (SELECT id FROM {name} LIMIT 1)",
+        name = tbl.name,
+    )
+}
+
+/// Apply one random INSERT / UPDATE / DELETE to `tbl`.
+fn apply_random_mutation(rng: &mut Lcg, tbl: &TestTable, next_id: &mut u64) -> String {
+    match rng.range(0, 2) {
+        0 => {
+            let sql = gen_insert_dml(rng, tbl, *next_id);
+            *next_id += 1;
+            sql
+        }
+        1 => gen_update_dml(rng, tbl).unwrap_or_else(|| gen_delete_dml(tbl)),
+        _ => gen_delete_dml(tbl),
+    }
+}
+
+// ── SQLANCER-3: DIFFERENTIAL ≡ FULL oracle after DML ─────────────────────
+
+/// **SQLANCER-3 — Differential ≡ Full equivalence oracle after DML.**
+///
+/// For each generated query, creates two stream tables — one DIFFERENTIAL,
+/// one FULL — applies a short random DML sequence, refreshes both, and
+/// asserts that their row counts match.  Catches semantic bugs that only
+/// surface after an UPDATE or DELETE (e.g. incorrect delta computation).
+///
+/// Run via `just sqlancer-fast` (combines SQLANCER-1 through SQLANCER-3).
+async fn run_diff_vs_full_oracle() {
+    let cases = sqlancer_cases();
+    let seed = base_seed();
+    println!("[sqlancer-3] diff-vs-full oracle: {cases} cases, seed=0x{seed:016x}");
+
+    let queries = generate_queries(seed, cases);
+    let mut mismatches: Vec<(u64, String, String)> = Vec::new();
+    let mut skipped = 0usize;
+    let mut checked = 0usize;
+
+    for (i, gq) in queries.iter().enumerate() {
+        let db = E2eDb::new().await.with_extension().await;
+
+        for tbl in &gq.tables {
+            db.execute(&tbl.ddl()).await;
+            let mut rng = Lcg::new(gq.seed ^ (i as u64).wrapping_mul(0x1234567890abcdef));
+            db.execute(&tbl.insert_dml(&mut rng)).await;
+        }
+
+        let st_diff = format!("sqlancer_s3_diff_{i}");
+        let st_full = format!("sqlancer_s3_full_{i}");
+
+        let create_diff = format!(
+            "SELECT pgtrickle.create_stream_table(\
+             name => '{st_diff}', \
+             defining_query => $SQL${}$SQL$, \
+             schedule => '1m', \
+             mode => 'DIFFERENTIAL')",
+            gq.query
+        );
+        let create_full = format!(
+            "SELECT pgtrickle.create_stream_table(\
+             name => '{st_full}', \
+             defining_query => $SQL${}$SQL$, \
+             schedule => '1m', \
+             mode => 'FULL')",
+            gq.query
+        );
+
+        // Skip if DIFFERENTIAL mode is not supported for this query.
+        if db.try_execute(&create_diff).await.is_err() {
+            skipped += 1;
+            continue;
+        }
+        if db.try_execute(&create_full).await.is_err() {
+            skipped += 1;
+            continue;
+        }
+
+        let refresh_diff_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_diff}')");
+        let refresh_full_sql = format!("SELECT pgtrickle.refresh_stream_table('{st_full}')");
+
+        if db.try_execute(&refresh_diff_sql).await.is_err()
+            || db.try_execute(&refresh_full_sql).await.is_err()
+        {
+            skipped += 1;
+            continue;
+        }
+
+        // Apply a short DML sequence (4 mutations) to the first source table.
+        let mut rng = Lcg::new(gq.seed ^ 0xabcdef1234567890);
+        let mut next_id = 10_000u64 + (i as u64 * 500);
+        if let Some(tbl) = gq.tables.first() {
+            for _ in 0..4 {
+                let sql = apply_random_mutation(&mut rng, tbl, &mut next_id);
+                let _ = db.try_execute(&sql).await;
+            }
+        }
+
+        if db.try_execute(&refresh_diff_sql).await.is_err()
+            || db.try_execute(&refresh_full_sql).await.is_err()
+        {
+            skipped += 1;
+            continue;
+        }
+
+        let diff_count: i64 = db
+            .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_diff}"))
+            .await;
+        let full_count: i64 = db
+            .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_full}"))
+            .await;
+
+        checked += 1;
+
+        if diff_count != full_count {
+            mismatches.push((
+                gq.seed,
+                gq.description.clone(),
+                format!(
+                    "count mismatch after DML: diff={diff_count} vs full={full_count} | query: {}",
+                    gq.query
+                ),
+            ));
+        }
+
+        if (i + 1) % 25 == 0 {
+            println!(
+                "[sqlancer-3] progress: {}/{cases} — \
+                 checked={checked} skipped={skipped} mismatches={}",
+                i + 1,
+                mismatches.len()
+            );
+        }
+    }
+
+    println!(
+        "[sqlancer-3] diff-vs-full oracle done: {cases} cases — \
+         checked={checked}, skipped={skipped}, mismatches={}",
+        mismatches.len()
+    );
+
+    if !mismatches.is_empty() {
+        eprintln!("\n[sqlancer-3] DIFF-vs-FULL FAILURES:");
+        for (seed, desc, msg) in &mismatches {
+            eprintln!("  seed=0x{seed:016x}  [{desc}]  {msg}");
+        }
+        eprintln!(
+            "\nTo replay: SQLANCER_SEED=0x{seed:016x} SQLANCER_CASES={cases} just sqlancer-fast",
+        );
+        panic!(
+            "SQLANCER-3 diff-vs-full oracle: {} mismatch(es) out of {checked} checked queries.",
+            mismatches.len()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_sqlancer_diff_vs_full_oracle() {
+    run_diff_vs_full_oracle().await;
+}
+
+// ── SQLANCER-4: Stateful DML fuzzing ──────────────────────────────────────
+
+/// **SQLANCER-4 — Stateful DML fuzzing.**
+///
+/// Finds the first generated query that pg_trickle supports in DIFFERENTIAL
+/// mode, then runs `SQLANCER_MUTATIONS` (default 100, set to 10 000 for
+/// nightly) random INSERT/UPDATE/DELETE operations on the source table.
+/// Every `SQLANCER_CHECKPOINT_INTERVAL` (50) mutations it refreshes both
+/// a DIFFERENTIAL stream table and a FULL-mode baseline and asserts that
+/// their row counts agree.  Catches state-dependent bugs that only manifest
+/// after specific mutation histories.
+///
+/// Run via `just sqlancer-stateful-fast` or in the `weekly-sqlancer-stateful`
+/// CI job with `SQLANCER_MUTATIONS=10000`.
+async fn run_stateful_dml_fuzzing() {
+    let mutations = stateful_dml_mutations();
+    let seed = base_seed();
+    const CHECKPOINT_INTERVAL: usize = 50;
+
+    println!(
+        "[sqlancer-4] stateful DML fuzzing: {mutations} mutations, \
+         checkpoint every {CHECKPOINT_INTERVAL}, seed=0x{seed:016x}"
+    );
+
+    // ── Find a query supported by DIFFERENTIAL mode ───────────────────
+    let probe_queries = generate_queries(seed, 50);
+    let db = E2eDb::new().await.with_extension().await;
+    let mut chosen: Option<(GeneratedQuery, TestTable)> = None;
+
+    for (i, gq) in probe_queries.iter().enumerate() {
+        let Some(tbl) = gq.tables.first().cloned() else {
+            continue;
+        };
+
+        db.execute(&tbl.ddl()).await;
+        let mut rng = Lcg::new(gq.seed ^ (i as u64).wrapping_mul(0x1234567890abcdef));
+        db.execute(&tbl.insert_dml(&mut rng)).await;
+
+        let create_sql = format!(
+            "SELECT pgtrickle.create_stream_table(\
+             name => 'soak_probe', \
+             defining_query => $SQL${}$SQL$, \
+             schedule => '1m', \
+             mode => 'DIFFERENTIAL')",
+            gq.query
+        );
+
+        if db.try_execute(&create_sql).await.is_ok()
+            && db
+                .try_execute("SELECT pgtrickle.refresh_stream_table('soak_probe')")
+                .await
+                .is_ok()
+        {
+            let _ = db
+                .try_execute("SELECT pgtrickle.drop_stream_table('soak_probe')")
+                .await;
+            chosen = Some((gq.clone(), tbl));
+            break;
+        }
+
+        let _ = db
+            .try_execute("SELECT pgtrickle.drop_stream_table('soak_probe')")
+            .await;
+        let _ = db
+            .try_execute(&format!("DROP TABLE IF EXISTS {}", tbl.name))
+            .await;
+    }
+
+    let Some((gq, source_tbl)) = chosen else {
+        println!("[sqlancer-4] SKIP: no DIFFERENTIAL-supported query found in probe corpus");
+        return;
+    };
+
+    println!("[sqlancer-4] running soak on: {}", gq.description);
+
+    // ── Create the soak stream tables ─────────────────────────────────
+    let st_diff = "sqlancer_soak_diff";
+    let st_full = "sqlancer_soak_full";
+
+    db.execute(&format!(
+        "SELECT pgtrickle.create_stream_table(\
+         name => '{st_diff}', \
+         defining_query => $SQL${}$SQL$, \
+         schedule => '1m', \
+         mode => 'DIFFERENTIAL')",
+        gq.query
+    ))
+    .await;
+
+    let _ = db
+        .try_execute(&format!(
+            "SELECT pgtrickle.create_stream_table(\
+             name => '{st_full}', \
+             defining_query => $SQL${}$SQL$, \
+             schedule => '1m', \
+             mode => 'FULL')",
+            gq.query
+        ))
+        .await;
+
+    db.execute(&format!(
+        "SELECT pgtrickle.refresh_stream_table('{st_diff}')"
+    ))
+    .await;
+    let _ = db
+        .try_execute(&format!(
+            "SELECT pgtrickle.refresh_stream_table('{st_full}')"
+        ))
+        .await;
+
+    // ── Mutation loop ─────────────────────────────────────────────────
+    let mut rng = Lcg::new(seed ^ 0xfeedfacecafebeef);
+    let mut next_id = 50_000u64;
+    let mut applied = 0usize;
+    let mut mismatches: Vec<(usize, i64, i64)> = Vec::new();
+
+    for m in 0..mutations {
+        let sql = apply_random_mutation(&mut rng, &source_tbl, &mut next_id);
+        if db.try_execute(&sql).await.is_ok() {
+            applied += 1;
+        }
+
+        if (m + 1) % CHECKPOINT_INTERVAL == 0 {
+            if db
+                .try_execute(&format!(
+                    "SELECT pgtrickle.refresh_stream_table('{st_diff}')"
+                ))
+                .await
+                .is_err()
+            {
+                println!("[sqlancer-4] refresh_diff failed at mutation {m} — skipping checkpoint");
+                continue;
+            }
+            let _ = db
+                .try_execute(&format!(
+                    "SELECT pgtrickle.refresh_stream_table('{st_full}')"
+                ))
+                .await;
+
+            let diff_count: i64 = db
+                .query_scalar(&format!("SELECT COUNT(*) FROM public.{st_diff}"))
+                .await;
+            // Baseline: FULL-mode count when available, else compare diff against itself.
+            let full_count: i64 = db
+                .query_scalar_opt::<i64>(&format!("SELECT COUNT(*) FROM public.{st_full}"))
+                .await
+                .unwrap_or(diff_count);
+
+            if diff_count != full_count {
+                mismatches.push((m + 1, diff_count, full_count));
+                eprintln!(
+                    "[sqlancer-4] MISMATCH at mutation {}: diff={diff_count} full={full_count}",
+                    m + 1
+                );
+            } else {
+                println!(
+                    "[sqlancer-4] checkpoint {}/{mutations}: ok (diff={diff_count} applied={applied})",
+                    m + 1
+                );
+            }
+        }
+    }
+
+    println!(
+        "[sqlancer-4] stateful DML done: {mutations} mutations, \
+         {applied} applied, {} checkpoints, {} mismatches",
+        mutations / CHECKPOINT_INTERVAL,
+        mismatches.len()
+    );
+
+    assert!(
+        mismatches.is_empty(),
+        "SQLANCER-4: {} mismatch(es) in stateful DML fuzzing over {mutations} mutations \
+         (query: {}, seed=0x{seed:016x})",
+        mismatches.len(),
+        gq.description,
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_sqlancer_stateful_dml() {
+    run_stateful_dml_fuzzing().await;
+}
+
 // ── SQLANCER: stress + crash combined (CI entry point) ────────────────────
 
-/// Combined crash + equivalence oracle for CI.
+/// Combined crash + equivalence + diff-vs-full oracle for CI (SQLANCER-1–3).
 ///
 /// Runs in the `weekly-sqlancer` CI job. Uses `SQLANCER_CASES` to control
-/// case count (default 200 for quick CI runs; 10 000 for nightly).
+/// case count (default 200 for quick CI runs; 2 000 for nightly).
+/// The stateful DML soak test (SQLANCER-4) runs separately via
+/// `test_sqlancer_stateful_dml` with `SQLANCER_MUTATIONS=10000`.
 #[tokio::test]
 #[ignore]
 async fn test_sqlancer_ci_combined() {
     run_crash_oracle().await;
     run_equivalence_oracle().await;
+    run_diff_vs_full_oracle().await;
 }

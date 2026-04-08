@@ -273,6 +273,17 @@ sqlancer-rust-only: build-e2e-image
 sqlancer-rust-only-fast:
     SKIP_JAVA_ORACLE=1 bash scripts/run_sqlancer.sh
 
+# Run SQLANCER-4 stateful DML soak (rebuilds Docker image first).
+# Controls: SQLANCER_MUTATIONS (default 100; set to 10000 for nightly).
+[group: "sqlancer"]
+sqlancer-stateful: build-e2e-image
+    SKIP_JAVA_ORACLE=1 SKIP_RUST_ORACLE=1 bash scripts/run_sqlancer.sh
+
+# Run SQLANCER-4 stateful DML soak, skip Docker image rebuild
+[group: "sqlancer"]
+sqlancer-stateful-fast:
+    SKIP_JAVA_ORACLE=1 SKIP_RUST_ORACLE=1 bash scripts/run_sqlancer.sh
+
 # ── dbt Tests ─────────────────────────────────────────────────────────────
 
 # Run dbt-pgtrickle integration tests (builds Docker image)
