@@ -9,6 +9,7 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.17.0 — 2026-04-08](#0170--2026-04-08)
 - [0.16.0 — 2026-04-06](#0160--2026-04-06)
 - [0.15.0 — 2026-04-03](#0150--2026-04-03)
 - [0.14.0 — 2026-04-02](#0140--2026-04-02)
@@ -36,6 +37,10 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.17.0] — 2026-04-08
 
 ### Changed
 
