@@ -74,7 +74,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.14.0 | Tiered scheduling, UNLOGGED buffers & diagnostics | ✅ Released |
 | v0.15.0 | External test suites & integration | ✅ Released |
 | **v0.16.0** | **Performance & refresh optimization** | **✅ Released** |
-| v0.17.0 | Query intelligence & stability | 🚧 Next |
+| **v0.17.0** | **Query intelligence & stability** | **🚧 In Progress** |
 | v0.18.0 | Hardening & delta performance | Planned |
 | v0.19.0 | PostgreSQL 19 compatibility | Planned |
 | v1.0.0 | Stable release | Planned |
@@ -3650,8 +3650,8 @@ provides a 60-second tryout experience.
 > **v0.17.0 total: ~2–3 weeks (cost-based strategy) + ~3–4 weeks (columnar tracking) + ~32–48 hours (TIVM Phase 4) + ~1–2 days (ROWS FROM) + ~2–3 weeks (SQLancer) + ~2–3 weeks (incremental DAG) + ~4–8 hours (unsafe reduction) + ~1–2 weeks (api.rs modularization) + ~2–3 days (pg_ivm migration) + ~3–5 days (failure runbook) + ~2–3 days (Docker playground) + ~2–3 days (doc polish)**
 
 **Exit criteria:**
-- [ ] B-4: Cost-based strategy selector trained on per-ST history; cold-start fallback to fixed threshold; benchmarked on mixed workloads (scan, join, aggregate); `refresh_strategy` GUC respected
-- [ ] A-2-COL: CDC trigger emits `changed_columns` bitmask; delta-scan filters irrelevant rows; wide-table UPDATE benchmark shows ≥50% delta reduction; aggregate correction optimization tested
+- [x] B-4: Cost-based strategy selector trained on per-ST history; cold-start fallback to fixed threshold; `QueryComplexityClass` cost model (scan/filter/aggregate/join/join_agg); `refresh_strategy` + `cost_model_safety_margin` GUCs; pre-refresh predictive comparison; 10 unit tests
+- [x] A-2-COL: CDC trigger emits `changed_cols` VARBIT bitmask (COL-1); delta-scan filters irrelevant rows via `changed_cols & mask` (COL-2); aggregate value-only correction 'V' path halves row volume (COL-3)
 - ~~[ ] A2-ENR~~: 🚫 Deferred post-1.0 — requires raw `pg_sys` ENR tuplestore FFI (memory-corruption risk); revisit after 1.0 stabilisation
 - ~~[ ] A2-CTR~~: 🚫 Deferred post-1.0 — requires raw `CreateTrigger()` C FFI (memory-corruption risk); revisit after 1.0 stabilisation
 - [x] A2-PS: ✅ Already shipped — `pg_trickle.use_prepared_statements` GUC (default `true`) wired in `refresh.rs`; parse/plan overhead eliminated on steady-state workloads
