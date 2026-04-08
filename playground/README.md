@@ -130,6 +130,9 @@ For a live monitoring dashboard, use the `pgtrickle` TUI:
 # Install (once, requires Rust toolchain)
 cargo install --path ../pgtrickle-tui
 
+# Make sure ~/.cargo/bin is on your PATH (add to ~/.bashrc or ~/.zshrc if needed)
+export PATH="$HOME/.cargo/bin:$PATH"
+
 # Launch against the playground
 pgtrickle --url postgresql://postgres:playground@localhost:5432/playground
 ```
