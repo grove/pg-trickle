@@ -3422,7 +3422,7 @@ coverage gaps to validate these new paths.
 - [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
 - [x] TG2-EQUIV: Differential ≡ Full equivalence validated for joins, aggregates, and window functions
 - [x] TG2-MERGE: refresh.rs MERGE template generation has unit test coverage (completed in v0.17.0)
-- [ ] ~~TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks~~ — deferred to v0.17.0
+- [x] TG2-CANCEL: Timeout and cancellation during refresh tested; no resource leaks (completed in v0.17.0)
 - [x] TG2-SCHEMA: Source table type changes and column renames tested end-to-end
 - [x] BENCH-CI: Performance regression CI runs on every PR; 10% regression threshold blocks merge; scenario coverage includes scan/filter/aggregate/join/window/CTE/TopK/SemiJoin/AntiJoin
 - [x] AUTO-IDX: Stream tables auto-create indexes on GROUP BY / DISTINCT columns; `__pgt_row_id` covering index for ≤ 8-column tables; `auto_index` GUC respected
@@ -3655,7 +3655,7 @@ provides a 60-second tryout experience.
 - [ ] A2-ENR: ENR-based transition tables eliminate temp-table round-trip; IMMEDIATE mode latency reduced vs SQL-trigger baseline
 - [ ] A2-CTR: C-level triggers registered; per-statement overhead < 0.1ms; existing IMMEDIATE mode tests pass
 - [ ] A2-PS: Prepared statement reuse across refresh cycles; parse/plan overhead eliminated on steady-state workloads
-- [ ] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
+- [x] A8: `ROWS FROM()` with multiple SRFs accepted in defining queries; E2E tests cover INSERT/UPDATE/DELETE propagation
 - [ ] SQLANCER: Fuzzing environment operational; crash-test oracle finds zero panics on seed corpus; equivalence oracle validates DIFFERENTIAL ≡ FULL for fuzzed queries; stateful DML fuzzing runs clean for 10K+ mutation sequences
 - [ ] C-2: Incremental DAG rebuild reduces DDL-triggered latency spike to < 5ms at 100+ STs; ring buffer overflow falls back to full rebuild; no correctness regressions
 - [x] UNSAFE-R1/R2: Unsafe block count reduced by 249 (690→441 in parser); `is_node_type!` and `pg_deref!` macros; all 1,700 unit tests pass

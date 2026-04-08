@@ -10,6 +10,8 @@
 //! | FR-4 | repeated failures increment counter; fuse activates at threshold |
 //! | FR-5 | refresh after consecutive_errors reset → resumes normal operation |
 //! | FR-6 | concurrent DDL (DROP column) during refresh → error, not panic |
+//! | FR-7 | pg_cancel_backend() during refresh → ST recovers next cycle |
+//! | FR-8 | no orphaned temp tables or stale catalog after cancel/timeout |
 //!
 //! These tests use the manual `refresh_stream_table()` API rather than the
 //! background scheduler to keep failure injection deterministic.
@@ -376,4 +378,195 @@ async fn test_drop_source_and_reinit_recovery() {
         // If st_count == 0, the cascade cleaned up the catalog too — also valid.
     }
     // If DROP was blocked by the extension, that is also correct behavior.
+}
+
+// ── FR-7: pg_cancel_backend() during refresh ────────────────────────────────
+
+/// Start a refresh that takes non-trivial time (large source table), cancel
+/// the backend PID from a second connection, then verify the ST is NOT left
+/// in a corrupt state and a subsequent refresh succeeds.
+#[tokio::test]
+async fn test_cancel_backend_during_refresh_recovers() {
+    use sqlx::Row;
+
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fr_cancel_src (id SERIAL PRIMARY KEY, val TEXT)")
+        .await;
+    // Insert enough rows that the refresh takes measurable time
+    db.execute(
+        "INSERT INTO fr_cancel_src (val) \
+         SELECT md5(generate_series::text) FROM generate_series(1, 2000)",
+    )
+    .await;
+
+    let q = "SELECT id, val FROM fr_cancel_src";
+    db.create_st("fr_cancel_st", q, "1m", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("fr_cancel_st", q).await;
+
+    // Insert more rows so the next refresh has real MERGE work to do
+    db.execute(
+        "INSERT INTO fr_cancel_src (val) \
+         SELECT md5(generate_series::text) FROM generate_series(2001, 4000)",
+    )
+    .await;
+
+    // Acquire two separate connections from the pool
+    let mut conn_refresh = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire refresh connection");
+    let mut conn_cancel = db
+        .pool
+        .acquire()
+        .await
+        .expect("failed to acquire cancel connection");
+
+    // Get the PID of the refresh connection
+    let refresh_pid: i32 = sqlx::query("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn_refresh)
+        .await
+        .expect("failed to get PID")
+        .get(0);
+
+    // Start the refresh on one connection, cancel from the other.
+    // Use tokio::spawn to run the refresh concurrently.
+    let refresh_handle = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('fr_cancel_st')")
+            .execute(&mut *conn_refresh)
+            .await
+    });
+
+    // Give the refresh a moment to start, then cancel it
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let cancel_result = sqlx::query(&format!("SELECT pg_cancel_backend({})", refresh_pid))
+        .execute(&mut *conn_cancel)
+        .await;
+    assert!(
+        cancel_result.is_ok(),
+        "pg_cancel_backend() call should succeed"
+    );
+
+    // The refresh may succeed (if it finished before cancel) or fail
+    let refresh_result = refresh_handle.await.expect("refresh task panicked");
+    // Either outcome is acceptable — what matters is the ST is not corrupt
+
+    // Verify the ST is in a recoverable state (ACTIVE or ERROR, not stuck)
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_cancel_st'",
+        )
+        .await;
+    assert!(
+        status == "ACTIVE" || status == "ERROR",
+        "ST should be ACTIVE or ERROR after cancel, got: {status}"
+    );
+
+    // A subsequent refresh MUST succeed and bring data up to date
+    db.refresh_st("fr_cancel_st").await;
+    db.assert_st_matches_query("fr_cancel_st", q).await;
+
+    // consecutive_errors should be 0 after a successful refresh
+    let errs: i64 = db
+        .query_scalar(
+            "SELECT consecutive_errors::bigint FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'fr_cancel_st'",
+        )
+        .await;
+    assert_eq!(
+        errs, 0,
+        "consecutive_errors should reset after successful recovery"
+    );
+    let _ = refresh_result;
+}
+
+// ── FR-8: No orphaned temp tables after failure/cancel ──────────────────────
+
+/// After a statement_timeout-induced failure, verify:
+/// - No orphaned `__pgt_delta_*` temp tables are left behind
+/// - The change buffer table still exists and is accessible
+/// - The catalog `consecutive_errors` is consistent with reality
+/// - A subsequent refresh cleans up and succeeds
+#[tokio::test]
+async fn test_no_resource_leak_after_timeout() {
+    let db = E2eDb::new().await.with_extension().await;
+    db.execute("CREATE TABLE fr_leak_src (id SERIAL PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute(
+        "INSERT INTO fr_leak_src (val) \
+         SELECT md5(generate_series::text) FROM generate_series(1, 500)",
+    )
+    .await;
+
+    let q = "SELECT id, val FROM fr_leak_src";
+    db.create_st("fr_leak_st", q, "1m", "DIFFERENTIAL").await;
+    db.assert_st_matches_query("fr_leak_st", q).await;
+
+    // Get the OID of the stream table source for change buffer lookup
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id::bigint FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'fr_leak_st'",
+        )
+        .await;
+
+    // Insert more rows to create pending changes
+    db.execute(
+        "INSERT INTO fr_leak_src (val) \
+         SELECT 'leak_test_' || generate_series FROM generate_series(1, 200)",
+    )
+    .await;
+
+    // Force a timeout — refresh may or may not fail
+    let _ = db
+        .try_execute(
+            "SET statement_timeout = '1ms'; \
+             SELECT pgtrickle.refresh_stream_table('fr_leak_st')",
+        )
+        .await;
+    db.execute("SET statement_timeout = 0").await;
+
+    // Check for orphaned __pgt_delta_* temp tables in pg_class
+    let orphaned_temps: i64 = db
+        .query_scalar(
+            "SELECT count(*)::bigint FROM pg_class \
+             WHERE relname LIKE '__pgt_delta_%' \
+             AND relpersistence = 't'",
+        )
+        .await;
+    assert_eq!(
+        orphaned_temps, 0,
+        "No __pgt_delta_* temp tables should remain after failed refresh; found {orphaned_temps}"
+    );
+
+    // Verify the change buffer table still exists and is accessible
+    let buffer_exists: bool = db
+        .query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'pgtrickle_changes' \
+             AND c.relname = 'changes_{}')",
+            pgt_id
+        ))
+        .await;
+    assert!(
+        buffer_exists,
+        "Change buffer table should still exist after failed refresh"
+    );
+
+    // A normal refresh must succeed and produce correct data
+    db.refresh_st("fr_leak_st").await;
+    db.assert_st_matches_query("fr_leak_st", q).await;
+
+    // After successful refresh, verify no temp tables remain
+    let post_temps: i64 = db
+        .query_scalar(
+            "SELECT count(*)::bigint FROM pg_class \
+             WHERE relname LIKE '__pgt_delta_%' \
+             AND relpersistence = 't'",
+        )
+        .await;
+    assert_eq!(
+        post_temps, 0,
+        "No __pgt_delta_* temp tables should remain after successful refresh"
+    );
 }

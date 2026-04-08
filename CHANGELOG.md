@@ -82,6 +82,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   pre-loaded sample data and 5 stream tables demonstrating aggregates, window
   functions, joins, time-series, and EXISTS subqueries.
 
+### Tests
+
+- **`ROWS FROM()` differential UPDATE test (A8)** — added
+  `test_rows_from_dual_unnest_differential_update` to cover UPDATE propagation
+  through the `ROWS FROM()` rewrite pass. INSERT/UPDATE/DELETE differential
+  coverage now complete.
+- **`pg_cancel_backend()` recovery test (TG2-CANCEL)** — added
+  `test_cancel_backend_during_refresh_recovers` (FR-7): starts a refresh on
+  one connection, cancels it via `pg_cancel_backend()` from a second, and
+  verifies the stream table recovers on the next refresh.
+- **Resource leak verification after timeout (TG2-CANCEL)** — added
+  `test_no_resource_leak_after_timeout` (FR-8): verifies no orphaned
+  `__pgt_delta_*` temp tables or stale catalog state remain after a
+  `statement_timeout`-induced failure.
+
 ---
 
 ## [0.16.0] — 2026-04-06
