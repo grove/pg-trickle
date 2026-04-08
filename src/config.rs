@@ -676,6 +676,17 @@ fn normalize_merge_strategy(value: Option<String>) -> MergeStrategy {
 pub static PGS_REFRESH_STRATEGY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 
+/// B-4: Cost-model safety margin for the FULL vs. DIFFERENTIAL decision.
+///
+/// When `refresh_strategy = 'auto'`, the cost model compares the estimated
+/// DIFFERENTIAL cost against `estimated_full_cost × safety_margin`.
+/// A value below 1.0 biases toward DIFFERENTIAL (which has lower lock
+/// contention), while a value above 1.0 biases toward FULL.
+///
+/// Default 0.8 — DIFFERENTIAL is chosen unless it's estimated to cost
+/// more than 80% of FULL.
+pub static PGS_COST_MODEL_SAFETY_MARGIN: GucSetting<f64> = GucSetting::<f64>::new(0.8);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshStrategy {
     /// Adaptive cost-based heuristic (existing behavior).
@@ -804,6 +815,21 @@ pub fn register_gucs() {
            'differential' always uses DIFFERENTIAL (skips ratio check). \
            'full' always uses FULL refresh. Per-ST refresh_mode takes precedence.",
         &PGS_REFRESH_STRATEGY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // B-4: Cost-model safety margin.
+    GucRegistry::define_float_guc(
+        c"pg_trickle.cost_model_safety_margin",
+        c"Safety margin for the cost-model FULL vs DIFFERENTIAL decision.",
+        c"When refresh_strategy = 'auto', DIFFERENTIAL is chosen unless its \
+           estimated cost exceeds estimated_full_cost × this margin. Values \
+           below 1.0 bias toward DIFFERENTIAL (lower lock contention). \
+           Default 0.8.",
+        &PGS_COST_MODEL_SAFETY_MARGIN,
+        0.1, // min
+        2.0, // max
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1499,6 +1525,11 @@ pub fn pg_trickle_refresh_strategy() -> RefreshStrategy {
             .get()
             .and_then(|cs| cs.to_str().ok().map(str::to_owned)),
     )
+}
+
+/// B-4: Returns the cost-model safety margin (default 0.8).
+pub fn pg_trickle_cost_model_safety_margin() -> f64 {
+    PGS_COST_MODEL_SAFETY_MARGIN.get()
 }
 
 /// PH-E1: Returns the max estimated delta output rows before FULL fallback.

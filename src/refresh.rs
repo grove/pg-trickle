@@ -20,6 +20,74 @@ use std::time::Instant;
 
 use crate::catalog::{StDependency, StreamTableMeta};
 
+// ── B-4: Query complexity classification ────────────────────────────────
+
+/// Complexity class for a stream table's defining query.
+///
+/// Used by the cost model to apply per-class cost coefficients.  Higher
+/// complexity classes have steeper differential cost curves (more joins /
+/// aggregates → more work per delta row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryComplexityClass {
+    /// Simple scan: `SELECT cols FROM single_table`
+    Scan,
+    /// Scan with filter: `SELECT cols FROM single_table WHERE ...`
+    Filter,
+    /// Aggregate: `SELECT ... GROUP BY ...` (no joins)
+    Aggregate,
+    /// Join(s) without aggregation
+    Join,
+    /// Join(s) with GROUP BY aggregation (most expensive differential path)
+    JoinAggregate,
+}
+
+impl QueryComplexityClass {
+    /// Default differential cost scaling factor per class.
+    ///
+    /// The factor represents the per-delta-row cost multiplier relative to
+    /// a plain scan.  Joins and aggregates make each delta row more
+    /// expensive to process incrementally.
+    pub(crate) fn diff_cost_factor(self) -> f64 {
+        match self {
+            Self::Scan => 1.0,
+            Self::Filter => 1.1,
+            Self::Aggregate => 1.5,
+            Self::Join => 2.5,
+            Self::JoinAggregate => 4.0,
+        }
+    }
+}
+
+/// Classify a defining query's complexity from its SQL text.
+///
+/// Uses lightweight keyword analysis (no parsing or SPI).  This is
+/// intentionally conservative: false positives (over-classifying) are
+/// preferable to false negatives because a higher class merely biases
+/// the cost model toward FULL at lower change rates, which is always safe.
+pub(crate) fn classify_query_complexity(defining_query: &str) -> QueryComplexityClass {
+    let upper = defining_query.to_ascii_uppercase();
+    let has_join = upper.contains(" JOIN ")
+        || upper.contains(" INNER JOIN ")
+        || upper.contains(" LEFT JOIN ")
+        || upper.contains(" RIGHT JOIN ")
+        || upper.contains(" FULL JOIN ")
+        || upper.contains(" CROSS JOIN ");
+    let has_group_by = upper.contains("GROUP BY");
+
+    match (has_join, has_group_by) {
+        (true, true) => QueryComplexityClass::JoinAggregate,
+        (true, false) => QueryComplexityClass::Join,
+        (false, true) => QueryComplexityClass::Aggregate,
+        (false, false) => {
+            if upper.contains(" WHERE ") {
+                QueryComplexityClass::Filter
+            } else {
+                QueryComplexityClass::Scan
+            }
+        }
+    }
+}
+
 // ── G12-ERM-1: Effective refresh mode tracking ──────────────────────────
 
 // Thread-local that records the mode actually used for the current refresh.
@@ -4079,6 +4147,36 @@ pub fn execute_differential_refresh(
         }
     }
 
+    // ── B-4: Pre-refresh cost-model prediction ──────────────────────
+    // When strategy = 'auto' and the ratio check didn't trigger, query
+    // historical refresh timings and use the cost model to predict
+    // whether DIFFERENTIAL or FULL is cheaper for the *current* delta.
+    if !should_fallback && !skip_ratio_check && total_change_count > 0 {
+        let complexity = classify_query_complexity(&st.defining_query);
+        if let Some(hist) = query_refresh_history_stats(st.pgt_id) {
+            if cost_model_prefers_full(
+                hist.avg_ms_per_delta,
+                hist.avg_full_ms,
+                total_change_count,
+                complexity,
+            ) {
+                pgrx::debug1!(
+                    "[pg_trickle] B-4 cost model: FULL preferred for {}.{} \
+                     (est_diff={:.1}ms > est_full×margin={:.1}ms, class={:?}, Δ={})",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    hist.avg_ms_per_delta
+                        * complexity.diff_cost_factor()
+                        * total_change_count as f64,
+                    hist.avg_full_ms * crate::config::pg_trickle_cost_model_safety_margin(),
+                    complexity,
+                    total_change_count,
+                );
+                should_fallback = true;
+            }
+        }
+    }
+
     if should_fallback {
         pgrx::warning!(
             "[pg_trickle] Falling back to FULL refresh for {}.{}: change ratio exceeds \
@@ -5359,11 +5457,13 @@ pub fn execute_differential_refresh(
         let ratio_threshold =
             compute_adaptive_threshold(current_threshold, incr_total_ms, last_full);
 
-        // ── D-3: Cost-based threshold from historical data ──────────
+        // ── D-3 / B-4: Cost-based threshold from historical data ────
         // Blend the ratio-based threshold with a cost-model estimate
         // derived from recent refresh history.  The cost model computes
-        // the crossover delta ratio where INCR cost equals FULL cost.
-        let new_threshold = match estimate_cost_based_threshold(st.pgt_id) {
+        // the crossover delta ratio where INCR cost equals FULL cost,
+        // adjusted for query complexity class.
+        let complexity = classify_query_complexity(&st.defining_query);
+        let new_threshold = match estimate_cost_based_threshold(st.pgt_id, complexity) {
             Some(cost_threshold) => {
                 // Weighted blend: 60% ratio-based, 40% cost-based.
                 let blended = ratio_threshold * 0.6 + cost_threshold * 0.4;
@@ -5431,20 +5531,90 @@ pub fn execute_differential_refresh(
     Ok((effective_count, 0))
 }
 
-/// D-3: Estimate a cost-based fallback threshold from refresh history.
+/// B-4: Aggregated refresh history statistics for cost-model prediction.
+struct RefreshHistoryStats {
+    /// Average milliseconds per delta row across recent DIFFERENTIAL refreshes.
+    avg_ms_per_delta: f64,
+    /// Average FULL refresh time in milliseconds.
+    avg_full_ms: f64,
+}
+
+/// B-4: Query recent refresh history stats for a stream table.
+///
+/// Returns `None` when insufficient history exists (fewer than 3
+/// completed DIFFERENTIAL refreshes or no completed FULL refresh).
+fn query_refresh_history_stats(pgt_id: i64) -> Option<RefreshHistoryStats> {
+    let stats: Option<(f64, f64)> = Spi::connect(|client| {
+        let sql = format!(
+            "SELECT incr.avg_ms_per_delta, full_r.avg_full_ms \
+             FROM ( \
+               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0 \
+                          / GREATEST(delta_row_count, 1)) AS avg_ms_per_delta, \
+                      COUNT(*)::int AS cnt \
+               FROM ( \
+                 SELECT end_time, start_time, delta_row_count \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = {pgt_id} \
+                   AND action = 'DIFFERENTIAL' \
+                   AND status = 'COMPLETED' \
+                   AND delta_row_count > 0 \
+                   AND end_time IS NOT NULL \
+                 ORDER BY refresh_id DESC LIMIT 10 \
+               ) __pgt_incr \
+             ) incr, ( \
+               SELECT AVG(EXTRACT(EPOCH FROM (end_time - start_time)) * 1000.0) AS avg_full_ms \
+               FROM ( \
+                 SELECT end_time, start_time \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = {pgt_id} \
+                   AND action = 'FULL' \
+                   AND status = 'COMPLETED' \
+                   AND end_time IS NOT NULL \
+                 ORDER BY refresh_id DESC LIMIT 5 \
+               ) __pgt_full \
+             ) full_r \
+             WHERE incr.cnt >= 3 \
+               AND full_r.avg_full_ms IS NOT NULL \
+               AND full_r.avg_full_ms > 0 \
+               AND incr.avg_ms_per_delta IS NOT NULL \
+               AND incr.avg_ms_per_delta > 0",
+        );
+
+        let result: Option<(f64, f64)> = (|| {
+            let row = client.select(&sql, None, &[]).ok()?.first();
+            let avg_ms_per_delta: f64 = row.get::<f64>(1).ok()??;
+            let avg_full_ms: f64 = row.get::<f64>(2).ok()??;
+            Some((avg_ms_per_delta, avg_full_ms))
+        })();
+        Ok::<_, pgrx::spi::SpiError>(result)
+    })
+    .unwrap_or(None);
+
+    let (avg_ms_per_delta, avg_full_ms) = stats?;
+    Some(RefreshHistoryStats {
+        avg_ms_per_delta,
+        avg_full_ms,
+    })
+}
+
+/// D-3 / B-4: Estimate a cost-based fallback threshold from refresh history.
 ///
 /// Queries the last N DIFFERENTIAL and FULL refreshes for a stream table
 /// and computes the crossover delta ratio where incremental cost equals
-/// full cost.  Returns `None` if insufficient history is available (fewer
+/// full cost.  The `complexity` class adjusts the per-delta-row cost
+/// via a multiplicative factor (joins and aggregates are more expensive
+/// per delta row than plain scans).
+///
+/// Returns `None` if insufficient history is available (fewer
 /// than 3 DIFFERENTIAL or no FULL refresh recorded).
 ///
 /// The model:
-///   incr_cost(delta_ratio) ≈ avg_incr_cost_per_delta_row × delta_ratio × table_size
+///   incr_cost(delta_ratio) ≈ avg_incr_cost_per_delta_row × complexity_factor × delta_ratio × table_size
 ///   full_cost              ≈ avg_full_ms
-///   crossover_ratio        = avg_full_ms / (avg_cost_per_delta_row × table_size)
+///   crossover_ratio        = avg_full_ms / (avg_cost_per_delta_row × complexity_factor × table_size)
 ///
 /// Clamped to [0.01, 0.80].
-fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
+fn estimate_cost_based_threshold(pgt_id: i64, complexity: QueryComplexityClass) -> Option<f64> {
     // Query recent completed DIFFERENTIAL refreshes with non-zero delta.
     let stats: Option<(f64, f64, f64)> = Spi::connect(|client| {
         // avg_ms_per_delta: average milliseconds per delta row
@@ -5501,12 +5671,12 @@ fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
 
     let (avg_ms_per_delta, avg_full_ms, avg_delta) = stats?;
 
-    // crossover_delta = avg_full_ms / avg_ms_per_delta
-    // Simplified: if we know the average delta and the crossover delta,
-    // the threshold ratio is crossover_delta / source_table_size.
-    // Since we don't have source_table_size here, we use the ratio of
-    // crossover_delta to the historical average delta as a scaling factor.
-    let crossover_delta = avg_full_ms / avg_ms_per_delta;
+    // crossover_delta = avg_full_ms / (avg_ms_per_delta × complexity_factor)
+    // The complexity factor scales the per-delta-row cost: join_agg queries
+    // have 4× the cost per delta row compared to a plain scan, so their
+    // crossover point is lower (smaller change ratio triggers FULL).
+    let factor = complexity.diff_cost_factor();
+    let crossover_delta = avg_full_ms / (avg_ms_per_delta * factor);
     if avg_delta <= 0.0 {
         return None;
     }
@@ -5519,6 +5689,29 @@ fn estimate_cost_based_threshold(pgt_id: i64) -> Option<f64> {
     let suggested: f64 = (global_ratio * scaling).clamp(0.01, 0.80);
 
     Some(suggested)
+}
+
+/// B-4: Pre-refresh predictive cost comparison.
+///
+/// **Before** executing a refresh, estimate the DIFFERENTIAL and FULL costs
+/// from historical data and the current delta size.  Returns `true` if the
+/// cost model recommends FULL refresh.
+///
+/// When insufficient history exists (cold start), returns `None` to let the
+/// caller fall through to the fixed-threshold heuristic.
+///
+/// Pure decision logic — called from the refresh decision path.
+fn cost_model_prefers_full(
+    avg_ms_per_delta: f64,
+    avg_full_ms: f64,
+    current_delta_rows: i64,
+    complexity: QueryComplexityClass,
+) -> bool {
+    let safety_margin = crate::config::pg_trickle_cost_model_safety_margin();
+    let factor = complexity.diff_cost_factor();
+    let estimated_diff = avg_ms_per_delta * factor * current_delta_rows as f64;
+    let estimated_full = avg_full_ms * safety_margin;
+    estimated_diff >= estimated_full
 }
 
 /// Compute a new adaptive fallback threshold based on observed performance.
@@ -7601,5 +7794,125 @@ mod pg_tests {
             }
         };
         assert!(union_result.is_none());
+    }
+
+    // ── B-4: classify_query_complexity() ────────────────────────────
+
+    #[test]
+    fn test_classify_scan() {
+        let q = "SELECT id, name FROM users";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Scan);
+    }
+
+    #[test]
+    fn test_classify_filter() {
+        let q = "SELECT id, name FROM users WHERE active = true";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Filter);
+    }
+
+    #[test]
+    fn test_classify_aggregate() {
+        let q = "SELECT region, SUM(amount) FROM orders GROUP BY region";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::Aggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_join() {
+        let q = "SELECT o.id, u.name FROM orders o JOIN users u ON o.user_id = u.id";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Join);
+    }
+
+    #[test]
+    fn test_classify_join_aggregate() {
+        let q = "SELECT u.name, SUM(o.amount) FROM orders o JOIN users u ON o.user_id = u.id GROUP BY u.name";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::JoinAggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_left_join() {
+        let q = "SELECT * FROM a LEFT JOIN b ON a.id = b.a_id";
+        assert_eq!(classify_query_complexity(q), QueryComplexityClass::Join);
+    }
+
+    #[test]
+    fn test_classify_case_insensitive() {
+        let q = "select id from users where active group by id";
+        assert_eq!(
+            classify_query_complexity(q),
+            QueryComplexityClass::Aggregate
+        );
+    }
+
+    // ── B-4: cost_model_prefers_full() ──────────────────────────────
+
+    #[test]
+    fn test_cost_model_prefers_full_large_delta() {
+        // avg_ms_per_delta=1.0, avg_full=100ms, delta=200 rows, scan class
+        // est_diff = 1.0 * 1.0 * 200 = 200ms > 100 * 0.8 = 80ms → FULL
+        assert!(cost_model_prefers_full(
+            1.0,
+            100.0,
+            200,
+            QueryComplexityClass::Scan
+        ));
+    }
+
+    #[test]
+    fn test_cost_model_prefers_diff_small_delta() {
+        // avg_ms_per_delta=1.0, avg_full=100ms, delta=10 rows, scan class
+        // est_diff = 1.0 * 1.0 * 10 = 10ms < 100 * 0.8 = 80ms → DIFF
+        assert!(!cost_model_prefers_full(
+            1.0,
+            100.0,
+            10,
+            QueryComplexityClass::Scan
+        ));
+    }
+
+    #[test]
+    fn test_cost_model_complexity_affects_decision() {
+        // Same delta count, but JoinAggregate has 4× factor
+        // Scan: est_diff = 0.5 * 1.0 * 100 = 50ms < 100 * 0.8 = 80ms → DIFF
+        assert!(!cost_model_prefers_full(
+            0.5,
+            100.0,
+            100,
+            QueryComplexityClass::Scan
+        ));
+        // JoinAgg: est_diff = 0.5 * 4.0 * 100 = 200ms > 80ms → FULL
+        assert!(cost_model_prefers_full(
+            0.5,
+            100.0,
+            100,
+            QueryComplexityClass::JoinAggregate
+        ));
+    }
+
+    // ── B-4: diff_cost_factor() ─────────────────────────────────────
+
+    #[test]
+    fn test_diff_cost_factors_ordering() {
+        assert!(
+            QueryComplexityClass::Scan.diff_cost_factor()
+                < QueryComplexityClass::Filter.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Filter.diff_cost_factor()
+                < QueryComplexityClass::Aggregate.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Aggregate.diff_cost_factor()
+                < QueryComplexityClass::Join.diff_cost_factor()
+        );
+        assert!(
+            QueryComplexityClass::Join.diff_cost_factor()
+                < QueryComplexityClass::JoinAggregate.diff_cost_factor()
+        );
     }
 }

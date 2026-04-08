@@ -62,6 +62,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   adaptive FULL/DIFFERENTIAL cost heuristic cluster-wide. `'differential'`
   skips the per-source ratio check; `'full'` forces FULL refresh unconditionally.
   Per-ST `refresh_mode` takes precedence. Documented in CONFIGURATION.md.
+- **Predictive cost model (B-4 Phase 2)** — the `refresh_strategy = 'auto'`
+  mode now uses a predictive cost model that classifies each stream table's
+  query into one of five complexity classes (scan, filter, aggregate, join,
+  join+aggregate) with per-class differential cost factors. Before each refresh,
+  the model estimates `diff_cost = avg_ms_per_delta × complexity_factor × Δ_rows`
+  and compares against `full_cost × safety_margin`.  New
+  `pg_trickle.cost_model_safety_margin` GUC (default 0.8) controls the bias
+  toward DIFFERENTIAL. Historical refresh timing data is queried from
+  `pgt_refresh_history` (last 10 DIFFERENTIAL + last 5 FULL refreshes).
+- **Columnar change tracking (A-2-COL)** — end-to-end `changed_cols` VARBIT
+  bitmask pipeline now fully active: COL-1 (CDC trigger computes per-column
+  `IS DISTINCT FROM` bitmask), COL-2 (scan operator skips UPDATE rows where
+  no referenced column changed via `changed_cols & mask != 0` filter),
+  COL-3 (aggregate operator emits single 'V' correction row for value-only
+  UPDATEs instead of D+I pair, halving row volume for aggregates).
 - **`StDag` is now `Clone` (C-2)** — added `#[derive(Clone)]` to `StDag` to
   enable benchmark cloning.
 
@@ -111,6 +126,10 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 - **`refresh_strategy` normalizer tests (B-4)** — 4 unit tests for
   `normalize_refresh_strategy` covering defaults, all variants, `as_str()`,
   and roundtrip. Total unit tests: 1,733.
+- **Cost model unit tests (B-4 Phase 2)** — 10 unit tests for
+  `classify_query_complexity` (scan, filter, aggregate, join, join_agg,
+  left join, case-insensitive), `cost_model_prefers_full` (large delta,
+  small delta, complexity affects decision), and `diff_cost_factor` ordering.
 - **SQLANCER-3: DIFFERENTIAL ≡ FULL oracle after DML** — new
   `test_sqlancer_diff_vs_full_oracle` (and `run_diff_vs_full_oracle` fn) in
   `tests/e2e_sqlancer_tests.rs`. For each fuzzed query, creates both a
