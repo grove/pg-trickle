@@ -1896,6 +1896,7 @@ fn estimate_delta_output_rows(merge_sql: &str, limit: i32) -> Option<i64> {
 /// delta DELETEs and duplicate-key UPDATEs.
 fn has_non_monotonic_cte(sql: &str) -> bool {
     sql.contains("__pgt_cte_agg_") // Aggregate: group updates → 'I' with existing row_id
+        || sql.contains("__pgt_cte_join_") // INNER JOIN: source DELETEs/UPDATEs produce delta DELETEs
         || sql.contains("__pgt_cte_left_join_") // LEFT JOIN: right INSERTs remove NULL-padded rows
         || sql.contains("__pgt_cte_lj_") // LEFT JOIN flags CTE
         || sql.contains("__pgt_cte_full_join_") // FULL JOIN
@@ -6861,6 +6862,11 @@ mod tests {
         assert!(has_non_monotonic_cte(
             "WITH __pgt_cte_agg_1 AS (SELECT ...) SELECT * FROM __pgt_cte_agg_1",
         ));
+    }
+
+    #[test]
+    fn test_has_non_monotonic_cte_inner_join() {
+        assert!(has_non_monotonic_cte("... __pgt_cte_join_1 ..."));
     }
 
     #[test]
