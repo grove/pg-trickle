@@ -44,6 +44,7 @@ jobs:
 
       - name: Build pg_stub for LD_PRELOAD
         run: |
+          mkdir -p target
           cc -shared -fPIC -o target/libpg_stub.so scripts/pg_stub.c
 
       - name: Generate coverage (unit tests)
@@ -120,6 +121,7 @@ jobs:
 
       - name: Build pg_stub for LD_PRELOAD
         run: |
+          mkdir -p target
           cc -shared -fPIC -o target/libpg_stub.so scripts/pg_stub.c
 
       - name: Generate unit test profdata
