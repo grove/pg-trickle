@@ -80,12 +80,12 @@ jobs:
   # ── E2E coverage (Docker-based, weekly + manual) ──────────────────────
   # Runs the full E2E test suite against a coverage-instrumented Docker
   # image, extracts profraw files, merges with unit profdata, and uploads
-  # combined coverage. Expensive (~30 min), so scheduled weekly only.
+  # combined coverage. Expensive (~60 min), so scheduled weekly only.
   e2e-coverage:
     name: E2E coverage
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
 
