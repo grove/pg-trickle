@@ -1724,6 +1724,69 @@ fn migrate_storage_table_compatible(
     Ok(())
 }
 
+/// Rebuild the `__pgt_row_id` index on a storage table.
+///
+/// The covering index created by `setup_storage_table` uses an INCLUDE clause
+/// referencing user columns.  When `migrate_storage_table_compatible` drops
+/// columns that appear in the INCLUDE list PostgreSQL silently drops the whole
+/// index, leaving no unique constraint for `ON CONFLICT (__pgt_row_id)` in
+/// differential refresh.  This function drops any surviving row-id index and
+/// recreates it with the correct INCLUDE clause for the *new* column set.
+fn rebuild_row_id_index(
+    schema: &str,
+    table_name: &str,
+    new_columns: &[ColumnDef],
+    has_keyless_source: bool,
+    is_partitioned: bool,
+) -> Result<(), PgTrickleError> {
+    let quoted_table = format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(table_name),
+    );
+
+    // Drop any existing index on __pgt_row_id (may already be gone).
+    let existing: Option<String> = Spi::get_one_with_args(
+        "SELECT indexrelid::regclass::text FROM pg_index \
+         JOIN pg_attribute ON attrelid = indrelid AND attnum = ANY(indkey) \
+         WHERE indrelid = $1::regclass AND attname = '__pgt_row_id' \
+         LIMIT 1",
+        &[quoted_table.clone().into()],
+    )
+    .unwrap_or(None);
+
+    if let Some(idx_name) = existing {
+        Spi::run(&format!("DROP INDEX IF EXISTS {idx_name}")).map_err(|e| {
+            PgTrickleError::SpiError(format!("Failed to drop old row_id index: {e}"))
+        })?;
+    }
+
+    // Rebuild with the new INCLUDE clause
+    let auto_index = crate::config::pg_trickle_auto_index();
+    const COVERING_INDEX_MAX_COLUMNS: usize = 8;
+    let include_clause =
+        if auto_index && new_columns.len() <= COVERING_INDEX_MAX_COLUMNS && !new_columns.is_empty()
+        {
+            let include_cols: Vec<String> = new_columns
+                .iter()
+                .map(|c| quote_identifier(&c.name).to_string())
+                .collect();
+            format!(" INCLUDE ({})", include_cols.join(", "))
+        } else {
+            String::new()
+        };
+
+    let index_sql = if has_keyless_source || is_partitioned {
+        format!("CREATE INDEX ON {quoted_table} (__pgt_row_id){include_clause}",)
+    } else {
+        format!("CREATE UNIQUE INDEX ON {quoted_table} (__pgt_row_id){include_clause}",)
+    };
+    Spi::run(&index_sql)
+        .map_err(|e| PgTrickleError::SpiError(format!("Failed to recreate row_id index: {e}")))?;
+
+    Ok(())
+}
+
 /// Manage auxiliary columns (__pgt_count, __pgt_count_l/r, __pgt_aux_sum_*,
 /// __pgt_aux_count_*, __pgt_aux_sum2_*, __pgt_aux_sumx_*, __pgt_aux_nonnull_*)
 /// during ALTER QUERY when the query type or aggregate composition changes.
@@ -2054,6 +2117,18 @@ fn alter_stream_table_query(
         }
         SchemaChange::Compatible { added, removed } => {
             migrate_storage_table_compatible(schema, table_name, added, removed)?;
+            // Dropping columns may destroy the covering INCLUDE index on
+            // __pgt_row_id.  Rebuild it with the new column set so that
+            // ON CONFLICT (__pgt_row_id) in differential refresh still works.
+            if !removed.is_empty() {
+                rebuild_row_id_index(
+                    schema,
+                    table_name,
+                    &vq.columns,
+                    vq.has_keyless_source,
+                    st.st_partition_key.is_some(),
+                )?;
+            }
             st.pgt_relid
         }
         SchemaChange::Incompatible { reason } => {
