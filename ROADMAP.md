@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-08
+> **Last updated:** 2026-04-10
 > **Latest release:** 0.17.0 (2026-04-08)
 > **Current milestone:** v0.18.0 — Hardening & Delta Performance
 
@@ -35,7 +35,10 @@ coverage, all in plain language.
 - [v0.16.0 — Performance & Refresh Optimization](#v0160--performance--refresh-optimization)
 - [v0.17.0 — Query Intelligence & Stability](#v0170--query-intelligence--stability)
 - [v0.18.0 — Hardening & Delta Performance](#v0180--hardening--delta-performance)
-- [v0.19.0 — PostgreSQL 19 Compatibility](#v0190--postgresql-19-compatibility)
+- [v0.19.0 — PGlite Proof of Concept](#v0190--pglite-proof-of-concept)
+- [v0.20.0 — Core Extraction (`pg_trickle_core`)](#v0200--core-extraction-pg_trickle_core)
+- [v0.21.0 — PGlite WASM Extension](#v0210--pglite-wasm-extension)
+- [v0.22.0 — PGlite Reactive Integration](#v0220--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
@@ -76,8 +79,11 @@ from the v0.1.x series to 1.0 and beyond.
 | **v0.16.0** | **Performance & refresh optimization** | **✅ Released** |
 | **v0.17.0** | **Query intelligence & stability** | **✅ Released** |
 | v0.18.0 | Hardening & delta performance | Planned |
-| v0.19.0 | PostgreSQL 19 compatibility | Planned |
-| v1.0.0 | Stable release | Planned |
+| v0.19.0 | PGlite proof of concept | Planned |
+| v0.20.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v0.21.0 | PGlite WASM extension | Planned |
+| v0.22.0 | PGlite reactive integration | Planned |
+| v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
 
@@ -3315,10 +3321,10 @@ coverage gaps to validate these new paths.
 
 > **G14-SHC subtotal: ~2–3 weeks**
 
-### ~~PostgreSQL 19 Forward-Compatibility (A3)~~ — Moved to v0.19.0
+### ~~PostgreSQL 19 Forward-Compatibility (A3)~~ — Moved to v1.0.0
 
 > PG 19 beta not available in time. Items A3-1 through A3-4 deferred
-> to v0.19.0 milestone.
+> to v1.0.0 milestone.
 
 ### Change Buffer Compaction (C-4)
 
@@ -3408,7 +3414,7 @@ coverage gaps to validate these new paths.
 > **Quick wins: ✅ Done**
 
 > **v0.16.0 total: ~1–2 weeks (MERGE alts) + ~4–6 weeks (aggregate fast-path) + ~1–2 weeks (append-only) + ~2–3 weeks (predicate pushdown) + ~2–3 weeks (template cache) + ~2–3 weeks (buffer compaction) + ~3–6 weeks (test coverage) + ~1–2 weeks (bench CI) + ~2–3 days (auto-indexing) + ~2–4 hours (quick wins)**
-> *Note: PG 19 compatibility (A3, ~18–36h) moved to v0.19.0.*
+> *Note: PG 19 compatibility (A3, ~18–36h) moved to v1.0.0.*
 
 **Exit criteria:**
 - [x] PH-D1: DELETE+INSERT strategy implemented and gated behind `merge_strategy` GUC; correctness verified for INSERT/UPDATE/DELETE deltas
@@ -3416,7 +3422,7 @@ coverage gaps to validate these new paths.
 - [x] A-3-AO: `CREATE STREAM TABLE … APPEND ONLY` accepted; refresh uses INSERT path; heuristic auto-promotion on insert-only buffers; falls back to MERGE on first non-insert CDC event
 - [x] B-2: Delta predicate pushdown implemented for single-source Filter nodes (P2-7); DELETE correctness verified (OR old_col predicate); selective-query benchmarks show delta row reduction
 - [x] G14-SHC: Cross-backend template cache eliminates cold-start; catalog-backed L2 cache with `template_cache` GUC; invalidation on DDL; `explain_st()` exposes stats
-- ~~A3: PG 19 builds and passes full E2E suite~~ — moved to v0.19.0
+- ~~A3: PG 19 builds and passes full E2E suite~~ — moved to v1.0.0
 - [x] C-4: Change buffer compaction reduces buffer size by ≥50% for high-churn workloads; `compact_threshold` GUC respected; no correctness regressions
 - [x] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
 - [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
@@ -4178,12 +4184,181 @@ Dependencies: None. Schema change: No.
 
 ---
 
-## v0.19.0 — PostgreSQL 19 Compatibility
+## v0.19.0 — PGlite Proof of Concept
 
-**Goal:** Add forward-compatibility with PostgreSQL 19. Ensure pg_trickle
-compiles, loads, and passes the full E2E test suite against PG 19. Gated
-on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
-19 beta reaching sufficient stability.
+**Goal:** Validate demand for pg_trickle's incremental view maintenance on
+PGlite by shipping a lightweight JavaScript plugin that demonstrates the
+concept with zero core changes. This is Phase 0 of the PGlite plan — a
+low-risk, low-effort proof of concept that informs whether to invest in
+the full core extraction (v0.20.0) and WASM build (v0.21.0).
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) for the full
+feasibility report.
+
+### PGlite JS Plugin PoC (Strategy C — Phase 0)
+
+> **In plain terms:** PGlite's built-in `live.incrementalQuery()` re-runs
+> the full query on every change and diffs at the JavaScript layer. This
+> proof of concept ships a PGlite plugin (`@pgtrickle/pglite-lite`) that
+> intercepts DML via statement-level AFTER triggers and applies pre-computed
+> delta SQL for simple cases — single-table aggregates and two-table inner
+> joins. It validates whether PGlite users want real IVM and whether the
+> trigger infrastructure works correctly in PGlite's single-user WASM mode.
+> No WASM compilation, no pgrx changes, no core refactoring required.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-0-1 | **PGlite trigger infrastructure validation.** Empirically verify that statement-level triggers with `REFERENCING NEW TABLE AS ... OLD TABLE AS ...` work in PGlite's single-user mode. Document any limitations. | 4–8h | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 Q1 |
+| PGL-0-2 | **Delta SQL templates for simple patterns.** Implement delta SQL generation in TypeScript for: (a) single-table `GROUP BY` with `COUNT`/`SUM`/`AVG`, (b) two-table `INNER JOIN`, (c) simple `WHERE` filter. Pre-compute at `createStreamTable()` time. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy C |
+| PGL-0-3 | **PGlite plugin skeleton.** TypeScript plugin implementing `createStreamTable()`, `dropStreamTable()`, trigger registration, and delta application via PGlite's plugin API. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy C |
+| PGL-0-4 | **npm package `@pgtrickle/pglite-lite`.** Package, publish, README with usage examples, and 3–5 supported SQL patterns documented. | 1–2d | — |
+| PGL-0-5 | **Benchmark vs `live.incrementalQuery()`.** Compare latency and throughput for a 10K-row table with single-row inserts. Quantify the IVM advantage. | 1d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §4.2 |
+
+> **Phase 0 subtotal: ~2–3 weeks**
+
+**Exit criteria:**
+- [ ] PGL-0-1: Statement-level triggers with transition tables confirmed working in PGlite
+- [ ] PGL-0-2: Delta SQL correct for single-table aggregate, two-table join, and filtered query
+- [ ] PGL-0-3: `@pgtrickle/pglite-lite` plugin creates and maintains stream tables in PGlite
+- [ ] PGL-0-4: npm package published with README and usage examples
+- [ ] PGL-0-5: Benchmark shows measurable latency improvement over `live.incrementalQuery()` for supported patterns
+- [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.20.0 — Core Extraction (`pg_trickle_core`)
+
+**Goal:** Extract the DVM engine, parser types, operator delta SQL
+generation, auto-rewrite passes, and DAG computation into a standalone
+Rust crate (`pg_trickle_core`) with no pgrx dependency. This crate
+compiles to both native (for the full extension) and
+`wasm32-unknown-emscripten` (for PGlite). The extraction also improves
+the main extension's testability and modularity — it is worthwhile even
+if PGlite support is never shipped. This is Phase 1 of the PGlite plan.
+
+### Core Crate Extraction (Phase 1)
+
+> **In plain terms:** pg_trickle's "brain" — the code that analyses SQL
+> queries, builds operator trees, and generates delta SQL — is currently
+> tangled with pgrx (the Rust-to-PostgreSQL bridge). This milestone
+> surgically separates the pure logic into its own crate so it can be
+> compiled independently. The existing extension continues to work
+> unchanged; it just imports from `pg_trickle_core` instead of having the
+> code inline. A `trait DatabaseBackend` abstracts SPI and parser access
+> so the core logic can be tested without a running PostgreSQL instance.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-1-1 | **Create `pg_trickle_core` crate.** Workspace member with `[lib]` target, no pgrx dependency. Move `OpTree`, `Expr`, `Column`, `AggExpr`, and all shared types. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-2 | **Extract operator delta SQL generation.** Move all `src/dvm/operators/` logic into the core crate. Each operator's `generate_delta_sql()` becomes a pure function taking abstract types. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-3 | **Extract auto-rewrite passes.** Move view inlining, DISTINCT ON rewrite, GROUPING SETS expansion, and SubLink extraction into `pg_trickle_core::rewrites`. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-4 | **Extract DAG computation.** Move dependency graph, topological sort, cycle detection, diamond detection into `pg_trickle_core::dag`. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-5 | **Define `trait DatabaseBackend`.** Abstract trait for SPI queries and raw_parser access. Implement for pgrx in the main extension crate. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-6 | **WASM compilation gate.** Verify `pg_trickle_core` compiles to `wasm32-unknown-emscripten` target. CI check for WASM build. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-7 | **Existing test suite passes.** All unit, integration, and E2E tests pass with the refactored crate structure. Zero behavior change. | 2–3d | — |
+
+> **Phase 1 subtotal: ~3–4 weeks**
+
+**Exit criteria:**
+- [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
+- [ ] PGL-1-2: All operator delta SQL generation lives in the core crate
+- [ ] PGL-1-3: All auto-rewrite passes live in the core crate
+- [ ] PGL-1-4: DAG computation lives in the core crate
+- [ ] PGL-1-5: `trait DatabaseBackend` defined; pgrx implementation passes all existing tests
+- [ ] PGL-1-6: `cargo build --target wasm32-unknown-emscripten -p pg_trickle_core` succeeds
+- [ ] PGL-1-7: `just test-all` passes with zero regressions
+- [ ] Extension upgrade path tested (`0.19.0 → 0.20.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.21.0 — PGlite WASM Extension
+
+**Goal:** Compile and load pg_trickle's IMMEDIATE mode into PGlite as a
+native WASM extension. This is Phase 2 of the PGlite plan — the first
+release where PGlite users get real in-engine incremental view maintenance
+with the full DVM operator vocabulary (outer joins, window functions,
+subqueries, recursive CTEs, and more). Gated on Phase 0 showing sufficient
+demand and Phase 1 completing the core extraction.
+
+### PGlite WASM Build (Phase 2)
+
+> **In plain terms:** This takes the `pg_trickle_core` crate extracted in
+> v0.20.0 and wraps it in a thin C shim that PGlite's Emscripten-based
+> extension build system can compile to WASM. The result is a PGlite
+> extension package (`@pgtrickle/pglite`) that provides
+> `create_stream_table()`, `drop_stream_table()`, and `alter_stream_table()`
+> — all running IMMEDIATE mode inside the WASM PostgreSQL engine with the
+> full DVM operator set.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-2-1 | **C shim for PGlite.** Thin C wrapper bridging PGlite's Emscripten environment to `pg_trickle_core` via Rust FFI. Handles `raw_parser` calls through PGlite's built-in PostgreSQL parser. | 1–2wk | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-2-2 | **`DatabaseBackend` for PGlite.** Implement the trait for PGlite's single-connection SPI and built-in parser. Remove advisory lock acquisition (trivial in single-connection). | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-2-3 | **WASM bundle build.** Integrate with PGlite's extension toolchain (`postgres-pglite`). Produce `.tar.gz` WASM bundle. Target bundle size < 2 MB. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 |
+| PGL-2-4 | **TypeScript wrapper.** `@pgtrickle/pglite` npm package with PGlite plugin API. `createStreamTable()`, `dropStreamTable()`, `alterStreamTable()` with full IMMEDIATE mode support. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §7 Phase 2 |
+| PGL-2-5 | **IMMEDIATE mode E2E tests on PGlite.** Verify inner joins, outer joins, aggregates, DISTINCT, UNION ALL, window functions, subqueries, CTEs (non-recursive + recursive), LATERAL, view inlining, DISTINCT ON, GROUPING SETS. | 1–2wk | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §4.1 |
+| PGL-2-6 | **PG 17 vs PG 18 parse tree compatibility.** PGlite tracks PG 17; pg_trickle targets PG 18. Audit and gate any node struct differences with conditional compilation. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 |
+
+> **Phase 2 subtotal: ~5–7 weeks**
+
+**Exit criteria:**
+- [ ] PGL-2-1: C shim compiles and links against PGlite's WASM PostgreSQL headers
+- [ ] PGL-2-3: WASM bundle size < 2 MB
+- [ ] PGL-2-4: `@pgtrickle/pglite` npm package published
+- [ ] PGL-2-5: All supported DVM operators pass E2E tests on PGlite
+- [ ] PGL-2-6: PG 17 parse tree differences documented and handled
+- [ ] Extension upgrade path tested (`0.20.0 → 0.21.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.22.0 — PGlite Reactive Integration
+
+**Goal:** Integrate pg_trickle's IMMEDIATE mode stream tables with PGlite's
+live query ecosystem, enabling reactive UI bindings for React, Vue, and
+other frameworks. This is Phase 3 of the PGlite plan — the final step that
+makes pg_trickle a first-class citizen in the PGlite/ElectricSQL local-first
+application stack.
+
+### Reactive Bindings (Phase 3)
+
+> **In plain terms:** Phase 2 gave PGlite users in-engine IVM. This phase
+> connects stream table changes to PGlite's `live.changes()` API and
+> provides framework-specific hooks — `useStreamTable()` for React,
+> `useStreamTable()` for Vue — so UI components automatically re-render
+> when the underlying data changes. For local-first apps like collaborative
+> editors, dashboards, and offline-capable tools, this is the last mile
+> between incremental SQL and reactive UI.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-3-1 | **`live.changes()` bridge.** Emit INSERT/UPDATE/DELETE change events from stream table delta application to PGlite's live query system. Keyed by `__pgt_row_id`. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §7 Phase 3 |
+| PGL-3-2 | **React hooks.** `useStreamTable(query)` hook that subscribes to stream table changes and returns reactive state. Handles mount/unmount lifecycle. | 3–5d | — |
+| PGL-3-3 | **Vue composable.** `useStreamTable(query)` composable with equivalent functionality. | 2–3d | — |
+| PGL-3-4 | **Documentation and examples.** Local-first app patterns: collaborative todo list, real-time dashboard, offline-first inventory tracker. Published as `@pgtrickle/pglite` docs. | 2–3d | — |
+| PGL-3-5 | **Performance benchmarks.** End-to-end latency from `INSERT` to React re-render. Compare against `live.incrementalQuery()` for complex queries (3-table join + aggregate). | 1–2d | — |
+
+> **Phase 3 subtotal: ~2–3 weeks**
+
+**Exit criteria:**
+- [ ] PGL-3-1: Stream table changes appear in `live.changes()` event stream
+- [ ] PGL-3-2: React `useStreamTable()` hook re-renders on stream table changes
+- [ ] PGL-3-3: Vue `useStreamTable()` composable re-renders on stream table changes
+- [ ] PGL-3-4: At least 2 example apps published with documentation
+- [ ] PGL-3-5: End-to-end latency benchmarked and documented
+- [ ] Extension upgrade path tested (`0.21.0 → 0.22.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v1.0.0 — Stable Release
+
+**Goal:** First officially supported release. Semantic versioning locks in.
+API, catalog schema, and GUC names are considered stable. Focus is
+distribution — getting pg_trickle onto package registries — and PostgreSQL 19
+forward-compatibility.
 
 ### PostgreSQL 19 Forward-Compatibility (A3)
 
@@ -4191,7 +4366,8 @@ on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
 > ships with PG 19 support, this milestone bumps the pgrx dependency,
 > audits every internal `pg_sys::*` API call for breaking changes, adds
 > conditional compilation gates, and validates the WAL decoder against any
-> pgoutput format changes introduced in PG 19.
+> pgoutput format changes introduced in PG 19. Moved here from the
+> earlier v0.19.0 milestone because PG 19 beta availability is uncertain.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
@@ -4201,20 +4377,6 @@ on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
 | A3-4 | CI matrix expansion for PG 19 + full E2E suite run | 4–8h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 
 > **A3 subtotal: ~18–36 hours**
-
-**Exit criteria:**
-- [ ] A3: PG 19 builds and passes full E2E suite
-- [ ] CI matrix includes PG 19
-- [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
-- [ ] `just check-version-sync` passes
-
----
-
-## v1.0.0 — Stable Release
-
-**Goal:** First officially supported release. Semantic versioning locks in.
-API, catalog schema, and GUC names are considered stable. Focus is
-distribution — getting pg_trickle onto package registries.
 
 ### Release engineering
 
@@ -4237,9 +4399,11 @@ distribution — getting pg_trickle onto package registries.
 | R6 | **Version sync automation.** Ensure `just check-version-sync` covers all version references (Cargo.toml, extension control files, Dockerfile.hub, dbt_project.yml, CNPG manifests). Add to CI as a blocking check. | 2–3h | — |
 | SAST-SEMGREP | **Elevate Semgrep to blocking in CI.** CodeQL and cargo-deny already block; Semgrep is advisory-only. Flip to blocking for consistent safety gating. Before flipping, verify zero findings across all current rules. | 1–2h | [PLAN_SAST.md](plans/testing/PLAN_SAST.md) |
 
-> **v1.0.0 total: ~18–30 hours**
+> **v1.0.0 total: ~36–66 hours** (incl. PG 19 compat ~18–36h + release engineering ~18–30h)
 
 **Exit criteria:**
+- [ ] A3: PG 19 builds and passes full E2E suite
+- [ ] CI matrix includes PG 19
 - [ ] Published on PGXN (stable) and apt/rpm via PGDG
 - [ ] Docker Hub image published (`pgtrickle/pg_trickle:1.0.0-pg18` and `:latest`)
 - [x] CNPG extension image published to GHCR (`pg_trickle-ext`)
@@ -4337,7 +4501,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | ~~A2~~ | ~~Transactional IVM Phase 4 remaining (ENR-based transition tables, C-level triggers, prepared stmt reuse)~~ ➡️ Pulled to v0.17.0 | ~36–54h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
-| ~~A3~~ | ~~PostgreSQL 19 forward-compatibility~~ ➡️ Pulled to v0.16.0 ➡️ Moved to v0.19.0 | ~18–36h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
+| ~~A3~~ | ~~PostgreSQL 19 forward-compatibility~~ ➡️ Pulled to v0.16.0 ➡️ Moved to v1.0.0 | ~18–36h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 | A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
 | ~~A6~~ | ~~Buffer table partitioning by LSN range (`pg_trickle.buffer_partitioning` GUC)~~ | ✅ Done | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.3 |
@@ -4395,8 +4559,11 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
-| v0.19.0 — PostgreSQL 19 Compatibility | ~18–36h | — | |
-| v1.0.0 — Stable release | ~18–30h | — | |
+| v0.19.0 — PGlite Proof of Concept | ~2–3wk | — | |
+| v0.20.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk | — | |
+| v0.21.0 — PGlite WASM Extension | ~5–7wk | — | |
+| v0.22.0 — PGlite Reactive Integration | ~2–3wk | — | |
+| v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
 | Post-1.0 (scale) | 6+ months | — | |
