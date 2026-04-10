@@ -1206,6 +1206,12 @@ fn validate_and_parse_query(
             .unwrap_or(false)
     });
 
+    // EC-06b: Join queries whose output does not include PK columns from
+    // both sides cannot produce unique __pgt_row_id hashes. Treat them
+    // as keyless so the storage table gets a non-unique index and the
+    // refresh uses CTID-based deletion.
+    let has_keyless_source = has_keyless_source || crate::dvm::query_has_incomplete_join_pk(query);
+
     let avg_aux_columns = parsed_tree
         .as_ref()
         .map(|pr| pr.tree.avg_aux_columns())

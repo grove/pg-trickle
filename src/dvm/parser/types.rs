@@ -2070,6 +2070,47 @@ impl OpTree {
         }
     }
 
+    /// Check whether this tree contains a join whose output does not include
+    /// primary key columns from both sides.
+    ///
+    /// When this returns `true`, the `__pgt_row_id` hash computed from
+    /// output columns cannot uniquely identify every join result row. The
+    /// storage table must use a non-unique index on `__pgt_row_id` and the
+    /// keyless refresh strategy (CTID-based deletion) to handle duplicates.
+    pub fn has_incomplete_join_pk(&self) -> bool {
+        match self {
+            OpTree::Project {
+                expressions,
+                aliases,
+                child,
+            } => {
+                let unwrapped = unwrap_transparent(child);
+                if matches!(
+                    unwrapped,
+                    OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. }
+                ) {
+                    // If join_pk_aliases returns None, at least one side's
+                    // PK is missing from the output → row_id is non-unique.
+                    if join_pk_aliases(expressions, aliases, unwrapped).is_none() {
+                        return true;
+                    }
+                }
+                child.has_incomplete_join_pk()
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Distinct { child }
+            | OpTree::Subquery { child, .. } => child.has_incomplete_join_pk(),
+            OpTree::Aggregate { child, .. } => child.has_incomplete_join_pk(),
+            OpTree::InnerJoin { left, right, .. }
+            | OpTree::LeftJoin { left, right, .. }
+            | OpTree::FullJoin { left, right, .. } => {
+                left.has_incomplete_join_pk() || right.has_incomplete_join_pk()
+            }
+            OpTree::UnionAll { children } => children.iter().any(|c| c.has_incomplete_join_pk()),
+            _ => false,
+        }
+    }
+
     /// Collect all base table OIDs referenced in this tree.
     pub fn source_oids(&self) -> Vec<u32> {
         match self {
