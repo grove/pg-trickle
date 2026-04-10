@@ -1,6 +1,6 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-08
+> **Last updated:** 2026-04-10
 > **Latest release:** 0.17.0 (2026-04-08)
 > **Current milestone:** v0.18.0 — Hardening & Delta Performance
 
@@ -35,7 +35,10 @@ coverage, all in plain language.
 - [v0.16.0 — Performance & Refresh Optimization](#v0160--performance--refresh-optimization)
 - [v0.17.0 — Query Intelligence & Stability](#v0170--query-intelligence--stability)
 - [v0.18.0 — Hardening & Delta Performance](#v0180--hardening--delta-performance)
-- [v0.19.0 — PostgreSQL 19 Compatibility](#v0190--postgresql-19-compatibility)
+- [v0.19.0 — PGlite Proof of Concept](#v0190--pglite-proof-of-concept)
+- [v0.20.0 — Core Extraction (`pg_trickle_core`)](#v0200--core-extraction-pg_trickle_core)
+- [v0.21.0 — PGlite WASM Extension](#v0210--pglite-wasm-extension)
+- [v0.22.0 — PGlite Reactive Integration](#v0220--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
@@ -76,8 +79,11 @@ from the v0.1.x series to 1.0 and beyond.
 | **v0.16.0** | **Performance & refresh optimization** | **✅ Released** |
 | **v0.17.0** | **Query intelligence & stability** | **✅ Released** |
 | v0.18.0 | Hardening & delta performance | Planned |
-| v0.19.0 | PostgreSQL 19 compatibility | Planned |
-| v1.0.0 | Stable release | Planned |
+| v0.19.0 | PGlite proof of concept | Planned |
+| v0.20.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v0.21.0 | PGlite WASM extension | Planned |
+| v0.22.0 | PGlite reactive integration | Planned |
+| v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
 
@@ -3315,10 +3321,10 @@ coverage gaps to validate these new paths.
 
 > **G14-SHC subtotal: ~2–3 weeks**
 
-### ~~PostgreSQL 19 Forward-Compatibility (A3)~~ — Moved to v0.19.0
+### ~~PostgreSQL 19 Forward-Compatibility (A3)~~ — Moved to v1.0.0
 
 > PG 19 beta not available in time. Items A3-1 through A3-4 deferred
-> to v0.19.0 milestone.
+> to v1.0.0 milestone.
 
 ### Change Buffer Compaction (C-4)
 
@@ -3408,7 +3414,7 @@ coverage gaps to validate these new paths.
 > **Quick wins: ✅ Done**
 
 > **v0.16.0 total: ~1–2 weeks (MERGE alts) + ~4–6 weeks (aggregate fast-path) + ~1–2 weeks (append-only) + ~2–3 weeks (predicate pushdown) + ~2–3 weeks (template cache) + ~2–3 weeks (buffer compaction) + ~3–6 weeks (test coverage) + ~1–2 weeks (bench CI) + ~2–3 days (auto-indexing) + ~2–4 hours (quick wins)**
-> *Note: PG 19 compatibility (A3, ~18–36h) moved to v0.19.0.*
+> *Note: PG 19 compatibility (A3, ~18–36h) moved to v1.0.0.*
 
 **Exit criteria:**
 - [x] PH-D1: DELETE+INSERT strategy implemented and gated behind `merge_strategy` GUC; correctness verified for INSERT/UPDATE/DELETE deltas
@@ -3416,7 +3422,7 @@ coverage gaps to validate these new paths.
 - [x] A-3-AO: `CREATE STREAM TABLE … APPEND ONLY` accepted; refresh uses INSERT path; heuristic auto-promotion on insert-only buffers; falls back to MERGE on first non-insert CDC event
 - [x] B-2: Delta predicate pushdown implemented for single-source Filter nodes (P2-7); DELETE correctness verified (OR old_col predicate); selective-query benchmarks show delta row reduction
 - [x] G14-SHC: Cross-backend template cache eliminates cold-start; catalog-backed L2 cache with `template_cache` GUC; invalidation on DDL; `explain_st()` exposes stats
-- ~~A3: PG 19 builds and passes full E2E suite~~ — moved to v0.19.0
+- ~~A3: PG 19 builds and passes full E2E suite~~ — moved to v1.0.0
 - [x] C-4: Change buffer compaction reduces buffer size by ≥50% for high-churn workloads; `compact_threshold` GUC respected; no correctness regressions
 - [x] TG2-WIN: Window function DVM execution tests cover ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD across INSERT/UPDATE/DELETE
 - [x] TG2-JOIN: Join multi-cycle tests cover INNER/LEFT/FULL JOIN with UPDATE and DELETE propagation; no silent data loss
@@ -4178,12 +4184,1771 @@ Dependencies: None. Schema change: No.
 
 ---
 
-## v0.19.0 — PostgreSQL 19 Compatibility
+## v0.19.0 — PGlite Proof of Concept
 
-**Goal:** Add forward-compatibility with PostgreSQL 19. Ensure pg_trickle
-compiles, loads, and passes the full E2E test suite against PG 19. Gated
-on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
-19 beta reaching sufficient stability.
+> **Release Theme**
+> This release validates whether PGlite users want real incremental view
+> maintenance by shipping a lightweight TypeScript plugin with zero core
+> changes. The plugin (`@pgtrickle/pglite-lite`) intercepts DML via
+> statement-level AFTER triggers and applies pre-computed delta SQL for
+> simple patterns — single-table aggregates, two-table inner joins, and
+> filtered scans. It deliberately limits scope to 3–5 SQL patterns to
+> keep effort low while generating a concrete demand signal. If adoption
+> materialises, the full core extraction (v0.20.0) and WASM build (v0.21.0)
+> proceed. The main pg_trickle PostgreSQL extension ships no functional
+> changes in this release — only version bumps and upgrade migration
+> plumbing.
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) for the full
+feasibility report.
+
+### PGlite JS Plugin PoC (Strategy C — Phase 0)
+
+> **In plain terms:** PGlite's built-in `live.incrementalQuery()` re-runs
+> the full query on every change and diffs at the JavaScript layer. This
+> proof of concept ships a PGlite plugin (`@pgtrickle/pglite-lite`) that
+> intercepts DML via statement-level AFTER triggers and applies pre-computed
+> delta SQL for simple cases — single-table aggregates and two-table inner
+> joins. It validates whether PGlite users want real IVM and whether the
+> trigger infrastructure works correctly in PGlite's single-user WASM mode.
+> No WASM compilation, no pgrx changes, no core refactoring required.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-0-1 | **PGlite trigger infrastructure validation.** Empirically verify that statement-level triggers with `REFERENCING NEW TABLE AS ... OLD TABLE AS ...` work in PGlite's single-user mode. Document any limitations. | 4–8h | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 Q1 |
+| PGL-0-2 | **Delta SQL templates for simple patterns.** Implement delta SQL generation in TypeScript for: (a) single-table `GROUP BY` with `COUNT`/`SUM`/`AVG`, (b) two-table `INNER JOIN`, (c) simple `WHERE` filter. Pre-compute at `createStreamTable()` time. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy C |
+| PGL-0-3 | **PGlite plugin skeleton.** TypeScript plugin implementing `createStreamTable()`, `dropStreamTable()`, trigger registration, and delta application via PGlite's plugin API. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy C |
+| PGL-0-4 | **npm package `@pgtrickle/pglite-lite`.** Package, publish, README with usage examples, and 3–5 supported SQL patterns documented. | 1–2d | — |
+| PGL-0-5 | **Benchmark vs `live.incrementalQuery()`.** Compare latency and throughput for a 10K-row table with single-row inserts. Quantify the IVM advantage. | 1d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §4.2 |
+
+> **Phase 0 subtotal: ~2–3 weeks**
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Delta SQL equivalence for supported patterns | M | P0 |
+| CORR-2 | NULL-key aggregate correctness in JS delta | S | P0 |
+| CORR-3 | Multi-DML transaction atomicity | S | P1 |
+
+**CORR-1 — Delta SQL equivalence for supported patterns**
+
+> **In plain terms:** The TypeScript delta SQL templates must produce the
+> exact same stream table state as a full query re-evaluation, for every
+> combination of INSERT, UPDATE, and DELETE on the supported patterns
+> (single-table GROUP BY + COUNT/SUM/AVG, two-table INNER JOIN, simple
+> WHERE filter). Correctness is proven by running each DML operation,
+> comparing the delta-maintained result against a fresh `SELECT`, and
+> asserting row-for-row equivalence.
+
+Verify: automated test suite runs 100+ randomised DML sequences per pattern;
+zero divergence from full re-evaluation.
+Dependencies: PGL-0-2, PGL-0-3. Schema change: No.
+
+**CORR-2 — NULL-key aggregate correctness in JS delta**
+
+> **In plain terms:** When a GROUP BY key is NULL, SQL three-valued logic
+> means `GROUP BY NULL` forms its own group. The TypeScript delta templates
+> must handle NULL group keys correctly — insertions into the NULL group,
+> deletions that empty it, and updates that move rows in/out of the NULL
+> group. This is the most common correctness pitfall in hand-rolled IVM.
+
+Verify: E2E test with nullable GROUP BY column; assert NULL group appears,
+grows, shrinks, and disappears correctly.
+Dependencies: CORR-1. Schema change: No.
+
+**CORR-3 — Multi-DML transaction atomicity**
+
+> **In plain terms:** PGlite runs in single-connection mode, so a
+> `BEGIN; INSERT ...; DELETE ...; COMMIT` sequence fires two separate
+> statement-level triggers. The plugin must ensure the stream table reflects
+> the net effect of the entire transaction, not an intermediate state. If
+> trigger ordering produces incorrect intermediate results, a
+> post-transaction reconciliation pass is needed.
+
+Verify: test with `BEGIN; INSERT; UPDATE; DELETE; COMMIT` on a single base
+table; stream table matches full re-evaluation after commit.
+Dependencies: PGL-0-3. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | Trigger cleanup on dropStreamTable | S | P0 |
+| STAB-2 | Graceful error on unsupported SQL | S | P0 |
+| STAB-3 | Plugin idempotency (create-drop-create cycle) | S | P1 |
+
+**STAB-1 — Trigger cleanup on dropStreamTable**
+
+> **In plain terms:** When a user calls `dropStreamTable()`, all statement-
+> level AFTER triggers registered on source tables must be removed. Orphaned
+> triggers would fire on every subsequent DML and attempt to write to a
+> non-existent stream table, causing errors.
+
+Verify: after `dropStreamTable()`, no pg_trickle-related triggers remain in
+`pg_trigger` for the source tables.
+Dependencies: PGL-0-3. Schema change: No.
+
+**STAB-2 — Graceful error on unsupported SQL**
+
+> **In plain terms:** The PoC supports only 3–5 SQL patterns. If a user
+> passes an unsupported query (e.g., a LEFT JOIN, window function, or
+> recursive CTE), the plugin must throw a clear, actionable error message
+> listing what is supported — not silently produce wrong results or crash.
+
+Verify: `createStreamTable()` with an unsupported query throws an error
+whose message names the unsupported feature and lists supported alternatives.
+Dependencies: PGL-0-2. Schema change: No.
+
+**STAB-3 — Plugin idempotency (create-drop-create cycle)**
+
+> **In plain terms:** Creating a stream table, dropping it, and creating it
+> again with the same name must work without leftover state. Leftover
+> catalog rows, triggers, or temp tables from the first creation must not
+> interfere with the second.
+
+Verify: create-drop-create cycle produces correct results; no duplicate
+triggers or stale catalog entries.
+Dependencies: STAB-1. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Benchmark vs live.incrementalQuery() | M | P0 |
+| PERF-2 | Delta overhead profiling per DML | S | P1 |
+| PERF-3 | Large result set scalability (10K/100K rows) | S | P1 |
+
+**PERF-1 — Benchmark vs `live.incrementalQuery()`** (= PGL-0-5)
+
+> **In plain terms:** The entire value proposition of this PoC depends on
+> being faster than PGlite's built-in `live.incrementalQuery()` for the
+> supported patterns. Produce a public benchmark comparing latency and
+> throughput for single-row inserts into a 10K-row base table across all
+> three supported patterns (aggregate, join, filter).
+
+Verify: delta-maintained stream table refresh latency < 50% of
+`live.incrementalQuery()` latency for all supported patterns at 10K rows.
+Dependencies: PGL-0-3, PGL-0-4. Schema change: No.
+
+**PERF-2 — Delta overhead profiling per DML**
+
+> **In plain terms:** Measure the per-DML overhead added by the statement-
+> level triggers. INSERT-heavy workloads should not suffer more than 2x
+> latency increase compared to the same INSERT without pg_trickle triggers
+> installed. Profile trigger function execution time, temp table creation,
+> and delta DML.
+
+Verify: microbenchmark shows per-DML overhead < 2 ms for aggregate pattern;
+< 5 ms for join pattern at 10K source rows.
+Dependencies: PGL-0-3. Schema change: No.
+
+**PERF-3 — Large result set scalability (10K/100K rows)**
+
+> **In plain terms:** Verify that the delta approach maintains its advantage
+> over full re-evaluation as base table size grows. At 100K rows, the delta
+> path should be significantly faster than full re-evaluation for single-row
+> changes.
+
+Verify: at 100K base table rows, single-row insert refresh latency is
+< 10% of full query re-evaluation latency.
+Dependencies: PERF-1. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Multiple stream tables on same source | S | P1 |
+| SCAL-2 | Cascading stream table triggers | M | P2 |
+| SCAL-3 | Concurrent DML with multiple stream tables | S | P2 |
+
+**SCAL-1 — Multiple stream tables on same source**
+
+> **In plain terms:** Verify that 3+ stream tables can be maintained from
+> the same base table simultaneously. Each DML fires one trigger per stream
+> table; ensure triggers do not interfere with each other.
+
+Verify: 3 stream tables on the same source; INSERT + UPDATE + DELETE cycle;
+all 3 produce correct results.
+Dependencies: PGL-0-3. Schema change: No.
+
+**SCAL-2 — Cascading stream table triggers**
+
+> **In plain terms:** If stream table B reads from stream table A's
+> underlying storage, an INSERT into A's source should propagate through
+> A's trigger, update A, and then fire B's trigger to update B — all
+> within the same PGlite transaction. Verify this works in PGlite's
+> single-connection environment without deadlocks or infinite trigger loops.
+
+Verify: A->B cascade produces correct results for INSERT/DELETE on A's
+source. No infinite loops detected.
+Dependencies: SCAL-1. Schema change: No.
+
+**SCAL-3 — Concurrent DML with multiple stream tables**
+
+> **In plain terms:** PGlite is single-connection, but a user could issue
+> rapid sequential DML (`INSERT; INSERT; INSERT`) without explicit
+> transactions. Verify all stream tables converge to the correct state.
+
+Verify: 100 sequential INSERTs with 3 stream tables; final state matches
+full re-evaluation.
+Dependencies: SCAL-1. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | Getting-started README with copy-paste examples | S | P0 |
+| UX-2 | Supported patterns decision table | XS | P0 |
+| UX-3 | Error messages include remediation hints | S | P1 |
+| UX-4 | TypeScript type definitions | S | P1 |
+| UX-5 | ElectricSQL outreach and collaboration | S | P1 |
+
+**UX-1 — Getting-started README with copy-paste examples**
+
+> **In plain terms:** The npm package README must include 3 complete,
+> copy-pasteable examples — one per supported pattern — that a developer
+> can run in under 2 minutes. Include Node.js and browser (Vite) examples.
+
+Verify: all README examples execute without modification on a fresh PGlite
+instance.
+Dependencies: PGL-0-4. Schema change: No.
+
+**UX-2 — Supported patterns decision table**
+
+> **In plain terms:** A clear table showing which SQL patterns are and are
+> not supported, what error you get for unsupported patterns, and when full
+> support is expected (v0.21.0). This prevents user frustration and sets
+> expectations.
+
+Verify: decision table in README and npm page lists all tested patterns with
+status (supported / unsupported / planned).
+Dependencies: None. Schema change: No.
+
+**UX-3 — Error messages include remediation hints**
+
+> **In plain terms:** Every error thrown by the plugin must include the
+> table name, the failing operation, and a one-sentence hint. Example:
+> `"LEFT JOIN is not supported in pglite-lite. Use @pgtrickle/pglite
+> (v0.21.0+) for full SQL support, or rewrite as INNER JOIN."`
+
+Verify: all error paths tested; every error message includes a remediation
+sentence.
+Dependencies: STAB-2. Schema change: No.
+
+**UX-4 — TypeScript type definitions**
+
+> **In plain terms:** Ship `.d.ts` type definitions so TypeScript users
+> get autocomplete and type checking for `createStreamTable()`,
+> `dropStreamTable()`, and configuration options.
+
+Verify: TypeScript project consumes the plugin with strict mode; no `any`
+types leaked.
+Dependencies: PGL-0-4. Schema change: No.
+
+**UX-5 — ElectricSQL outreach and collaboration**
+
+> **In plain terms:** PGlite is developed by ElectricSQL. Their cooperation
+> is essential for Phase 2 (WASM build). Initiate contact before shipping
+> Phase 0 to gauge interest, validate assumptions about PGlite's trigger
+> infrastructure, and explore potential co-marketing.
+
+Verify: documented exchange with ElectricSQL team (GitHub issue, email, or
+meeting notes).
+Dependencies: None. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Automated correctness suite (all patterns x DML types) | M | P0 |
+| TEST-2 | PGlite version compatibility matrix | S | P1 |
+| TEST-3 | Regression test: trigger firing order | S | P1 |
+| TEST-4 | Bundle size monitoring | XS | P2 |
+| TEST-5 | Extension upgrade path (0.18 to 0.19) | S | P0 |
+
+**TEST-1 — Automated correctness suite (all patterns x DML types)**
+
+> **In plain terms:** For each supported pattern (aggregate, join, filter),
+> run every DML type (INSERT, UPDATE, DELETE, multi-row, TRUNCATE) and
+> assert the stream table matches a fresh full evaluation. This is the
+> primary quality gate.
+
+Verify: Jest/Vitest test suite with > 50 test cases; all pass on PGlite
+latest.
+Dependencies: PGL-0-2, PGL-0-3. Schema change: No.
+
+**TEST-2 — PGlite version compatibility matrix**
+
+> **In plain terms:** PGlite updates frequently. Test the plugin against
+> the last 3 PGlite releases to ensure trigger behavior hasn't changed.
+> Document the minimum supported PGlite version.
+
+Verify: CI matrix runs tests against PGlite N, N-1, N-2.
+Dependencies: TEST-1. Schema change: No.
+
+**TEST-3 — Regression test: trigger firing order**
+
+> **In plain terms:** When multiple triggers exist on the same table,
+> PostgreSQL fires them in alphabetical order by trigger name. Verify that
+> trigger naming conventions prevent ordering conflicts with user-defined
+> triggers.
+
+Verify: test with a user-defined AFTER trigger alongside the plugin's
+trigger; both fire correctly; stream table produces correct results.
+Dependencies: PGL-0-3. Schema change: No.
+
+**TEST-4 — Bundle size monitoring**
+
+> **In plain terms:** The npm package should be small (< 50 KB minified +
+> gzipped) since this is a pure-JS plugin with no WASM. Add a CI check
+> that fails if bundle size exceeds the threshold.
+
+Verify: `npm pack --dry-run` reports < 50 KB gzipped.
+Dependencies: PGL-0-4. Schema change: No.
+
+**TEST-5 — Extension upgrade path (0.18 to 0.19)**
+
+> **In plain terms:** The main pg_trickle PostgreSQL extension ships no
+> functional changes in v0.19.0, but the upgrade migration path must still
+> be tested. `ALTER EXTENSION pg_trickle UPDATE` from 0.18.0 to 0.19.0
+> must leave existing stream tables intact.
+
+Verify: upgrade E2E test confirms all existing stream tables survive and
+refresh correctly after `0.18.0 -> 0.19.0` upgrade.
+Dependencies: None. Schema change: No (PG extension unchanged).
+
+### Conflicts & Risks
+
+1. **Demand uncertainty is the primary risk.** This entire milestone is a bet
+   that PGlite users want IVM beyond what pg_ivm provides. If Phase 0
+   generates no adoption signal, v0.20.0–v0.22.0 should be deprioritised and
+   v1.0.0 proceeds without PGlite. Define a concrete adoption threshold
+   (e.g., > 100 npm weekly downloads within 60 days of publication) as a
+   go/no-go gate for v0.20.0.
+
+2. **PGlite trigger infrastructure is unverified.** PGL-0-1 (trigger
+   validation) is a hard prerequisite for everything else. If statement-level
+   triggers with transition tables do not work in PGlite's single-user mode,
+   the entire Strategy C approach fails and the PoC must pivot to a pure JS
+   diff approach (lower value).
+
+3. **PGlite version mismatch.** PGlite tracks PostgreSQL 17; pg_trickle
+   targets PG 18. The PoC operates at the SQL level and should be unaffected,
+   but if PGlite upgrades to PG 18 mid-cycle, trigger behavior may change.
+   Pin the minimum PGlite version in `package.json`.
+
+4. **No core Rust changes, but version bump required.** The main pg_trickle
+   extension needs a v0.19.0 version bump, upgrade migration SQL, and passing
+   CI even though no functional code changes. This is low-risk but must not
+   be forgotten.
+
+5. **ElectricSQL collaboration timing.** UX-5 (outreach) should happen
+   early — before v0.19.0 ships — to avoid building something ElectricSQL is
+   already working on or would actively resist. If they signal interest in
+   co-development, Phase 2 scope and timeline may shift.
+
+6. **TypeScript delta SQL correctness is harder to prove than Rust.** The
+   main extension uses property-based testing and SQLancer for correctness.
+   The TS plugin lacks these tools. TEST-1 must be rigorously designed to
+   compensate — consider porting the proptest approach to a JS property-
+   testing library (e.g., fast-check).
+
+> **v0.19.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
+
+**Exit criteria:**
+- [ ] PGL-0-1: Statement-level triggers with transition tables confirmed working in PGlite
+- [ ] PGL-0-2: Delta SQL correct for single-table aggregate, two-table join, and filtered query
+- [ ] PGL-0-3: `@pgtrickle/pglite-lite` plugin creates and maintains stream tables in PGlite
+- [ ] PGL-0-4: npm package published with README and usage examples
+- [ ] PGL-0-5: Benchmark shows measurable latency improvement over `live.incrementalQuery()` for supported patterns
+- [ ] CORR-1: Automated delta SQL equivalence tests pass (100+ DML sequences per pattern)
+- [ ] CORR-2: NULL-key aggregate groups correctly created, updated, and removed
+- [ ] CORR-3: Multi-DML transaction produces correct net result
+- [ ] STAB-1: No orphaned triggers after `dropStreamTable()`
+- [ ] STAB-2: Unsupported SQL patterns produce clear, actionable errors
+- [ ] STAB-3: Create-drop-create cycle produces correct results
+- [ ] PERF-1: Delta refresh latency < 50% of `live.incrementalQuery()` at 10K rows
+- [ ] PERF-3: Delta advantage holds at 100K rows (< 10% of full re-evaluation latency)
+- [ ] SCAL-1: 3+ stream tables on same source produce correct results
+- [ ] UX-1: README examples run unmodified on fresh PGlite instance
+- [ ] UX-2: Supported patterns decision table published
+- [ ] UX-4: TypeScript type definitions ship with strict-mode compatibility
+- [ ] TEST-1: > 50 correctness test cases pass on PGlite latest
+- [ ] TEST-2: CI tests pass against PGlite N, N-1, N-2
+- [ ] TEST-5: Extension upgrade path tested (`0.18.0 -> 0.19.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.20.0 — Core Extraction (`pg_trickle_core`)
+
+> **Release Theme**
+> This release surgically separates pg_trickle's "brain" — the DVM engine,
+> operator delta SQL generation, query rewrite passes, and DAG computation —
+> into a standalone Rust crate (`pg_trickle_core`) with zero pgrx dependency.
+> The extraction touches ~51,000 lines of code across 30+ source files but
+> produces zero user-visible behavior change: every existing test must pass
+> unchanged. The payoff is threefold: the core crate compiles to WASM
+> (enabling the PGlite extension in v0.21.0), pure-logic unit tests run
+> without a PostgreSQL instance (10x faster CI), and the main extension
+> gains a cleaner internal architecture. Approximately 500 unsafe blocks in
+> the parser require an abstraction layer over raw `pg_sys` node traversal,
+> making this the most technically demanding refactoring in the project's
+> history.
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A for the
+full extraction architecture.
+
+### Core Crate Extraction (Phase 1)
+
+> **In plain terms:** pg_trickle's "brain" — the code that analyses SQL
+> queries, builds operator trees, and generates delta SQL — is currently
+> tangled with pgrx (the Rust-to-PostgreSQL bridge). This milestone
+> surgically separates the pure logic into its own crate so it can be
+> compiled independently. The existing extension continues to work
+> unchanged; it just imports from `pg_trickle_core` instead of having the
+> code inline. A `trait DatabaseBackend` abstracts SPI and parser access
+> so the core logic can be tested without a running PostgreSQL instance.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-1-1 | **Create `pg_trickle_core` crate.** Workspace member with `[lib]` target, no pgrx dependency. Move `OpTree`, `Expr`, `Column`, `AggExpr`, and all shared types. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-2 | **Extract operator delta SQL generation.** Move all `src/dvm/operators/` logic (~24K lines, 23 files) into the core crate. Each operator's `generate_delta_sql()` becomes a pure function taking abstract types. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-3 | **Extract auto-rewrite passes.** Move view inlining, DISTINCT ON rewrite, GROUPING SETS expansion, and SubLink extraction into `pg_trickle_core::rewrites`. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-4 | **Extract DAG computation.** Move dependency graph, topological sort, cycle detection, diamond detection into `pg_trickle_core::dag`. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-5 | **Define `trait DatabaseBackend`.** Abstract trait for SPI queries and raw_parser access. Implement for pgrx in the main extension crate. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-6 | **WASM compilation gate.** Verify `pg_trickle_core` compiles to `wasm32-unknown-emscripten` target. CI check for WASM build. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-7 | **Existing test suite passes.** All unit, integration, and E2E tests pass with the refactored crate structure. Zero behavior change. | 2–3d | — |
+
+> **Phase 1 subtotal: ~3–4 weeks**
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Delta SQL output byte-for-byte equivalence | M | P0 |
+| CORR-2 | OpTree serialization round-trip fidelity | S | P0 |
+| CORR-3 | Rewrite pass ordering preservation | S | P1 |
+| CORR-4 | DAG cycle detection parity after extraction | S | P1 |
+
+**CORR-1 — Delta SQL output byte-for-byte equivalence**
+
+> **In plain terms:** After the extraction, every operator's
+> `generate_delta_sql()` must produce the exact same SQL string as it did
+> before the refactoring. Any byte-level difference — even whitespace —
+> indicates a semantic shift that could change query plans or correctness.
+> Capture the SQL output for all 22 TPC-H stream tables before and after
+> the extraction and assert bit-for-bit equality.
+
+Verify: snapshot test comparing delta SQL for all TPC-H queries + the full
+E2E test suite. Any diff fails the build.
+Dependencies: PGL-1-2. Schema change: No.
+
+**CORR-2 — OpTree serialization round-trip fidelity**
+
+> **In plain terms:** The `OpTree` types are moving to a new crate. If any
+> field is accidentally dropped or retyped during the move, the delta SQL
+> generator will silently produce wrong output. Add a round-trip test:
+> serialize an OpTree to JSON, deserialize it back, and assert structural
+> equality. This catches missing `#[derive]` attributes and field ordering
+> issues.
+
+Verify: proptest generating random OpTrees; serialize-deserialize round-trip
+produces identical trees.
+Dependencies: PGL-1-1. Schema change: No.
+
+**CORR-3 — Rewrite pass ordering preservation**
+
+> **In plain terms:** The auto-rewrite passes (view inlining, DISTINCT ON,
+> GROUPING SETS, SubLink extraction) must execute in the same order after
+> extraction. Reordering could change the resulting OpTree and thereby the
+> delta SQL. Add an integration test that runs all rewrite passes on a
+> complex query (joining 3 tables with DISTINCT ON + GROUPING SETS) and
+> asserts the final OpTree matches a golden snapshot.
+
+Verify: golden-snapshot test for rewrite pass output on complex query.
+Dependencies: PGL-1-3. Schema change: No.
+
+**CORR-4 — DAG cycle detection parity after extraction**
+
+> **In plain terms:** The cycle detection algorithm in `dag.rs` has subtleties
+> around self-referencing views and diamond patterns. After moving to the
+> core crate, the algorithm must detect the same cycles. Run the existing
+> cycle-detection unit tests and add 3 new edge cases: self-referencing CTE,
+> diamond with mixed IMMEDIATE/DIFFERENTIAL, and 4-level cascade.
+
+Verify: all existing DAG unit tests pass + 3 new edge-case tests.
+Dependencies: PGL-1-4. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | pg_sys node abstraction layer (~500 unsafe blocks) | L | P0 |
+| STAB-2 | Compile-time pgrx dependency leak detection | S | P0 |
+| STAB-3 | Cargo workspace configuration correctness | S | P0 |
+| STAB-4 | Extension upgrade path (0.19 to 0.20) | S | P0 |
+| STAB-5 | Feature-flag isolation for WASM target | S | P1 |
+
+**STAB-1 — pg_sys node abstraction layer (~500 unsafe blocks)**
+
+> **In plain terms:** `rewrites.rs` (118 unsafe blocks, 295 `pg_sys` refs)
+> and `sublinks.rs` (367 unsafe blocks, 492 `pg_sys` refs) are the most
+> deeply coupled to pgrx. The core crate cannot contain raw `pg_sys` calls.
+> Define a `trait NodeVisitor` (or equivalent) that wraps pg_sys node
+> traversal behind safe method calls. The pgrx backend implements the trait
+> using actual pg_sys pointers; a mock backend can be used for unit tests.
+> This is the single highest-effort item in the release.
+
+Verify: zero `pg_sys::` references in `pg_trickle_core/`; `grep -r pg_sys
+pg_trickle_core/src/` returns empty.
+Dependencies: PGL-1-1, PGL-1-5. Schema change: No.
+
+**STAB-2 — Compile-time pgrx dependency leak detection**
+
+> **In plain terms:** After extraction, any accidental `use pgrx::*` in the
+> core crate would break the WASM build. Add a CI job that compiles
+> `pg_trickle_core` in isolation (without the pgrx feature) and fails if any
+> pgrx symbol is referenced. This catches leaks immediately rather than at
+> WASM build time.
+
+Verify: `cargo build -p pg_trickle_core --no-default-features` succeeds in
+CI.
+Dependencies: PGL-1-1. Schema change: No.
+
+**STAB-3 — Cargo workspace configuration correctness**
+
+> **In plain terms:** Adding a workspace member changes `Cargo.lock`
+> resolution, feature unification, and `cargo pgrx` behavior. Verify:
+> `cargo pgrx package` still produces a valid `.so`, `cargo test` runs all
+> workspace tests, and `cargo pgrx test` works for the extension crate.
+> pgrx version must remain pinned at 0.17.x.
+
+Verify: `cargo pgrx package`, `cargo test --workspace`, `cargo pgrx test`
+all succeed.
+Dependencies: PGL-1-1. Schema change: No.
+
+**STAB-4 — Extension upgrade path (0.19 to 0.20)**
+
+> **In plain terms:** v0.20.0 makes no SQL-visible changes (same functions,
+> same catalog schema), but the upgrade migration must still be tested.
+> `ALTER EXTENSION pg_trickle UPDATE` from 0.19.0 to 0.20.0 must leave
+> existing stream tables intact and refreshable.
+
+Verify: upgrade E2E test confirms stream tables survive and refresh
+correctly after `0.19.0 -> 0.20.0`.
+Dependencies: None. Schema change: No.
+
+**STAB-5 — Feature-flag isolation for WASM target**
+
+> **In plain terms:** The core crate must compile on both native and WASM.
+> Any platform-specific code (e.g., `std::time::Instant` unavailable on
+> `wasm32-unknown-emscripten`) must be gated behind `#[cfg]` attributes.
+> Add a CI matrix entry for the WASM target that catches platform leaks.
+
+Verify: `cargo build --target wasm32-unknown-emscripten -p pg_trickle_core`
+succeeds in CI.
+Dependencies: PGL-1-6. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Zero-overhead abstraction for DatabaseBackend | M | P0 |
+| PERF-2 | Benchmark regression gate across extraction | S | P0 |
+| PERF-3 | Core-only unit test speedup measurement | S | P1 |
+
+**PERF-1 — Zero-overhead abstraction for DatabaseBackend**
+
+> **In plain terms:** The `trait DatabaseBackend` introduces dynamic
+> dispatch (`dyn DatabaseBackend` or generics). For the native extension,
+> the abstraction must add zero measurable overhead. Use monomorphization
+> (generics, not trait objects) for the hot path — delta SQL generation is
+> called on every refresh cycle and must not regress. Measure with Criterion
+> before/after on the `diff_operators` benchmark suite.
+
+Verify: Criterion benchmark shows < 1% regression on `diff_operators` suite
+after extraction.
+Dependencies: PGL-1-5. Schema change: No.
+
+**PERF-2 — Benchmark regression gate across extraction**
+
+> **In plain terms:** The extraction touches 51K lines of code. Even
+> without functional changes, module restructuring can alter inlining,
+> cache locality, and link-time optimization. Run the full Criterion
+> benchmark suite before and after and assert no regression > 5%.
+
+Verify: `scripts/criterion_regression_check.py` passes with 5% threshold on
+all existing benchmarks.
+Dependencies: PGL-1-7. Schema change: No.
+
+**PERF-3 — Core-only unit test speedup measurement**
+
+> **In plain terms:** One of the key benefits of extraction is that
+> `pg_trickle_core` unit tests run without starting PostgreSQL. Measure the
+> wall-clock time for `cargo test -p pg_trickle_core` vs the old in-tree
+> unit tests. Document the speedup in the CHANGELOG — expect 5-10x faster
+> CI for unit-level tests.
+
+Verify: document test execution times before/after in PR description.
+Dependencies: PGL-1-7. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Workspace build parallelism verification | S | P1 |
+| SCAL-2 | Core crate binary size for WASM budget | S | P1 |
+| SCAL-3 | Incremental compilation impact assessment | S | P2 |
+
+**SCAL-1 — Workspace build parallelism verification**
+
+> **In plain terms:** With two crates, `cargo build` can compile
+> `pg_trickle_core` and other non-dependent crates in parallel. Verify that
+> the workspace DAG allows parallel compilation and measure the
+> incremental rebuild time for a change in `pg_trickle_core` only.
+
+Verify: `cargo build --timings` shows parallel compilation of core crate.
+Dependencies: PGL-1-1. Schema change: No.
+
+**SCAL-2 — Core crate binary size for WASM budget**
+
+> **In plain terms:** v0.21.0 targets < 2 MB WASM bundle. Measure the
+> compiled size of `pg_trickle_core` for the WASM target now so the budget
+> is known before Phase 2. If > 5 MB, investigate `wasm-opt` stripping and
+> feature-gating large operator modules.
+
+Verify: `wasm32-unknown-emscripten` build of `pg_trickle_core` produces < 5
+MB unoptimized. Document size in tracking issue.
+Dependencies: PGL-1-6. Schema change: No.
+
+**SCAL-3 — Incremental compilation impact assessment**
+
+> **In plain terms:** Splitting into two crates changes the incremental
+> compilation boundary. A change in `pg_trickle_core` now forces a
+> recompile of the extension crate. Measure incremental compile time for
+> common edit patterns (add a test, modify an operator, change a rewrite
+> pass) and ensure developer-experience compile times remain < 30s.
+
+Verify: document incremental compile times for 3 edit patterns.
+Dependencies: PGL-1-1. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | Workspace-aware justfile targets | S | P0 |
+| UX-2 | Developer guide for core crate contributions | S | P1 |
+| UX-3 | ARCHITECTURE.md update for two-crate layout | S | P1 |
+
+**UX-1 — Workspace-aware justfile targets**
+
+> **In plain terms:** Existing `just` targets (`just test-unit`, `just
+> lint`, `just fmt`) must work seamlessly with the new workspace layout.
+> Update the justfile so `just test-unit` runs both `pg_trickle_core` unit
+> tests and extension unit tests. Add `just test-core` for core-only tests.
+
+Verify: all existing `just` targets pass; `just test-core` runs core-only
+tests in < 5 seconds.
+Dependencies: PGL-1-1. Schema change: No.
+
+**UX-2 — Developer guide for core crate contributions**
+
+> **In plain terms:** Contributors need to know the rules: what goes in
+> `pg_trickle_core` (pure logic, no pgrx) vs the extension crate (SPI, FFI,
+> SQL functions). Add a section to `CONTRIBUTING.md` explaining the crate
+> boundary, the `DatabaseBackend` trait contract, and how to add a new
+> operator to the core crate.
+
+Verify: CONTRIBUTING.md updated with crate boundary rules.
+Dependencies: PGL-1-5. Schema change: No.
+
+**UX-3 — ARCHITECTURE.md update for two-crate layout**
+
+> **In plain terms:** The module layout diagram in `docs/ARCHITECTURE.md`
+> and `AGENTS.md` must reflect the new two-crate structure. Update both
+> files so new contributors see the correct layout.
+
+Verify: `docs/ARCHITECTURE.md` and `AGENTS.md` module diagrams show
+`pg_trickle_core/` and `pg_trickle/` crates.
+Dependencies: PGL-1-7. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Delta SQL snapshot tests for all 22 TPC-H queries | M | P0 |
+| TEST-2 | Pure-Rust unit tests for extracted operators | L | P0 |
+| TEST-3 | Mock DatabaseBackend for in-memory testing | M | P1 |
+| TEST-4 | WASM build smoke test in CI | S | P0 |
+| TEST-5 | Cargo deny / audit for new crate | XS | P0 |
+
+**TEST-1 — Delta SQL snapshot tests for all 22 TPC-H queries**
+
+> **In plain terms:** Before extraction, capture the exact delta SQL output
+> for each of the 22 TPC-H stream table definitions. After extraction, run
+> the same generator and diff. Any change is a hard failure. This is the
+> primary correctness gate for the refactoring.
+
+Verify: `cargo test -p pg_trickle_core -- snapshot` passes with zero diffs.
+Dependencies: CORR-1. Schema change: No.
+
+**TEST-2 — Pure-Rust unit tests for extracted operators**
+
+> **In plain terms:** The 23 operator files currently have ~1,700 unit tests
+> that run inside `cargo pgrx test` (requires PostgreSQL). After extraction,
+> all pure-logic tests should run via `cargo test -p pg_trickle_core`
+> without a database. Tests that require SPI (e.g., catalog lookups) stay
+> in the extension crate. Audit and migrate every test that can run without
+> PostgreSQL.
+
+Verify: > 80% of existing operator unit tests run in `pg_trickle_core`
+without PostgreSQL.
+Dependencies: PGL-1-2, TEST-3. Schema change: No.
+
+**TEST-3 — Mock DatabaseBackend for in-memory testing**
+
+> **In plain terms:** For core crate tests that need to call the parser or
+> SPI, provide a `MockBackend` that returns canned parse trees and query
+> results. This allows testing the full pipeline (parse -> rewrite ->
+> operator tree -> delta SQL) without PostgreSQL.
+
+Verify: `MockBackend` supports at least: `raw_parser()` returning a canned
+`OpTree`, and `spi_query()` returning a canned result set. 10+ tests use it.
+Dependencies: PGL-1-5. Schema change: No.
+
+**TEST-4 — WASM build smoke test in CI**
+
+> **In plain terms:** Add a CI job that compiles `pg_trickle_core` to
+> `wasm32-unknown-emscripten` on every PR. This catches platform-specific
+> code leaks before they accumulate. The job does not need to run the WASM
+> binary — just compile it.
+
+Verify: CI job `build-wasm` passes on every PR targeting the core crate.
+Dependencies: PGL-1-6, STAB-5. Schema change: No.
+
+**TEST-5 — Cargo deny / audit for new crate**
+
+> **In plain terms:** The new `pg_trickle_core` crate may introduce new
+> transitive dependencies. Ensure `cargo deny check` and `cargo audit`
+> cover the new crate and report no advisories.
+
+Verify: `cargo deny check` and `cargo audit` pass for the full workspace.
+Dependencies: PGL-1-1. Schema change: No.
+
+### Conflicts & Risks
+
+1. **STAB-1 is the critical path.** The ~500 unsafe blocks in `rewrites.rs`
+   and `sublinks.rs` require a `NodeVisitor` abstraction over raw
+   `pg_sys` pointer traversal. This is the highest-effort, highest-risk
+   item. If the abstraction proves too leaky (e.g., too many pg_sys node
+   types to wrap), consider leaving `rewrites.rs` and `sublinks.rs` in the
+   extension crate and extracting only operators + DAG + types to the core
+   crate. This reduces v0.20.0 scope but still delivers the WASM-compilable
+   operator engine for v0.21.0.
+
+2. **PERF-1 must be validated before merging.** Introducing a
+   `trait DatabaseBackend` could add vtable dispatch overhead on the hot
+   refresh path. Use monomorphization (generics) rather than `dyn Trait`
+   for the extension-side implementation. If Criterion shows > 1%
+   regression, investigate `#[inline]` annotations and LTO settings.
+
+3. **No schema changes, but workspace restructuring can break `cargo pgrx`.**
+   The `cargo-pgrx` tool makes assumptions about workspace layout (e.g.,
+   expecting a single `lib.rs` entry point). Test `cargo pgrx package`,
+   `cargo pgrx test`, and `cargo pgrx run` early. If `cargo-pgrx` 0.17.x
+   cannot handle the workspace, consider upgrading to a newer pgrx that
+   supports workspaces, or use a `[patch]` section in `Cargo.toml`.
+
+4. **TEST-2 depends on TEST-3 (MockBackend).** Pure-Rust operator tests
+   need a way to feed canned parse trees. Build the MockBackend early so
+   TEST-2 can proceed.
+
+5. **WASM target may not be available in standard CI runners.** The
+   `wasm32-unknown-emscripten` target requires Emscripten SDK. Either
+   install it in CI (adds ~2 min setup) or use a pre-built Docker image
+   with the SDK. Budget for CI setup time.
+
+6. **Extraction is all-or-nothing per module.** Partially extracting a
+   module (e.g., moving half of `rewrites.rs`) creates circular
+   dependencies. Each module must move completely or stay. Plan the
+   extraction order: types -> operators -> DAG -> diff -> rewrites ->
+   sublinks.
+
+> **v0.20.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
+
+**Exit criteria:**
+- [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
+- [ ] PGL-1-2: All operator delta SQL generation lives in the core crate
+- [ ] PGL-1-3: All auto-rewrite passes live in the core crate
+- [ ] PGL-1-4: DAG computation lives in the core crate
+- [ ] PGL-1-5: `trait DatabaseBackend` defined; pgrx implementation passes all existing tests
+- [ ] PGL-1-6: `cargo build --target wasm32-unknown-emscripten -p pg_trickle_core` succeeds
+- [ ] PGL-1-7: `just test-all` passes with zero regressions
+- [ ] CORR-1: Delta SQL snapshot tests pass for all 22 TPC-H queries (byte-for-byte match)
+- [ ] CORR-2: OpTree serialize-deserialize round-trip passes proptest
+- [ ] CORR-3: Rewrite pass ordering golden snapshot matches
+- [ ] CORR-4: DAG cycle detection passes with 3 new edge-case tests
+- [ ] STAB-1: Zero `pg_sys::` references in `pg_trickle_core/src/`
+- [ ] STAB-2: `cargo build -p pg_trickle_core --no-default-features` passes in CI
+- [ ] STAB-3: `cargo pgrx package` and `cargo pgrx test` succeed with workspace layout
+- [ ] STAB-4: Extension upgrade path tested (`0.19.0 -> 0.20.0`)
+- [ ] STAB-5: WASM target builds in CI
+- [ ] PERF-1: Criterion shows < 1% regression on `diff_operators` benchmark
+- [ ] PERF-2: Full benchmark suite passes with < 5% regression threshold
+- [ ] TEST-1: TPC-H delta SQL snapshot tests pass
+- [ ] TEST-2: > 80% of operator unit tests run without PostgreSQL
+- [ ] TEST-3: MockBackend used by 10+ core crate tests
+- [ ] TEST-4: CI `build-wasm` job passes on every PR
+- [ ] TEST-5: `cargo deny check` and `cargo audit` pass for workspace
+- [ ] UX-1: All existing `just` targets pass; `just test-core` added
+- [ ] UX-3: ARCHITECTURE.md and AGENTS.md updated with two-crate layout
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.21.0 — PGlite WASM Extension
+
+> **Release Theme**
+> This release delivers the first working PGlite extension — the moment
+> pg_trickle's incremental view maintenance runs in the browser. By
+> wrapping `pg_trickle_core` (extracted in v0.20.0) in a thin C/FFI shim
+> and compiling to WASM via PGlite's Emscripten toolchain, we ship an npm
+> package (`@pgtrickle/pglite`) that gives PGlite users the full DVM
+> operator vocabulary — outer joins, window functions, subqueries,
+> recursive CTEs — in IMMEDIATE mode. This dramatically exceeds pg_ivm's
+> PGlite offering (INNER joins + basic aggregates only). The release also
+> establishes the cross-platform correctness and performance baselines that
+> all future PGlite work builds on.
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A and §7
+Phase 2 for the full architecture.
+
+### PGlite WASM Build (Phase 2)
+
+> **In plain terms:** This takes the `pg_trickle_core` crate extracted in
+> v0.20.0 and wraps it in a thin C shim that PGlite's Emscripten-based
+> extension build system can compile to WASM. The result is a PGlite
+> extension package (`@pgtrickle/pglite`) that provides
+> `create_stream_table()`, `drop_stream_table()`, and `alter_stream_table()`
+> — all running IMMEDIATE mode inside the WASM PostgreSQL engine with the
+> full DVM operator set.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-2-1 | **C shim for PGlite.** Thin C wrapper bridging PGlite's Emscripten environment to `pg_trickle_core` via Rust FFI. Handles `raw_parser` calls through PGlite's built-in PostgreSQL parser. | 1–2wk | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-2-2 | **`DatabaseBackend` for PGlite.** Implement the trait for PGlite's single-connection SPI and built-in parser. Remove advisory lock acquisition (trivial in single-connection). | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-2-3 | **WASM bundle build.** Integrate with PGlite's extension toolchain (`postgres-pglite`). Produce `.tar.gz` WASM bundle. Target bundle size < 2 MB. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 |
+| PGL-2-4 | **TypeScript wrapper.** `@pgtrickle/pglite` npm package with PGlite plugin API. `createStreamTable()`, `dropStreamTable()`, `alterStreamTable()` with full IMMEDIATE mode support. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §7 Phase 2 |
+| PGL-2-5 | **IMMEDIATE mode E2E tests on PGlite.** Verify inner joins, outer joins, aggregates, DISTINCT, UNION ALL, window functions, subqueries, CTEs (non-recursive + recursive), LATERAL, view inlining, DISTINCT ON, GROUPING SETS. | 1–2wk | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §4.1 |
+| PGL-2-6 | **PG 17 vs PG 18 parse tree compatibility.** PGlite tracks PG 17; pg_trickle targets PG 18. Audit and gate any node struct differences with conditional compilation. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §8 |
+
+> **Phase 2 subtotal: ~5–7 weeks**
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | PG 17/18 parse tree node divergence audit | M | P0 |
+| CORR-2 | Delta SQL cross-platform equivalence | M | P0 |
+| CORR-3 | Advisory lock no-op safety proof | S | P1 |
+| CORR-4 | IMMEDIATE trigger ordering in single-connection | S | P1 |
+
+**CORR-1 — PG 17/18 parse tree node divergence audit**
+
+> **In plain terms:** PGlite embeds PostgreSQL 17's parser; pg_trickle's
+> `OpTree` construction targets PostgreSQL 18 node structs. Any struct
+> layout difference (added fields, renamed members, changed enum values)
+> would cause the C shim to misinterpret parse trees, producing silently
+> wrong delta SQL. Systematically diff the PG 17 and PG 18 parse tree
+> headers (`nodes/parsenodes.h`, `nodes/primnodes.h`) and catalog every
+> node type that pg_trickle traverses. Gate incompatible nodes behind
+> `#[cfg(pg17)]` / `#[cfg(pg18)]` conditional compilation.
+
+Verify: a CI job compiles `pg_trickle_core` against both PG 17 and PG 18
+parse tree headers. A test generates OpTrees from the same SQL on both
+versions and asserts structural equality.
+Dependencies: PGL-2-6. Schema change: No.
+
+**CORR-2 — Delta SQL cross-platform equivalence**
+
+> **In plain terms:** The same SQL view definition must produce the exact
+> same delta SQL on native PostgreSQL 18 and PGlite (WASM + PG 17 parser).
+> Any divergence means one platform gets wrong incremental results. Create
+> a snapshot test suite that runs all 22 TPC-H stream table definitions
+> through both the native and WASM `DatabaseBackend` implementations and
+> asserts byte-for-byte identical delta SQL output.
+
+Verify: snapshot comparison test passes for all 22 TPC-H queries on both
+platforms. Any diff is a hard failure.
+Dependencies: PGL-2-2, CORR-1. Schema change: No.
+
+**CORR-3 — Advisory lock no-op safety proof**
+
+> **In plain terms:** The native extension uses `pg_advisory_xact_lock()`
+> to prevent concurrent refresh of the same stream table. PGlite is
+> single-connection — the lock acquisition is a no-op. Verify that
+> removing the lock cannot cause re-entrancy (a trigger firing
+> `create_stream_table()` from within a refresh) by auditing all SPI
+> call paths from the PGlite `DatabaseBackend` for re-entrant calls.
+
+Verify: code review + integration test that attempts re-entrant refresh
+from within a trigger. Must error cleanly, not corrupt state.
+Dependencies: PGL-2-2. Schema change: No.
+
+**CORR-4 — IMMEDIATE trigger ordering in single-connection**
+
+> **In plain terms:** IMMEDIATE mode relies on AFTER triggers firing in a
+> specific order when multiple source tables are modified in the same
+> statement (e.g., a CTE with multiple INSERTs). Verify that PGlite's
+> trigger execution order matches native PostgreSQL's for the trigger
+> configurations pg_trickle creates.
+
+Verify: integration test with multi-table CTE INSERT on PGlite; assert
+stream table state matches native.
+Dependencies: PGL-2-5. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | WASM heap OOM graceful degradation | M | P0 |
+| STAB-2 | C shim panic/unwind boundary safety | S | P0 |
+| STAB-3 | Extension load/unload lifecycle correctness | S | P0 |
+| STAB-4 | Native extension upgrade path (0.20 → 0.21) | S | P0 |
+| STAB-5 | npm package version synchronization | XS | P1 |
+
+**STAB-1 — WASM heap OOM graceful degradation**
+
+> **In plain terms:** WASM environments have a finite heap (typically
+> 256 MB in browsers, configurable in Node). A large stream table with
+> many operators could exhaust WASM memory during OpTree construction or
+> delta SQL generation. The extension must detect allocation failures and
+> return a clear PostgreSQL error rather than crashing the WASM instance
+> (which would kill all PGlite state). Implement a memory-aware allocator
+> wrapper or check `emscripten_get_heap_size()` at entry points.
+
+Verify: stress test creating stream tables over increasingly complex views
+until OOM; assert PGlite remains functional and returns an actionable error.
+Dependencies: PGL-2-1. Schema change: No.
+
+**STAB-2 — C shim panic/unwind boundary safety**
+
+> **In plain terms:** Rust panics must not cross the FFI boundary into C.
+> The C shim must catch panics via `std::panic::catch_unwind()` and
+> convert them to PostgreSQL `ereport(ERROR)` calls. Any uncaught panic in
+> WASM would abort the entire PGlite instance. Audit every `#[no_mangle]
+> extern "C"` entry point in the shim for panic safety.
+
+Verify: test that triggers a panic path (e.g., invalid SQL) from TypeScript;
+assert PGlite returns a SQL error, not a WASM trap.
+Dependencies: PGL-2-1. Schema change: No.
+
+**STAB-3 — Extension load/unload lifecycle correctness**
+
+> **In plain terms:** PGlite extensions can be loaded and unloaded. The
+> C shim must free all Rust-allocated memory on unload and not leave
+> dangling pointers or leaked state. Test the full lifecycle: load
+> extension → create stream tables → drop stream tables → unload
+> extension → reload extension → create new stream tables.
+
+Verify: lifecycle test with memory profiling shows zero leaked allocations
+after unload/reload cycle.
+Dependencies: PGL-2-1, PGL-2-4. Schema change: No.
+
+**STAB-4 — Native extension upgrade path (0.20 → 0.21)**
+
+> **In plain terms:** v0.21.0 adds PGlite support but makes no SQL-visible
+> changes to the native extension. The upgrade migration from 0.20.0 to
+> 0.21.0 must leave existing stream tables intact and refreshable.
+
+Verify: upgrade E2E test confirms stream tables survive and refresh
+correctly after `0.20.0 -> 0.21.0`.
+Dependencies: None. Schema change: No.
+
+**STAB-5 — npm package version synchronization**
+
+> **In plain terms:** The `@pgtrickle/pglite` npm package version must
+> match the extension version (0.21.0). Add a CI check that verifies
+> `package.json` version matches `pg_trickle.control` version, similar to
+> the existing `just check-version-sync` target.
+
+Verify: `just check-version-sync` also validates npm package version.
+Dependencies: PGL-2-4. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | WASM vs native refresh latency benchmark | M | P0 |
+| PERF-2 | WASM bundle size optimization (< 2 MB target) | M | P0 |
+| PERF-3 | PGlite cold-start extension load time | S | P1 |
+
+**PERF-1 — WASM vs native refresh latency benchmark**
+
+> **In plain terms:** WASM is expected to be 1.5–3× slower than native
+> (per PLAN_PGLITE.md §8). Quantify the actual overhead by benchmarking
+> IMMEDIATE-mode refresh on both platforms using the same schema + data.
+> The overhead must stay below the threshold where IMMEDIATE mode is still
+> faster than full re-evaluation — otherwise PGlite users would be better
+> off just re-running the query. Establish a Criterion-like benchmark suite
+> for PGlite (potentially using Node.js + `@electric-sql/pglite`).
+
+Verify: benchmark report showing WASM refresh latency for 5 representative
+stream tables (scan, join, aggregate, window, recursive CTE). Document
+native-to-WASM overhead ratio.
+Dependencies: PGL-2-5. Schema change: No.
+
+**PERF-2 — WASM bundle size optimization (< 2 MB target)**
+
+> **In plain terms:** The WASM bundle must be < 2 MB for acceptable
+> download times in browser environments (PostGIS is 8.2 MB, pgcrypto is
+> 1.1 MB — pg_trickle should be closer to pgcrypto). Apply `wasm-opt -Oz`,
+> LTO, `codegen-units = 1`, strip debug info, and feature-gate large
+> operator modules (e.g., recursive CTE, window functions) behind optional
+> features if needed to meet the target.
+
+Verify: CI job measures WASM bundle size after `wasm-opt` and fails if > 2
+MB. Document size breakdown by operator module.
+Dependencies: PGL-2-3. Schema change: No.
+
+**PERF-3 — PGlite cold-start extension load time**
+
+> **In plain terms:** The first `CREATE EXTENSION pg_trickle` in a PGlite
+> session compiles and loads the WASM module. This must complete in < 500 ms
+> in a browser and < 200 ms in Node.js. Measure and optimize by using
+> streaming WASM compilation (`WebAssembly.compileStreaming()`) and ensuring
+> the extension `_PG_init()` function does minimal work.
+
+Verify: benchmark measuring time from `CREATE EXTENSION` to first
+`create_stream_table()` on fresh PGlite instance. Document cold-start time.
+Dependencies: PGL-2-1, PGL-2-3. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Stream table count ceiling in WASM | S | P1 |
+| SCAL-2 | Wide-table OpTree memory footprint | S | P1 |
+| SCAL-3 | Dataset size practical limit for IMMEDIATE mode | S | P2 |
+
+**SCAL-1 — Stream table count ceiling in WASM**
+
+> **In plain terms:** Each stream table consumes memory for its OpTree,
+> delta SQL templates, and trigger metadata. In native PostgreSQL with
+> gigabytes of RAM this is trivial, but in a 256 MB WASM heap it matters.
+> Determine the practical limit by creating stream tables in a loop until
+> OOM, then document the ceiling and add a guard that errors at 80%
+> capacity with an actionable message.
+
+Verify: stress test documents the ceiling (e.g., "~200 stream tables with
+average 3-table join in 256 MB heap"). Guard errors at 80%.
+Dependencies: STAB-1. Schema change: No.
+
+**SCAL-2 — Wide-table OpTree memory footprint**
+
+> **In plain terms:** A stream table over a 100-column source table
+> produces a large OpTree and long delta SQL strings. Profile the memory
+> consumption of OpTree construction for wide tables and ensure it fits
+> within the WASM heap budget alongside typical stream table counts.
+
+Verify: profile OpTree allocation for 10, 50, 100-column source tables.
+Document memory per stream table as a function of column count.
+Dependencies: PGL-2-5. Schema change: No.
+
+**SCAL-3 — Dataset size practical limit for IMMEDIATE mode**
+
+> **In plain terms:** IMMEDIATE mode fires triggers on every DML, so
+> overhead scales with write frequency. In a WASM environment with ~2×
+> slower execution, determine at what dataset size (rows × columns ×
+> writes/second) IMMEDIATE mode becomes impractical. Document the
+> breakpoint so PGlite users know when their use case has outgrown the
+> browser and should migrate to native pg_trickle with DIFFERENTIAL mode.
+
+Verify: benchmark with increasing write rates; document the throughput
+ceiling (e.g., "> 10K rows/sec INSERT rate degrades stream table latency
+past 100 ms").
+Dependencies: PERF-1. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | TypeScript API ergonomics and type safety | S | P0 |
+| UX-2 | PGlite getting-started guide | M | P0 |
+| UX-3 | WASM-context error message quality | S | P1 |
+| UX-4 | npm package README with runnable examples | S | P1 |
+
+**UX-1 — TypeScript API ergonomics and type safety**
+
+> **In plain terms:** The `@pgtrickle/pglite` TypeScript API must follow
+> PGlite plugin conventions (`PGlitePlugin` interface, `init()` lifecycle).
+> All methods must be fully typed — no `any` types. The API surface must
+> be minimal: `createStreamTable(sql)`, `dropStreamTable(name)`,
+> `alterStreamTable(name, sql)`, `listStreamTables()`, and
+> `refreshStreamTable(name)`. Review against existing PGlite plugins
+> (`@electric-sql/pglite-repl`, `pglite-vector`) for consistency.
+
+Verify: TypeScript strict mode compilation with no errors. API review
+against PGlite plugin conventions checklist.
+Dependencies: PGL-2-4. Schema change: No.
+
+**UX-2 — PGlite getting-started guide**
+
+> **In plain terms:** A `docs/tutorials/PGLITE_QUICKSTART.md` guide
+> walking a user from `npm install` to a working React app with live
+> stream tables in < 10 minutes. Include: install, create PGlite instance
+> with extension, define source table + stream table, insert data, observe
+> stream table update. Provide a CodeSandbox / StackBlitz link for
+> zero-install try-it-now experience.
+
+Verify: a new developer can follow the guide and see a working stream table
+in PGlite in a browser within 10 minutes.
+Dependencies: PGL-2-4, UX-1. Schema change: No.
+
+**UX-3 — WASM-context error message quality**
+
+> **In plain terms:** Error messages from the Rust/C shim must be
+> JavaScript-friendly: no raw pg_sys error codes, no memory addresses.
+> Every error must include the stream table name, the failing SQL
+> fragment, and a remediation hint. Unsupported features (DIFFERENTIAL
+> mode, scheduled refresh, parallel workers) must error with
+> "Not supported in PGlite: <feature>. Use IMMEDIATE mode." rather than
+> cryptic internal errors.
+
+Verify: audit all error paths in the C shim + PGlite `DatabaseBackend`.
+Every error message includes table name + remediation hint.
+Dependencies: PGL-2-1, PGL-2-2. Schema change: No.
+
+**UX-4 — npm package README with runnable examples**
+
+> **In plain terms:** The npm package must have a README with: badge for
+> PGlite compatibility, install command, 3 runnable examples (basic
+> aggregate, join, window function), API reference, link to the full
+> PGlite quickstart guide, and a "Limitations vs native pg_trickle"
+> section clearly stating: no DIFFERENTIAL mode, no scheduled refresh,
+> no parallel workers, PG 17 parser only.
+
+Verify: README renders correctly on npmjs.com; examples are copy-pasteable
+into a Node.js REPL.
+Dependencies: PGL-2-4, UX-2. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Full DVM operator E2E suite on PGlite | L | P0 |
+| TEST-2 | PG 17/18 parse tree compatibility tests | M | P0 |
+| TEST-3 | WASM memory stress tests | M | P1 |
+| TEST-4 | TypeScript integration tests | M | P0 |
+| TEST-5 | Bundle size regression gate in CI | S | P0 |
+
+**TEST-1 — Full DVM operator E2E suite on PGlite**
+
+> **In plain terms:** Run every DVM operator (23 operators across inner
+> join, outer join, full join, semi-join, anti-join, aggregate, distinct,
+> union/intersect/except, subquery, scalar subquery, CTE scan, recursive
+> CTE, lateral function, lateral subquery, window function, scan, filter,
+> project) through IMMEDIATE mode in PGlite. This is the primary
+> correctness gate for the WASM extension. Use a Node.js test harness
+> with `@electric-sql/pglite` to run the tests headlessly.
+
+Verify: test suite with ≥ 1 test per operator (23+ tests) passes in CI
+using PGlite Node.js. Test matrix: INSERT, UPDATE, DELETE for each operator.
+Dependencies: PGL-2-5. Schema change: No.
+
+**TEST-2 — PG 17/18 parse tree compatibility tests**
+
+> **In plain terms:** For every parse tree node type that pg_trickle
+> traverses, generate a test query that exercises that node, parse it on
+> both PG 17 (PGlite) and PG 18 (native), and assert that the resulting
+> `OpTree` is structurally identical. This catches version-specific
+> divergences before they reach users.
+
+Verify: compatibility test suite covers all node types referenced in
+`pg_trickle_core`. Any divergence is a hard failure with clear diagnostic.
+Dependencies: CORR-1. Schema change: No.
+
+**TEST-3 — WASM memory stress tests**
+
+> **In plain terms:** Create increasing numbers of stream tables with
+> increasing complexity until OOM. Verify that: (a) the guard from SCAL-1
+> fires at 80% capacity, (b) PGlite remains functional after the guard
+> fires, (c) dropping stream tables actually frees memory. Run under
+> different heap sizes (64 MB, 128 MB, 256 MB) to validate the guard
+> thresholds.
+
+Verify: stress test with 3 heap sizes completes without WASM trap. Guard
+fires at documented threshold. Memory reclaimed after DROP.
+Dependencies: STAB-1, SCAL-1. Schema change: No.
+
+**TEST-4 — TypeScript integration tests**
+
+> **In plain terms:** Test the `@pgtrickle/pglite` TypeScript API end-to-end
+> using Jest or Vitest in Node.js. Cover: create/drop/alter stream table,
+> error handling (invalid SQL, unsupported features), plugin lifecycle
+> (init/cleanup), and concurrent operations on different stream tables.
+> Run as part of CI on every PR that touches `pg_trickle_pglite/`.
+
+Verify: ≥ 20 TypeScript integration tests pass in CI. Test coverage report
+for the TypeScript wrapper shows > 90% line coverage.
+Dependencies: PGL-2-4, UX-1. Schema change: No.
+
+**TEST-5 — Bundle size regression gate in CI**
+
+> **In plain terms:** Add a CI job that builds the WASM bundle, runs
+> `wasm-opt`, measures the final `.wasm` file size, and fails if it
+> exceeds 2 MB. Store the current size as a baseline and alert on any
+> increase > 10%. This prevents bundle bloat as features are added.
+
+Verify: CI job `check-wasm-size` runs on every PR touching
+`pg_trickle_core/` or `pg_trickle_pglite/`. Fails at > 2 MB.
+Dependencies: PGL-2-3, PERF-2. Schema change: No.
+
+### Conflicts & Risks
+
+1. **CORR-1 (PG 17/18 parse tree compatibility) is the highest risk.**
+   PGlite embeds PG 17; pg_trickle targets PG 18. If node struct layouts
+   diverged significantly between versions (e.g., `JoinExpr` gained a
+   field, `RangeTblEntry` changed a flag), the C shim must handle both
+   layouts via conditional compilation. In the worst case, some operators
+   may need version-specific code paths. Start this audit early — it
+   blocks PGL-2-1 and PGL-2-2.
+
+2. **PERF-2 (bundle size < 2 MB) may conflict with full operator coverage.**
+   If the 23-operator delta SQL generator compiles to > 2 MB, we may need
+   to feature-gate rarely-used operators (recursive CTE, GROUPING SETS)
+   behind cargo features. This would reduce the "full DVM vocabulary" claim
+   and require documenting which operators are available by default.
+   Measure early with a minimal build to establish baseline.
+
+3. **PGlite's Emscripten toolchain is a moving target.** PGlite's
+   extension build system (`postgres-pglite`) is not yet stable. Breaking
+   changes in the toolchain could block PGL-2-3. Pin the PGlite version
+   and track upstream releases. Have a fallback plan: manual Emscripten
+   compilation without the PGlite toolchain.
+
+4. **STAB-2 (panic boundary) and STAB-1 (OOM handling) interact.** A Rust
+   OOM in WASM triggers a panic, which must not cross the FFI boundary.
+   Both items must be implemented together: the OOM guard (STAB-1) sets a
+   pre-panic threshold, and the catch_unwind wrapper (STAB-2) is the
+   last-resort safety net.
+
+5. **No prior C FFI in the codebase.** The only C code is `scripts/pg_stub.c`
+   (test helper). The C shim (PGL-2-1) introduces a new language and
+   toolchain requirement. Ensure the C code is minimal (< 500 lines),
+   well-documented, and covered by the TypeScript integration tests.
+
+6. **TEST-1 and TEST-4 require a PGlite-based CI runner.** Need Node.js
+   18+ with `@electric-sql/pglite` in CI. This is a new CI dependency.
+   Add it to the existing CI matrix as a separate job that only runs when
+   `pg_trickle_pglite/` or `pg_trickle_core/` files are modified.
+
+> **v0.21.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
+
+**Exit criteria:**
+- [ ] PGL-2-1: C shim compiles and links against PGlite's WASM PostgreSQL headers
+- [ ] PGL-2-2: PGlite `DatabaseBackend` passes all IMMEDIATE-mode operator tests
+- [ ] PGL-2-3: WASM bundle size < 2 MB after `wasm-opt`
+- [ ] PGL-2-4: `@pgtrickle/pglite` npm package published to npmjs.com
+- [ ] PGL-2-5: All 23 DVM operators pass E2E tests on PGlite
+- [ ] PGL-2-6: PG 17 parse tree differences documented and handled with `#[cfg]`
+- [ ] CORR-1: PG 17/18 parse tree audit complete; compatibility tests pass
+- [ ] CORR-2: Delta SQL cross-platform snapshot tests pass for all 22 TPC-H queries
+- [ ] CORR-3: Re-entrant refresh test passes on PGlite
+- [ ] CORR-4: Multi-table CTE trigger ordering matches native
+- [ ] STAB-1: OOM stress test: PGlite survives with actionable error
+- [ ] STAB-2: Panic from invalid SQL returns SQL error, not WASM trap
+- [ ] STAB-3: Load/unload/reload lifecycle test: zero leaked allocations
+- [ ] STAB-4: Extension upgrade path tested (`0.20.0 -> 0.21.0`)
+- [ ] PERF-1: WASM vs native benchmark report published (≤ 3× overhead)
+- [ ] PERF-2: WASM bundle ≤ 2 MB (CI gated)
+- [ ] PERF-3: Cold-start load time < 500 ms browser, < 200 ms Node.js
+- [ ] TEST-1: ≥ 23 operator E2E tests pass on PGlite in CI
+- [ ] TEST-2: Parse tree compatibility tests cover all traversed node types
+- [ ] TEST-3: Memory stress tests pass under 64/128/256 MB heap sizes
+- [ ] TEST-4: ≥ 20 TypeScript integration tests with > 90% line coverage
+- [ ] TEST-5: CI `check-wasm-size` job passes on every PR
+- [ ] UX-1: TypeScript strict mode compilation: zero errors
+- [ ] UX-2: PGlite getting-started guide published with CodeSandbox link
+- [ ] UX-4: npm README renders correctly on npmjs.com
+- [ ] `just check-version-sync` passes (incl. npm package version)
+
+---
+
+## v0.22.0 — PGlite Reactive Integration
+
+> **Release Theme**
+> This release completes the PGlite story by bridging the gap between
+> database-side incremental view maintenance and front-end UI reactivity.
+> By connecting stream table deltas to PGlite's `live.changes()` API and
+> providing framework-specific hooks (`useStreamTable()` for React and
+> Vue), pg_trickle becomes the first IVM engine to offer truly reactive
+> UI bindings — where DOM updates are proportional to changed rows, not
+> result set size. This is the local-first developer's final mile: from
+> `INSERT` to re-render in a single digit millisecond count, with no
+> polling, no diffing, and no full query re-execution.
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §7 Phase 3 for the
+full reactive integration design.
+
+### Reactive Bindings (Phase 3)
+
+> **In plain terms:** Phase 2 gave PGlite users in-engine IVM. This phase
+> connects stream table changes to PGlite's `live.changes()` API and
+> provides framework-specific hooks — `useStreamTable()` for React,
+> `useStreamTable()` for Vue — so UI components automatically re-render
+> when the underlying data changes. For local-first apps like collaborative
+> editors, dashboards, and offline-capable tools, this is the last mile
+> between incremental SQL and reactive UI.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGL-3-1 | **`live.changes()` bridge.** Emit INSERT/UPDATE/DELETE change events from stream table delta application to PGlite's live query system. Keyed by `__pgt_row_id`. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §7 Phase 3 |
+| PGL-3-2 | **React hooks.** `useStreamTable(query)` hook that subscribes to stream table changes and returns reactive state. Handles mount/unmount lifecycle. | 3–5d | — |
+| PGL-3-3 | **Vue composable.** `useStreamTable(query)` composable with equivalent functionality. | 2–3d | — |
+| PGL-3-4 | **Documentation and examples.** Local-first app patterns: collaborative todo list, real-time dashboard, offline-first inventory tracker. Published as `@pgtrickle/pglite` docs. | 2–3d | — |
+| PGL-3-5 | **Performance benchmarks.** End-to-end latency from `INSERT` to React re-render. Compare against `live.incrementalQuery()` for complex queries (3-table join + aggregate). | 1–2d | — |
+
+> **Phase 3 subtotal: ~2–3 weeks**
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Change event fidelity vs stream table state | M | P0 |
+| CORR-2 | Multi-row DML atomicity in reactive stream | S | P0 |
+| CORR-3 | Hook state consistency after rapid mutations | M | P1 |
+| CORR-4 | DELETE/re-INSERT identity stability | S | P1 |
+
+**CORR-1 — Change event fidelity vs stream table state**
+
+> **In plain terms:** The `live.changes()` bridge emits INSERT/UPDATE/DELETE
+> events derived from the IMMEDIATE mode delta application. If an event is
+> missed, duplicated, or misclassified (e.g., an UPDATE emitted as DELETE +
+> INSERT), the React/Vue state will diverge from the actual stream table
+> contents. For every DML operation on every DVM operator type, assert that
+> the sequence of change events, when applied to an empty accumulator,
+> produces a set identical to `SELECT * FROM stream_table`.
+
+Verify: integration test replaying 1,000 random DML operations across all
+operator types; final accumulator state matches `SELECT *`. Any divergence
+is a hard failure.
+Dependencies: PGL-3-1. Schema change: No.
+
+**CORR-2 — Multi-row DML atomicity in reactive stream**
+
+> **In plain terms:** A single `INSERT INTO source SELECT ... FROM
+> generate_series(1, 100)` inserts 100 rows and triggers IMMEDIATE mode
+> delta application. The `live.changes()` bridge must emit all 100 change
+> events as a single batch — not trickle them one-by-one — so that React
+> performs a single re-render, not 100. If events leak across batch
+> boundaries, the UI shows intermediate states that never existed in the
+> database.
+
+Verify: test with 100-row INSERT; assert `useStreamTable()` callback fires
+exactly once with all 100 rows. Intermediate renders counted via React
+profiler must be ≤ 1.
+Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
+
+**CORR-3 — Hook state consistency after rapid mutations**
+
+> **In plain terms:** If a user performs INSERT → DELETE → INSERT on the
+> same row within 10 ms (e.g., optimistic UI with undo), the hook must
+> resolve to the correct final state. Race conditions between the
+> `live.changes()` event stream and React's asynchronous render cycle
+> could show stale data. The hook must use a monotonic sequence number
+> (from the bridge's event stream) to discard stale updates.
+
+Verify: stress test with 50 rapid mutations on the same row at 1 ms
+intervals; final hook state matches `SELECT *`. Test on both React 18
+(concurrent mode) and React 19.
+Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
+
+**CORR-4 — DELETE/re-INSERT identity stability**
+
+> **In plain terms:** When a row is deleted and a new row with the same PK
+> is inserted, the `__pgt_row_id` changes but the PK doesn't. The change
+> bridge must emit a DELETE for the old `__pgt_row_id` and an INSERT for
+> the new one — not an UPDATE — so that React's reconciler correctly
+> unmounts and remounts the component (not just re-renders it). Wrong
+> identity semantics cause stale closures and event handler leaks.
+
+Verify: test DELETE + INSERT with same PK; verify React component lifecycle
+(unmount + mount, not just update). Use React DevTools profiler.
+Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | Memory leak prevention in long-lived hooks | M | P0 |
+| STAB-2 | Subscription cleanup on component unmount | S | P0 |
+| STAB-3 | Error boundary integration for hook failures | S | P0 |
+| STAB-4 | Native extension upgrade path (0.21 → 0.22) | S | P0 |
+| STAB-5 | Framework version compatibility matrix | S | P1 |
+
+**STAB-1 — Memory leak prevention in long-lived hooks**
+
+> **In plain terms:** A `useStreamTable()` hook in a long-lived component
+> (e.g., a dashboard that runs for hours) accumulates change events via
+> the `live.changes()` subscription. If the bridge or hook retains
+> references to processed events, memory grows unboundedly. Implement a
+> bounded event buffer (configurable, default 1,000 events) that discards
+> processed events after they are applied to the hook's state snapshot.
+> After the buffer fills, old entries are garbage-collected.
+
+Verify: 4-hour soak test with continuous 1 row/sec mutations. Heap snapshot
+at 1h and 4h shows < 10% growth. No detached DOM nodes or leaked closures.
+Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
+
+**STAB-2 — Subscription cleanup on component unmount**
+
+> **In plain terms:** When a React component using `useStreamTable()` is
+> unmounted (e.g., route change), the `live.changes()` subscription must
+> be cancelled immediately. Failing to clean up causes: (a) memory leaks
+> from the change listener, (b) "setState on unmounted component" warnings,
+> (c) stale event processing after the component is gone. Use
+> `useEffect()` cleanup function with an AbortController pattern.
+
+Verify: mount/unmount cycle test (100 cycles); zero console warnings, zero
+leaked subscriptions (verified via PGlite connection subscription count).
+Dependencies: PGL-3-2. Schema change: No.
+
+**STAB-3 — Error boundary integration for hook failures**
+
+> **In plain terms:** If the `live.changes()` bridge throws (e.g., stream
+> table was dropped while the hook is active), the hook must propagate the
+> error to React's error boundary / Vue's `onErrorCaptured` — not swallow
+> it silently or crash the app. Provide an `onError` callback option and
+> a default that throws to the nearest error boundary.
+
+Verify: test dropping a stream table while `useStreamTable()` is active;
+assert error boundary catches the error with an actionable message.
+Dependencies: PGL-3-2, PGL-3-3. Schema change: No.
+
+**STAB-4 — Native extension upgrade path (0.21 → 0.22)**
+
+> **In plain terms:** v0.22.0 adds reactive bindings at the TypeScript/npm
+> layer only. The native PostgreSQL extension and PGlite WASM extension
+> must continue to work unchanged. The upgrade migration from 0.21.0 to
+> 0.22.0 must leave existing stream tables and the `@pgtrickle/pglite`
+> WASM extension intact.
+
+Verify: upgrade E2E test confirms stream tables survive and refresh
+correctly after `0.21.0 -> 0.22.0`. TypeScript API backward compatibility
+verified.
+Dependencies: None. Schema change: No.
+
+**STAB-5 — Framework version compatibility matrix**
+
+> **In plain terms:** Test `useStreamTable()` against: React 18.x, React
+> 19.x, Vue 3.4+. Document which framework versions are supported. Future
+> consideration: Svelte 5 (runes), SolidJS, Angular signals — document
+> these as "community-contributed" integration points, not first-party.
+
+Verify: CI matrix testing React 18, React 19, Vue 3.4. Published
+compatibility table in npm README.
+Dependencies: PGL-3-2, PGL-3-3. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | INSERT-to-render latency benchmark | M | P0 |
+| PERF-2 | Batch rendering efficiency (single re-render) | S | P0 |
+| PERF-3 | Bridge overhead vs raw `live.changes()` | S | P1 |
+
+**PERF-1 — INSERT-to-render latency benchmark**
+
+> **In plain terms:** Measure the end-to-end latency from `INSERT INTO
+> source_table` to the React component's DOM update. The target is
+> < 50% of `live.incrementalQuery()` latency for a 3-table join +
+> aggregate at 10K rows (per PLAN_PGLITE.md). This is the headline
+> metric: if pg_trickle's reactive path is not significantly faster than
+> PGlite's built-in incremental query, the value proposition collapses.
+
+Verify: benchmark suite with 5 complexity levels (scan, filter, join,
+aggregate, window). Publish results as a comparison table against
+`live.incrementalQuery()`. Target: < 50% latency at 10K rows.
+Dependencies: PGL-3-1, PGL-3-2, PGL-3-5. Schema change: No.
+
+**PERF-2 — Batch rendering efficiency (single re-render)**
+
+> **In plain terms:** A bulk INSERT (100 rows) must produce exactly one
+> React re-render, not 100. The change bridge must batch events emitted
+> within the same transaction into a single `live.changes()` notification.
+> Use `queueMicrotask()` or `requestAnimationFrame()` batching in the
+> TypeScript wrapper to coalesce rapid-fire events.
+
+Verify: React profiler shows ≤ 1 render per bulk DML. Test with 1, 10,
+100, 1000-row INSERTs; render count is always 1.
+Dependencies: PGL-3-1, PGL-3-2, CORR-2. Schema change: No.
+
+**PERF-3 — Bridge overhead vs raw `live.changes()`**
+
+> **In plain terms:** The change bridge adds a translation layer between
+> the IMMEDIATE mode delta application and PGlite's `live.changes()` API.
+> Measure the overhead of this translation (serialization, event
+> construction, key mapping) and ensure it is < 5% of total refresh
+> latency. If overhead is higher, optimize the bridge's change event
+> construction (e.g., avoid JSON round-trips, use structured clones).
+
+Verify: micro-benchmark isolating bridge overhead from WASM refresh time.
+Document overhead as percentage of total INSERT-to-event latency.
+Dependencies: PGL-3-1. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Multiple concurrent subscriptions | S | P1 |
+| SCAL-2 | Large result set rendering (10K+ rows) | M | P1 |
+| SCAL-3 | Multi-tab / SharedWorker isolation | S | P2 |
+
+**SCAL-1 — Multiple concurrent subscriptions**
+
+> **In plain terms:** A dashboard page may render 5-10 `useStreamTable()`
+> hooks simultaneously, each watching a different stream table. The bridge
+> must not create per-hook subscriptions to `live.changes()` — instead,
+> use a single multiplexed subscription that fans out to registered hooks.
+> Measure performance with 1, 5, 10, 20 concurrent hooks.
+
+Verify: benchmark with 20 concurrent `useStreamTable()` hooks; latency
+degradation < 20% vs single hook. Memory growth linear (not quadratic).
+Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
+
+**SCAL-2 — Large result set rendering (10K+ rows)**
+
+> **In plain terms:** A stream table with 10K+ rows produces a large
+> initial snapshot when `useStreamTable()` mounts. The hook must support
+> virtualized rendering (integrating with libraries like `react-virtual`
+> or `tanstack-virtual`) by providing a stable row identity key
+> (`__pgt_row_id`) and fine-grained change signals (which rows changed,
+> not just "something changed"). Without this, mounting a 10K-row stream
+> table would freeze the UI for seconds.
+
+Verify: demo app with 10K-row stream table using `@tanstack/react-virtual`.
+Mount time < 200 ms. Single-row INSERT re-renders only the affected row,
+not the full list.
+Dependencies: PGL-3-2, PGL-3-4. Schema change: No.
+
+**SCAL-3 — Multi-tab / SharedWorker isolation**
+
+> **In plain terms:** In multi-tab apps using PGlite with SharedWorker,
+> each tab gets its own `useStreamTable()` hooks but shares a single
+> PGlite instance. The bridge must correctly fan out change events to all
+> tabs without cross-tab interference or duplicate processing. Document
+> the SharedWorker architecture and test with 3 concurrent tabs.
+
+Verify: 3-tab test with shared PGlite instance via SharedWorker. INSERT in
+tab 1 causes re-render in all 3 tabs. No duplicate events. No memory leaks
+across tabs.
+Dependencies: PGL-3-1. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | Local-first app example: collaborative todo | M | P0 |
+| UX-2 | Real-time dashboard example | M | P0 |
+| UX-3 | API reference with interactive playground | S | P1 |
+| UX-4 | Migration guide from `live.incrementalQuery()` | S | P1 |
+
+**UX-1 — Local-first app example: collaborative todo**
+
+> **In plain terms:** A complete, runnable React app demonstrating
+> pg_trickle + PGlite for a collaborative todo list: multiple "users"
+> (simulated in separate components) INSERT/UPDATE/DELETE todos, each
+> user's view updates reactively via `useStreamTable()`. Published in
+> the monorepo under `examples/pglite-todo/` with a CodeSandbox link.
+> This is the primary "show, don't tell" marketing asset.
+
+Verify: example app runs in CodeSandbox with zero local setup. README
+explains every code section. A non-pg_trickle developer can understand it
+in 5 minutes.
+Dependencies: PGL-3-2, PGL-3-4. Schema change: No.
+
+**UX-2 — Real-time dashboard example**
+
+> **In plain terms:** A React dashboard with 3 stream tables: (a) live
+> order count (aggregate), (b) revenue by region (join + aggregate), (c)
+> top products (window function + LIMIT). Data is inserted via a simulated
+> event stream. Each panel updates reactively. Demonstrates the breadth of
+> SQL operators supported in PGlite, beyond what `live.incrementalQuery()`
+> can efficiently handle.
+
+Verify: example app with 3 panels. INSERT 100 orders; all 3 panels update
+with a single render each. Published to CodeSandbox.
+Dependencies: PGL-3-2, PGL-3-4. Schema change: No.
+
+**UX-3 — API reference with interactive playground**
+
+> **In plain terms:** An interactive documentation page (MDX or Storybook)
+> where users can type SQL, create a stream table, insert data, and see
+> the `useStreamTable()` hook update live — all in the browser via PGlite.
+> This replaces the need for a local install for initial exploration.
+
+Verify: playground page loads in < 3 seconds. Users can create a stream
+table and see reactive updates within 30 seconds of page load.
+Dependencies: PGL-3-2, UX-1. Schema change: No.
+
+**UX-4 — Migration guide from `live.incrementalQuery()`**
+
+> **In plain terms:** Users already using PGlite's `live.incrementalQuery()`
+> need a clear guide showing: (a) when to switch to pg_trickle (complex
+> queries, high-throughput writes, large result sets), (b) how to migrate
+> step-by-step (replace `live.incrementalQuery(q)` with
+> `createStreamTable(q)` + `useStreamTable(name)`), (c) what to expect
+> (latency improvement, memory trade-off, SQL surface differences).
+
+Verify: migration guide published in docs. Includes a before/after code
+diff and a decision flowchart.
+Dependencies: PGL-3-4, PERF-1. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Change event fidelity suite (all operators) | L | P0 |
+| TEST-2 | React hook lifecycle tests | M | P0 |
+| TEST-3 | Vue composable lifecycle tests | M | P0 |
+| TEST-4 | Cross-framework render count assertions | S | P0 |
+| TEST-5 | Long-running soak test for memory leaks | M | P1 |
+
+**TEST-1 — Change event fidelity suite (all operators)**
+
+> **In plain terms:** For each of the 23 DVM operators, test that the
+> `live.changes()` bridge emits the correct change events for INSERT,
+> UPDATE, and DELETE on the source table. Replay events into an
+> accumulator and assert it matches `SELECT * FROM stream_table`. This
+> extends v0.21.0 TEST-1 (operator E2E) by adding the reactive layer.
+
+Verify: ≥ 69 tests (23 operators × 3 DML types). Accumulator matches
+`SELECT *` for every test case.
+Dependencies: PGL-3-1, v0.21.0 TEST-1. Schema change: No.
+
+**TEST-2 — React hook lifecycle tests**
+
+> **In plain terms:** Test the full lifecycle of `useStreamTable()`:
+> (a) initial mount returns current stream table state, (b) INSERT on
+> source triggers re-render with new data, (c) unmount cancels
+> subscription, (d) remount re-subscribes and returns current state,
+> (e) rapid mount/unmount (100 cycles) has no leaks. Use React Testing
+> Library with `renderHook()`.
+
+Verify: ≥ 15 tests covering mount, update, unmount, remount, error, and
+stress scenarios. Zero console warnings in test output.
+Dependencies: PGL-3-2. Schema change: No.
+
+**TEST-3 — Vue composable lifecycle tests**
+
+> **In plain terms:** Equivalent of TEST-2 for Vue: mount, update, unmount,
+> remount, error handling. Use Vue Test Utils with `mount()` and
+> `wrapper.unmount()`. Test with both Options API and Composition API
+> usage patterns.
+
+Verify: ≥ 10 tests covering Vue lifecycle. Zero console warnings.
+Dependencies: PGL-3-3. Schema change: No.
+
+**TEST-4 — Cross-framework render count assertions**
+
+> **In plain terms:** For each framework (React, Vue), verify that a bulk
+> INSERT (100 rows) triggers exactly 1 render, not 100. This is the
+> batching correctness test. Use framework-specific profiling APIs (React
+> Profiler, Vue DevTools perf hooks) to count renders.
+
+Verify: render count = 1 for 100-row bulk INSERT in both React and Vue.
+CI assertion.
+Dependencies: PGL-3-2, PGL-3-3, PERF-2. Schema change: No.
+
+**TEST-5 — Long-running soak test for memory leaks**
+
+> **In plain terms:** Run a React app with `useStreamTable()` for 4 hours
+> with 1 mutation/second. Take heap snapshots at 0h, 1h, 2h, 4h. Assert
+> heap growth < 10%. Check for detached DOM nodes, leaked event listeners,
+> and orphaned closures. This validates STAB-1 under real conditions.
+
+Verify: soak test runs in CI (with a 30-min abbreviated version for PR CI).
+Full 4-hour version runs in nightly CI. Heap growth < 10%.
+Dependencies: STAB-1, PGL-3-2. Schema change: No.
+
+### Conflicts & Risks
+
+1. **`live.changes()` API stability.** PGlite's `live.changes()` is
+   relatively new and its event format may change between PGlite releases.
+   Pin the PGlite version and add an adapter layer so the bridge can
+   accommodate event format changes without rewriting the React/Vue hooks.
+   If PGlite deprecates `live.changes()` before v0.22.0 ships, fall back
+   to `LISTEN/NOTIFY` with a custom channel.
+
+2. **CORR-2 (batch atomicity) and PERF-2 (single re-render) are coupled.**
+   The batching mechanism must ensure correctness (all-or-nothing event
+   delivery) AND performance (single render). Using `queueMicrotask()`
+   for batching risks splitting a transaction's events across two
+   microtasks if the event stream straddles a microtask boundary. Consider
+   explicit transaction-boundary markers in the bridge's event protocol.
+
+3. **React concurrent mode complicates CORR-3 (rapid mutations).** React
+   18/19 concurrent features (`startTransition`, `useDeferredValue`) may
+   delay or re-order state updates from `useStreamTable()`. The hook must
+   use `useSyncExternalStore()` (React 18+) to ensure tearing-free reads.
+   This is non-negotiable for correctness.
+
+4. **SCAL-2 (large result set rendering) requires external library
+   integration.** The `useStreamTable()` hook should not bundle a
+   virtualization library — instead, expose stable row keys and
+   fine-grained change signals that integrate with `@tanstack/react-virtual`
+   or similar. Document the pattern but do not create a hard dependency.
+
+5. **SCAL-3 (SharedWorker) is exploratory.** PGlite's SharedWorker support
+   has known limitations (no concurrent transactions). Mark SCAL-3 as P2
+   and scope it to documentation + a proof-of-concept, not production-grade
+   support.
+
+6. **No native extension changes in v0.22.0.** This release is entirely
+   in the TypeScript/npm layer. Any temptation to add native features
+   (e.g., `LISTEN/NOTIFY` bridge, WebSocket push) should be deferred to
+   post-1.0. Keep the scope tight: reactive bindings + examples + docs.
+
+> **v0.22.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
+
+**Exit criteria:**
+- [ ] PGL-3-1: Stream table changes appear in `live.changes()` event stream
+- [ ] PGL-3-2: React `useStreamTable()` hook re-renders on stream table changes
+- [ ] PGL-3-3: Vue `useStreamTable()` composable re-renders on stream table changes
+- [ ] PGL-3-4: At least 2 example apps published with documentation and CodeSandbox links
+- [ ] PGL-3-5: End-to-end latency benchmarked and published
+- [ ] CORR-1: 1,000-operation replay test: accumulator matches `SELECT *` for all operators
+- [ ] CORR-2: 100-row bulk INSERT triggers exactly 1 re-render
+- [ ] CORR-3: 50 rapid same-row mutations: final hook state matches `SELECT *`
+- [ ] CORR-4: DELETE + re-INSERT with same PK: correct unmount/mount lifecycle
+- [ ] STAB-1: 4-hour soak test: heap growth < 10%
+- [ ] STAB-2: 100 mount/unmount cycles: zero leaked subscriptions
+- [ ] STAB-3: Stream table dropped while hook active: error boundary catches
+- [ ] STAB-4: Extension upgrade path tested (`0.21.0 -> 0.22.0`)
+- [ ] STAB-5: CI matrix passes for React 18, React 19, Vue 3.4+
+- [ ] PERF-1: INSERT-to-render latency < 50% of `live.incrementalQuery()` at 10K rows
+- [ ] PERF-2: Render count = 1 for bulk DML (1, 10, 100, 1000 rows)
+- [ ] TEST-1: ≥ 69 change event fidelity tests pass (23 operators × 3 DML types)
+- [ ] TEST-2: ≥ 15 React hook lifecycle tests pass
+- [ ] TEST-3: ≥ 10 Vue composable lifecycle tests pass
+- [ ] TEST-4: Cross-framework render count = 1 for bulk DML
+- [ ] TEST-5: 30-min abbreviated soak test passes in PR CI
+- [ ] UX-1: Collaborative todo example published to CodeSandbox
+- [ ] UX-2: Real-time dashboard example published to CodeSandbox
+- [ ] UX-4: Migration guide from `live.incrementalQuery()` published
+- [ ] `just check-version-sync` passes (incl. npm package version)
+
+---
+
+## v1.0.0 — Stable Release
+
+**Goal:** First officially supported release. Semantic versioning locks in.
+API, catalog schema, and GUC names are considered stable. Focus is
+distribution — getting pg_trickle onto package registries — and PostgreSQL 19
+forward-compatibility.
 
 ### PostgreSQL 19 Forward-Compatibility (A3)
 
@@ -4191,7 +5956,8 @@ on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
 > ships with PG 19 support, this milestone bumps the pgrx dependency,
 > audits every internal `pg_sys::*` API call for breaking changes, adds
 > conditional compilation gates, and validates the WAL decoder against any
-> pgoutput format changes introduced in PG 19.
+> pgoutput format changes introduced in PG 19. Moved here from the
+> earlier v0.19.0 milestone because PG 19 beta availability is uncertain.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
@@ -4201,20 +5967,6 @@ on pgrx 0.18.x availability (expected July–August 2026) and on PostgreSQL
 | A3-4 | CI matrix expansion for PG 19 + full E2E suite run | 4–8h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 
 > **A3 subtotal: ~18–36 hours**
-
-**Exit criteria:**
-- [ ] A3: PG 19 builds and passes full E2E suite
-- [ ] CI matrix includes PG 19
-- [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
-- [ ] `just check-version-sync` passes
-
----
-
-## v1.0.0 — Stable Release
-
-**Goal:** First officially supported release. Semantic versioning locks in.
-API, catalog schema, and GUC names are considered stable. Focus is
-distribution — getting pg_trickle onto package registries.
 
 ### Release engineering
 
@@ -4237,9 +5989,11 @@ distribution — getting pg_trickle onto package registries.
 | R6 | **Version sync automation.** Ensure `just check-version-sync` covers all version references (Cargo.toml, extension control files, Dockerfile.hub, dbt_project.yml, CNPG manifests). Add to CI as a blocking check. | 2–3h | — |
 | SAST-SEMGREP | **Elevate Semgrep to blocking in CI.** CodeQL and cargo-deny already block; Semgrep is advisory-only. Flip to blocking for consistent safety gating. Before flipping, verify zero findings across all current rules. | 1–2h | [PLAN_SAST.md](plans/testing/PLAN_SAST.md) |
 
-> **v1.0.0 total: ~18–30 hours**
+> **v1.0.0 total: ~36–66 hours** (incl. PG 19 compat ~18–36h + release engineering ~18–30h)
 
 **Exit criteria:**
+- [ ] A3: PG 19 builds and passes full E2E suite
+- [ ] CI matrix includes PG 19
 - [ ] Published on PGXN (stable) and apt/rpm via PGDG
 - [ ] Docker Hub image published (`pgtrickle/pg_trickle:1.0.0-pg18` and `:latest`)
 - [x] CNPG extension image published to GHCR (`pg_trickle-ext`)
@@ -4337,7 +6091,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | ~~A2~~ | ~~Transactional IVM Phase 4 remaining (ENR-based transition tables, C-level triggers, prepared stmt reuse)~~ ➡️ Pulled to v0.17.0 | ~36–54h | [PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) |
-| ~~A3~~ | ~~PostgreSQL 19 forward-compatibility~~ ➡️ Pulled to v0.16.0 ➡️ Moved to v0.19.0 | ~18–36h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
+| ~~A3~~ | ~~PostgreSQL 19 forward-compatibility~~ ➡️ Pulled to v0.16.0 ➡️ Moved to v1.0.0 | ~18–36h | [PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) |
 | A4 | PostgreSQL 14–15 backward compatibility | ~40h | [PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) |
 | A5 | Partitioned stream table storage (opt-in) | ~60–80h | [PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) §4 |
 | ~~A6~~ | ~~Buffer table partitioning by LSN range (`pg_trickle.buffer_partitioning` GUC)~~ | ✅ Done | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](plans/PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) Stage 4 §3.3 |
@@ -4395,8 +6149,11 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
-| v0.19.0 — PostgreSQL 19 Compatibility | ~18–36h | — | |
-| v1.0.0 — Stable release | ~18–30h | — | |
+| v0.19.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
+| v0.20.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
+| v0.21.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
+| v0.22.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
+| v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
 | Post-1.0 (scale) | 6+ months | — | |
