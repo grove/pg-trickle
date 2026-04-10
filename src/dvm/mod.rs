@@ -694,6 +694,18 @@ pub fn query_needs_union_dedup_count(defining_query: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check whether the defining query contains a join whose output does not
+/// include primary key columns from both sides.
+///
+/// When `true`, the `__pgt_row_id` hash computed from output columns cannot
+/// uniquely identify every join result row. The storage index must be
+/// non-unique and the keyless refresh strategy should be used.
+pub fn query_has_incomplete_join_pk(defining_query: &str) -> bool {
+    parse_defining_query(defining_query)
+        .map(|tree| tree.has_incomplete_join_pk())
+        .unwrap_or(false)
+}
+
 /// Extract GROUP BY column names from a defining query.
 ///
 /// Returns `Some(["region", "category"])` for aggregate queries with
