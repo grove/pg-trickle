@@ -2077,6 +2077,12 @@ impl OpTree {
     /// output columns cannot uniquely identify every join result row. The
     /// storage table must use a non-unique index on `__pgt_row_id` and the
     /// keyless refresh strategy (CTID-based deletion) to handle duplicates.
+    ///
+    /// Returns `false` when:
+    /// - PKs from both sides are in the output (unique by construction), or
+    /// - One side's PK is missing but the join condition equates the missing
+    ///   side's PK (many-to-one join: each row from the covered side matches
+    ///   at most one row from the uncovered side, so the covered PK suffices).
     pub fn has_incomplete_join_pk(&self) -> bool {
         match self {
             OpTree::Project {
@@ -2088,10 +2094,12 @@ impl OpTree {
                 if matches!(
                     unwrapped,
                     OpTree::InnerJoin { .. } | OpTree::LeftJoin { .. } | OpTree::FullJoin { .. }
-                ) {
-                    // If join_pk_aliases returns None, at least one side's
-                    // PK is missing from the output → row_id is non-unique.
-                    if join_pk_aliases(expressions, aliases, unwrapped).is_none() {
+                ) && join_pk_aliases(expressions, aliases, unwrapped).is_none()
+                {
+                    // At least one side's PK is missing from the output.
+                    // Check if the join is many-to-one (the uncovered side
+                    // is joined on its PK), making the covered PK sufficient.
+                    if !is_many_to_one_join(expressions, aliases, unwrapped) {
                         return true;
                     }
                 }
@@ -2955,5 +2963,120 @@ pub(crate) fn scan_pk_columns(op: &OpTree) -> Vec<String> {
         }
         OpTree::Filter { child, .. } => scan_pk_columns(child),
         _ => Vec::new(),
+    }
+}
+
+/// Check whether a Project-over-Join is a many-to-one join where the
+/// covered side's PK in the output suffices for unique row identification.
+///
+/// A join is many-to-one when:
+/// - One side's PK is in the output (the "covered" side)
+/// - The other side's PK is NOT in the output (the "uncovered" side)
+/// - The join condition equates the uncovered side's PK column(s)
+///   (guaranteeing at most one match per covered-side row)
+///
+/// Examples:
+/// - `bids b JOIN auctions a ON a.id = b.auction_id` with `b.id` in output:
+///   Right PK (`a.id`) is part of the join condition → many-to-one ✓
+/// - `s1 JOIN s2 ON s1.category = s2.category` with `s1.id` in output:
+///   Right PK (`s2.id`) is NOT part of the join condition → many-to-many ✗
+fn is_many_to_one_join(expressions: &[Expr], aliases: &[String], join_child: &OpTree) -> bool {
+    let (left, right, condition) = match join_child {
+        OpTree::InnerJoin {
+            left,
+            right,
+            condition,
+        }
+        | OpTree::LeftJoin {
+            left,
+            right,
+            condition,
+        }
+        | OpTree::FullJoin {
+            left,
+            right,
+            condition,
+        } => (left.as_ref(), right.as_ref(), condition),
+        _ => return false,
+    };
+
+    let left_alias = left.alias();
+    let right_alias = right.alias();
+    let left_pks = scan_pk_columns(left);
+    let right_pks = scan_pk_columns(right);
+
+    // Determine which side's PK is covered in the output.
+    let left_covered = !left_pks.is_empty()
+        && left_pks.iter().all(|pk| {
+            expressions.iter().zip(aliases.iter()).any(|(expr, _)| {
+                matches!(expr, Expr::ColumnRef { table_alias: Some(tbl), column_name }
+                    if tbl == left_alias && column_name == pk)
+            })
+        });
+    let right_covered = !right_pks.is_empty()
+        && right_pks.iter().all(|pk| {
+            expressions.iter().zip(aliases.iter()).any(|(expr, _)| {
+                matches!(expr, Expr::ColumnRef { table_alias: Some(tbl), column_name }
+                    if tbl == right_alias && column_name == pk)
+            })
+        });
+
+    // Extract equi-join column names from the condition.
+    let equi_cols = extract_equijoin_col_names(condition);
+
+    // If the left PK is covered but right isn't, check if the right
+    // side's PK columns are ALL in the join condition.
+    if left_covered && !right_covered {
+        return right_pks
+            .iter()
+            .all(|pk| equi_cols.iter().any(|(_, right_col)| right_col == pk));
+    }
+
+    // If the right PK is covered but left isn't, check if the left
+    // side's PK columns are ALL in the join condition.
+    if right_covered && !left_covered {
+        return left_pks
+            .iter()
+            .all(|pk| equi_cols.iter().any(|(left_col, _)| left_col == pk));
+    }
+
+    // Neither side or both sides covered — not a simple many-to-one.
+    false
+}
+
+/// Extract equi-join column names from a condition expression.
+///
+/// Returns `(left_col_name, right_col_name)` pairs for simple `a.col = b.col`
+/// patterns, including through AND conjunctions.
+fn extract_equijoin_col_names(condition: &Expr) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    collect_equijoin_col_names(condition, &mut pairs);
+    pairs
+}
+
+fn collect_equijoin_col_names(expr: &Expr, pairs: &mut Vec<(String, String)>) {
+    match expr {
+        Expr::BinaryOp { op, left, right } if op == "=" => {
+            if let (
+                Expr::ColumnRef {
+                    column_name: left_col,
+                    ..
+                },
+                Expr::ColumnRef {
+                    column_name: right_col,
+                    ..
+                },
+            ) = (left.as_ref(), right.as_ref())
+            {
+                pairs.push((left_col.clone(), right_col.clone()));
+                // Also push reversed for symmetric matching
+                pairs.push((right_col.clone(), left_col.clone()));
+            }
+        }
+        Expr::BinaryOp { op, left, right } if op.eq_ignore_ascii_case("AND") => {
+            collect_equijoin_col_names(left, pairs);
+            collect_equijoin_col_names(right, pairs);
+        }
+        _ => {}
     }
 }
