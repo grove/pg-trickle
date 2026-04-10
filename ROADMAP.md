@@ -4583,13 +4583,22 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 
 ## v0.20.0 — Core Extraction (`pg_trickle_core`)
 
-**Goal:** Extract the DVM engine, parser types, operator delta SQL
-generation, auto-rewrite passes, and DAG computation into a standalone
-Rust crate (`pg_trickle_core`) with no pgrx dependency. This crate
-compiles to both native (for the full extension) and
-`wasm32-unknown-emscripten` (for PGlite). The extraction also improves
-the main extension's testability and modularity — it is worthwhile even
-if PGlite support is never shipped. This is Phase 1 of the PGlite plan.
+> **Release Theme**
+> This release surgically separates pg_trickle's "brain" — the DVM engine,
+> operator delta SQL generation, query rewrite passes, and DAG computation —
+> into a standalone Rust crate (`pg_trickle_core`) with zero pgrx dependency.
+> The extraction touches ~51,000 lines of code across 30+ source files but
+> produces zero user-visible behavior change: every existing test must pass
+> unchanged. The payoff is threefold: the core crate compiles to WASM
+> (enabling the PGlite extension in v0.21.0), pure-logic unit tests run
+> without a PostgreSQL instance (10x faster CI), and the main extension
+> gains a cleaner internal architecture. Approximately 500 unsafe blocks in
+> the parser require an abstraction layer over raw `pg_sys` node traversal,
+> making this the most technically demanding refactoring in the project's
+> history.
+
+See [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A for the
+full extraction architecture.
 
 ### Core Crate Extraction (Phase 1)
 
@@ -4605,7 +4614,7 @@ if PGlite support is never shipped. This is Phase 1 of the PGlite plan.
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | PGL-1-1 | **Create `pg_trickle_core` crate.** Workspace member with `[lib]` target, no pgrx dependency. Move `OpTree`, `Expr`, `Column`, `AggExpr`, and all shared types. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
-| PGL-1-2 | **Extract operator delta SQL generation.** Move all `src/dvm/operators/` logic into the core crate. Each operator's `generate_delta_sql()` becomes a pure function taking abstract types. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
+| PGL-1-2 | **Extract operator delta SQL generation.** Move all `src/dvm/operators/` logic (~24K lines, 23 files) into the core crate. Each operator's `generate_delta_sql()` becomes a pure function taking abstract types. | 3–5d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
 | PGL-1-3 | **Extract auto-rewrite passes.** Move view inlining, DISTINCT ON rewrite, GROUPING SETS expansion, and SubLink extraction into `pg_trickle_core::rewrites`. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
 | PGL-1-4 | **Extract DAG computation.** Move dependency graph, topological sort, cycle detection, diamond detection into `pg_trickle_core::dag`. | 1–2d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
 | PGL-1-5 | **Define `trait DatabaseBackend`.** Abstract trait for SPI queries and raw_parser access. Implement for pgrx in the main extension crate. | 2–3d | [PLAN_PGLITE.md](plans/ecosystem/PLAN_PGLITE.md) §5 Strategy A |
@@ -4613,6 +4622,361 @@ if PGlite support is never shipped. This is Phase 1 of the PGlite plan.
 | PGL-1-7 | **Existing test suite passes.** All unit, integration, and E2E tests pass with the refactored crate structure. Zero behavior change. | 2–3d | — |
 
 > **Phase 1 subtotal: ~3–4 weeks**
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Delta SQL output byte-for-byte equivalence | M | P0 |
+| CORR-2 | OpTree serialization round-trip fidelity | S | P0 |
+| CORR-3 | Rewrite pass ordering preservation | S | P1 |
+| CORR-4 | DAG cycle detection parity after extraction | S | P1 |
+
+**CORR-1 — Delta SQL output byte-for-byte equivalence**
+
+> **In plain terms:** After the extraction, every operator's
+> `generate_delta_sql()` must produce the exact same SQL string as it did
+> before the refactoring. Any byte-level difference — even whitespace —
+> indicates a semantic shift that could change query plans or correctness.
+> Capture the SQL output for all 22 TPC-H stream tables before and after
+> the extraction and assert bit-for-bit equality.
+
+Verify: snapshot test comparing delta SQL for all TPC-H queries + the full
+E2E test suite. Any diff fails the build.
+Dependencies: PGL-1-2. Schema change: No.
+
+**CORR-2 — OpTree serialization round-trip fidelity**
+
+> **In plain terms:** The `OpTree` types are moving to a new crate. If any
+> field is accidentally dropped or retyped during the move, the delta SQL
+> generator will silently produce wrong output. Add a round-trip test:
+> serialize an OpTree to JSON, deserialize it back, and assert structural
+> equality. This catches missing `#[derive]` attributes and field ordering
+> issues.
+
+Verify: proptest generating random OpTrees; serialize-deserialize round-trip
+produces identical trees.
+Dependencies: PGL-1-1. Schema change: No.
+
+**CORR-3 — Rewrite pass ordering preservation**
+
+> **In plain terms:** The auto-rewrite passes (view inlining, DISTINCT ON,
+> GROUPING SETS, SubLink extraction) must execute in the same order after
+> extraction. Reordering could change the resulting OpTree and thereby the
+> delta SQL. Add an integration test that runs all rewrite passes on a
+> complex query (joining 3 tables with DISTINCT ON + GROUPING SETS) and
+> asserts the final OpTree matches a golden snapshot.
+
+Verify: golden-snapshot test for rewrite pass output on complex query.
+Dependencies: PGL-1-3. Schema change: No.
+
+**CORR-4 — DAG cycle detection parity after extraction**
+
+> **In plain terms:** The cycle detection algorithm in `dag.rs` has subtleties
+> around self-referencing views and diamond patterns. After moving to the
+> core crate, the algorithm must detect the same cycles. Run the existing
+> cycle-detection unit tests and add 3 new edge cases: self-referencing CTE,
+> diamond with mixed IMMEDIATE/DIFFERENTIAL, and 4-level cascade.
+
+Verify: all existing DAG unit tests pass + 3 new edge-case tests.
+Dependencies: PGL-1-4. Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | pg_sys node abstraction layer (~500 unsafe blocks) | L | P0 |
+| STAB-2 | Compile-time pgrx dependency leak detection | S | P0 |
+| STAB-3 | Cargo workspace configuration correctness | S | P0 |
+| STAB-4 | Extension upgrade path (0.19 to 0.20) | S | P0 |
+| STAB-5 | Feature-flag isolation for WASM target | S | P1 |
+
+**STAB-1 — pg_sys node abstraction layer (~500 unsafe blocks)**
+
+> **In plain terms:** `rewrites.rs` (118 unsafe blocks, 295 `pg_sys` refs)
+> and `sublinks.rs` (367 unsafe blocks, 492 `pg_sys` refs) are the most
+> deeply coupled to pgrx. The core crate cannot contain raw `pg_sys` calls.
+> Define a `trait NodeVisitor` (or equivalent) that wraps pg_sys node
+> traversal behind safe method calls. The pgrx backend implements the trait
+> using actual pg_sys pointers; a mock backend can be used for unit tests.
+> This is the single highest-effort item in the release.
+
+Verify: zero `pg_sys::` references in `pg_trickle_core/`; `grep -r pg_sys
+pg_trickle_core/src/` returns empty.
+Dependencies: PGL-1-1, PGL-1-5. Schema change: No.
+
+**STAB-2 — Compile-time pgrx dependency leak detection**
+
+> **In plain terms:** After extraction, any accidental `use pgrx::*` in the
+> core crate would break the WASM build. Add a CI job that compiles
+> `pg_trickle_core` in isolation (without the pgrx feature) and fails if any
+> pgrx symbol is referenced. This catches leaks immediately rather than at
+> WASM build time.
+
+Verify: `cargo build -p pg_trickle_core --no-default-features` succeeds in
+CI.
+Dependencies: PGL-1-1. Schema change: No.
+
+**STAB-3 — Cargo workspace configuration correctness**
+
+> **In plain terms:** Adding a workspace member changes `Cargo.lock`
+> resolution, feature unification, and `cargo pgrx` behavior. Verify:
+> `cargo pgrx package` still produces a valid `.so`, `cargo test` runs all
+> workspace tests, and `cargo pgrx test` works for the extension crate.
+> pgrx version must remain pinned at 0.17.x.
+
+Verify: `cargo pgrx package`, `cargo test --workspace`, `cargo pgrx test`
+all succeed.
+Dependencies: PGL-1-1. Schema change: No.
+
+**STAB-4 — Extension upgrade path (0.19 to 0.20)**
+
+> **In plain terms:** v0.20.0 makes no SQL-visible changes (same functions,
+> same catalog schema), but the upgrade migration must still be tested.
+> `ALTER EXTENSION pg_trickle UPDATE` from 0.19.0 to 0.20.0 must leave
+> existing stream tables intact and refreshable.
+
+Verify: upgrade E2E test confirms stream tables survive and refresh
+correctly after `0.19.0 -> 0.20.0`.
+Dependencies: None. Schema change: No.
+
+**STAB-5 — Feature-flag isolation for WASM target**
+
+> **In plain terms:** The core crate must compile on both native and WASM.
+> Any platform-specific code (e.g., `std::time::Instant` unavailable on
+> `wasm32-unknown-emscripten`) must be gated behind `#[cfg]` attributes.
+> Add a CI matrix entry for the WASM target that catches platform leaks.
+
+Verify: `cargo build --target wasm32-unknown-emscripten -p pg_trickle_core`
+succeeds in CI.
+Dependencies: PGL-1-6. Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Zero-overhead abstraction for DatabaseBackend | M | P0 |
+| PERF-2 | Benchmark regression gate across extraction | S | P0 |
+| PERF-3 | Core-only unit test speedup measurement | S | P1 |
+
+**PERF-1 — Zero-overhead abstraction for DatabaseBackend**
+
+> **In plain terms:** The `trait DatabaseBackend` introduces dynamic
+> dispatch (`dyn DatabaseBackend` or generics). For the native extension,
+> the abstraction must add zero measurable overhead. Use monomorphization
+> (generics, not trait objects) for the hot path — delta SQL generation is
+> called on every refresh cycle and must not regress. Measure with Criterion
+> before/after on the `diff_operators` benchmark suite.
+
+Verify: Criterion benchmark shows < 1% regression on `diff_operators` suite
+after extraction.
+Dependencies: PGL-1-5. Schema change: No.
+
+**PERF-2 — Benchmark regression gate across extraction**
+
+> **In plain terms:** The extraction touches 51K lines of code. Even
+> without functional changes, module restructuring can alter inlining,
+> cache locality, and link-time optimization. Run the full Criterion
+> benchmark suite before and after and assert no regression > 5%.
+
+Verify: `scripts/criterion_regression_check.py` passes with 5% threshold on
+all existing benchmarks.
+Dependencies: PGL-1-7. Schema change: No.
+
+**PERF-3 — Core-only unit test speedup measurement**
+
+> **In plain terms:** One of the key benefits of extraction is that
+> `pg_trickle_core` unit tests run without starting PostgreSQL. Measure the
+> wall-clock time for `cargo test -p pg_trickle_core` vs the old in-tree
+> unit tests. Document the speedup in the CHANGELOG — expect 5-10x faster
+> CI for unit-level tests.
+
+Verify: document test execution times before/after in PR description.
+Dependencies: PGL-1-7. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Workspace build parallelism verification | S | P1 |
+| SCAL-2 | Core crate binary size for WASM budget | S | P1 |
+| SCAL-3 | Incremental compilation impact assessment | S | P2 |
+
+**SCAL-1 — Workspace build parallelism verification**
+
+> **In plain terms:** With two crates, `cargo build` can compile
+> `pg_trickle_core` and other non-dependent crates in parallel. Verify that
+> the workspace DAG allows parallel compilation and measure the
+> incremental rebuild time for a change in `pg_trickle_core` only.
+
+Verify: `cargo build --timings` shows parallel compilation of core crate.
+Dependencies: PGL-1-1. Schema change: No.
+
+**SCAL-2 — Core crate binary size for WASM budget**
+
+> **In plain terms:** v0.21.0 targets < 2 MB WASM bundle. Measure the
+> compiled size of `pg_trickle_core` for the WASM target now so the budget
+> is known before Phase 2. If > 5 MB, investigate `wasm-opt` stripping and
+> feature-gating large operator modules.
+
+Verify: `wasm32-unknown-emscripten` build of `pg_trickle_core` produces < 5
+MB unoptimized. Document size in tracking issue.
+Dependencies: PGL-1-6. Schema change: No.
+
+**SCAL-3 — Incremental compilation impact assessment**
+
+> **In plain terms:** Splitting into two crates changes the incremental
+> compilation boundary. A change in `pg_trickle_core` now forces a
+> recompile of the extension crate. Measure incremental compile time for
+> common edit patterns (add a test, modify an operator, change a rewrite
+> pass) and ensure developer-experience compile times remain < 30s.
+
+Verify: document incremental compile times for 3 edit patterns.
+Dependencies: PGL-1-1. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | Workspace-aware justfile targets | S | P0 |
+| UX-2 | Developer guide for core crate contributions | S | P1 |
+| UX-3 | ARCHITECTURE.md update for two-crate layout | S | P1 |
+
+**UX-1 — Workspace-aware justfile targets**
+
+> **In plain terms:** Existing `just` targets (`just test-unit`, `just
+> lint`, `just fmt`) must work seamlessly with the new workspace layout.
+> Update the justfile so `just test-unit` runs both `pg_trickle_core` unit
+> tests and extension unit tests. Add `just test-core` for core-only tests.
+
+Verify: all existing `just` targets pass; `just test-core` runs core-only
+tests in < 5 seconds.
+Dependencies: PGL-1-1. Schema change: No.
+
+**UX-2 — Developer guide for core crate contributions**
+
+> **In plain terms:** Contributors need to know the rules: what goes in
+> `pg_trickle_core` (pure logic, no pgrx) vs the extension crate (SPI, FFI,
+> SQL functions). Add a section to `CONTRIBUTING.md` explaining the crate
+> boundary, the `DatabaseBackend` trait contract, and how to add a new
+> operator to the core crate.
+
+Verify: CONTRIBUTING.md updated with crate boundary rules.
+Dependencies: PGL-1-5. Schema change: No.
+
+**UX-3 — ARCHITECTURE.md update for two-crate layout**
+
+> **In plain terms:** The module layout diagram in `docs/ARCHITECTURE.md`
+> and `AGENTS.md` must reflect the new two-crate structure. Update both
+> files so new contributors see the correct layout.
+
+Verify: `docs/ARCHITECTURE.md` and `AGENTS.md` module diagrams show
+`pg_trickle_core/` and `pg_trickle/` crates.
+Dependencies: PGL-1-7. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Delta SQL snapshot tests for all 22 TPC-H queries | M | P0 |
+| TEST-2 | Pure-Rust unit tests for extracted operators | L | P0 |
+| TEST-3 | Mock DatabaseBackend for in-memory testing | M | P1 |
+| TEST-4 | WASM build smoke test in CI | S | P0 |
+| TEST-5 | Cargo deny / audit for new crate | XS | P0 |
+
+**TEST-1 — Delta SQL snapshot tests for all 22 TPC-H queries**
+
+> **In plain terms:** Before extraction, capture the exact delta SQL output
+> for each of the 22 TPC-H stream table definitions. After extraction, run
+> the same generator and diff. Any change is a hard failure. This is the
+> primary correctness gate for the refactoring.
+
+Verify: `cargo test -p pg_trickle_core -- snapshot` passes with zero diffs.
+Dependencies: CORR-1. Schema change: No.
+
+**TEST-2 — Pure-Rust unit tests for extracted operators**
+
+> **In plain terms:** The 23 operator files currently have ~1,700 unit tests
+> that run inside `cargo pgrx test` (requires PostgreSQL). After extraction,
+> all pure-logic tests should run via `cargo test -p pg_trickle_core`
+> without a database. Tests that require SPI (e.g., catalog lookups) stay
+> in the extension crate. Audit and migrate every test that can run without
+> PostgreSQL.
+
+Verify: > 80% of existing operator unit tests run in `pg_trickle_core`
+without PostgreSQL.
+Dependencies: PGL-1-2, TEST-3. Schema change: No.
+
+**TEST-3 — Mock DatabaseBackend for in-memory testing**
+
+> **In plain terms:** For core crate tests that need to call the parser or
+> SPI, provide a `MockBackend` that returns canned parse trees and query
+> results. This allows testing the full pipeline (parse -> rewrite ->
+> operator tree -> delta SQL) without PostgreSQL.
+
+Verify: `MockBackend` supports at least: `raw_parser()` returning a canned
+`OpTree`, and `spi_query()` returning a canned result set. 10+ tests use it.
+Dependencies: PGL-1-5. Schema change: No.
+
+**TEST-4 — WASM build smoke test in CI**
+
+> **In plain terms:** Add a CI job that compiles `pg_trickle_core` to
+> `wasm32-unknown-emscripten` on every PR. This catches platform-specific
+> code leaks before they accumulate. The job does not need to run the WASM
+> binary — just compile it.
+
+Verify: CI job `build-wasm` passes on every PR targeting the core crate.
+Dependencies: PGL-1-6, STAB-5. Schema change: No.
+
+**TEST-5 — Cargo deny / audit for new crate**
+
+> **In plain terms:** The new `pg_trickle_core` crate may introduce new
+> transitive dependencies. Ensure `cargo deny check` and `cargo audit`
+> cover the new crate and report no advisories.
+
+Verify: `cargo deny check` and `cargo audit` pass for the full workspace.
+Dependencies: PGL-1-1. Schema change: No.
+
+### Conflicts & Risks
+
+1. **STAB-1 is the critical path.** The ~500 unsafe blocks in `rewrites.rs`
+   and `sublinks.rs` require a `NodeVisitor` abstraction over raw
+   `pg_sys` pointer traversal. This is the highest-effort, highest-risk
+   item. If the abstraction proves too leaky (e.g., too many pg_sys node
+   types to wrap), consider leaving `rewrites.rs` and `sublinks.rs` in the
+   extension crate and extracting only operators + DAG + types to the core
+   crate. This reduces v0.20.0 scope but still delivers the WASM-compilable
+   operator engine for v0.21.0.
+
+2. **PERF-1 must be validated before merging.** Introducing a
+   `trait DatabaseBackend` could add vtable dispatch overhead on the hot
+   refresh path. Use monomorphization (generics) rather than `dyn Trait`
+   for the extension-side implementation. If Criterion shows > 1%
+   regression, investigate `#[inline]` annotations and LTO settings.
+
+3. **No schema changes, but workspace restructuring can break `cargo pgrx`.**
+   The `cargo-pgrx` tool makes assumptions about workspace layout (e.g.,
+   expecting a single `lib.rs` entry point). Test `cargo pgrx package`,
+   `cargo pgrx test`, and `cargo pgrx run` early. If `cargo-pgrx` 0.17.x
+   cannot handle the workspace, consider upgrading to a newer pgrx that
+   supports workspaces, or use a `[patch]` section in `Cargo.toml`.
+
+4. **TEST-2 depends on TEST-3 (MockBackend).** Pure-Rust operator tests
+   need a way to feed canned parse trees. Build the MockBackend early so
+   TEST-2 can proceed.
+
+5. **WASM target may not be available in standard CI runners.** The
+   `wasm32-unknown-emscripten` target requires Emscripten SDK. Either
+   install it in CI (adds ~2 min setup) or use a pre-built Docker image
+   with the SDK. Budget for CI setup time.
+
+6. **Extraction is all-or-nothing per module.** Partially extracting a
+   module (e.g., moving half of `rewrites.rs`) creates circular
+   dependencies. Each module must move completely or stay. Plan the
+   extraction order: types -> operators -> DAG -> diff -> rewrites ->
+   sublinks.
+
+> **v0.20.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
 
 **Exit criteria:**
 - [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
@@ -4622,7 +4986,24 @@ if PGlite support is never shipped. This is Phase 1 of the PGlite plan.
 - [ ] PGL-1-5: `trait DatabaseBackend` defined; pgrx implementation passes all existing tests
 - [ ] PGL-1-6: `cargo build --target wasm32-unknown-emscripten -p pg_trickle_core` succeeds
 - [ ] PGL-1-7: `just test-all` passes with zero regressions
-- [ ] Extension upgrade path tested (`0.19.0 → 0.20.0`)
+- [ ] CORR-1: Delta SQL snapshot tests pass for all 22 TPC-H queries (byte-for-byte match)
+- [ ] CORR-2: OpTree serialize-deserialize round-trip passes proptest
+- [ ] CORR-3: Rewrite pass ordering golden snapshot matches
+- [ ] CORR-4: DAG cycle detection passes with 3 new edge-case tests
+- [ ] STAB-1: Zero `pg_sys::` references in `pg_trickle_core/src/`
+- [ ] STAB-2: `cargo build -p pg_trickle_core --no-default-features` passes in CI
+- [ ] STAB-3: `cargo pgrx package` and `cargo pgrx test` succeed with workspace layout
+- [ ] STAB-4: Extension upgrade path tested (`0.19.0 -> 0.20.0`)
+- [ ] STAB-5: WASM target builds in CI
+- [ ] PERF-1: Criterion shows < 1% regression on `diff_operators` benchmark
+- [ ] PERF-2: Full benchmark suite passes with < 5% regression threshold
+- [ ] TEST-1: TPC-H delta SQL snapshot tests pass
+- [ ] TEST-2: > 80% of operator unit tests run without PostgreSQL
+- [ ] TEST-3: MockBackend used by 10+ core crate tests
+- [ ] TEST-4: CI `build-wasm` job passes on every PR
+- [ ] TEST-5: `cargo deny check` and `cargo audit` pass for workspace
+- [ ] UX-1: All existing `just` targets pass; `just test-core` added
+- [ ] UX-3: ARCHITECTURE.md and AGENTS.md updated with two-crate layout
 - [ ] `just check-version-sync` passes
 
 ---
@@ -4914,7 +5295,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
 | v0.19.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
-| v0.20.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk | — | |
+| v0.20.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
 | v0.21.0 — PGlite WASM Extension | ~5–7wk | — | |
 | v0.22.0 — PGlite Reactive Integration | ~2–3wk | — | |
 | v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
