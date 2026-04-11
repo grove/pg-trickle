@@ -50,15 +50,46 @@ fine.
 Never create a new git branch unless the current branch is `main`.
 
 When creating a pull request, always write the PR description to a temporary
-file first and pass it to `gh` via `--body-file` to avoid shell quoting and
-garbling issues with special characters:
+file using the **`create_file` tool** (never a shell heredoc or `echo`), then
+pass it to `gh` via `--body-file`.  Shell heredocs and terminal commands
+silently corrupt Unicode characters and can pick up stale content from a
+previous session's file at the same path.
 
-```bash
-cat > /tmp/pr_description.md << 'EOF'
-<PR description here>
-EOF
-gh pr create --title "..." --body-file /tmp/pr_description.md
-```
+**Guaranteed-safe workflow:**
+
+1. Delete any stale file at the target path first:
+   ```bash
+   rm -f /tmp/pr_TICKETNAME.md
+   ```
+
+2. Use the `create_file` tool to write the description.  Keep the text
+   **ASCII-only** — avoid Unicode math symbols (Δ, ⋈, ₁, →) and em-dashes
+   in the body; use plain ASCII equivalents (`delta`, `JOIN`, `_1`, `->`)
+   instead.  GitHub renders them fine but shell pipelines and gh can corrupt
+   non-ASCII bytes.
+
+3. Verify the file is clean before using it:
+   ```bash
+   python3 -c "
+   with open('/tmp/pr_TICKETNAME.md') as f:
+       body = f.read()
+   print('lines:', body.count(chr(10)))
+   print('ok:', '####' not in body)
+   print(body[:120])
+   "
+   ```
+
+4. Create or update the PR:
+   ```bash
+   gh pr create --title "..." --body-file /tmp/pr_TICKETNAME.md
+   # or, to fix a garbled description:
+   gh pr edit <number> --body-file /tmp/pr_TICKETNAME.md
+   ```
+
+5. Verify the live PR body is not garbled:
+   ```bash
+   gh pr view <number> --json body --jq '.body' | head -20
+   ```
 
 ---
 
