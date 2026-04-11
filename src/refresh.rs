@@ -765,16 +765,19 @@ const DEEP_JOIN_SCAN_THRESHOLD: usize = 5;
 ///
 /// `SET LOCAL` is automatically reset at the end of the current transaction,
 /// so these hints cannot leak to other queries.
-fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: usize) {
+///
+/// Returns `true` if the SCAL-3 work_mem cap would be exceeded, signalling
+/// that the caller should fall back to a FULL refresh instead.
+fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: usize) -> bool {
     if !crate::config::pg_trickle_merge_planner_hints() {
-        return;
+        return false;
     }
 
     // PH-D2: Manual join strategy override — bypass heuristics entirely.
     let strategy = crate::config::pg_trickle_merge_join_strategy();
     if strategy != crate::config::MergeJoinStrategy::Auto {
         apply_fixed_join_strategy(strategy);
-        return;
+        return false;
     }
 
     // ── Deep-join hints (DI-11) ─────────────────────────────────────
@@ -785,13 +788,25 @@ fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: 
     // so the planner considers all join orderings, and remove the
     // temp_file_limit cap so the query can run to completion.
     if scan_count >= DEEP_JOIN_SCAN_THRESHOLD {
+        let mb = crate::config::pg_trickle_merge_work_mem_mb().max(512);
+
+        // SCAL-3: If a work_mem cap is set and the deep-join allocation
+        // would exceed it, signal fallback to FULL refresh.
+        let cap = crate::config::pg_trickle_delta_work_mem_cap_mb();
+        if cap > 0 && mb > cap {
+            pgrx::notice!(
+                "[pg_trickle] SCAL-3: deep-join work_mem ({mb}MB) exceeds \
+                 delta_work_mem_cap_mb ({cap}MB). Falling back to FULL refresh.",
+            );
+            return true;
+        }
+
         if let Err(e) = Spi::run("SET LOCAL enable_nestloop = off") {
             pgrx::debug1!(
                 "[pg_trickle] DI-11: failed to SET LOCAL enable_nestloop: {}",
                 e
             );
         }
-        let mb = crate::config::pg_trickle_merge_work_mem_mb().max(512);
         // mb is a config integer, not user-supplied input; SET LOCAL cannot use parameterized queries.
         let work_mem_sql = format!("SET LOCAL work_mem = '{mb}MB'");
         if let Err(e) = Spi::run(&work_mem_sql) {
@@ -830,7 +845,7 @@ fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: 
         );
         // Skip the normal delta-size hints below — deep-join hints
         // already cover nest-loop and work_mem.
-        return;
+        return false;
     }
 
     // P3-4: For small deltas against large stream tables, disable seqscan
@@ -866,13 +881,25 @@ fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: 
 
     if estimated_delta >= PLANNER_HINT_WORKMEM_THRESHOLD {
         // Large delta: disable nested loops AND raise work_mem for hash joins
+        let mb = crate::config::pg_trickle_merge_work_mem_mb();
+
+        // SCAL-3: If a work_mem cap is set and the large-delta allocation
+        // would exceed it, signal fallback to FULL refresh.
+        let cap = crate::config::pg_trickle_delta_work_mem_cap_mb();
+        if cap > 0 && mb > cap {
+            pgrx::notice!(
+                "[pg_trickle] SCAL-3: large-delta work_mem ({mb}MB) exceeds \
+                 delta_work_mem_cap_mb ({cap}MB). Falling back to FULL refresh.",
+            );
+            return true;
+        }
+
         if let Err(e) = Spi::run("SET LOCAL enable_nestloop = off") {
             pgrx::debug1!(
                 "[pg_trickle] D-1: failed to SET LOCAL enable_nestloop: {}",
                 e
             );
         }
-        let mb = crate::config::pg_trickle_merge_work_mem_mb();
         if let Err(e) = Spi::run(&format!("SET LOCAL work_mem = '{mb}MB'")) {
             pgrx::debug1!("[pg_trickle] D-1: failed to SET LOCAL work_mem: {}", e);
         }
@@ -885,6 +912,7 @@ fn apply_planner_hints(estimated_delta: i64, st_relid: pg_sys::Oid, scan_count: 
             );
         }
     }
+    false
 }
 
 /// PH-D2: Apply a fixed join strategy override via `SET LOCAL` hints.
@@ -4730,7 +4758,23 @@ pub fn execute_differential_refresh(
     // SET LOCAL hints that are automatically reset at transaction end.
     // Deep joins (5+ tables) get aggressive hints to avoid pathological
     // plans that spill excessive temp files.
-    apply_planner_hints(total_change_count, st.pgt_relid, scan_count);
+    let work_mem_cap_exceeded = apply_planner_hints(total_change_count, st.pgt_relid, scan_count);
+
+    // ── SCAL-3: Work-mem cap exceeded — fall back to FULL ───────────
+    if work_mem_cap_exceeded {
+        let t_full_start = Instant::now();
+        let result = execute_full_refresh(st);
+        let full_ms = t_full_start.elapsed().as_secs_f64() * 1000.0;
+        if let Err(e) =
+            StreamTableMeta::update_adaptive_threshold(st.pgt_id, st.auto_threshold, Some(full_ms))
+        {
+            pgrx::debug1!(
+                "[pg_trickle] SCAL-3: failed to update adaptive threshold: {}",
+                e,
+            );
+        }
+        return result;
+    }
 
     // ── PH-E1: Delta output cardinality estimation ──────────────────
     // Before executing expensive MERGE, run a capped COUNT on the delta

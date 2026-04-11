@@ -107,6 +107,12 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   tests) from full E2E to light E2E, raising the light-eligible count from
   51 to 69 files. All migrated files have zero scheduler dependencies.
 
+- **SCAL-3:** Delta working-set memory cap — new GUC
+  `pg_trickle.delta_work_mem_cap_mb` (default 0 = disabled) caps the
+  `work_mem` that planner hints can set during delta MERGE. When the deep-join
+  or large-delta path would exceed the cap, the refresh falls back to FULL
+  automatically, preventing OOM on unexpectedly large deltas.
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and
@@ -132,6 +138,18 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   `apply_planner_hints()` already implements adaptive planner hints: seqscan
   disabled for small deltas, nestloop disabled for medium deltas, work_mem and
   join_collapse_limit adjusted for deep joins (5+ tables).
+
+- **PERF-3:** Zero-change branch elision — verified that `zero_change_oids`
+  HashSet is already collected in `execute_differential_refresh()`, populated
+  from the change count map, and passed through to LSN resolution where it
+  replaces snapshot predicates with `FALSE` for sources with zero changes.
+  12 reference sites across `refresh.rs` confirm complete implementation.
+
+- **STAB-5:** Upgrade chain test (0.16→0.17→0.18) — verified that the CI
+  upgrade matrix auto-discovers all adjacent pairs plus the full chain from
+  0.1.3→0.18.0. All 7 parameterized chain tests (L8–L14) cover function
+  parity, schema additions, event triggers, version consistency, and data
+  survival across upgrade hops.
 
 ---
 
