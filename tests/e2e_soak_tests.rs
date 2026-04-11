@@ -169,15 +169,20 @@ async fn create_stream_tables(db: &E2eDb, n: usize) {
 // ── DML Operations ─────────────────────────────────────────────────────
 
 /// Apply a mixed DML batch to a random source table.
-async fn apply_dml_batch(db: &E2eDb, source_idx: usize, batch: usize) {
+async fn apply_dml_batch(db: &E2eDb, source_idx: usize, batch: usize, cycle: u64) {
     let table = format!("source_{source_idx}");
 
-    // INSERT batch
+    // INSERT batch — labels include cycle number to ensure uniqueness.
+    // Without this, repeated 'batch_{batch}_N' labels across cycles create
+    // duplicate (category, label) pairs in source tables.  For soak_join
+    // (which projects label but not s2.id), duplicate output rows share the
+    // same __pgt_row_id, violating the UNIQUE constraint and causing
+    // monotonic row-count drift during differential refresh.
     db.execute(&format!(
         "INSERT INTO {table} (category, value, label)
          SELECT (random() * 10)::int,
                 (random() * 1000)::numeric(12,2),
-                'batch_{batch}_' || g
+                'c{cycle}_' || g
          FROM generate_series(1, {bs}) g",
         bs = batch
     ))
@@ -452,7 +457,7 @@ async fn test_soak_stability() {
         let source_idx = ((cycle as usize - 1) % n_sources) + 1;
 
         // Apply mixed DML
-        apply_dml_batch(&db, source_idx, batch).await;
+        apply_dml_batch(&db, source_idx, batch, cycle).await;
         total_dml_ops += 3; // INSERT + UPDATE + DELETE
 
         // Manual refresh on a rotating stream table.
