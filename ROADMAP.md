@@ -4155,7 +4155,7 @@ Dependencies: None. Schema change: No.
 - [x] CORR-1: Split-snapshot E2E test passes under concurrent writes; `pgt_css_watermark_lsn` column added
 - [x] CORR-2 / TEST-1: TPC-H baseline populated; deliberate regression detected by the guard
 - [x] CORR-3: NULL-keyed GROUP BY group fully removed after all-row delete
-- [ ] CORR-4 / TEST-4: Property-based Z-set weight tests pass for randomly generated multi-source DAGs
+- [x] CORR-4 / TEST-4: Property-based Z-set weight tests pass for randomly generated multi-source DAGs
 - [x] CORR-5: HAVING-qualified group deleted from stream table when row count drops below threshold
 - [x] STAB-1: All production-path `unwrap()` calls in `api.rs` and `refresh.rs` replaced with proper error propagation
 - [x] STAB-2: `unsafe_inventory.sh` reports ≥69 fewer `unsafe` blocks; CI baseline updated

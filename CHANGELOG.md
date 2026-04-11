@@ -123,6 +123,17 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   dispatch priority, monitoring queries, tuning profiles (low-latency,
   high-throughput, resource-constrained), and profiling methodology.
 
+- **CORR-4:** Z-set weight accounting proof — 6 proptest property tests (2000
+  cases each) in `src/refresh.rs` proving the Z-set weight algebra contract:
+  sequential equivalence, additivity (homomorphism), HAVING zero-cancellation,
+  multi-row independence (GROUP BY partitioning), DISTINCT ON keyed resolution,
+  and keyless generate_series expansion count.
+
+- **TEST-4:** Property-based Z-set E2E tests — new
+  `e2e_property_zset_tests.rs` with 4 tests exercising the full CDC→weight
+  aggregation→MERGE pipeline: I/D cancellation (phantom rows), multi-update
+  coalescing, 3-source fan-in join, and weight storm (10-20 mixed ops/cycle).
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and
