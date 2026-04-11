@@ -119,6 +119,79 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        // UX-3: Enriched reporting for NotFound errors.
+        PgTrickleError::NotFound(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+                format!("stream table not found: {}", name),
+                "",
+            )
+            .set_hint(
+                "Use pgtrickle.pgt_status() to list existing stream tables. \
+                 Ensure the name is schema-qualified (e.g., 'public.my_table')."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // UX-3: Enriched reporting for AlreadyExists errors.
+        PgTrickleError::AlreadyExists(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_TABLE,
+                format!("stream table already exists: {}", name),
+                "",
+            )
+            .set_hint(
+                "Use pgtrickle.alter_stream_table() to modify an existing stream table, \
+                 or pgtrickle.drop_stream_table() to remove it first."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // UX-3: Enriched reporting for InvalidArgument errors.
+        PgTrickleError::InvalidArgument(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("invalid argument: {}", msg),
+                "",
+            )
+            .set_hint(
+                "See docs/SQL_REFERENCE.md for valid parameter values and syntax.".to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // UX-3: Enriched reporting for LockTimeout errors.
+        PgTrickleError::LockTimeout(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+                format!("lock timeout: {}", msg),
+                "",
+            )
+            .set_hint(
+                "The stream table may be locked by a concurrent refresh. Retry after \
+                 the current refresh completes, or increase lock_timeout."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // UX-3: Enriched reporting for QueryTooComplex errors.
+        PgTrickleError::QueryTooComplex(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                format!("query too complex: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Simplify the defining query or use refresh_mode = 'FULL'. \
+                 The differential engine has limits on join depth and subquery nesting."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
         // All other error types: plain message without detail/hint.
         other => {
             pgrx::error!("{}", other);

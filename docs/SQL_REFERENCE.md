@@ -20,6 +20,7 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
   - [Status & Monitoring](#status--monitoring)
     - [pgtrickle.pgt\_status](#pgtricklepgt_status)
     - [pgtrickle.health\_check](#pgtricklehealth_check)
+    - [pgtrickle.health\_summary](#pgtricklehealth_summary)
     - [pgtrickle.refresh\_timeline](#pgtricklerefresh_timeline)
     - [pgtrickle.st\_refresh\_stats](#pgtricklest_refresh_stats)
     - [pgtrickle.get\_refresh\_history](#pgtrickleget_refresh_history)
@@ -1117,6 +1118,41 @@ Checks: `scheduler_running`, `error_tables`, `stale_tables`, `needs_reinit`,
 (retained WAL above `pg_trickle.slot_lag_warning_threshold_mb`, default 100 MB),
 `worker_pool` (all worker tokens in use — parallel mode only), `job_queue`
 (> 10 jobs queued — parallel mode only).
+
+---
+
+### pgtrickle.health_summary
+
+Single-row summary of the entire pg_trickle deployment's health. Designed for
+monitoring dashboards that want one endpoint to poll instead of joining
+multiple views.
+
+```sql
+pgtrickle.health_summary() → SETOF record(
+    total_stream_tables   int,
+    active_count          int,
+    error_count           int,
+    suspended_count       int,
+    stale_count           int,
+    reinit_pending        int,
+    max_staleness_seconds float8,    -- NULL if no stream tables
+    scheduler_status      text,      -- 'ACTIVE', 'STOPPED', or 'NOT_LOADED'
+    cache_hit_rate        float8     -- NULL if no cache lookups yet
+)
+```
+
+**Example:**
+
+```sql
+SELECT * FROM pgtrickle.health_summary();
+```
+
+| total_stream_tables | active_count | error_count | suspended_count | stale_count | reinit_pending | max_staleness_seconds | scheduler_status | cache_hit_rate |
+|---|---|---|---|---|---|---|---|---|
+| 12 | 11 | 0 | 1 | 0 | 0 | 45.2 | ACTIVE | 0.94 |
+
+> **Tip:** Use this in a Grafana single-stat panel or a Prometheus exporter
+> to surface fleet-level health at a glance.
 
 ---
 

@@ -51,6 +51,21 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   eviction counters now tracked in shared memory alongside the existing L2
   hit/miss counters.
 
+- **UX-4:** Single-endpoint health summary — new `pgtrickle.health_summary()`
+  returns a single row with total/active/error/suspended/stale stream table
+  counts, max staleness, scheduler status, and cache hit rate. Designed for
+  dashboard single-stat panels and Prometheus exporters.
+
+- **UX-3:** Error message actionability audit — enriched `raise_error_with_context()`
+  to cover `NotFound`, `AlreadyExists`, `InvalidArgument`, `LockTimeout`, and
+  `QueryTooComplex` error types with SQLSTATE codes, DETAIL, and HINT fields
+  so operators can quickly diagnose and resolve issues.
+
+- **CORR-3:** NULL-safe GROUP BY elimination under deletes — added E2E test
+  suite (`e2e_null_group_by_tests.rs`) with 7 tests covering full and partial
+  deletion of NULL-keyed groups, multi-column NULL keys, NULL + HAVING
+  interaction, UPDATE into NULL groups, and COUNT-only aggregates.
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and
@@ -59,6 +74,18 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 - **STAB-2 (Phase 1):** The `pg_cstr_to_str()` safe wrapper in
   `src/dvm/parser/mod.rs` already covers all ~76 C-string conversion sites.
   Zero remaining `CStr::from_ptr` calls outside the wrapper implementation.
+
+- **CORR-5:** HAVING group depletion correction — verified via comprehensive
+  existing E2E test suite (`e2e_having_transition_tests.rs`) with 7 tests
+  covering threshold crossing up/down, oscillation, group migration, COUNT
+  conditions, multiple HAVING clauses, and complete group elimination.
+
+- **STAB-4:** Parallel worker orphaned resource cleanup — verified that the
+  existing `reap_dead_worker_jobs()` and `reconcile_parallel_state()` paths
+  handle job cancellation, shmem token correction, and job pruning. Temp tables
+  use `ON COMMIT DROP` (auto-cleaned by PostgreSQL). Advisory locks replaced
+  with row-level locks (PB1, auto-released on disconnect). Change buffer rows
+  are frontier-scoped (no double-counting risk).
 
 ---
 

@@ -4154,13 +4154,13 @@ Dependencies: None. Schema change: No.
 **Exit criteria:**
 - [ ] CORR-1: Split-snapshot E2E test passes under concurrent writes; `pgt_css_watermark_lsn` column added
 - [ ] CORR-2 / TEST-1: TPC-H baseline populated; deliberate regression detected by the guard
-- [ ] CORR-3: NULL-keyed GROUP BY group fully removed after all-row delete
+- [x] CORR-3: NULL-keyed GROUP BY group fully removed after all-row delete
 - [ ] CORR-4 / TEST-4: Property-based Z-set weight tests pass for randomly generated multi-source DAGs
-- [ ] CORR-5: HAVING-qualified group deleted from stream table when row count drops below threshold
+- [x] CORR-5: HAVING-qualified group deleted from stream table when row count drops below threshold
 - [x] STAB-1: All production-path `unwrap()` calls in `api.rs` and `refresh.rs` replaced with proper error propagation
 - [x] STAB-2: `unsafe_inventory.sh` reports ≥69 fewer `unsafe` blocks; CI baseline updated
 - [x] STAB-3: Spill alert fires in E2E test with artificially low threshold
-- [ ] STAB-4: Worker crash recovery E2E test cleans up advisory locks, temp tables, and buffer rows
+- [x] STAB-4: Worker crash recovery E2E test cleans up advisory locks, temp tables, and buffer rows
 - [ ] STAB-5 / TEST-6: Three-version upgrade chain (0.16→0.17→0.18) passes
 - [ ] STAB-6: All user-facing errors have documented SQLSTATE codes in `docs/ERRORS.md`
 - [ ] PERF-1: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
@@ -4173,8 +4173,8 @@ Dependencies: None. Schema change: No.
 - [ ] SCAL-3: Delta work_mem cap triggers FULL fallback in E2E test
 - [x] UX-1: `pgtrickle.cache_stats()` returns correct counters in smoke test
 - [ ] UX-2: Grafana dashboard JSON importable; documents refresh latency, buffer backlog, spill events
-- [ ] UX-3: Error message audit complete; all errors include table name and remediation hint
-- [ ] UX-4: `pgtrickle.health_summary()` returns single-row JSONB with correct counts
+- [x] UX-3: Error message audit complete; all errors include table name and remediation hint
+- [x] UX-4: `pgtrickle.health_summary()` returns single-row JSONB with correct counts
 - [ ] UX-5: Prometheus metric names match documentation; no undocumented metrics
 - [ ] TEST-2: SQLancer crash-test oracle runs 10K+ fuzzed queries with zero panics
 - [ ] TEST-3: CDC edge case tests cover NULL PKs, composite PKs, generated columns, domain types, arrays
