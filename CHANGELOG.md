@@ -83,6 +83,30 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   and hourly refresh success/failure. Added Prometheus exporter queries for
   `cache_stats()` and `health_summary()`.
 
+- **TPCH-BASE (CORR-2/TEST-1):** TPC-H expected-output regression guard —
+  populated the IMMEDIATE skip allowlist with 5 empirically verified entries
+  (q05, q07, q08, q09: temp_file_limit; q15: non-monotonic WHERE). Both
+  DIFFERENTIAL and IMMEDIATE regression guards are now active with assertions.
+
+- **TEST-7:** dbt integration regression coverage — added AUTO refresh mode
+  model (`order_totals_auto`), `assert_auto_mode_correct` equality test,
+  `assert_all_tables_active` status validation, and
+  `assert_refresh_history_populated` lifecycle test. Updated schema.yml with
+  `stream_table_healthy` test for the new model.
+
+- **UX-5:** Prometheus metric completeness audit — documented 8 new metrics
+  in `monitoring/README.md` (cache L1 hits/evictions, delta cache entries,
+  cache hit rate, P99/avg refresh latency, refresh counts). All metrics in
+  `pg_trickle_queries.yml` now have matching documentation.
+
+- **UX-6:** TUI gap note for `cache_stats()` and `health_summary()` — added
+  planned integration section to `docs/TUI.md` documenting the lightest path
+  (dashboard status ribbon + Health Checks view). Functions available via SQL.
+
+- **TEST-5:** Light E2E eligibility audit — migrated 19 test files (~197
+  tests) from full E2E to light E2E, raising the light-eligible count from
+  51 to 69 files. All migrated files have zero scheduler dependencies.
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and

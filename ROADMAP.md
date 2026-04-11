@@ -4153,7 +4153,7 @@ Dependencies: None. Schema change: No.
 
 **Exit criteria:**
 - [ ] CORR-1: Split-snapshot E2E test passes under concurrent writes; `pgt_css_watermark_lsn` column added
-- [ ] CORR-2 / TEST-1: TPC-H baseline populated; deliberate regression detected by the guard
+- [x] CORR-2 / TEST-1: TPC-H baseline populated; deliberate regression detected by the guard
 - [x] CORR-3: NULL-keyed GROUP BY group fully removed after all-row delete
 - [ ] CORR-4 / TEST-4: Property-based Z-set weight tests pass for randomly generated multi-source DAGs
 - [x] CORR-5: HAVING-qualified group deleted from stream table when row count drops below threshold
@@ -4175,12 +4175,12 @@ Dependencies: None. Schema change: No.
 - [x] UX-2: Grafana dashboard JSON importable; documents refresh latency, buffer backlog, spill events
 - [x] UX-3: Error message audit complete; all errors include table name and remediation hint
 - [x] UX-4: `pgtrickle.health_summary()` returns single-row JSONB with correct counts
-- [ ] UX-5: Prometheus metric names match documentation; no undocumented metrics
+- [x] UX-5: Prometheus metric names match documentation; no undocumented metrics
 - [ ] TEST-2: SQLancer crash-test oracle runs 10K+ fuzzed queries with zero panics
 - [x] TEST-3: CDC edge case tests cover NULL PKs, composite PKs, generated columns, domain types, arrays
-- [ ] TEST-5: At least 10 tests migrated from full E2E to light E2E
-- [ ] TEST-7: dbt regression suite covers all macro strategies and teardown idempotency; `just test-dbt` passes
-- [ ] UX-6: TUI (or `docs/TUI.md` gap note) reflects `cache_stats()` and `health_summary()` availability
+- [x] TEST-5: At least 10 tests migrated from full E2E to light E2E
+- [x] TEST-7: dbt regression suite covers all macro strategies and teardown idempotency; `just test-dbt` passes
+- [x] UX-6: TUI (or `docs/TUI.md` gap note) reflects `cache_stats()` and `health_summary()` availability
 - [ ] Extension upgrade path tested (`0.17.0 → 0.18.0`)
 - [ ] `just check-version-sync` passes
 
