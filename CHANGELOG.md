@@ -113,6 +113,16 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   or large-delta path would exceed the cap, the refresh falls back to FULL
   automatically, preventing OOM on unexpectedly large deltas.
 
+- **SCAL-1:** Buffer growth stress test — new `e2e_buffer_growth_tests.rs`
+  with 4 tests validating `max_buffer_rows` cap enforcement: FULL fallback
+  trigger, recovery to DIFFERENTIAL after burst, no-data-loss verification
+  with mixed DML, and sustained high write rate with auto-refresh.
+
+- **SCAL-2:** Scaling guide — new `docs/SCALING.md` documenting worker pool
+  sizing for 200+ stream tables, tiered scheduling, per-database quotas,
+  dispatch priority, monitoring queries, tuning profiles (low-latency,
+  high-throughput, resource-constrained), and profiling methodology.
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and
@@ -150,6 +160,17 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   0.1.3→0.18.0. All 7 parameterized chain tests (L8–L14) cover function
   parity, schema additions, event triggers, version consistency, and data
   survival across upgrade hops.
+
+- **PERF-2:** Cost-based refresh strategy — verified that the full cost model
+  is already implemented: `estimate_cost_based_threshold()` queries last 10
+  DIFFERENTIAL + 5 FULL refreshes, `cost_model_prefers_full()` predicts
+  strategy with safety margin, `compute_adaptive_threshold()` adjusts per-ST
+  thresholds. 6+ unit tests, cold-start fallback, integrated into refresh path.
+
+- **TEST-2:** SQLancer crash-test oracle — verified that `e2e_sqlancer_tests.rs`
+  (965 lines, 5 tests) implements crash + equivalence + diff-vs-full oracles
+  with seeded LCG RNG. `sqlancer.yml` CI workflow runs weekly with 2000 cases
+  and supports manual dispatch with configurable seed/count.
 
 ---
 
