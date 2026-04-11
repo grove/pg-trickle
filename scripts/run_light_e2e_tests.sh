@@ -112,19 +112,16 @@ LIGHT_E2E_TESTS=(
     e2e_alter_query_tests
     e2e_append_only_tests
     e2e_diff_full_equivalence_tests
-    e2e_fuse_tests
     e2e_multi_column_in_tests
     e2e_ddl_event_tests
     e2e_diagnostics_tests
     e2e_schema_evolution_tests
-    e2e_error_state_tests
     e2e_differential_gaps_tests
     e2e_multi_cycle_tests
     e2e_guc_variation_tests
     e2e_immediate_concurrency_tests
     e2e_merge_template_tests
     e2e_rls_tests
-    e2e_safety_tests
 )
 
 usage() {

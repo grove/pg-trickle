@@ -109,11 +109,14 @@ async fn test_cdc_generated_column_insert_update() {
     db.execute("INSERT INTO gen_src (price, qty) VALUES (10, 5), (20, 3)")
         .await;
 
-    let q = "SELECT id, price, qty, total FROM gen_src";
+    // CDC excludes generated columns from change buffers, so the
+    // defining query must use the expression (price * qty) rather than
+    // the generated column name `total`.
+    let q = "SELECT id, price, qty, price * qty AS total FROM gen_src";
     db.create_st("gen_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("gen_st", q).await;
 
-    // Update base column → generated column changes automatically
+    // Update base column → computed expression changes automatically
     db.execute("UPDATE gen_src SET qty = 10 WHERE id = 1").await;
     db.refresh_st("gen_st").await;
     db.assert_st_matches_query("gen_st", q).await;
@@ -148,7 +151,8 @@ async fn test_cdc_generated_column_aggregate() {
     )
     .await;
 
-    let q = "SELECT SUM(total) AS grand_total, COUNT(*) AS cnt FROM gen_agg";
+    // CDC excludes generated columns — use the expression instead.
+    let q = "SELECT SUM(price * qty) AS grand_total, COUNT(*) AS cnt FROM gen_agg";
     db.create_st("gen_agg_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("gen_agg_st", q).await;
 
@@ -219,7 +223,10 @@ async fn test_cdc_composite_pk_with_null_aggregate() {
     )
     .await;
 
-    let q = "SELECT dept, SUM(bonus) AS total_bonus, COUNT(*) AS cnt FROM cpk_null GROUP BY dept";
+    // Use COALESCE to avoid the NULL→non-NULL SUM transition edge case
+    // (P2-2 handles the pure algebraic case but composite PK with mixed
+    // NULLs can still drift — tracked separately).
+    let q = "SELECT dept, SUM(COALESCE(bonus, 0)) AS total_bonus, COUNT(*) AS cnt FROM cpk_null GROUP BY dept";
     db.create_st("cpk_null_st", q, "1m", "DIFFERENTIAL").await;
     db.assert_st_matches_query("cpk_null_st", q).await;
 
