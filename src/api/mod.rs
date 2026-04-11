@@ -192,9 +192,165 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
-        // All other error types: plain message without detail/hint.
-        other => {
-            pgrx::error!("{}", other);
+        // STAB-6: SQLSTATE coverage for remaining error variants.
+        PgTrickleError::TypeMismatch(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
+                format!("type mismatch: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Check that all column types in the defining query are compatible \
+                 with the stream table schema. Explicit casts may be needed."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::UpstreamTableDropped(oid) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+                format!("upstream table dropped: OID {}", oid),
+                "",
+            )
+            .set_detail(
+                "A source table referenced by this stream table has been dropped.".to_string(),
+            )
+            .set_hint(
+                "Drop the stream table with pgtrickle.drop_stream_table() or \
+                 recreate it with an updated query."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::ReplicationSlotError(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("replication slot error: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Ensure the replication slot exists and is not in use by another \
+                 consumer. Check pg_replication_slots for details."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::WalTransitionError(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("WAL transition error: {}", msg),
+                "",
+            )
+            .set_hint(
+                "The trigger-to-WAL CDC transition could not complete. Check \
+                 wal_level = 'logical' and that the replication slot is healthy."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::SpiError(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("SPI error: {}", msg),
+                "",
+            )
+            .set_hint(
+                "An internal query failed. This may be transient — retry the \
+                 operation. If it persists, check the PostgreSQL log for details."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::SpiPermissionError(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                format!("SPI permission error: {}", msg),
+                "",
+            )
+            .set_detail(
+                "The background worker role lacks required privileges on a \
+                 referenced table."
+                    .to_string(),
+            )
+            .set_hint(
+                "GRANT SELECT on source tables and INSERT/UPDATE/DELETE on the \
+                 stream table to the role running pg_trickle."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::WatermarkBackwardMovement(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+                format!("watermark moved backward: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Watermarks must advance monotonically. Ensure the source data \
+                 timestamp or LSN is not moving backward."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::WatermarkGroupNotFound(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("watermark group not found: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Check the watermark group name. Use pgtrickle.pgt_watermark_groups() \
+                 to list existing groups."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::WatermarkGroupAlreadyExists(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("watermark group already exists: {}", msg),
+                "",
+            )
+            .set_hint("Choose a different group name or drop the existing group first.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::RefreshSkipped(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("refresh skipped: {}", msg),
+                "",
+            )
+            .set_hint(
+                "A concurrent refresh is still running. Wait for it to complete \
+                 or check pgtrickle.pgt_status() for the current state."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::InternalError(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+                format!("internal error: {}", msg),
+                "",
+            )
+            .set_hint(
+                "This is a bug in pg_trickle. Please report it at \
+                 https://github.com/grove/pg-trickle/issues with the full error \
+                 message and PostgreSQL log output."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
         }
     }
 }

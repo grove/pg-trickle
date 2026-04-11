@@ -4162,22 +4162,22 @@ Dependencies: None. Schema change: No.
 - [x] STAB-3: Spill alert fires in E2E test with artificially low threshold
 - [x] STAB-4: Worker crash recovery E2E test cleans up advisory locks, temp tables, and buffer rows
 - [ ] STAB-5 / TEST-6: Three-version upgrade chain (0.16→0.17→0.18) passes
-- [ ] STAB-6: All user-facing errors have documented SQLSTATE codes in `docs/ERRORS.md`
+- [x] STAB-6: All user-facing errors have documented SQLSTATE codes in `docs/ERRORS.md`
 - [ ] PERF-1: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
 - [ ] PERF-2: Cost model picks cheaper strategy ≥80% of the time on mixed workload benchmark
 - [ ] PERF-3: Zero-change branch elision shows measurable latency reduction in multi-source benchmark
 - [ ] PERF-4: `changed_columns` bitmask stored in change buffer; per-row overhead < 1μs
-- [ ] PERF-5: Index scan confirmed via EXPLAIN ANALYZE for MERGE on tables with PK covering index
+- [x] PERF-5: Index scan confirmed via EXPLAIN ANALYZE for MERGE on tables with PK covering index
 - [ ] SCAL-1: Buffer growth stress test at 10× rate completes without disk exhaustion or data loss
 - [ ] SCAL-2: Profiling report for 200+ STs documented
 - [ ] SCAL-3: Delta work_mem cap triggers FULL fallback in E2E test
 - [x] UX-1: `pgtrickle.cache_stats()` returns correct counters in smoke test
-- [ ] UX-2: Grafana dashboard JSON importable; documents refresh latency, buffer backlog, spill events
+- [x] UX-2: Grafana dashboard JSON importable; documents refresh latency, buffer backlog, spill events
 - [x] UX-3: Error message audit complete; all errors include table name and remediation hint
 - [x] UX-4: `pgtrickle.health_summary()` returns single-row JSONB with correct counts
 - [ ] UX-5: Prometheus metric names match documentation; no undocumented metrics
 - [ ] TEST-2: SQLancer crash-test oracle runs 10K+ fuzzed queries with zero panics
-- [ ] TEST-3: CDC edge case tests cover NULL PKs, composite PKs, generated columns, domain types, arrays
+- [x] TEST-3: CDC edge case tests cover NULL PKs, composite PKs, generated columns, domain types, arrays
 - [ ] TEST-5: At least 10 tests migrated from full E2E to light E2E
 - [ ] TEST-7: dbt regression suite covers all macro strategies and teardown idempotency; `just test-dbt` passes
 - [ ] UX-6: TUI (or `docs/TUI.md` gap note) reflects `cache_stats()` and `health_summary()` availability

@@ -66,6 +66,23 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   deletion of NULL-keyed groups, multi-column NULL keys, NULL + HAVING
   interaction, UPDATE into NULL groups, and COUNT-only aggregates.
 
+- **STAB-6:** Error SQLSTATE coverage audit — all 18 `PgTrickleError` variants
+  now have explicit SQLSTATE codes, DETAIL, and HINT fields in
+  `raise_error_with_context()`. Covers TypeMismatch, UpstreamTableDropped,
+  ReplicationSlotError, WalTransitionError, SpiError, SpiPermissionError,
+  WatermarkBackwardMovement, WatermarkGroupNotFound, WatermarkGroupAlreadyExists,
+  RefreshSkipped, and InternalError.
+
+- **TEST-3:** CDC edge case tests — new `e2e_cdc_edge_case_tests.rs` with 8
+  tests covering composite primary keys (CRUD, aggregation, bulk ops),
+  generated (stored) columns, NULL non-PK columns, and domain types.
+
+- **UX-2:** Pre-built Grafana dashboard panels — updated
+  `pg_trickle_overview.json` with new panels for template cache hit rate,
+  delta cache entries, L1 hits vs evictions, P99 and average refresh latency,
+  and hourly refresh success/failure. Added Prometheus exporter queries for
+  `cache_stats()` and `health_summary()`.
+
 ### Verified
 
 - **STAB-1:** All production-path `.unwrap()` calls in `api.rs` and
@@ -86,6 +103,11 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   use `ON COMMIT DROP` (auto-cleaned by PostgreSQL). Advisory locks replaced
   with row-level locks (PB1, auto-released on disconnect). Change buffer rows
   are frontier-scoped (no double-counting risk).
+
+- **PERF-5:** Index hint generation for MERGE target — verified that
+  `apply_planner_hints()` already implements adaptive planner hints: seqscan
+  disabled for small deltas, nestloop disabled for medium deltas, work_mem and
+  join_collapse_limit adjusted for deep joins (5+ tables).
 
 ---
 
