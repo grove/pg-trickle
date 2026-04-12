@@ -3684,6 +3684,8 @@ provides a 60-second tryout experience.
 
 ## v0.18.0 — Hardening & Delta Performance
 
+**Status: Released (2026-04-12).**
+
 > **Release Theme**
 > This release hardens pg_trickle for production at scale and delivers the
 > biggest remaining performance win in the differential refresh path. The Z-set
@@ -3698,6 +3700,9 @@ provides a 60-second tryout experience.
 > SQLancer fuzzing integration provides an external, assumption-free
 > correctness oracle. Together, these changes build the confidence foundation
 > for 1.0.
+
+<details>
+<summary>Completed items (click to expand)</summary>
 
 ### Correctness
 
@@ -4183,6 +4188,8 @@ Dependencies: None. Schema change: No.
 - [x] UX-6: TUI (or `docs/TUI.md` gap note) reflects `cache_stats()` and `health_summary()` availability
 - [x] Extension upgrade path tested (`0.17.0 → 0.18.0`)
 - [x] `just check-version-sync` passes
+
+</details>
 
 ---
 
