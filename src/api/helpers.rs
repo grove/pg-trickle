@@ -1735,6 +1735,33 @@ pub(super) fn initialize_st(
     let data_ts = get_data_timestamp_str();
     let frontier = version::compute_initial_frontier(&slot_positions, &data_ts);
     StreamTableMeta::store_frontier_and_complete_refresh(pgt_id, &frontier, 0)?;
+
+    // Record the initial population in pgt_refresh_history so that monitoring
+    // tools and tests can observe the initial fill event.  Errors here are
+    // non-fatal — the table is already correctly populated.
+    if let Ok(now_ts) = Spi::get_one::<TimestampWithTimeZone>("SELECT now()")
+        .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+        .and_then(|v| v.ok_or_else(|| PgTrickleError::InternalError("now() returned NULL".into())))
+        && let Ok(refresh_id) = RefreshRecord::insert(
+            pgt_id,
+            now_ts,
+            "FULL",
+            "RUNNING",
+            0,
+            0,
+            None,
+            Some("INITIAL"),
+            None,
+            0,
+            None,
+            false,
+            None,
+        )
+    {
+        let _ =
+            RefreshRecord::complete(refresh_id, "COMPLETED", 0, 0, None, 0, Some("FULL"), false);
+    }
+
     Ok(())
 }
 
