@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-04-12
 > **Latest release:** 0.18.0 (2026-04-12)
-> **Current milestone:** v0.19.0 — PostgreSQL 17 Support
+> **Current milestone:** v0.19.0 — Production Gap Closure & Distribution
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -35,11 +35,12 @@ coverage, all in plain language.
 - [v0.16.0 — Performance & Refresh Optimization](#v0160--performance--refresh-optimization)
 - [v0.17.0 — Query Intelligence & Stability](#v0170--query-intelligence--stability)
 - [v0.18.0 — Hardening & Delta Performance](#v0180--hardening--delta-performance)
-- [v0.19.0 — PostgreSQL 17 Support](#v0190--postgresql-17-support)
-- [v0.20.0 — PGlite Proof of Concept](#v0200--pglite-proof-of-concept)
-- [v0.21.0 — Core Extraction (`pg_trickle_core`)](#v0210--core-extraction-pg_trickle_core)
-- [v0.22.0 — PGlite WASM Extension](#v0220--pglite-wasm-extension)
-- [v0.23.0 — PGlite Reactive Integration](#v0230--pglite-reactive-integration)
+- [v0.19.0 — Production Gap Closure & Distribution](#v0190--production-gap-closure--distribution)
+- [v0.20.0 — PostgreSQL 17 Support](#v0200--postgresql-17-support)
+- [v0.21.0 — PGlite Proof of Concept](#v0210--pglite-proof-of-concept)
+- [v0.22.0 — Core Extraction (`pg_trickle_core`)](#v0220--core-extraction-pg_trickle_core)
+- [v0.23.0 — PGlite WASM Extension](#v0230--pglite-wasm-extension)
+- [v0.24.0 — PGlite Reactive Integration](#v0240--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
@@ -80,11 +81,12 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.16.0 | Performance & refresh optimization | ✅ Released |
 | v0.17.0 | Query intelligence & stability | ✅ Released |
 | **v0.18.0** | **Hardening & delta performance** | **✅ Released** |
-| v0.19.0 | PostgreSQL 17 support | Planned |
-| v0.20.0 | PGlite proof of concept | Planned |
-| v0.21.0 | Core extraction (`pg_trickle_core`) | Planned |
-| v0.22.0 | PGlite WASM extension | Planned |
-| v0.23.0 | PGlite reactive integration | Planned |
+| v0.19.0 | Production gap closure & distribution | Planned |
+| v0.20.0 | PostgreSQL 17 support | Planned |
+| v0.21.0 | PGlite proof of concept | Planned |
+| v0.22.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v0.23.0 | PGlite WASM extension | Planned |
+| v0.24.0 | PGlite reactive integration | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
@@ -3925,7 +3927,7 @@ Dependencies: PERF-1 (applies to the merged delta builder). Schema change: No.
 > bitmask (`old.col IS DISTINCT FROM new.col`) in the CDC trigger; store as
 > `int8` or `bit(n)` alongside the change row. Phase 1 only: bitmask
 > computation + storage. Phase 2 (delta-scan filtering using the bitmask)
-> deferred to v0.20.0. Provides the foundation for 50–90% delta volume
+> deferred to v0.21.0. Provides the foundation for 50–90% delta volume
 > reduction on wide-table UPDATE workloads.
 
 Gate behind `pg_trickle.columnar_tracking` GUC (default `off`).
@@ -4069,7 +4071,7 @@ Dependencies: None. Schema change: No.
 > to crash-test oracle only for v0.18.0: SQLancer in Docker, configured to
 > feed randomized SQL to the parser and DVM pipeline. Zero-panic guarantee —
 > any input that crashes the extension is a bug. Equivalence oracle
-> (DIFFERENTIAL ≡ FULL) and stateful DML fuzzing deferred to v0.20.0.
+> (DIFFERENTIAL ≡ FULL) and stateful DML fuzzing deferred to v0.21.0.
 
 Verify: 10K+ fuzzed queries with zero panics.
 Dependencies: None. Schema change: No.
@@ -4193,12 +4195,434 @@ Dependencies: None. Schema change: No.
 
 ---
 
-## v0.19.0 — PostgreSQL 17 Support
+## v0.19.0 — Production Gap Closure & Distribution
+
+> **Release Theme**
+> This release closes the most impactful correctness and stability gaps
+> identified in the Phase 7 deep-dive that v0.18.0 did not address, removes
+> the unsafe `delete_insert` merge strategy, hardens the WAL decoder path
+> before it is promoted to production-ready, and ships pg_trickle on standard
+> package registries for the first time. The JOIN delta R₀ fix for simultaneous
+> key-change + right-side delete is the highest-value correctness improvement
+> remaining before 1.0. Two to three weeks of focused work delivers measurable
+> correctness improvements, a PgBouncer transaction-mode compatibility fix,
+> read-replica safety, and PGXN/apt/rpm distribution.
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Remove unsafe `delete_insert` merge strategy | XS | P0 |
+| CORR-2 | JOIN delta R₀ fix — key change + right-side delete | M | P1 |
+| CORR-3 | Track `ALTER TYPE` / `ALTER DOMAIN` DDL events | S | P1 |
+| CORR-4 | Track `ALTER POLICY` DDL events for RLS source tables | S | P1 |
+| CORR-5 | Fix keyless content-hash collision on identical-content rows | S | P1 |
+
+**CORR-1 — Remove unsafe `delete_insert` merge strategy**
+
+> **In plain terms:** The `delete_insert` strategy (set via
+> `pg_trickle.merge_join_strategy = 'delete_insert'`) is semantically unsafe
+> for aggregate and DISTINCT queries because the DELETE half executes against
+> already-mutated state, producing phantom deletes. It is slower than standard
+> MERGE for small deltas and incompatible with prepared statements. The `auto`
+> strategy already covers its only legitimate use case.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| CORR-1-1 | Remove `delete_insert` as a valid enum value; emit `ERROR` if set with hint to use `'auto'`. | XS |
+| CORR-1-2 | Add upgrade SQL to detect old GUC value and log a NOTICE. | XS |
+
+Verify: `SET pg_trickle.merge_join_strategy = 'delete_insert'` raises `ERROR`
+with actionable hint. All existing benchmarks pass.
+Dependencies: None. Schema change: No.
+
+**CORR-2 — JOIN delta R₀ fix for simultaneous key-change + right-side delete**
+
+> **In plain terms:** When a row's join key column is updated
+> (`UPDATE orders SET cust_id = 5 WHERE cust_id = 3`) in the same refresh
+> cycle as the old join partner (customer 3) is deleted, the DELETE half of
+> the delta finds no match in `current_right` and is silently dropped, leaving
+> a stale row in the stream table until the next full refresh. The fix applies
+> the R₀ snapshot technique (pre-change right-side state via EXCEPT ALL)
+> symmetrically with the existing L₀ already implemented for Part 2 of the
+> delta. `build_snapshot_sql()` in `join_common.rs` already exists.
+
+| Item | Description | Effort |
+|------|-------------|--------|
+| CORR-2-1 | Add `right_part1_source` / `use_r0` logic mirroring `use_l0` in `diff_inner_join`, `diff_left_join`, `diff_full_join`. | M |
+| CORR-2-2 | Split Part 1 SQL into two `UNION ALL` arms for the `use_r0` case; update row ID hashing for Part 1b. | M |
+| CORR-2-3 | Integration tests: co-delete scenario, UPDATE-then-delete, multi-cycle correctness, TPC-H Q07 regression. | M |
+
+Verify: E2E test where `UPDATE orders SET cust_id = new_id` and
+`DELETE FROM customers WHERE id = old_id` land in the same refresh cycle produces
+correct stream table result without a forced full refresh.
+Dependencies: EC-01 R₀ EXCEPT ALL pattern (shipped in v0.15.0). Schema change: No.
+
+**CORR-3 — Track `ALTER TYPE` / `ALTER DOMAIN` DDL events**
+
+> **In plain terms:** When a user-defined type or domain used by a source table
+> column is altered (e.g., extending an enum, changing a domain constraint),
+> the DDL event trigger fires but `hooks.rs` does not classify it as requiring
+> downstream stream table invalidation. Fix: extend the DDL classifier to catch
+> `ALTER TYPE` and `ALTER DOMAIN` and trigger cascade invalidation.
+
+Verify: `ALTER TYPE my_enum ADD VALUE 'new_val'` on a type used by a source
+column triggers the marked-for-reinit flag on dependent stream tables.
+Dependencies: None. Schema change: No.
+
+**CORR-4 — Track `ALTER POLICY` DDL events for RLS source tables**
+
+> **In plain terms:** If an `ALTER POLICY` changes the USING expression on a
+> source table, stream tables may silently return wrong results for sessions
+> with active RLS. Fix: detect `ALTER POLICY` in the DDL classifier and mark
+> dependent stream tables for conservative reinit.
+
+Verify: `ALTER POLICY` on a source table with dependent stream tables triggers
+invalidation. E2E test with RLS policy change confirms correct reinitialization.
+Dependencies: None. Schema change: No.
+
+**CORR-5 — Fix keyless content-hash collision on identical-content rows**
+
+> **In plain terms:** The keyless table path uses a content hash to identify
+> rows. If two rows have completely identical content, they hash to the same
+> bucket. Under concurrent INSERT + DELETE of identical rows, the net-counting
+> approach may attribute a delete to the wrong "copy" of the row, leaving
+> incorrect counts. Fix: incorporate the change buffer's `(lsn, op_index)` pair
+> into the hash to break ties between otherwise-identical rows.
+
+Verify: E2E test with two identical rows — insert 2, delete 1 in same cycle;
+stream table retains exactly 1 row.
+Dependencies: EC-06 keyless path (shipped in prior release). Schema change: No.
+
+### Stability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| STAB-1 | PgBouncer transaction-mode compatibility guard | M | P1 |
+| STAB-2 | Read-replica / hot-standby safety guard | S | P1 |
+| STAB-3 | Elevate Semgrep to blocking in CI | XS | P1 |
+| STAB-4 | `auto_backoff` GUC — double interval after 3 falling-behind cycles | S | P2 |
+
+**STAB-1 — PgBouncer transaction-mode compatibility guard**
+
+> **In plain terms:** In PgBouncer transaction mode, session-level state is
+> lost between transactions because different backend connections may serve
+> the same session. pg_trickle uses transaction-scoped advisory locks which
+> are safe, but also uses prepared statements and `SET LOCAL` —  both of which
+> fail silently in transaction mode, causing incorrect refresh behavior. Adding
+> `pg_trickle.connection_pooler_mode` GUC (`none` / `session` / `transaction`)
+> and disabling prepared statements in `transaction` mode prevents silent
+> misbehavior.
+
+Verify: integration test with PgBouncer transaction mode confirms refreshes
+complete correctly without prepared statement errors.
+`pg_trickle.connection_pooler_mode = 'transaction'` documented in
+`docs/PRE_DEPLOYMENT.md`.
+Dependencies: None. Schema change: No.
+
+**STAB-2 — Read-replica / hot-standby safety guard**
+
+> **In plain terms:** If pg_trickle's background worker accidentally starts on
+> a streaming replica (hot standby), it attempts writes to the catalog and
+> crash-loops. Fix: detect `pg_is_in_recovery()` at worker startup and exit
+> gracefully with `LOG: pg_trickle background worker skipped: server is in
+> recovery mode.`
+
+Verify: integration test that simulates a replica environment; background
+worker exits cleanly with the correct log message. No crash loop.
+Dependencies: None. Schema change: No.
+
+**STAB-3 — Elevate Semgrep to blocking in CI**
+
+> **In plain terms:** CodeQL and cargo-deny are already blocking in CI; Semgrep
+> runs as advisory-only. Before v1.0.0, all SAST tooling should be blocking.
+> Verify zero findings across all current rules, then flip the CI step from
+> `continue-on-error: true` to blocking.
+
+Verify: CI step passes in blocking mode. Zero advisory-only bypasses remain.
+Dependencies: None. Schema change: No.
+
+**STAB-4 — `auto_backoff` GUC for scheduler overload**
+
+> **In plain terms:** EC-11 shipped the `scheduler_falling_behind` alert but
+> deferred auto-remediation. When a stream table has triggered the alert for
+> 3 consecutive cycles, automatically double the effective refresh interval for
+> that table until the next successful on-time cycle. Prevents a single heavy
+> stream table from starving the rest of the queue.
+
+Verify: E2E test with artificially slow stream table; effective interval
+doubles after 3 consecutive falling-behind alerts; returns to original
+interval after catching up.
+Dependencies: EC-11 `scheduler_falling_behind` (shipped in v0.18.0). Schema change: No.
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Fix WAL decoder: `old_*` columns always NULL on UPDATE | S | P1 |
+| PERF-2 | Fix WAL decoder: naive `pgoutput` action string parsing | S | P1 |
+| PERF-3 | `EXPLAIN (ANALYZE, BUFFERS)` surface for delta SQL in `explain_st()` | S | P2 |
+
+**PERF-1 — Fix WAL decoder: `old_*` columns always NULL on UPDATE**
+
+> **In plain terms:** In WAL-based CDC (`pg_trickle.wal_enabled = true`), the
+> `old_col_*` values for UPDATE rows are always NULL because the decoder reads
+> `new_tuple` for both old and new field positions. This breaks R₀ snapshot
+> construction for the WAL path. Fix: correctly write `old_tuple` fields to
+> the `old_col_*` buffer columns for UPDATE events. Currently dormant (only
+> manifests with `wal_enabled = true`).
+
+Verify: WAL decoder integration test: `UPDATE source SET pk = new_pk`; assert
+`old_col_pk IS NOT NULL` in the change buffer and equals the pre-update value.
+Dependencies: None. Schema change: No.
+
+**PERF-2 — Fix WAL decoder: naive `pgoutput` action string parsing**
+
+> **In plain terms:** The WAL decoder parses action type with `starts_with("I")`
+> which incorrectly matches any string beginning with "I" (e.g., `"INSERT"`).
+> Fix: use exact single-character comparison (`== "I"`) or parse the action
+> byte directly from the pgoutput message buffer. Currently dormant (only
+> manifests with `wal_enabled = true`).
+
+Verify: WAL decoder unit tests for each action type using exact-match
+assertion. Fuzz test with action strings longer than 1 character.
+Dependencies: None. Schema change: No.
+
+**PERF-3 — `EXPLAIN (ANALYZE, BUFFERS)` in `explain_st()`**
+
+> **In plain terms:** `pgtrickle.explain_st(name)` returns the delta SQL
+> template without execution statistics. Adding a `with_analyze BOOLEAN`
+> parameter that runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` on the delta
+> SQL gives operators plan + actual row counts + buffer hit/miss data — making
+> slow refresh diagnosis much easier.
+
+Verify: `pgtrickle.explain_st('my_st', with_analyze => true)` returns JSONB
+with `Plan`, `Actual Rows`, and `Shared Hit Blocks` fields. Documented in
+`docs/SQL_REFERENCE.md`.
+Dependencies: None. Schema change: No.
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Read replica compatibility section in `docs/SCALING.md` | S | P1 |
+| SCAL-2 | Multi-database GUC stub (`pg_trickle.database_list`) | S | P2 |
+
+**SCAL-1 — Read replica compatibility documentation**
+
+> **In plain terms:** The background worker now safely skips on replicas
+> (STAB-2), but the interaction with read replicas for query offloading deserves
+> its own documentation section. Add `docs/SCALING.md §Read Replicas` covering:
+> which queries are safe on a replica, how `pg_is_in_recovery()` is used by
+> the extension, and the recommended architecture for OLAP read-offload
+> alongside pg_trickle stream tables.
+
+Verify: `docs/SCALING.md` has a dedicated replica section.
+Dependencies: STAB-2. Schema change: No.
+
+**SCAL-2 — Multi-database GUC stub**
+
+> **In plain terms:** Post-1.0 multi-database support requires catalog changes.
+> This item adds only the `pg_trickle.database_list TEXT` GUC declaration with
+> a default of `''` (current database only) and a startup WARNING if set. This
+> reserves the configuration namespace and lets operators test GUC surface
+> before the full feature ships.
+
+Verify: `SHOW pg_trickle.database_list` returns `''`. Setting a non-empty
+value emits a WARNING: "pg_trickle.database_list is not yet implemented."
+Dependencies: None. Schema change: No.
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | PGXN `release_status` → `"stable"` | XS | P1 |
+| UX-2 | Automated Docker Hub release pipeline | S | P1 |
+| UX-3 | apt/rpm packaging via PGDG | M | P1 |
+| UX-4 | Connection pooler compatibility guide in `docs/PRE_DEPLOYMENT.md` | S | P1 |
+| UX-5 | `pgtrickle.write_and_refresh(dml_sql TEXT, st_name TEXT)` | S | P2 |
+
+**UX-1 — PGXN `release_status` → `"stable"`**
+
+> **In plain terms:** pg_trickle's `META.json` uses `release_status: "testing"`.
+> Flipping to `"stable"` signals production-readiness, enabling the extension
+> to appear in the main PGXN package listing and in downstream package managers
+> that consume the PGXN stable feed. One field change in `META.json`.
+
+Verify: `META.json` `"release_status": "stable"`. Published PGXN listing
+reflects the change after the next PGXN sync.
+Dependencies: None. Schema change: No.
+
+**UX-2 — Automated Docker Hub release pipeline**
+
+> **In plain terms:** Automate publishing `pgtrickle/pg_trickle:<ver>-pg18`
+> and `pgtrickle/pg_trickle:latest` on every tagged release. Wire the existing
+> `Dockerfile.hub` into the GitHub Actions release workflow via
+> `docker/build-push-action`. The `latest` tag tracks the highest
+> non-prerelease version.
+
+Verify: After a test release tag, Docker Hub shows the correct image.
+`docker pull pgtrickle/pg_trickle:0.19.0-pg18` succeeds and passes the
+smoke test.
+Dependencies: `Dockerfile.hub` (already exists). Schema change: No.
+
+**UX-3 — apt/rpm packaging via PGDG**
+
+> **In plain terms:** PostgreSQL users install extensions via
+> `apt install postgresql-18-pg-trickle` or `dnf install pg_trickle_18`.
+> Submit package specs to `pgrpms.org` (rpm) and the PGDG apt repository (deb).
+> Generate packages from the GitHub release tarball. This is the most impactful
+> distribution improvement possible.
+
+Verify: `apt install postgresql-18-pg-trickle` works on Ubuntu 24.04.
+`dnf install pg_trickle_18` works on RHEL 9. Both pass `verify_install.sql`.
+Dependencies: None. Schema change: No.
+
+**UX-4 — Connection pooler compatibility guide**
+
+> **In plain terms:** Add a dedicated section to `docs/PRE_DEPLOYMENT.md`
+> covering: PgBouncer session mode (fully compatible), PgBouncer transaction
+> mode (set `pg_trickle.connection_pooler_mode = 'transaction'`), pgpool-II
+> (session mode only), PgCat (session mode only). Include a compatibility
+> matrix and `postgresql.conf` + PgBouncer config snippets.
+
+Verify: PRE_DEPLOYMENT.md pooler section reviewed by a DBA familiar with
+PgBouncer. All described modes are tested or explicitly marked "untested."
+Dependencies: STAB-1. Schema change: No.
+
+**UX-5 — `pgtrickle.write_and_refresh()` convenience function**
+
+> **In plain terms:** In DIFFERENTIAL mode, a write followed by
+> `refresh_stream_table()` requires two API calls. A single function that
+> executes the DML and triggers a refresh atomically simplifies
+> read-your-writes patterns for applications that need immediate consistency
+> without the overhead of IMMEDIATE mode.
+
+Verify: `SELECT pgtrickle.write_and_refresh('INSERT INTO src VALUES (1)', 'my_st')`
+executes the INSERT and refreshes the stream table. Documented in
+`docs/SQL_REFERENCE.md`.
+Dependencies: None. Schema change: No.
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | E2E tests for CORR-2 (JOIN delta R₀ fix) | S | P1 |
+| TEST-2 | E2E tests for DDL tracking gaps (CORR-3 / CORR-4) | S | P1 |
+| TEST-3 | WAL decoder unit tests for PERF-1 / PERF-2 | S | P1 |
+| TEST-4 | PgBouncer transaction-mode integration smoke test | M | P1 |
+| TEST-5 | Read-replica guard integration test | S | P1 |
+
+**TEST-1 — E2E tests for CORR-2 (JOIN delta R₀ fix)**
+
+> **In plain terms:** The co-delete scenario (UPDATE join key + DELETE join
+> partner in same cycle) is currently untested. Add three E2E tests:
+> (a) simultaneous key change + right-side delete; (b) UPDATE key + DELETE
+> multiple right-side rows; (c) multi-cycle correctness after the scenario.
+
+Verify: 3 E2E tests in `e2e_join_tests.rs`. All pass; intermediate full
+refresh not required for correctness.
+Dependencies: CORR-2. Schema change: No.
+
+**TEST-2 — E2E tests for DDL tracking (CORR-3 / CORR-4)**
+
+> **In plain terms:** Add E2E tests verifying that `ALTER TYPE`, `ALTER DOMAIN`,
+> and `ALTER POLICY` DDL events correctly trigger stream table invalidation.
+
+Verify: 3 E2E tests (one per DDL type). Stream table state after reinit is
+correct.
+Dependencies: CORR-3, CORR-4. Schema change: No.
+
+**TEST-3 — WAL decoder unit tests**
+
+> **In plain terms:** Add WAL decoder unit tests that explicitly enable
+> `wal_enabled = true` and verify: (a) `old_col_*` values are non-NULL for
+> UPDATE rows; (b) `pk_hash` is non-zero for keyless tables; (c) action string
+> parsing uses exact comparison.
+
+Verify: 5+ unit tests in `tests/wal_decoder_tests.rs` using Testcontainers
+with WAL mode enabled.
+Dependencies: PERF-1, PERF-2. Schema change: No.
+
+**TEST-4 — PgBouncer transaction-mode smoke test**
+
+> **In plain terms:** Start PgBouncer in transaction mode via Testcontainers,
+> connect pg_trickle through it, and run a basic refresh cycle. Verifies
+> `connection_pooler_mode = 'transaction'` correctly disables prepared
+> statements and refreshes complete without errors.
+
+Verify: integration test passes with PgBouncer transaction mode container.
+Dependencies: STAB-1. Schema change: No.
+
+**TEST-5 — Read-replica guard integration test**
+
+> **In plain terms:** Start a streaming replica via Testcontainers, install
+> pg_trickle on the replica, and verify the background worker exits cleanly
+> with the correct log message rather than crash-looping.
+
+Verify: worker log contains "pg_trickle background worker skipped: server is
+in recovery mode." No ERROR or FATAL in replica logs.
+Dependencies: STAB-2. Schema change: No.
+
+> **v0.19.0 total: ~2–3 weeks**
+
+**Exit criteria:**
+- [ ] CORR-1: `delete_insert` strategy removed; `ERROR` raised on old GUC value
+- [ ] CORR-2: JOIN delta R₀ fix: `UPDATE key + DELETE partner` in same cycle produces correct stream table result
+- [ ] CORR-3: `ALTER TYPE` / `ALTER DOMAIN` DDL events trigger stream table invalidation
+- [ ] CORR-4: `ALTER POLICY` DDL events trigger stream table invalidation
+- [ ] CORR-5: Keyless content-hash collision test passes with two identical-content rows
+- [ ] STAB-1: `pg_trickle.connection_pooler_mode` GUC added; transaction mode disables prepared statements
+- [ ] STAB-2: Background worker exits cleanly on hot standby with correct log message
+- [ ] STAB-3: Semgrep elevated to blocking; zero findings verified
+- [ ] STAB-4: `auto_backoff` GUC: interval doubles after 3 consecutive falling-behind alerts
+- [ ] PERF-1: WAL decoder writes correct `old_col_*` values for UPDATE rows
+- [ ] PERF-2: WAL decoder uses exact action string comparison
+- [ ] SCAL-1: `docs/SCALING.md` replica section added
+- [ ] UX-1: `META.json` `release_status` → `"stable"`; PGXN listing updated
+- [ ] UX-2: Docker Hub release automation wired in GitHub Actions
+- [ ] UX-3: apt/rpm packages available via PGDG
+- [ ] UX-4: `docs/PRE_DEPLOYMENT.md` connection pooler compatibility guide added
+- [ ] TEST-1: 3 JOIN delta R₀ E2E tests pass
+- [ ] TEST-2: 3 DDL tracking E2E tests pass
+- [ ] TEST-3: 5+ WAL decoder unit tests pass with `wal_enabled = true`
+- [ ] TEST-4: PgBouncer transaction-mode integration test passes
+- [ ] TEST-5: Read-replica guard integration test passes
+- [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
+- [ ] `just check-version-sync` passes
+
+### Conflicts & Risks
+
+1. **CORR-1 is a user-visible breaking change.** Any deployment with
+   `merge_join_strategy = 'delete_insert'` in `postgresql.conf` will error
+   at startup after upgrade. Requires a prominent CHANGELOG entry and a
+   NOTICE during the upgrade migration.
+
+2. **CORR-2 touches high-traffic diff operators.** `diff_inner_join` and
+   `diff_left_join` are the most commonly used operators. Gate the merge
+   behind TPC-H regression suite + TEST-1. Do not merge without both passing.
+
+3. **STAB-1 introduces a new GUC.** The `pg_trickle.connection_pooler_mode`
+   GUC must be mirrored in upgrade migration SQL, `CONFIGURATION.md`, and
+   `check-version-sync` validation.
+
+4. **PERF-1/PERF-2 are currently dormant.** Changes to `wal_decoder.rs`
+   must be tested with `wal_enabled = true` explicitly. The default
+   trigger-based CDC is unaffected — keep WAL tests behind an explicit
+   env var to avoid slowing down the default test run.
+
+5. **UX-3 (apt/rpm packaging)** depends on PGDG maintainer availability
+   (~8–12h) and can be cut without impacting correctness if it risks
+   delaying the release.
+
+---
+
+## v0.20.0 — PostgreSQL 17 Support
 
 > **Release Theme**
 > This release adds PostgreSQL 17 as a supported target alongside
 > PostgreSQL 18. PGlite is built on PostgreSQL 17, so this is a hard
-> prerequisite for the PGlite proof of concept (v0.20.0). The pgrx 0.17.x
+> prerequisite for the PGlite proof of concept (v0.21.0). The pgrx 0.17.x
 > framework already supports PG 17 — the work is enabling the feature flag,
 > adapting version-sensitive code paths, expanding the CI matrix, and
 > validating the full test suite against a PG 17 instance.
@@ -4227,16 +4651,16 @@ Dependencies: None. Schema change: No.
 |------|-------------|--------|-----|
 | PG17-9 | **Full E2E suite against PG 17.** Run the complete E2E test suite against a PG 17 instance. Fix any parser or catalog incompatibilities that surface. | 1–2d | — |
 | PG17-10 | **TPC-H validation on PG 17.** Run TPC-H benchmark queries on PG 17 to verify differential refresh correctness for complex queries. | 4–8h | — |
-| PG17-11 | **Upgrade path test.** Verify `ALTER EXTENSION pg_trickle UPDATE` from 0.18.0 to 0.19.0 works on both PG 17 and PG 18. | 2–4h | — |
+| PG17-11 | **Upgrade path test.** Verify `ALTER EXTENSION pg_trickle UPDATE` from 0.19.0 to 0.20.0 works on both PG 17 and PG 18. | 2–4h | — |
 
 ### Documentation
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
 | PG17-12 | **Update docs and README.** Change "PostgreSQL 18 extension" to "PostgreSQL 17/18 extension" in `README.md`, `INSTALL.md`, `src/lib.rs` doc comments, and `ARCHITECTURE.md`. | 1–2h | — |
-| PG17-13 | **Docker Hub image variants.** Publish images tagged with both PG versions (e.g., `:0.19.0-pg17`, `:0.19.0-pg18`). | 2–4h | — |
+| PG17-13 | **Docker Hub image variants.** Publish images tagged with both PG versions (e.g., `:0.20.0-pg17`, `:0.20.0-pg18`). | 2–4h | — |
 
-> **v0.19.0 total: ~2–4 days**
+> **v0.20.0 total: ~2–4 days**
 
 **Exit criteria:**
 - [ ] PG17-1: `cargo build --features pg17 --no-default-features` compiles cleanly
@@ -4247,12 +4671,12 @@ Dependencies: None. Schema change: No.
 - [ ] PG17-10: TPC-H differential refresh matches full refresh on PG 17
 - [ ] PG17-11: Extension upgrade path works on both PG 17 and PG 18
 - [ ] PG17-12: Documentation reflects PG 17/18 dual support
-- [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
+- [ ] Extension upgrade path tested (`0.19.0 → 0.20.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.20.0 — PGlite Proof of Concept
+## v0.21.0 — PGlite Proof of Concept
 
 > **Release Theme**
 > This release validates whether PGlite users want real incremental view
@@ -4262,7 +4686,7 @@ Dependencies: None. Schema change: No.
 > simple patterns — single-table aggregates, two-table inner joins, and
 > filtered scans. It deliberately limits scope to 3–5 SQL patterns to
 > keep effort low while generating a concrete demand signal. If adoption
-> materialises, the full core extraction (v0.21.0) and WASM build (v0.22.0)
+> materialises, the full core extraction (v0.22.0) and WASM build (v0.23.0)
 > proceed. The main pg_trickle PostgreSQL extension ships no functional
 > changes in this release — only version bumps and upgrade migration
 > plumbing.
@@ -4486,7 +4910,7 @@ Dependencies: PGL-0-4. Schema change: No.
 
 > **In plain terms:** A clear table showing which SQL patterns are and are
 > not supported, what error you get for unsupported patterns, and when full
-> support is expected (v0.22.0). This prevents user frustration and sets
+> support is expected (v0.23.0). This prevents user frustration and sets
 > expectations.
 
 Verify: decision table in README and npm page lists all tested patterns with
@@ -4498,7 +4922,7 @@ Dependencies: None. Schema change: No.
 > **In plain terms:** Every error thrown by the plugin must include the
 > table name, the failing operation, and a one-sentence hint. Example:
 > `"LEFT JOIN is not supported in pglite-lite. Use @pgtrickle/pglite
-> (v0.22.0+) for full SQL support, or rewrite as INNER JOIN."`
+> (v0.23.0+) for full SQL support, or rewrite as INNER JOIN."`
 
 Verify: all error paths tested; every error message includes a remediation
 sentence.
@@ -4578,22 +5002,22 @@ Dependencies: PGL-0-4. Schema change: No.
 **TEST-5 — Extension upgrade path (0.18 to 0.19)**
 
 > **In plain terms:** The main pg_trickle PostgreSQL extension ships no
-> functional changes in v0.20.0, but the upgrade migration path must still
-> be tested. `ALTER EXTENSION pg_trickle UPDATE` from 0.19.0 to 0.20.0
+> functional changes in v0.21.0, but the upgrade migration path must still
+> be tested. `ALTER EXTENSION pg_trickle UPDATE` from 0.20.0 to 0.21.0
 > must leave existing stream tables intact.
 
 Verify: upgrade E2E test confirms all existing stream tables survive and
-refresh correctly after `0.19.0 -> 0.20.0` upgrade.
+refresh correctly after `0.20.0 -> 0.21.0` upgrade.
 Dependencies: None. Schema change: No (PG extension unchanged).
 
 ### Conflicts & Risks
 
 1. **Demand uncertainty is the primary risk.** This entire milestone is a bet
    that PGlite users want IVM beyond what pg_ivm provides. If Phase 0
-   generates no adoption signal, v0.21.0–v0.23.0 should be deprioritised and
+   generates no adoption signal, v0.22.0–v0.24.0 should be deprioritised and
    v1.0.0 proceeds without PGlite. Define a concrete adoption threshold
    (e.g., > 100 npm weekly downloads within 60 days of publication) as a
-   go/no-go gate for v0.21.0.
+   go/no-go gate for v0.22.0.
 
 2. **PGlite trigger infrastructure is unverified.** PGL-0-1 (trigger
    validation) is a hard prerequisite for everything else. If statement-level
@@ -4607,12 +5031,12 @@ Dependencies: None. Schema change: No (PG extension unchanged).
    Pin the minimum PGlite version in `package.json`.
 
 4. **No core Rust changes, but version bump required.** The main pg_trickle
-   extension needs a v0.20.0 version bump, upgrade migration SQL, and passing
+   extension needs a v0.21.0 version bump, upgrade migration SQL, and passing
    CI even though no functional code changes. This is low-risk but must not
    be forgotten.
 
 5. **ElectricSQL collaboration timing.** UX-5 (outreach) should happen
-   early — before v0.20.0 ships — to avoid building something ElectricSQL is
+   early — before v0.21.0 ships — to avoid building something ElectricSQL is
    already working on or would actively resist. If they signal interest in
    co-development, Phase 2 scope and timeline may shift.
 
@@ -4622,7 +5046,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
    compensate — consider porting the proptest approach to a JS property-
    testing library (e.g., fast-check).
 
-> **v0.20.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
+> **v0.21.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
 
 **Exit criteria:**
 - [ ] PGL-0-1: Statement-level triggers with transition tables confirmed working in PGlite
@@ -4644,12 +5068,12 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 - [ ] UX-4: TypeScript type definitions ship with strict-mode compatibility
 - [ ] TEST-1: > 50 correctness test cases pass on PGlite latest
 - [ ] TEST-2: CI tests pass against PGlite N, N-1, N-2
-- [ ] TEST-5: Extension upgrade path tested (`0.19.0 -> 0.20.0`)
+- [ ] TEST-5: Extension upgrade path tested (`0.20.0 -> 0.21.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.21.0 — Core Extraction (`pg_trickle_core`)
+## v0.22.0 — Core Extraction (`pg_trickle_core`)
 
 > **Release Theme**
 > This release surgically separates pg_trickle's "brain" — the DVM engine,
@@ -4658,7 +5082,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 > The extraction touches ~51,000 lines of code across 30+ source files but
 > produces zero user-visible behavior change: every existing test must pass
 > unchanged. The payoff is threefold: the core crate compiles to WASM
-> (enabling the PGlite extension in v0.22.0), pure-logic unit tests run
+> (enabling the PGlite extension in v0.23.0), pure-logic unit tests run
 > without a PostgreSQL instance (10x faster CI), and the main extension
 > gains a cleaner internal architecture. Approximately 500 unsafe blocks in
 > the parser require an abstraction layer over raw `pg_sys` node traversal,
@@ -4799,13 +5223,13 @@ Dependencies: PGL-1-1. Schema change: No.
 
 **STAB-4 — Extension upgrade path (0.19 to 0.20)**
 
-> **In plain terms:** v0.21.0 makes no SQL-visible changes (same functions,
+> **In plain terms:** v0.22.0 makes no SQL-visible changes (same functions,
 > same catalog schema), but the upgrade migration must still be tested.
-> `ALTER EXTENSION pg_trickle UPDATE` from 0.20.0 to 0.21.0 must leave
+> `ALTER EXTENSION pg_trickle UPDATE` from 0.21.0 to 0.22.0 must leave
 > existing stream tables intact and refreshable.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.20.0 -> 0.21.0`.
+correctly after `0.21.0 -> 0.22.0`.
 Dependencies: None. Schema change: No.
 
 **STAB-5 — Feature-flag isolation for WASM target**
@@ -4882,7 +5306,7 @@ Dependencies: PGL-1-1. Schema change: No.
 
 **SCAL-2 — Core crate binary size for WASM budget**
 
-> **In plain terms:** v0.22.0 targets < 2 MB WASM bundle. Measure the
+> **In plain terms:** v0.23.0 targets < 2 MB WASM bundle. Measure the
 > compiled size of `pg_trickle_core` for the WASM target now so the budget
 > is known before Phase 2. If > 5 MB, investigate `wasm-opt` stripping and
 > feature-gating large operator modules.
@@ -5013,8 +5437,8 @@ Dependencies: PGL-1-1. Schema change: No.
    item. If the abstraction proves too leaky (e.g., too many pg_sys node
    types to wrap), consider leaving `rewrites.rs` and `sublinks.rs` in the
    extension crate and extracting only operators + DAG + types to the core
-   crate. This reduces v0.21.0 scope but still delivers the WASM-compilable
-   operator engine for v0.22.0.
+   crate. This reduces v0.22.0 scope but still delivers the WASM-compilable
+   operator engine for v0.23.0.
 
 2. **PERF-1 must be validated before merging.** Introducing a
    `trait DatabaseBackend` could add vtable dispatch overhead on the hot
@@ -5044,7 +5468,7 @@ Dependencies: PGL-1-1. Schema change: No.
    extraction order: types -> operators -> DAG -> diff -> rewrites ->
    sublinks.
 
-> **v0.21.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
+> **v0.22.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
 
 **Exit criteria:**
 - [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
@@ -5061,7 +5485,7 @@ Dependencies: PGL-1-1. Schema change: No.
 - [ ] STAB-1: Zero `pg_sys::` references in `pg_trickle_core/src/`
 - [ ] STAB-2: `cargo build -p pg_trickle_core --no-default-features` passes in CI
 - [ ] STAB-3: `cargo pgrx package` and `cargo pgrx test` succeed with workspace layout
-- [ ] STAB-4: Extension upgrade path tested (`0.20.0 -> 0.21.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.21.0 -> 0.22.0`)
 - [ ] STAB-5: WASM target builds in CI
 - [ ] PERF-1: Criterion shows < 1% regression on `diff_operators` benchmark
 - [ ] PERF-2: Full benchmark suite passes with < 5% regression threshold
@@ -5076,12 +5500,12 @@ Dependencies: PGL-1-1. Schema change: No.
 
 ---
 
-## v0.22.0 — PGlite WASM Extension
+## v0.23.0 — PGlite WASM Extension
 
 > **Release Theme**
 > This release delivers the first working PGlite extension — the moment
 > pg_trickle's incremental view maintenance runs in the browser. By
-> wrapping `pg_trickle_core` (extracted in v0.21.0) in a thin C/FFI shim
+> wrapping `pg_trickle_core` (extracted in v0.22.0) in a thin C/FFI shim
 > and compiling to WASM via PGlite's Emscripten toolchain, we ship an npm
 > package (`@pgtrickle/pglite`) that gives PGlite users the full DVM
 > operator vocabulary — outer joins, window functions, subqueries,
@@ -5096,7 +5520,7 @@ Phase 2 for the full architecture.
 ### PGlite WASM Build (Phase 2)
 
 > **In plain terms:** This takes the `pg_trickle_core` crate extracted in
-> v0.21.0 and wraps it in a thin C shim that PGlite's Emscripten-based
+> v0.22.0 and wraps it in a thin C shim that PGlite's Emscripten-based
 > extension build system can compile to WASM. The result is a PGlite
 > extension package (`@pgtrickle/pglite`) that provides
 > `create_stream_table()`, `drop_stream_table()`, and `alter_stream_table()`
@@ -5184,7 +5608,7 @@ Dependencies: PGL-2-5. Schema change: No.
 | STAB-1 | WASM heap OOM graceful degradation | M | P0 |
 | STAB-2 | C shim panic/unwind boundary safety | S | P0 |
 | STAB-3 | Extension load/unload lifecycle correctness | S | P0 |
-| STAB-4 | Native extension upgrade path (0.20 → 0.21) | S | P0 |
+| STAB-4 | Native extension upgrade path (0.21 → 0.22) | S | P0 |
 | STAB-5 | npm package version synchronization | XS | P1 |
 
 **STAB-1 — WASM heap OOM graceful degradation**
@@ -5225,20 +5649,20 @@ Verify: lifecycle test with memory profiling shows zero leaked allocations
 after unload/reload cycle.
 Dependencies: PGL-2-1, PGL-2-4. Schema change: No.
 
-**STAB-4 — Native extension upgrade path (0.20 → 0.21)**
+**STAB-4 — Native extension upgrade path (0.21 → 0.22)**
 
-> **In plain terms:** v0.22.0 adds PGlite support but makes no SQL-visible
-> changes to the native extension. The upgrade migration from 0.20.0 to
-> 0.21.0 must leave existing stream tables intact and refreshable.
+> **In plain terms:** v0.23.0 adds PGlite support but makes no SQL-visible
+> changes to the native extension. The upgrade migration from 0.21.0 to
+> 0.22.0 must leave existing stream tables intact and refreshable.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.21.0 -> 0.22.0`.
+correctly after `0.22.0 -> 0.23.0`.
 Dependencies: None. Schema change: No.
 
 **STAB-5 — npm package version synchronization**
 
 > **In plain terms:** The `@pgtrickle/pglite` npm package version must
-> match the extension version (0.21.0). Add a CI check that verifies
+> match the extension version (0.22.0). Add a CI check that verifies
 > `package.json` version matches `pg_trickle.control` version, similar to
 > the existing `just check-version-sync` target.
 
@@ -5513,7 +5937,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
    Add it to the existing CI matrix as a separate job that only runs when
    `pg_trickle_pglite/` or `pg_trickle_core/` files are modified.
 
-> **v0.22.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
+> **v0.23.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-2-1: C shim compiles and links against PGlite's WASM PostgreSQL headers
@@ -5529,7 +5953,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 - [ ] STAB-1: OOM stress test: PGlite survives with actionable error
 - [ ] STAB-2: Panic from invalid SQL returns SQL error, not WASM trap
 - [ ] STAB-3: Load/unload/reload lifecycle test: zero leaked allocations
-- [ ] STAB-4: Extension upgrade path tested (`0.21.0 -> 0.22.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.22.0 -> 0.23.0`)
 - [ ] PERF-1: WASM vs native benchmark report published (≤ 3× overhead)
 - [ ] PERF-2: WASM bundle ≤ 2 MB (CI gated)
 - [ ] PERF-3: Cold-start load time < 500 ms browser, < 200 ms Node.js
@@ -5545,7 +5969,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 
 ---
 
-## v0.23.0 — PGlite Reactive Integration
+## v0.24.0 — PGlite Reactive Integration
 
 > **Release Theme**
 > This release completes the PGlite story by bridging the gap between
@@ -5654,7 +6078,7 @@ Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
 | STAB-1 | Memory leak prevention in long-lived hooks | M | P0 |
 | STAB-2 | Subscription cleanup on component unmount | S | P0 |
 | STAB-3 | Error boundary integration for hook failures | S | P0 |
-| STAB-4 | Native extension upgrade path (0.22 → 0.23) | S | P0 |
+| STAB-4 | Native extension upgrade path (0.23 → 0.24) | S | P0 |
 | STAB-5 | Framework version compatibility matrix | S | P1 |
 
 **STAB-1 — Memory leak prevention in long-lived hooks**
@@ -5696,16 +6120,16 @@ Verify: test dropping a stream table while `useStreamTable()` is active;
 assert error boundary catches the error with an actionable message.
 Dependencies: PGL-3-2, PGL-3-3. Schema change: No.
 
-**STAB-4 — Native extension upgrade path (0.22 → 0.23)**
+**STAB-4 — Native extension upgrade path (0.23 → 0.24)**
 
-> **In plain terms:** v0.23.0 adds reactive bindings at the TypeScript/npm
+> **In plain terms:** v0.24.0 adds reactive bindings at the TypeScript/npm
 > layer only. The native PostgreSQL extension and PGlite WASM extension
-> must continue to work unchanged. The upgrade migration from 0.21.0 to
-> 0.22.0 must leave existing stream tables and the `@pgtrickle/pglite`
+> must continue to work unchanged. The upgrade migration from 0.22.0 to
+> 0.23.0 must leave existing stream tables and the `@pgtrickle/pglite`
 > WASM extension intact.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.22.0 -> 0.23.0`. TypeScript API backward compatibility
+correctly after `0.23.0 -> 0.24.0`. TypeScript API backward compatibility
 verified.
 Dependencies: None. Schema change: No.
 
@@ -5891,11 +6315,11 @@ Dependencies: PGL-3-4, PERF-1. Schema change: No.
 > `live.changes()` bridge emits the correct change events for INSERT,
 > UPDATE, and DELETE on the source table. Replay events into an
 > accumulator and assert it matches `SELECT * FROM stream_table`. This
-> extends v0.22.0 TEST-1 (operator E2E) by adding the reactive layer.
+> extends v0.23.0 TEST-1 (operator E2E) by adding the reactive layer.
 
 Verify: ≥ 69 tests (23 operators × 3 DML types). Accumulator matches
 `SELECT *` for every test case.
-Dependencies: PGL-3-1, v0.22.0 TEST-1. Schema change: No.
+Dependencies: PGL-3-1, v0.23.0 TEST-1. Schema change: No.
 
 **TEST-2 — React hook lifecycle tests**
 
@@ -5948,7 +6372,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
    relatively new and its event format may change between PGlite releases.
    Pin the PGlite version and add an adapter layer so the bridge can
    accommodate event format changes without rewriting the React/Vue hooks.
-   If PGlite deprecates `live.changes()` before v0.23.0 ships, fall back
+   If PGlite deprecates `live.changes()` before v0.24.0 ships, fall back
    to `LISTEN/NOTIFY` with a custom channel.
 
 2. **CORR-2 (batch atomicity) and PERF-2 (single re-render) are coupled.**
@@ -5975,12 +6399,12 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
    and scope it to documentation + a proof-of-concept, not production-grade
    support.
 
-6. **No native extension changes in v0.23.0.** This release is entirely
+6. **No native extension changes in v0.24.0.** This release is entirely
    in the TypeScript/npm layer. Any temptation to add native features
    (e.g., `LISTEN/NOTIFY` bridge, WebSocket push) should be deferred to
    post-1.0. Keep the scope tight: reactive bindings + examples + docs.
 
-> **v0.23.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
+> **v0.24.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-3-1: Stream table changes appear in `live.changes()` event stream
@@ -5995,7 +6419,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
 - [ ] STAB-1: 4-hour soak test: heap growth < 10%
 - [ ] STAB-2: 100 mount/unmount cycles: zero leaked subscriptions
 - [ ] STAB-3: Stream table dropped while hook active: error boundary catches
-- [ ] STAB-4: Extension upgrade path tested (`0.22.0 -> 0.23.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.23.0 -> 0.24.0`)
 - [ ] STAB-5: CI matrix passes for React 18, React 19, Vue 3.4+
 - [ ] PERF-1: INSERT-to-render latency < 50% of `live.incrementalQuery()` at 10K rows
 - [ ] PERF-2: Render count = 1 for bulk DML (1, 10, 100, 1000 rows)
@@ -6025,7 +6449,7 @@ forward-compatibility.
 > audits every internal `pg_sys::*` API call for breaking changes, adds
 > conditional compilation gates, and validates the WAL decoder against any
 > pgoutput format changes introduced in PG 19. Moved here from the
-> earlier v0.20.0 milestone because PG 19 beta availability is uncertain.
+> earlier v0.21.0 milestone because PG 19 beta availability is uncertain.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
@@ -6217,11 +6641,12 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
-| v0.19.0 — PostgreSQL 17 Support | ~2–4d | — | |
-| v0.20.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
-| v0.21.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
-| v0.22.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
-| v0.23.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
+| v0.19.0 — Production Gap Closure & Distribution | ~2–3 weeks | — | |
+| v0.20.0 — PostgreSQL 17 Support | ~2–4d | — | |
+| v0.21.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
+| v0.22.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
+| v0.23.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
+| v0.24.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
 | v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
