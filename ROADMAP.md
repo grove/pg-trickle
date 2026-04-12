@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-10
-> **Latest release:** 0.17.0 (2026-04-08)
-> **Current milestone:** v0.18.0 — Hardening & Delta Performance
+> **Last updated:** 2026-04-12
+> **Latest release:** 0.18.0 (2026-04-12)
+> **Current milestone:** v0.19.0 — PostgreSQL 17 Support
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -79,7 +79,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.15.0 | External test suites & integration | ✅ Released |
 | v0.16.0 | Performance & refresh optimization | ✅ Released |
 | v0.17.0 | Query intelligence & stability | ✅ Released |
-| **v0.18.0** | **Hardening & delta performance** | **All 30/30 items complete** |
+| **v0.18.0** | **Hardening & delta performance** | **✅ Released** |
 | v0.19.0 | PostgreSQL 17 support | Planned |
 | v0.20.0 | PGlite proof of concept | Planned |
 | v0.21.0 | Core extraction (`pg_trickle_core`) | Planned |
