@@ -4,4 +4,4 @@
 SELECT pgt_name, status
 FROM pgtrickle.pgt_stream_tables
 WHERE status NOT IN ('ACTIVE', 'SUSPENDED')
-  AND pgt_name LIKE '%order%' OR pgt_name LIKE '%customer%'
+  AND (pgt_name LIKE '%order%' OR pgt_name LIKE '%customer%')

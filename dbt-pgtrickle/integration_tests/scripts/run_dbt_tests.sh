@@ -121,9 +121,21 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# The postgres image does a controlled restart after running initdb init scripts.
+# Retry the CREATE EXTENSION step so we don't hit the brief shutdown window.
 echo "Creating pg_trickle extension..."
-docker exec "$CONTAINER_NAME" \
-  psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_trickle;"
+for i in $(seq 1 10); do
+  if docker exec "$CONTAINER_NAME" \
+      psql -U postgres -c "CREATE EXTENSION IF NOT EXISTS pg_trickle;" 2>/dev/null; then
+    break
+  fi
+  if [ "$i" -eq 10 ]; then
+    echo "ERROR: Could not create pg_trickle extension after 10 attempts" >&2
+    docker logs "$CONTAINER_NAME" | tail -20
+    exit 1
+  fi
+  sleep 1
+done
 
 # ── Set up dbt Python environment ─────────────────────────────────────────
 # dbt-core 1.10 requires Python <=3.13 (mashumaro dependency incompatible with 3.14).

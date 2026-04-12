@@ -635,9 +635,11 @@ jobs:
           dbt seed
           dbt run
           ./scripts/wait_for_populated.sh order_totals 30
+          ./scripts/wait_for_populated.sh order_totals_auto 30
           dbt test
           dbt run --full-refresh
           ./scripts/wait_for_populated.sh order_totals 30
+          ./scripts/wait_for_populated.sh order_totals_auto 30
           dbt test
           dbt run-operation pgtrickle_refresh --args '{model_name: order_totals}'
           dbt run-operation pgtrickle_check_freshness
@@ -659,9 +661,11 @@ jobs:
           dbt seed
           dbt run
           ./scripts/wait_for_populated.sh order_totals 30
+          ./scripts/wait_for_populated.sh order_totals_auto 30
           dbt test
           dbt run --full-refresh
           ./scripts/wait_for_populated.sh order_totals 30
+          ./scripts/wait_for_populated.sh order_totals_auto 30
           dbt test
           dbt run-operation pgtrickle_refresh --args '{model_name: order_totals}'
           dbt run-operation pgtrickle_check_freshness
