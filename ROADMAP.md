@@ -79,7 +79,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.15.0 | External test suites & integration | ✅ Released |
 | v0.16.0 | Performance & refresh optimization | ✅ Released |
 | v0.17.0 | Query intelligence & stability | ✅ Released |
-| **v0.18.0** | **Hardening & delta performance** | **In Progress** |
+| **v0.18.0** | **Hardening & delta performance** | **All 30/30 items complete** |
 | v0.19.0 | PostgreSQL 17 support | Planned |
 | v0.20.0 | PGlite proof of concept | Planned |
 | v0.21.0 | Core extraction (`pg_trickle_core`) | Planned |
@@ -4163,7 +4163,7 @@ Dependencies: None. Schema change: No.
 - [x] STAB-4: Worker crash recovery E2E test cleans up advisory locks, temp tables, and buffer rows
 - [x] STAB-5 / TEST-6: Three-version upgrade chain (0.16→0.17→0.18) passes
 - [x] STAB-6: All user-facing errors have documented SQLSTATE codes in `docs/ERRORS.md`
-- [ ] PERF-1: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
+- [x] PERF-1: Merged multi-source delta implemented; all B3-3 diamond-flow property tests pass unchanged
 - [x] PERF-2: Cost model picks cheaper strategy ≥80% of the time on mixed workload benchmark
 - [x] PERF-3: Zero-change branch elision shows measurable latency reduction in multi-source benchmark
 - [x] PERF-4: `changed_columns` bitmask stored in change buffer; per-row overhead < 1μs

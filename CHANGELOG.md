@@ -199,6 +199,15 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
   (P2-5), and the aggregate operator detects value-only UPDATEs (A-2/P5)
   using key-column masks. Always-on for keyed tables; no GUC needed.
 
+- **PERF-1 (B3-MERGE):** Z-set multi-source delta engine — verified that all
+  three pillars are already implemented: B3-1 zero-change branch elision
+  (`zero_change_oids` + FALSE predicate pruning), B3-2 merged-delta weight
+  aggregation (`build_weight_agg_using()` / `build_keyless_weight_agg()` with
+  `GROUP BY __pgt_row_id, SUM(weight) + HAVING <> 0`), and B3-3 diamond-flow
+  property tests (`e2e_diamond_tests.rs`). The weight aggregation wraps the
+  entire multi-source delta query, collapsing overlapping corrections from
+  simultaneous source changes into net I/D actions.
+
 ### Fixed
 
 - **CDC edge case tests:** Fixed generated column tests to use computed
