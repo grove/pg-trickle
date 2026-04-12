@@ -3464,6 +3464,9 @@ a pg_ivm migration guide targets the largest potential adopter audience, a
 failure mode runbook equips production teams, and a Docker Compose playground
 provides a 60-second tryout experience.
 
+<details>
+<summary>Completed items (click to expand)</summary>
+
 ### Cost-Based Refresh Strategy Selection (B-4)
 
 > **In plain terms:** The current adaptive FULL/DIFFERENTIAL threshold is a
@@ -3681,6 +3684,8 @@ provides a 60-second tryout experience.
 - [x] DOC-VERIFY: `scripts/verify_install.sql` checks shared_preload_libraries, extension, scheduler, GUCs, and runs end-to-end stream table cycle
 - [x] DOC-STUBS: Research stubs already use `{{#include}}` directives pointing to substantial content (923 + 1232 lines)
 - [x] Extension upgrade path tested (`0.16.0 → 0.17.0`)
+
+</details>
 
 ---
 
@@ -4198,15 +4203,18 @@ Dependencies: None. Schema change: No.
 ## v0.19.0 — Production Gap Closure & Distribution
 
 > **Release Theme**
-> This release closes the most impactful correctness and stability gaps
-> identified in the Phase 7 deep-dive that v0.18.0 did not address, removes
-> the unsafe `delete_insert` merge strategy, hardens the WAL decoder path
-> before it is promoted to production-ready, and ships pg_trickle on standard
-> package registries for the first time. The JOIN delta R₀ fix for simultaneous
+> This release closes the most impactful correctness, security, stability, and
+> performance gaps identified in the Phase 7 deep-dive and subsequent audits
+> that v0.18.0 did not address. It removes the unsafe `delete_insert` merge
+> strategy, adds ownership checks to all DDL-like API functions, hardens the
+> WAL decoder path before it is promoted to production-ready, eliminates O(n²)
+> scheduler dispatch overhead, and ships pg_trickle on standard package
+> registries for the first time. The JOIN delta R₀ fix for simultaneous
 > key-change + right-side delete is the highest-value correctness improvement
-> remaining before 1.0. Two to three weeks of focused work delivers measurable
-> correctness improvements, a PgBouncer transaction-mode compatibility fix,
-> read-replica safety, and PGXN/apt/rpm distribution.
+> remaining before 1.0. Three to four weeks of focused work delivers measurable
+> correctness improvements, privilege enforcement, catalog index optimizations,
+> a PgBouncer transaction-mode compatibility fix, read-replica safety, and
+> PGXN/apt/rpm distribution.
 
 ### Correctness
 
@@ -4217,6 +4225,7 @@ Dependencies: None. Schema change: No.
 | CORR-3 | Track `ALTER TYPE` / `ALTER DOMAIN` DDL events | S | P1 |
 | CORR-4 | Track `ALTER POLICY` DDL events for RLS source tables | S | P1 |
 | CORR-5 | Fix keyless content-hash collision on identical-content rows | S | P1 |
+| CORR-6 | Harden guarded `.unwrap()` calls in DVM operators | XS | P2 |
 
 **CORR-1 — Remove unsafe `delete_insert` merge strategy**
 
@@ -4294,6 +4303,44 @@ Verify: E2E test with two identical rows — insert 2, delete 1 in same cycle;
 stream table retains exactly 1 row.
 Dependencies: EC-06 keyless path (shipped in prior release). Schema change: No.
 
+**CORR-6 — Harden guarded `.unwrap()` calls in DVM operators**
+
+> **In plain terms:** Several DVM operators use `.unwrap()` on values that are
+> logically guaranteed by a prior `is_some()` guard, but the coupling is
+> implicit and fragile — a refactor could silently break the invariant, causing
+> a panic in SQL-reachable code. The most fragile instance is
+> `ctx.st_qualified_name.as_deref().unwrap()` in `filter.rs` (line ~130),
+> guarded by `has_st` which is derived from `is_some()` several lines earlier.
+> Replace these patterns with `if let Some(…)` or `.unwrap_or_else(|| …)` to
+> make the invariant structurally enforced rather than comment-documented.
+
+Verify: `grep -rn '\.unwrap()' src/dvm/operators/` returns zero hits outside
+test modules. All existing unit tests pass.
+Dependencies: None. Schema change: No.
+
+### Security
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SEC-1 | Add ownership checks to `drop_stream_table` / `alter_stream_table` | S | P0 |
+
+**SEC-1 — Add ownership checks to `drop_stream_table` / `alter_stream_table`**
+
+> **In plain terms:** Currently, any role with EXECUTE privilege on
+> `pgtrickle.drop_stream_table()` or `pgtrickle.alter_stream_table()` can
+> modify or drop **any** stream table, regardless of who created it. PostgreSQL
+> convention requires that only the owner (or a superuser) can DROP or ALTER
+> an object. Fix: call `pg_class_ownercheck(stream_table_oid, GetUserId())`
+> (or the pgrx-safe equivalent) at the top of both functions and raise
+> `ERROR: must be owner of stream table "name"` if the check fails.
+> `create_stream_table` already records the creating role as the table owner
+> in `pg_class`.
+
+Verify: Non-owner role calling `pgtrickle.drop_stream_table('other_users_st')`
+receives `ERROR: must be owner of stream table "other_users_st"`. Superuser
+can still drop any stream table. E2E test with two roles confirms.
+Dependencies: None. Schema change: No.
+
 ### Stability
 
 | ID | Title | Effort | Priority |
@@ -4302,6 +4349,7 @@ Dependencies: EC-06 keyless path (shipped in prior release). Schema change: No.
 | STAB-2 | Read-replica / hot-standby safety guard | S | P1 |
 | STAB-3 | Elevate Semgrep to blocking in CI | XS | P1 |
 | STAB-4 | `auto_backoff` GUC — double interval after 3 falling-behind cycles | S | P2 |
+| STAB-5 | Harden `unwrap()` in scheduler hot path | XS | P2 |
 
 **STAB-1 — PgBouncer transaction-mode compatibility guard**
 
@@ -4355,6 +4403,21 @@ doubles after 3 consecutive falling-behind alerts; returns to original
 interval after catching up.
 Dependencies: EC-11 `scheduler_falling_behind` (shipped in v0.18.0). Schema change: No.
 
+**STAB-5 — Harden `unwrap()` in scheduler hot path**
+
+> **In plain terms:** The scheduler dispatch loop in `scheduler.rs` uses
+> `eu_dag.units().find(|u| u.id == uid).unwrap()` at several call sites
+> (lines ~1522, ~1680, ~1751, ~1811, ~1859, ~1885). While the IDs come from
+> the same DAG and are expected to always match, a stale topo-order after a
+> concurrent DDL change could cause a panic inside the background worker. Fix:
+> replace with `.ok_or(PgTrickleError::InternalError("unit not found in DAG"))?`
+> or use the HashMap introduced by PERF-5. This eliminates the last `unwrap()`
+> cluster in the scheduler hot path.
+
+Verify: `grep -n '\.unwrap()' src/scheduler.rs` returns zero hits outside
+test-only code. All scheduler integration tests pass.
+Dependencies: PERF-5 (HashMap replaces `.find().unwrap()` pattern). Schema change: No.
+
 ### Performance
 
 | ID | Title | Effort | Priority |
@@ -4362,6 +4425,9 @@ Dependencies: EC-11 `scheduler_falling_behind` (shipped in v0.18.0). Schema chan
 | PERF-1 | Fix WAL decoder: `old_*` columns always NULL on UPDATE | S | P1 |
 | PERF-2 | Fix WAL decoder: naive `pgoutput` action string parsing | S | P1 |
 | PERF-3 | `EXPLAIN (ANALYZE, BUFFERS)` surface for delta SQL in `explain_st()` | S | P2 |
+| PERF-4 | Add catalog indexes on `pgt_relid` and `pgt_dependencies(pgt_id)` | XS | P1 |
+| PERF-5 | Eliminate O(n²) `units().find()` in scheduler dispatch | S | P1 |
+| PERF-6 | Batch `has_table_source_changes()` into single query | S | P2 |
 
 **PERF-1 — Fix WAL decoder: `old_*` columns always NULL on UPDATE**
 
@@ -4399,6 +4465,47 @@ Dependencies: None. Schema change: No.
 Verify: `pgtrickle.explain_st('my_st', with_analyze => true)` returns JSONB
 with `Plan`, `Actual Rows`, and `Shared Hit Blocks` fields. Documented in
 `docs/SQL_REFERENCE.md`.
+Dependencies: None. Schema change: No.
+
+**PERF-4 — Add catalog indexes on `pgt_relid` and `pgt_dependencies(pgt_id)`**
+
+> **In plain terms:** `pgt_stream_tables` has an index on `status` but not on
+> `pgt_relid`, which is used in hot-path lookups (`WHERE pgt_relid = $1`) by
+> DDL hooks, CDC trigger installation, and refresh dependency resolution.
+> `pgt_dependencies` has an index on `source_relid` but not on `pgt_id`, which
+> is used when rebuilding a single stream table's dependency set. Adding these
+> two B-tree indexes eliminates sequential scans on these catalog tables at
+> scale.
+
+Verify: `\di pgtrickle.idx_pgt_relid` and `\di pgtrickle.idx_deps_pgt_id`
+exist after upgrade. `EXPLAIN` of `SELECT * FROM pgtrickle.pgt_stream_tables
+WHERE pgt_relid = 12345` shows Index Scan.
+Dependencies: None. Schema change: Yes (upgrade SQL adds CREATE INDEX).
+
+**PERF-5 — Eliminate O(n²) `units().find()` in scheduler dispatch**
+
+> **In plain terms:** The scheduler dispatch loop calls
+> `eu_dag.units().find(|u| u.id == uid)` inside iteration over `topo_order`
+> and `ready_queue`, causing O(n²) behavior per tick. At 500+ stream tables
+> this adds measurable overhead. Fix: build a `HashMap<UnitId, &Unit>` once
+> per tick and replace all `.find()` lookups with O(1) map access.
+
+Verify: Benchmark with 500 stream tables shows tick latency < 1ms (currently
+~5–10ms). `grep -n 'units().find' src/scheduler.rs` returns zero hits.
+Dependencies: None. Schema change: No.
+
+**PERF-6 — Batch `has_table_source_changes()` into single query**
+
+> **In plain terms:** `has_table_source_changes()` executes N separate
+> `SELECT EXISTS(SELECT 1 FROM changes_<oid> LIMIT 1)` SPI queries — one per
+> source table per stream table per scheduler tick. For a stream table with 5
+> sources, this is 5 SPI round-trips. Batching into a single
+> `SELECT unnest(ARRAY[oid1, oid2, ...]) AS oid WHERE EXISTS(...)` or using
+> a single `UNION ALL` subquery reduces this to 1 SPI call regardless of
+> source count.
+
+Verify: SPI call count for `has_table_source_changes()` is 1 regardless of
+source table count. Scheduler integration tests pass.
 Dependencies: None. Schema change: No.
 
 ### Scalability
@@ -4441,6 +4548,10 @@ Dependencies: None. Schema change: No.
 | UX-3 | apt/rpm packaging via PGDG | M | P1 |
 | UX-4 | Connection pooler compatibility guide in `docs/PRE_DEPLOYMENT.md` | S | P1 |
 | UX-5 | `pgtrickle.write_and_refresh(dml_sql TEXT, st_name TEXT)` | S | P2 |
+| UX-6 | Change `drop_stream_table` cascade default to `false` | XS | P1 |
+| UX-7 | Resolve OIDs to table names in error messages | S | P1 |
+| UX-8 | Emit NOTICE when `refresh_stream_table` is skipped | XS | P1 |
+| UX-9 | Fix CONFIGURATION.md TOC gaps for 3 undocumented GUCs | XS | P2 |
 
 **UX-1 — PGXN `release_status` → `"stable"`**
 
@@ -4503,6 +4614,61 @@ executes the INSERT and refreshes the stream table. Documented in
 `docs/SQL_REFERENCE.md`.
 Dependencies: None. Schema change: No.
 
+**UX-6 — Change `drop_stream_table` cascade default to `false`**
+
+> **In plain terms:** `pgtrickle.drop_stream_table(name, cascade)` currently
+> defaults `cascade` to `true`. This violates the PostgreSQL convention where
+> `DROP` defaults to `RESTRICT` and `CASCADE` must be explicit. A user calling
+> `SELECT pgtrickle.drop_stream_table('my_st')` may inadvertently cascade-drop
+> dependent stream tables. Fix: change the default to `false` (RESTRICT). This
+> is a behavior change — existing scripts that rely on the implicit cascade
+> must add `cascade => true` explicitly.
+
+Verify: `SELECT pgtrickle.drop_stream_table('parent_st')` returns an error
+when `parent_st` has dependents. `SELECT pgtrickle.drop_stream_table('parent_st',
+cascade => true)` succeeds. Documented in CHANGELOG as a breaking change.
+Dependencies: None. Schema change: No (function signature change only).
+
+**UX-7 — Resolve OIDs to table names in error messages**
+
+> **In plain terms:** `UpstreamTableDropped(u32)` and
+> `UpstreamSchemaChanged(u32)` display raw PostgreSQL OIDs (e.g., `"upstream
+> table dropped: OID 16384"`). Users cannot easily map OIDs to table names.
+> Fix: resolve the OID to `schema.table` via `pg_class` at error-construction
+> time or store the name alongside the OID. If the table is already dropped,
+> fall back to `"OID <oid> (table no longer exists)"`.
+
+Verify: `UpstreamTableDropped` error message shows `"upstream table dropped:
+public.orders"` instead of raw OID. Fallback tested with a pre-dropped table.
+Dependencies: None. Schema change: No.
+
+**UX-8 — Emit NOTICE when `refresh_stream_table` is skipped**
+
+> **In plain terms:** When `refresh_stream_table()` encounters a
+> `RefreshSkipped` condition (e.g., no changes detected, another refresh
+> already in progress), it currently logs at `debug1` level and returns
+> success — invisible to the caller at default log levels. Fix: emit a
+> PostgreSQL `NOTICE` (visible to the calling session) in addition to the
+> `debug1` log, so the caller knows the refresh did not execute.
+
+Verify: `SELECT pgtrickle.refresh_stream_table('my_st')` with no pending
+changes emits `NOTICE: refresh skipped for "my_st": no changes detected`.
+Visible in `psql` output.
+Dependencies: None. Schema change: No.
+
+**UX-9 — Fix CONFIGURATION.md TOC gaps**
+
+> **In plain terms:** Three GUCs (`delta_work_mem_cap_mb`,
+> `volatile_function_policy`, `unlogged_buffers`) have full documentation
+> sections in `docs/CONFIGURATION.md` but are missing from the table of
+> contents navigation at the top of the file. Additionally, there is a
+> duplicate "Guardrails" entry in the TOC. Fix: add the missing TOC entries
+> and remove the duplicate.
+
+Verify: All `### pg_trickle.*` headings in CONFIGURATION.md have a
+corresponding TOC link. No duplicate entries.
+Dependencies: None. Schema change: No.
+
 ### Test Coverage
 
 | ID | Title | Effort | Priority |
@@ -4512,6 +4678,8 @@ Dependencies: None. Schema change: No.
 | TEST-3 | WAL decoder unit tests for PERF-1 / PERF-2 | S | P1 |
 | TEST-4 | PgBouncer transaction-mode integration smoke test | M | P1 |
 | TEST-5 | Read-replica guard integration test | S | P1 |
+| TEST-6 | Ownership-check privilege tests for SEC-1 | S | P1 |
+| TEST-7 | Scheduler dispatch benchmark (500+ STs) | S | P1 |
 
 **TEST-1 — E2E tests for CORR-2 (JOIN delta R₀ fix)**
 
@@ -4564,7 +4732,30 @@ Verify: worker log contains "pg_trickle background worker skipped: server is
 in recovery mode." No ERROR or FATAL in replica logs.
 Dependencies: STAB-2. Schema change: No.
 
-> **v0.19.0 total: ~2–3 weeks**
+**TEST-6 — Ownership-check privilege tests for SEC-1**
+
+> **In plain terms:** Add E2E tests with two PostgreSQL roles: role A creates
+> a stream table, role B (non-superuser, non-owner) attempts to drop and alter
+> it. Verify that role B receives `ERROR: must be owner of stream table`. Also
+> verify that a superuser can drop/alter any stream table regardless of
+> ownership.
+
+Verify: 3 E2E tests (non-owner drop, non-owner alter, superuser override).
+Dependencies: SEC-1. Schema change: No.
+
+**TEST-7 — Scheduler dispatch benchmark (500+ STs)**
+
+> **In plain terms:** Add a Criterion benchmark that creates a mock DAG with
+> 500+ stream tables and measures per-tick dispatch latency. This gates
+> PERF-5 (HashMap optimization) and provides a regression baseline for future
+> scheduler changes. The benchmark should run in the existing `benches/`
+> framework.
+
+Verify: `cargo bench --bench scheduler_bench` runs and reports P50/P99 tick
+latency. Baseline saved for Criterion regression gate.
+Dependencies: PERF-5. Schema change: No.
+
+> **v0.19.0 total: ~3–4 weeks**
 
 **Exit criteria:**
 - [ ] CORR-1: `delete_insert` strategy removed; `ERROR` raised on old GUC value
@@ -4572,22 +4763,34 @@ Dependencies: STAB-2. Schema change: No.
 - [ ] CORR-3: `ALTER TYPE` / `ALTER DOMAIN` DDL events trigger stream table invalidation
 - [ ] CORR-4: `ALTER POLICY` DDL events trigger stream table invalidation
 - [ ] CORR-5: Keyless content-hash collision test passes with two identical-content rows
+- [ ] CORR-6: Zero `.unwrap()` in `src/dvm/operators/` outside test modules
+- [ ] SEC-1: Non-owner `drop_stream_table`/`alter_stream_table` raises `ERROR: must be owner`
 - [ ] STAB-1: `pg_trickle.connection_pooler_mode` GUC added; transaction mode disables prepared statements
 - [ ] STAB-2: Background worker exits cleanly on hot standby with correct log message
 - [ ] STAB-3: Semgrep elevated to blocking; zero findings verified
 - [ ] STAB-4: `auto_backoff` GUC: interval doubles after 3 consecutive falling-behind alerts
+- [ ] STAB-5: Zero `.unwrap()` in scheduler hot path outside test modules
 - [ ] PERF-1: WAL decoder writes correct `old_col_*` values for UPDATE rows
 - [ ] PERF-2: WAL decoder uses exact action string comparison
+- [ ] PERF-4: Catalog indexes on `pgt_relid` and `pgt_dependencies(pgt_id)` exist after upgrade
+- [ ] PERF-5: Zero `units().find()` in scheduler; HashMap-based O(1) lookup
+- [ ] PERF-6: `has_table_source_changes()` executes single SPI query regardless of source count
 - [ ] SCAL-1: `docs/SCALING.md` replica section added
 - [ ] UX-1: `META.json` `release_status` → `"stable"`; PGXN listing updated
 - [ ] UX-2: Docker Hub release automation wired in GitHub Actions
 - [ ] UX-3: apt/rpm packages available via PGDG
 - [ ] UX-4: `docs/PRE_DEPLOYMENT.md` connection pooler compatibility guide added
+- [ ] UX-6: `drop_stream_table` defaults to `cascade => false`
+- [ ] UX-7: `UpstreamTableDropped`/`UpstreamSchemaChanged` show table name instead of raw OID
+- [ ] UX-8: `refresh_stream_table` emits NOTICE when refresh is skipped
+- [ ] UX-9: CONFIGURATION.md TOC complete; no duplicate entries
 - [ ] TEST-1: 3 JOIN delta R₀ E2E tests pass
 - [ ] TEST-2: 3 DDL tracking E2E tests pass
 - [ ] TEST-3: 5+ WAL decoder unit tests pass with `wal_enabled = true`
 - [ ] TEST-4: PgBouncer transaction-mode integration test passes
 - [ ] TEST-5: Read-replica guard integration test passes
+- [ ] TEST-6: 3 ownership-check privilege E2E tests pass
+- [ ] TEST-7: Scheduler dispatch benchmark baseline saved
 - [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
 - [ ] `just check-version-sync` passes
 
@@ -4614,6 +4817,22 @@ Dependencies: STAB-2. Schema change: No.
 5. **UX-3 (apt/rpm packaging)** depends on PGDG maintainer availability
    (~8–12h) and can be cut without impacting correctness if it risks
    delaying the release.
+
+6. **SEC-1 changes privilege semantics.** Existing deployments where
+   non-owner roles call `drop_stream_table` or `alter_stream_table` will
+   break. Requires a CHANGELOG entry and, optionally, a
+   `pg_trickle.skip_ownership_check` GUC (default `false`) for a transition
+   period.
+
+7. **UX-6 changes the cascade default.** Scripts relying on implicit
+   `cascade => true` will silently change behavior — DROP will error instead
+   of cascading. Ship alongside SEC-1 and document both breaking changes
+   together.
+
+8. **PERF-4 requires upgrade SQL.** The two `CREATE INDEX` statements must
+   be added to `sql/pg_trickle--0.18.0--0.19.0.sql`. Index creation on a
+   busy system may briefly lock the catalog tables (millisecond-range for
+   small catalogs; document in upgrade notes).
 
 ---
 
@@ -6641,7 +6860,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
-| v0.19.0 — Production Gap Closure & Distribution | ~2–3 weeks | — | |
+| v0.19.0 — Production Gap Closure & Distribution | ~3–4 weeks | — | |
 | v0.20.0 — PostgreSQL 17 Support | ~2–4d | — | |
 | v0.21.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
 | v0.22.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
