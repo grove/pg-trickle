@@ -4869,7 +4869,8 @@ pub fn execute_differential_refresh(
             );
             if ao_suppress
                 && let Err(e) = Spi::run(&format!(
-                    "ALTER TABLE {} DISABLE TRIGGER USER", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; ao_quoted_table uses manual double-quote escaping.
+                    // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; ao_quoted_table uses manual double-quote escaping.
+                    "ALTER TABLE {} DISABLE TRIGGER USER",
                     ao_quoted_table
                 ))
             {
@@ -4890,7 +4891,8 @@ pub fn execute_differential_refresh(
 
             if ao_suppress
                 && let Err(e) = Spi::run(&format!(
-                    "ALTER TABLE {} ENABLE TRIGGER USER", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; ao_quoted_table uses manual double-quote escaping.
+                    // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; ao_quoted_table uses manual double-quote escaping.
+                    "ALTER TABLE {} ENABLE TRIGGER USER",
                     ao_quoted_table
                 ))
             {
