@@ -226,3 +226,88 @@ is undersized. If utilization is < 50%, the pool is oversized and consuming
 | Change buffer rows    | `max_buffer_rows` (default 1M) | Disk I/O |
 | Template cache size   | 128 entries (L1) | Evictions increase at >128 STs |
 | DAG depth             | ~20 levels      | Topological sort + cascade latency |
+
+---
+
+## Read Replicas & Hot Standby
+
+> **Added in v0.19.0 (SCAL-1 / STAB-2).**
+
+pg_trickle is a **primary-only** extension. Stream tables are maintained
+by the background scheduler through DML (INSERT, DELETE, MERGE), which is
+only possible on the primary server.
+
+### Behaviour on Replicas
+
+When the pg_trickle shared library is loaded on a **read replica** (physical
+standby or streaming replica):
+
+1. The **launcher worker** detects `pg_is_in_recovery() = true` and enters
+   a sleep loop, checking every 30 seconds for promotion.
+2. Upon **promotion** (e.g. `pg_promote()`), the launcher resumes normal
+   operation and spawns per-database schedulers.
+3. **Manual refresh** calls (`pgtrickle.refresh_stream_table()`) on a replica
+   are rejected with a clear error message.
+
+### Recommended Setup
+
+- Include `pg_trickle` in `shared_preload_libraries` on **both** primary and
+  replicas. This ensures immediate availability after failover without a restart.
+- Stream tables are read-queryable on replicas via physical replication —
+  the storage tables are regular PostgreSQL tables that replicate normally.
+- Monitor the replication lag to estimate stream table staleness on replicas.
+
+---
+
+## CNPG & Kubernetes Operations
+
+> **Added in v0.19.0 (SCAL-3).**
+
+[CloudNativePG (CNPG)](https://cloudnative-pg.io/) is the recommended Kubernetes
+operator for running pg_trickle. The extension is packaged as a custom container
+image that extends the official PostgreSQL image.
+
+### Container Image
+
+Build the pg_trickle image using the provided Dockerfiles:
+
+```bash
+# GHCR image (multi-stage build)
+docker build -f Dockerfile.ghcr -t pg-trickle:latest .
+
+# Or use the CNPG-specific Dockerfile
+docker build -f cnpg/Dockerfile.ext -t pg-trickle-cnpg:latest .
+```
+
+### CNPG Cluster Configuration
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pg-trickle-cluster
+spec:
+  instances: 3
+  imageName: your-registry/pg-trickle:0.19.0
+  postgresql:
+    shared_preload_libraries:
+      - pg_trickle
+    parameters:
+      pg_trickle.enabled: "true"
+      pg_trickle.scheduler_interval_ms: "1000"
+      pg_trickle.max_concurrent_refreshes: "4"
+      # STAB-1: If using PgBouncer sidecar in transaction mode:
+      # pg_trickle.connection_pooler_mode: "transaction"
+```
+
+### Operational Notes
+
+- **Failover**: pg_trickle detects promotion automatically (see Read Replicas
+  above). After CNPG promotes a replica, the launcher starts within 30 seconds.
+- **Scaling replicas**: Stream table data replicates to all replicas via
+  physical replication. No pg_trickle-specific configuration needed on replicas.
+- **Backup**: Use CNPG's built-in Barman backup. pg_trickle's catalog tables
+  are included automatically. See [Backup & Restore](BACKUP_AND_RESTORE.md).
+- **Monitoring**: The Prometheus endpoint (`pgtrickle.health_summary()`) is
+  compatible with CNPG's monitoring sidecar. See the Grafana dashboards in
+  `monitoring/grafana/`.

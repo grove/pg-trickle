@@ -801,10 +801,14 @@ fn cache_stats() -> TableIterator<
 ///
 /// Returns whether the query supports differential refresh,
 /// lists the operators found, and shows the generated delta query.
-/// Exposed as `pgtrickle.explain_st(name)`.
+///
+/// PERF-3: When `with_analyze` is true, the defining query is EXPLAINed with
+/// ANALYZE to show actual row counts, timings, and buffer usage.
+/// Exposed as `pgtrickle.explain_st(name, with_analyze)`.
 #[pg_extern(schema = "pgtrickle", name = "explain_st")]
 fn explain_st(
     name: &str,
+    with_analyze: default!(bool, false),
 ) -> TableIterator<'static, (name!(property, String), name!(value, String))> {
     let parts: Vec<&str> = name.splitn(2, '.').collect();
     let (schema, table_name) = if parts.len() == 2 {
@@ -813,7 +817,7 @@ fn explain_st(
         ("public", parts[0])
     };
 
-    let rows = explain_st_impl(schema, table_name)
+    let rows = explain_st_impl(schema, table_name, with_analyze)
         .unwrap_or_else(|e| vec![("error".to_string(), e.to_string())]);
 
     TableIterator::new(rows)
@@ -822,6 +826,7 @@ fn explain_st(
 fn explain_st_impl(
     schema: &str,
     table_name: &str,
+    with_analyze: bool,
 ) -> Result<Vec<(String, String)>, PgTrickleError> {
     use crate::catalog::StreamTableMeta;
     use crate::dvm;
@@ -1019,6 +1024,33 @@ fn explain_st_impl(
             "template_cache_stats".to_string(),
             format!("{{\"l2_hits\":{},\"full_misses\":{}}}", l2_hits, misses),
         ));
+    }
+
+    // PERF-3: EXPLAIN ANALYZE of the defining query (when requested).
+    if with_analyze {
+        let explain_sql = format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {}",
+            st.defining_query
+        );
+        match Spi::connect(|client| {
+            let result = client
+                .select(&explain_sql, None, &[])
+                .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?;
+            let mut lines = Vec::new();
+            for row in result {
+                if let Some(line) = row.get::<String>(1).unwrap_or(None) {
+                    lines.push(line);
+                }
+            }
+            Ok::<String, crate::error::PgTrickleError>(lines.join("\n"))
+        }) {
+            Ok(plan) => {
+                props.push(("explain_analyze".to_string(), plan));
+            }
+            Err(e) => {
+                props.push(("explain_analyze".to_string(), format!("error: {}", e)));
+            }
+        }
     }
 
     Ok(props)

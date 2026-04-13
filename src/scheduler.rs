@@ -1748,7 +1748,8 @@ fn parallel_dispatch_tick(
                 // catch_unwind path, but this is a safety net in case the
                 // worker died before completing the error-state UPDATE.
                 if job.status == JobStatus::PermanentFailed {
-                    let unit = eu_dag.units().find(|u| u.id == unit_id);
+                    // PERF-5: O(1) lookup via unit_by_id.
+                    let unit = eu_dag.unit_by_id(unit_id);
                     if let Some(unit) = unit {
                         let error_detail = job
                             .outcome_detail
@@ -1808,7 +1809,8 @@ fn parallel_dispatch_tick(
             continue;
         }
 
-        let unit = match eu_dag.units().find(|u| u.id == uid) {
+        // PERF-5: O(1) lookup via unit_by_id.
+        let unit = match eu_dag.unit_by_id(uid) {
             Some(u) => u,
             None => continue,
         };
@@ -1851,12 +1853,12 @@ fn parallel_dispatch_tick(
     // For each EU in the ready queue, compute the "best" (most urgent) tier
     // among its member STs.  This is the secondary sort key used below.
     // We only compute for units that are actually ready so the map stays small.
+    // PERF-5: O(1) lookup via unit_by_id.
     let tier_map: HashMap<ExecutionUnitId, u8> = ready_queue
         .iter()
         .filter_map(|&uid| {
             eu_dag
-                .units()
-                .find(|u| u.id == uid)
+                .unit_by_id(uid)
                 .map(|u| (uid, compute_unit_tier_priority(&u.member_pgt_ids)))
         })
         .collect();
@@ -1882,7 +1884,8 @@ fn parallel_dispatch_tick(
             break;
         }
 
-        let unit = match eu_dag.units().find(|u| u.id == uid) {
+        // PERF-5: O(1) lookup via unit_by_id.
+        let unit = match eu_dag.unit_by_id(uid) {
             Some(u) => u,
             None => {
                 shmem::release_worker_token();
@@ -2166,6 +2169,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // avoid spamming the NOTIFY channel every check cycle.
     let mut reported_stuck_sources: HashSet<u32> = HashSet::new();
 
+    // DB-5: Timestamp for daily history retention cleanup.
+    let mut last_history_cleanup_ms: u64 = 0;
+    const HISTORY_CLEANUP_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
@@ -2422,6 +2429,42 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }
                 }));
                 last_watermark_stuck_check_ms = now_for_wm_check;
+            }
+        }
+
+        // DB-5: Periodic history retention cleanup (daily).
+        {
+            let now_for_cleanup = current_epoch_ms();
+            if now_for_cleanup.saturating_sub(last_history_cleanup_ms)
+                >= HISTORY_CLEANUP_INTERVAL_MS
+            {
+                let retention_days = config::pg_trickle_history_retention_days();
+                if retention_days > 0 {
+                    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                        // Use a parameterised query (no format!) to avoid any
+                        // dynamic-SQL concerns raised by static analysis tools.
+                        // make_interval(days => $1) accepts the i32 GUC value
+                        // through the standard SPI bind-parameter path.
+                        let deleted = Spi::get_one_with_args::<i64>(
+                            "WITH deleted AS (\
+                                DELETE FROM pgtrickle.pgt_refresh_history \
+                                WHERE start_time < now() - make_interval(days => $1) \
+                                RETURNING 1\
+                            ) SELECT count(*) FROM deleted",
+                            &[retention_days.into()],
+                        )
+                        .unwrap_or(Some(0))
+                        .unwrap_or(0);
+                        if deleted > 0 {
+                            log!(
+                                "pg_trickle: history cleanup — deleted {} rows older than {} days",
+                                deleted,
+                                retention_days,
+                            );
+                        }
+                    }));
+                }
+                last_history_cleanup_ms = now_for_cleanup;
             }
         }
 
@@ -3878,6 +3921,9 @@ fn upstream_change_state(
 
 /// Returns `true` if any TABLE or FOREIGN_TABLE upstream source has rows in
 /// its CDC change buffer that have not yet been consumed by a refresh.
+///
+/// PERF-6: Uses a single batched EXISTS query instead of one SPI round-trip
+/// per source table.
 fn has_table_source_changes(st: &StreamTableMeta) -> bool {
     if let Err(e) = refresh::poll_foreign_table_sources_for_st(st) {
         log!(
@@ -3891,20 +3937,28 @@ fn has_table_source_changes(st: &StreamTableMeta) -> bool {
     let change_schema = config::pg_trickle_change_buffer_schema();
     let source_oids = get_source_oids_for_st(st.pgt_id);
 
-    for oid in &source_oids {
-        let has_rows = Spi::get_one::<bool>(&format!(
-            "SELECT EXISTS(SELECT 1 FROM {}.changes_{} LIMIT 1)",
-            change_schema,
-            oid.to_u32(),
-        ))
-        .unwrap_or(Some(false))
-        .unwrap_or(false);
-
-        if has_rows {
-            return true;
-        }
+    if source_oids.is_empty() {
+        return false;
     }
-    false
+
+    // PERF-6: Build a single UNION ALL EXISTS query for all sources.
+    // Each arm is `SELECT 1 FROM <schema>.changes_<oid> LIMIT 1`.
+    // The outer EXISTS returns true if ANY source has pending rows.
+    let union_arms: Vec<String> = source_oids
+        .iter()
+        .map(|oid| {
+            format!(
+                "SELECT 1 FROM {}.changes_{} LIMIT 1",
+                change_schema,
+                oid.to_u32(),
+            )
+        })
+        .collect();
+    let batched_sql = format!("SELECT EXISTS({})", union_arms.join(" UNION ALL "));
+
+    Spi::get_one::<bool>(&batched_sql) // nosemgrep: rust.spi.get-one.dynamic-format — change_schema is config-derived, OIDs are system values
+        .unwrap_or(Some(false))
+        .unwrap_or(false)
 }
 
 /// Returns `true` if any STREAM_TABLE upstream has buffered changes beyond
@@ -6368,5 +6422,43 @@ mod tests {
         assert!(!state.unit_states[&uid_a].succeeded);
         assert_eq!(state.unit_states[&uid_b].remaining_upstreams, 1);
         assert!(!state.unit_states[&uid_b].succeeded);
+    }
+
+    // ── TEST-9: Unit tests for compute_per_db_quota ───────────────────
+
+    #[test]
+    fn test_per_db_quota_disabled_returns_max_concurrent() {
+        // per_db_quota = 0 means disabled — fall back to max_concurrent_refreshes
+        assert_eq!(compute_per_db_quota(0, 4, 10, 0), 4);
+        assert_eq!(compute_per_db_quota(-1, 8, 20, 5), 8);
+    }
+
+    #[test]
+    fn test_per_db_quota_burst_when_spare_capacity() {
+        // Under 80% of cluster capacity → allow up to 150% of base quota
+        // base = 4, max_cluster = 20, burst_threshold = ceil(20*0.8) = 16
+        // current_active = 5 (< 16) → burst = max(4*3/2, 4+1) = 6
+        assert_eq!(compute_per_db_quota(4, 8, 20, 5), 6);
+    }
+
+    #[test]
+    fn test_per_db_quota_no_burst_at_capacity() {
+        // At or above 80% of cluster capacity → return base quota
+        // base = 4, max_cluster = 20, burst_threshold = 16, current_active = 16
+        assert_eq!(compute_per_db_quota(4, 8, 20, 16), 4);
+        assert_eq!(compute_per_db_quota(4, 8, 20, 20), 4);
+    }
+
+    #[test]
+    fn test_per_db_quota_minimum_one() {
+        // Even with per_db_quota = 0 and max_concurrent = 0, at least 1
+        assert_eq!(compute_per_db_quota(0, 0, 10, 0), 1);
+    }
+
+    #[test]
+    fn test_per_db_quota_small_base_still_bursts() {
+        // base = 1, max_cluster = 10, threshold = 8, active = 0
+        // burst = max(1*3/2=1, 1+1=2) = 2
+        assert_eq!(compute_per_db_quota(1, 4, 10, 0), 2);
     }
 }

@@ -56,6 +56,10 @@ pub enum PgTrickleError {
     #[error("query too complex: {0}")]
     QueryTooComplex(String),
 
+    /// SEC-1: The current role does not own the stream table's storage table.
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     // ── Schema errors — may require reinitialize ─────────────────────────
     /// An upstream (source) table was dropped.
     #[error("upstream table dropped: OID {0}")]
@@ -151,7 +155,9 @@ impl PgTrickleError {
     pub fn counts_toward_suspension(&self) -> bool {
         !matches!(
             self,
-            PgTrickleError::RefreshSkipped(_) | PgTrickleError::SpiPermissionError(_)
+            PgTrickleError::RefreshSkipped(_)
+                | PgTrickleError::SpiPermissionError(_)
+                | PgTrickleError::PermissionDenied(_)
         )
     }
 }
@@ -263,6 +269,7 @@ impl PgTrickleError {
             | PgTrickleError::AlreadyExists(_)
             | PgTrickleError::InvalidArgument(_)
             | PgTrickleError::QueryTooComplex(_)
+            | PgTrickleError::PermissionDenied(_)
             | PgTrickleError::WatermarkBackwardMovement(_)
             | PgTrickleError::WatermarkGroupNotFound(_)
             | PgTrickleError::WatermarkGroupAlreadyExists(_) => PgTrickleErrorKind::User,

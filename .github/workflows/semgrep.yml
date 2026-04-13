@@ -2,9 +2,8 @@
 # Semgrep Workflow — repository-specific static checks for extension security
 # hotspots such as dynamic SPI SQL and SECURITY DEFINER SQL.
 #
-# This first pass is advisory: findings are uploaded as SARIF but do not fail
-# CI yet. That keeps the initial rollout useful without immediately blocking on
-# the existing dynamic-SPI surface area.
+# This workflow is blocking: findings that are not suppressed with nosemgrep
+# will fail the CI check, preventing merge.
 # =============================================================================
 name: Semgrep
 
@@ -16,9 +15,13 @@ on:
       - 'sql/**'
       - '.semgrep/**'
       - '.github/workflows/semgrep.yml'
-  # No pull_request trigger: Semgrep rules are advisory-only and won't block
-  # a merge, so running on every PR provides no gate value. Weekly schedule
-  # + push-to-main covers main-branch drift.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'sql/**'
+      - '.semgrep/**'
+      - '.github/workflows/semgrep.yml'
   schedule:
     - cron: '0 10 * * 1'
   workflow_dispatch:
@@ -48,10 +51,7 @@ jobs:
         run: python -m pip install --upgrade semgrep
 
       - name: Run Semgrep ruleset
-        # Advisory-only: upload findings as SARIF but do not block CI.
-        # Semgrep exits with code 2 when blocking findings exist; continue-on-error
-        # prevents that from failing the job while still uploading the SARIF report.
-        continue-on-error: true
+        # STAB-3: Blocking — unsuppressed findings fail the CI check.
         run: semgrep scan --config .semgrep/pg_trickle.yml --sarif --output semgrep.sarif
 
       - name: Filter suppressed findings from SARIF

@@ -315,6 +315,24 @@ pub static PGS_IVM_TOPK_MAX_LIMIT: GucSetting<i32> = GucSetting::<i32>::new(1000
 /// The default (100) is sufficient for virtually all practical hierarchies.
 pub static PGS_IVM_RECURSIVE_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(100);
 
+/// STAB-1: Cluster-wide connection pooler mode.
+///
+/// Overrides the per-ST `pooler_compatibility_mode` for all stream tables.
+/// - `"off"` (default): per-ST setting governs (normal behaviour).
+/// - `"transaction"`: globally disable prepared-statement reuse and suppress
+///   NOTIFY emissions, matching PgBouncer transaction-pooling requirements.
+/// - `"session"`: explicit opt-in to session mode — same as `"off"` today,
+///   reserved for future session-pinning optimisations.
+pub static PGS_CONNECTION_POOLER_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"off"));
+
+/// DB-5: History retention in days.
+///
+/// The scheduler runs a daily cleanup that deletes rows from
+/// `pgtrickle.pgt_refresh_history` older than this many days.
+/// Set to 0 to disable automatic cleanup (history grows unbounded).
+pub static PGS_HISTORY_RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(90);
+
 /// WAKE-1: Event-driven scheduler wake via LISTEN/NOTIFY.
 ///
 /// When enabled, CDC triggers emit `pg_notify('pgtrickle_wake', '')` after
@@ -627,7 +645,9 @@ pub static PGS_UNLOGGED_BUFFERS: GucSetting<bool> = GucSetting::<bool>::new(fals
 /// - `"auto"` (default): use DELETE+INSERT when `delta_rows / target_rows`
 ///   is below `merge_strategy_threshold`; MERGE otherwise.
 /// - `"merge"`: always use the MERGE statement.
-/// - `"delete_insert"`: always use DELETE + INSERT (two separate statements).
+///
+/// The former `"delete_insert"` value was removed in v0.19.0 (CORR-1).
+/// Setting it now logs a WARNING and falls back to `"auto"`.
 pub static PGS_MERGE_STRATEGY: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"auto"));
 
@@ -646,8 +666,6 @@ pub enum MergeStrategy {
     Auto,
     /// Always MERGE.
     Merge,
-    /// Always DELETE + INSERT.
-    DeleteInsert,
 }
 
 impl MergeStrategy {
@@ -655,7 +673,6 @@ impl MergeStrategy {
         match self {
             MergeStrategy::Auto => "auto",
             MergeStrategy::Merge => "merge",
-            MergeStrategy::DeleteInsert => "delete_insert",
         }
     }
 }
@@ -663,7 +680,16 @@ impl MergeStrategy {
 fn normalize_merge_strategy(value: Option<String>) -> MergeStrategy {
     match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("merge") => MergeStrategy::Merge,
-        Some("delete_insert") => MergeStrategy::DeleteInsert,
+        Some("delete_insert") => {
+            // CORR-1: The delete_insert strategy was removed in v0.19.0.
+            // It was semantically unsafe for aggregate/DISTINCT queries.
+            pgrx::warning!(
+                "pg_trickle.merge_strategy = 'delete_insert' was removed in v0.19.0 \
+                 (unsafe for aggregate/DISTINCT queries). Falling back to 'auto'. \
+                 Update your postgresql.conf to use 'auto' or 'merge'."
+            );
+            MergeStrategy::Auto
+        }
         _ => MergeStrategy::Auto,
     }
 }
@@ -1469,12 +1495,12 @@ pub fn register_gucs() {
     // PH-D1: MERGE strategy override.
     GucRegistry::define_string_guc(
         c"pg_trickle.merge_strategy",
-        c"Delta apply strategy: auto (default), merge, delete_insert.",
+        c"Delta apply strategy: auto (default) or merge.",
         c"'auto' (default) uses DELETE+INSERT for sub-1% deltas (delta_rows / target_rows \
            below merge_strategy_threshold) and MERGE otherwise. \
            'merge' always uses the MERGE statement. \
-           'delete_insert' always uses separate DELETE + INSERT statements, \
-           avoiding the MERGE join cost for small deltas against large tables.",
+           The former 'delete_insert' value was removed in v0.19.0 (CORR-1); \
+           setting it logs a WARNING and falls back to 'auto'.",
         &PGS_MERGE_STRATEGY,
         GucContext::Suset,
         GucFlags::default(),
@@ -1490,6 +1516,33 @@ pub fn register_gucs() {
         &PGS_MERGE_STRATEGY_THRESHOLD,
         0.001, // min
         1.0,   // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // STAB-1: Cluster-wide connection pooler mode.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.connection_pooler_mode",
+        c"Cluster-wide connection pooler compatibility mode: off (default), transaction, session.",
+        c"'off' — per-ST pooler_compatibility_mode governs. \
+           'transaction' — globally disable prepared-statement reuse and suppress \
+           NOTIFY emissions for PgBouncer transaction-pool compatibility. \
+           'session' — explicit opt-in to session mode (same as off today).",
+        &PGS_CONNECTION_POOLER_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // DB-5: History retention in days.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.history_retention_days",
+        c"Number of days to retain rows in pgt_refresh_history (default: 90).",
+        c"The scheduler runs a daily cleanup that deletes rows from \
+           pgtrickle.pgt_refresh_history older than this many days. \
+           Set to 0 to disable automatic cleanup (history grows unbounded).",
+        &PGS_HISTORY_RETENTION_DAYS,
+        0,      // min (disabled)
+        36_500, // max (~100 years)
         GucContext::Suset,
         GucFlags::default(),
     );
@@ -1879,6 +1932,29 @@ pub fn pg_trickle_merge_strategy_threshold() -> f64 {
     PGS_MERGE_STRATEGY_THRESHOLD.get()
 }
 
+/// STAB-1: Returns `true` when the cluster-wide pooler mode is `"transaction"`,
+/// which overrides per-ST `pooler_compatibility_mode` for all stream tables.
+pub fn pg_trickle_connection_pooler_transaction_mode() -> bool {
+    PGS_CONNECTION_POOLER_MODE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(str::to_owned))
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("transaction")
+}
+
+/// STAB-1: Effective pooler compatibility check — `true` if either the per-ST
+/// flag or the cluster-wide GUC requires pooler-safe behaviour.
+pub fn effective_pooler_compat(per_st_flag: bool) -> bool {
+    per_st_flag || pg_trickle_connection_pooler_transaction_mode()
+}
+
+/// DB-5: Returns the history retention period in days (0 = disabled).
+pub fn pg_trickle_history_retention_days() -> i32 {
+    PGS_HISTORY_RETENTION_DAYS.get()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2203,9 +2279,10 @@ mod tests {
             normalize_merge_strategy(Some("merge".to_string())),
             MergeStrategy::Merge
         );
+        // CORR-1: delete_insert now falls back to Auto with a warning
         assert_eq!(
             normalize_merge_strategy(Some("delete_insert".to_string())),
-            MergeStrategy::DeleteInsert
+            MergeStrategy::Auto
         );
         assert_eq!(
             normalize_merge_strategy(Some("auto".to_string())),
@@ -2214,7 +2291,7 @@ mod tests {
         // Case-insensitive
         assert_eq!(
             normalize_merge_strategy(Some("DELETE_INSERT".to_string())),
-            MergeStrategy::DeleteInsert
+            MergeStrategy::Auto
         );
         assert_eq!(
             normalize_merge_strategy(Some("MERGE".to_string())),
@@ -2224,11 +2301,7 @@ mod tests {
 
     #[test]
     fn test_normalize_merge_strategy_roundtrip_via_as_str() {
-        for strategy in [
-            MergeStrategy::Auto,
-            MergeStrategy::Merge,
-            MergeStrategy::DeleteInsert,
-        ] {
+        for strategy in [MergeStrategy::Auto, MergeStrategy::Merge] {
             assert_eq!(
                 normalize_merge_strategy(Some(strategy.as_str().to_string())),
                 strategy

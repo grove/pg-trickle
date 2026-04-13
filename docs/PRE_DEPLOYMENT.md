@@ -254,6 +254,55 @@ DROP TABLE _deploy_test_src;
 
 ---
 
+## Connection Pooler Compatibility
+
+> **Added in v0.19.0 (UX-4 / STAB-1).**
+
+pg_trickle uses prepared statements and `NOTIFY` internally. These features
+require special handling when a connection pooler sits between the application
+and PostgreSQL.
+
+### PgBouncer Transaction Mode
+
+In PgBouncer **transaction pooling** mode, each transaction may land on a
+different server-side connection. Prepared statements and LISTEN/NOTIFY do
+not survive across transactions.
+
+**Recommended configuration:**
+
+```ini
+# postgresql.conf
+pg_trickle.connection_pooler_mode = 'transaction'
+```
+
+This cluster-wide GUC:
+- Disables prepared-statement reuse for all stream tables.
+- Suppresses `NOTIFY pg_trickle_refresh` emissions (listeners on other
+  connections will not receive them anyway in transaction mode).
+
+Alternatively, enable pooler compatibility per stream table:
+
+```sql
+SELECT pgtrickle.alter_stream_table('my_stream_table',
+    pooler_compatibility_mode => true);
+```
+
+### PgBouncer Session Mode
+
+Session pooling is fully compatible — no special configuration needed.
+
+### pgcat / Supavisor
+
+These poolers generally support prepared statements and NOTIFY. Set
+`pg_trickle.connection_pooler_mode = 'off'` (the default).
+
+### Kubernetes / CNPG
+
+See [Scaling — CNPG](SCALING.md#cnpg--kubernetes-operations) for connection
+pooler configuration in Kubernetes environments.
+
+---
+
 ## Related Documentation
 
 - [Getting Started](GETTING_STARTED.md) — First stream table in 5 minutes

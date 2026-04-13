@@ -5111,61 +5111,61 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > **v0.19.0 total: ~4–5 weeks**
 
 **Exit criteria:**
-- [ ] CORR-1: `delete_insert` strategy removed; `ERROR` raised on old GUC value
-- [ ] CORR-2: JOIN delta R₀ fix: `UPDATE key + DELETE partner` in same cycle produces correct stream table result
-- [ ] CORR-3: `ALTER TYPE` / `ALTER DOMAIN` DDL events trigger stream table invalidation
-- [ ] CORR-4: `ALTER POLICY` DDL events trigger stream table invalidation
-- [ ] CORR-5: Keyless content-hash collision test passes with two identical-content rows
-- [ ] CORR-6: Zero `.unwrap()` in `src/dvm/operators/` outside test modules
-- [ ] SEC-1: Non-owner `drop_stream_table`/`alter_stream_table` raises `ERROR: must be owner`
-- [ ] STAB-1: `pg_trickle.connection_pooler_mode` GUC added; transaction mode disables prepared statements
-- [ ] STAB-2: Background worker exits cleanly on hot standby with correct log message
-- [ ] STAB-3: Semgrep elevated to blocking; zero findings verified
-- [ ] STAB-4: `auto_backoff` GUC: interval doubles after 3 consecutive falling-behind alerts
-- [ ] STAB-5: Zero `.unwrap()` in scheduler hot path outside test modules
-- [ ] PERF-1: WAL decoder writes correct `old_col_*` values for UPDATE rows
-- [ ] PERF-2: WAL decoder uses exact action string comparison
-- [ ] PERF-4: Catalog indexes on `pgt_relid` and `pgt_dependencies(pgt_id)` exist after upgrade
-- [ ] PERF-5: Zero `units().find()` in scheduler; HashMap-based O(1) lookup
-- [ ] PERF-6: `has_table_source_changes()` executes single SPI query regardless of source count
-- [ ] SCAL-1: `docs/SCALING.md` replica section added
-- [ ] UX-1: `META.json` `release_status` → `"stable"`; PGXN listing updated
-- [ ] UX-2: Docker Hub release automation wired in GitHub Actions
+- [x] CORR-1: `delete_insert` strategy removed; `ERROR` raised on old GUC value
+- [x] CORR-2: JOIN delta R₀ fix: `UPDATE key + DELETE partner` in same cycle produces correct stream table result
+- [x] CORR-3: `ALTER TYPE` / `ALTER DOMAIN` DDL events trigger stream table invalidation
+- [x] CORR-4: `ALTER POLICY` DDL events trigger stream table invalidation
+- [x] CORR-5: Keyless content-hash collision test passes with two identical-content rows
+- [x] CORR-6: Zero `.unwrap()` in `src/dvm/operators/` outside test modules
+- [x] SEC-1: Non-owner `drop_stream_table`/`alter_stream_table` raises `ERROR: must be owner`
+- [x] STAB-1: `pg_trickle.connection_pooler_mode` GUC added; transaction mode disables prepared statements
+- [x] STAB-2: Background worker exits cleanly on hot standby with correct log message
+- [x] STAB-3: Semgrep elevated to blocking; zero findings verified
+- [x] STAB-4: `auto_backoff` GUC: interval doubles after 3 consecutive falling-behind alerts
+- [x] STAB-5: Zero `.unwrap()` in scheduler hot path outside test modules
+- [x] PERF-1: WAL decoder writes correct `old_col_*` values for UPDATE rows
+- [x] PERF-2: WAL decoder uses exact action string comparison
+- [x] PERF-4: Catalog indexes on `pgt_relid` and `pgt_dependencies(pgt_id)` exist after upgrade
+- [x] PERF-5: Zero `units().find()` in scheduler; HashMap-based O(1) lookup
+- [x] PERF-6: `has_table_source_changes()` executes single SPI query regardless of source count
+- [x] SCAL-1: `docs/SCALING.md` replica section added
+- [x] UX-1: `META.json` `release_status` → `"stable"`; PGXN listing updated
+- [x] UX-2: Docker Hub release automation wired in GitHub Actions
 - [ ] UX-3: apt/rpm packages available via PGDG
-- [ ] UX-4: `docs/PRE_DEPLOYMENT.md` connection pooler compatibility guide added
-- [ ] UX-6: `drop_stream_table` defaults to `cascade => false`
-- [ ] UX-7: `UpstreamTableDropped`/`UpstreamSchemaChanged` show table name instead of raw OID
-- [ ] UX-8: `refresh_stream_table` emits NOTICE when refresh is skipped
-- [ ] UX-9: CONFIGURATION.md TOC complete; no duplicate entries
-- [ ] TEST-1: 3 JOIN delta R₀ E2E tests pass
-- [ ] TEST-2: 3 DDL tracking E2E tests pass
-- [ ] TEST-3: 5+ WAL decoder unit tests pass with `wal_enabled = true`
-- [ ] TEST-4: PgBouncer transaction-mode integration test passes
-- [ ] TEST-5: Read-replica guard integration test passes
-- [ ] TEST-6: 3 ownership-check privilege E2E tests pass
-- [ ] TEST-7: Scheduler dispatch benchmark baseline saved
-- [ ] TEST-8: Upgrade E2E tests pass (pre- and post-upgrade stream table correctness)
-- [ ] DB-1: No duplicate `'DIFFERENTIAL'` in CHECK constraints
-- [ ] DB-2: `pgt_refresh_history.pgt_id` FK with `ON DELETE CASCADE` added
-- [ ] DB-3: `pgtrickle.pgt_schema_version` table present and seeded
-- [ ] DB-4: `pgtrickle_refresh` channel renamed to `pg_trickle_refresh`
-- [ ] DB-5: `pg_trickle.history_retention_days` GUC active; daily cleanup deletes old rows
-- [ ] DB-6: `docs/SQL_REFERENCE.md` stability contract section published
-- [ ] DB-7: `sql/pg_trickle--0.18.0--0.19.0.sql` applies DB-1 through DB-4 changes
-- [ ] DB-8: `drop_stream_table` leaves no orphan rows in `pgt_change_tracking`
-- [ ] CORR-7: TRUNCATE + INSERT in same transaction — stream table correct after refresh
-- [ ] CORR-8: NULL join-key delta correct for INNER, LEFT, and FULL JOIN
-- [ ] SEC-2: SQL injection audit complete — zero unquoted interpolations in refresh SQL
-- [ ] STAB-6: Worker crash recovery sweep cleans orphaned locks and stuck REFRESHING state
-- [ ] STAB-7: Version mismatch WARNING emitted after `ALTER EXTENSION` without restart
-- [ ] PERF-7: Delta branch pruning skips zero-change source arms in multi-JOIN
-- [ ] PERF-8: Index-aware MERGE uses nested loop for small deltas on indexed tables
-- [ ] SCAL-3: `docs/SCALING.md` CNPG/Kubernetes section published
-- [ ] SCAL-4: Partitioning spike report written with concrete findings
-- [ ] UX-10: TUI sparkline column visible for refresh latency trend
-- [ ] UX-11: `pgtrickle.version()` returns extension, library, and PG versions
-- [ ] TEST-9: 5+ unit tests extracted from E2E-only refresh/scheduler logic
-- [ ] TEST-10: TPC-H nightly runs at SF-1 and SF-10 with correct results
+- [x] UX-4: `docs/PRE_DEPLOYMENT.md` connection pooler compatibility guide added
+- [x] UX-6: `drop_stream_table` defaults to `cascade => false`
+- [x] UX-7: `UpstreamTableDropped`/`UpstreamSchemaChanged` show table name instead of raw OID
+- [x] UX-8: `refresh_stream_table` emits NOTICE when refresh is skipped
+- [x] UX-9: CONFIGURATION.md TOC complete; no duplicate entries
+- [x] TEST-1: 3 JOIN delta R₀ E2E tests pass
+- [x] TEST-2: 3 DDL tracking E2E tests pass
+- [x] TEST-3: 5+ WAL decoder unit tests pass with `wal_enabled = true`
+- [x] TEST-4: PgBouncer transaction-mode integration test passes
+- [x] TEST-5: Read-replica guard integration test passes
+- [x] TEST-6: 3 ownership-check privilege E2E tests pass
+- [x] TEST-7: Scheduler dispatch benchmark baseline saved
+- [x] TEST-8: Upgrade E2E tests pass (pre- and post-upgrade stream table correctness)
+- [x] DB-1: No duplicate `'DIFFERENTIAL'` in CHECK constraints
+- [x] DB-2: `pgt_refresh_history.pgt_id` FK with `ON DELETE CASCADE` added
+- [x] DB-3: `pgtrickle.pgt_schema_version` table present and seeded
+- [x] DB-4: `pgtrickle_refresh` channel renamed to `pg_trickle_refresh`
+- [x] DB-5: `pg_trickle.history_retention_days` GUC active; daily cleanup deletes old rows
+- [x] DB-6: `docs/SQL_REFERENCE.md` stability contract section published
+- [x] DB-7: `sql/pg_trickle--0.18.0--0.19.0.sql` applies DB-1 through DB-4 changes
+- [x] DB-8: `drop_stream_table` leaves no orphan rows in `pgt_change_tracking`
+- [x] CORR-7: TRUNCATE + INSERT in same transaction — stream table correct after refresh
+- [x] CORR-8: NULL join-key delta correct for INNER, LEFT, and FULL JOIN
+- [x] SEC-2: SQL injection audit complete — zero unquoted interpolations in refresh SQL
+- [x] STAB-6: Worker crash recovery sweep cleans orphaned locks and stuck REFRESHING state
+- [x] STAB-7: Version mismatch WARNING emitted after `ALTER EXTENSION` without restart
+- [x] PERF-7: Delta branch pruning skips zero-change source arms in multi-JOIN
+- [x] PERF-8: Index-aware MERGE uses nested loop for small deltas on indexed tables
+- [x] SCAL-3: `docs/SCALING.md` CNPG/Kubernetes section published
+- [x] SCAL-4: Partitioning spike report written with concrete findings
+- [x] UX-10: TUI sparkline column visible for refresh latency trend
+- [x] UX-11: `pgtrickle.version()` returns extension, library, and PG versions
+- [x] TEST-9: 5+ unit tests extracted from E2E-only refresh/scheduler logic
+- [x] TEST-10: TPC-H nightly runs at SF-1 and SF-10 with correct results
 - [ ] Extension upgrade path tested (`0.18.0 → 0.19.0`)
 - [ ] `just check-version-sync` passes
 

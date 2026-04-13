@@ -2634,7 +2634,7 @@ pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
 ///
 /// When user triggers are detected (and the GUC is not `"off"`), they are
 /// suppressed during the TRUNCATE + INSERT via `DISABLE TRIGGER USER` /
-/// `ENABLE TRIGGER USER`. A `NOTIFY pgtrickle_refresh` is emitted so
+/// `ENABLE TRIGGER USER`. A `NOTIFY pg_trickle_refresh` is emitted so
 /// listeners know a FULL refresh occurred.
 ///
 /// **Note:** Row-level user triggers do NOT fire correctly for FULL refresh.
@@ -2818,14 +2818,14 @@ pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickl
         Spi::run(&format!("ALTER TABLE {quoted_table} ENABLE TRIGGER USER"))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
 
-        // PB2: Skip NOTIFY when pooler compatibility mode is enabled.
-        if !st.pooler_compatibility_mode {
+        // PB2/STAB-1: Skip NOTIFY when pooler compatibility mode is enabled.
+        if !crate::config::effective_pooler_compat(st.pooler_compatibility_mode) {
             // Escape single quotes in the JSON payload.
             let escaped_name = name.replace('\'', "''");
             let escaped_schema = schema.replace('\'', "''");
             // NOTIFY does not support parameterized payloads; single quotes are escaped above.
             let notify_sql = format!(
-                "NOTIFY pgtrickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
+                "NOTIFY pg_trickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
                  \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\", \"rows\": {rows_inserted}}}'"
             );
             Spi::run(&notify_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -4978,7 +4978,6 @@ pub fn execute_differential_refresh(
     // merge_strategy GUC and the delta-to-target ratio heuristic.
     let merge_strategy = crate::config::pg_trickle_merge_strategy();
     let use_delete_insert = match merge_strategy {
-        crate::config::MergeStrategy::DeleteInsert => true,
         crate::config::MergeStrategy::Merge => false,
         crate::config::MergeStrategy::Auto => {
             // Heuristic: use DELETE+INSERT when delta is a small fraction
@@ -5138,9 +5137,10 @@ pub fn execute_differential_refresh(
         || resolved
             .parameterized_merge_sql
             .contains("__PGS_NEW_LSN_pgt_");
+    // PB2/STAB-1: Disable prepared statements when pooler compat mode is on.
     let use_prepared = crate::config::pg_trickle_use_prepared_statements()
         && was_cache_hit
-        && !st.pooler_compatibility_mode
+        && !crate::config::effective_pooler_compat(st.pooler_compatibility_mode)
         && st.st_partition_key.is_none()
         && !has_pgt_placeholders;
 
@@ -8379,6 +8379,73 @@ mod pg_tests {
         assert!(
             QueryComplexityClass::Join.diff_cost_factor()
                 < QueryComplexityClass::JoinAggregate.diff_cost_factor()
+        );
+    }
+
+    // ── TEST-9: Unit tests for classify_query_complexity ──────────────
+
+    #[test]
+    fn test_classify_plain_scan() {
+        assert_eq!(
+            classify_query_complexity("SELECT id, val FROM my_table"),
+            QueryComplexityClass::Scan
+        );
+    }
+
+    #[test]
+    fn test_classify_filter() {
+        assert_eq!(
+            classify_query_complexity("SELECT id FROM t WHERE id > 10"),
+            QueryComplexityClass::Filter
+        );
+    }
+
+    #[test]
+    fn test_classify_aggregate() {
+        assert_eq!(
+            classify_query_complexity("SELECT dept, count(*) FROM emp GROUP BY dept"),
+            QueryComplexityClass::Aggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_join() {
+        assert_eq!(
+            classify_query_complexity(
+                "SELECT a.id, b.name FROM orders a JOIN customers b ON a.cust_id = b.id"
+            ),
+            QueryComplexityClass::Join
+        );
+    }
+
+    #[test]
+    fn test_classify_join_aggregate() {
+        assert_eq!(
+            classify_query_complexity(
+                "SELECT c.name, sum(o.amount) FROM orders o \
+                 JOIN customers c ON o.cust_id = c.id GROUP BY c.name"
+            ),
+            QueryComplexityClass::JoinAggregate
+        );
+    }
+
+    #[test]
+    fn test_classify_left_join() {
+        assert_eq!(
+            classify_query_complexity("SELECT a.id, b.val FROM t1 a LEFT JOIN t2 b ON a.id = b.id"),
+            QueryComplexityClass::Join
+        );
+    }
+
+    #[test]
+    fn test_classify_case_insensitive() {
+        assert_eq!(
+            classify_query_complexity("select id from t where id > 0"),
+            QueryComplexityClass::Filter
+        );
+        assert_eq!(
+            classify_query_complexity("SELECT a.x FROM t1 a inner join t2 b on a.id = b.id"),
+            QueryComplexityClass::Join
         );
     }
 }
