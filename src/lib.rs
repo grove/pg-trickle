@@ -285,6 +285,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
 
 CREATE INDEX IF NOT EXISTS idx_pgt_status ON pgtrickle.pgt_stream_tables (status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pgt_name ON pgtrickle.pgt_stream_tables (pgt_schema, pgt_name);
+-- PERF-4: Scheduler hot‐path lookup by relation OID.
+CREATE INDEX IF NOT EXISTS idx_pgt_relid ON pgtrickle.pgt_stream_tables (pgt_relid);
 
 -- DAG edges
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
@@ -303,6 +305,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
 );
 
 CREATE INDEX IF NOT EXISTS idx_deps_source ON pgtrickle.pgt_dependencies (source_relid);
+-- PERF-4: Fast lookup by pgt_id (non‐PK prefix for multi‐column PK).
+CREATE INDEX IF NOT EXISTS idx_deps_pgt_id ON pgtrickle.pgt_dependencies (pgt_id);
 
 -- Refresh history / audit log
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
@@ -397,6 +401,17 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_watermark_groups (
     tolerance_secs     DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- DB-3: Schema version tracking table.
+-- Records which schema migration versions have been applied to this database.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_schema_version (
+    version     TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    description TEXT
+);
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES ('0.19.0', 'Initial schema version tracking')
+ON CONFLICT (version) DO NOTHING;
 
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_stream_tables', '');
 SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_dependencies', '');

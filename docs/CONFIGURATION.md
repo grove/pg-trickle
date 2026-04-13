@@ -71,6 +71,10 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
     - [pg\_trickle.delta\_amplification\_threshold](#pg_trickledelta_amplification_threshold)
     - [pg\_trickle.algebraic\_drift\_reset\_cycles](#pg_tricklealgebraic_drift_reset_cycles)
     - [pg\_trickle.agg\_diff\_cardinality\_threshold](#pg_trickleagg_diff_cardinality_threshold)
+  - [Connection Pooler](#connection-pooler)
+    - [pg\_trickle.connection\_pooler\_mode](#pg_trickleconnection_pooler_mode)
+  - [History & Retention](#history--retention)
+    - [pg\_trickle.history\_retention\_days](#pg_tricklehistory_retention_days)
   - [Circular Dependencies](#circular-dependencies)
     - [pg\_trickle.allow\_circular](#pg_trickleallow_circular)
     - [pg\_trickle.max\_fixpoint\_iterations](#pg_tricklemax_fixpoint_iterations)
@@ -637,7 +641,7 @@ SET pg_trickle.merge_join_strategy = 'auto';
 |---|---|
 | Type | `text` |
 | Default | `'auto'` |
-| Values | `auto`, `merge`, `delete_insert` |
+| Values | `auto`, `merge` |
 | Context | `SUSET` |
 | Restart Required | No |
 
@@ -645,7 +649,10 @@ SET pg_trickle.merge_join_strategy = 'auto';
 |---|---|
 | `auto` (default) | Use DELETE+INSERT when `delta_rows / target_rows` is below [`merge_strategy_threshold`](#pg_tricklemerge_strategy_threshold); MERGE otherwise |
 | `merge` | Always use the PostgreSQL MERGE statement |
-| `delete_insert` | Always use separate DELETE + INSERT statements |
+
+> **Breaking change (v0.19.0):** The `delete_insert` value was removed in
+> v0.19.0 (CORR-1) because it was semantically unsafe for aggregate and
+> DISTINCT queries. Setting it now logs a WARNING and falls back to `auto`.
 
 The DELETE+INSERT strategy avoids the MERGE join cost by executing two targeted statements:
 a DELETE for removed rows (matched by `__pgt_row_id`), then an INSERT for new rows.
@@ -654,12 +661,11 @@ scanning the entire target for the MERGE join.
 
 **Tuning Guidance:**
 - **Most workloads**: Leave at `auto` — the heuristic picks DELETE+INSERT for small deltas automatically.
-- **Append-heavy workloads**: Consider `delete_insert` if deltas are consistently tiny relative to the target.
 - **Correctness concerns**: The `merge` setting preserves the pre-v0.16.0 behaviour.
 
 ```sql
--- Force DELETE+INSERT for all differential refreshes
-SET pg_trickle.merge_strategy = 'delete_insert';
+-- Force MERGE for all differential refreshes
+SET pg_trickle.merge_strategy = 'merge';
 
 -- Revert to automatic heuristics
 SET pg_trickle.merge_strategy = 'auto';
@@ -1896,6 +1902,64 @@ Set to `0` to disable the warning.
 ```sql
 -- Warn when GROUP BY cardinality is below 100
 SET pg_trickle.agg_diff_cardinality_threshold = 100;
+```
+
+---
+
+### Connection Pooler
+
+> **v0.19.0+ (STAB-1).**
+
+#### pg_trickle.connection_pooler_mode
+
+Cluster-wide connection pooler compatibility override.
+
+| Property | Value |
+|----------|-------|
+| Type | `string` |
+| Default | `'off'` |
+| Valid values | `'off'`, `'transaction'`, `'session'` |
+| Context | `SUSET` |
+
+| Value | Behaviour |
+|-------|-----------|
+| `off` (default) | Per-ST `pooler_compatibility_mode` governs |
+| `transaction` | Globally disable prepared-statement reuse and suppress NOTIFY emissions (PgBouncer transaction-pool compatibility) |
+| `session` | Explicit opt-in to session mode (same as `off` today, reserved for future use) |
+
+See [Connection Pooler Compatibility](PRE_DEPLOYMENT.md#connection-pooler-compatibility)
+for deployment guidance.
+
+```sql
+-- Enable transaction-mode pooler compatibility globally
+SET pg_trickle.connection_pooler_mode = 'transaction';
+```
+
+---
+
+### History & Retention
+
+> **v0.19.0+ (DB-5).**
+
+#### pg_trickle.history_retention_days
+
+Number of days to retain rows in `pgtrickle.pgt_refresh_history`.
+
+| Property | Value |
+|----------|-------|
+| Type | `integer` |
+| Default | `90` |
+| Min | `0` (disabled) |
+| Max | `36500` (~100 years) |
+| Context | `SUSET` |
+
+The scheduler runs a daily background cleanup that deletes rows older than
+this many days. Set to `0` to disable automatic cleanup (history grows
+unbounded — monitor disk usage).
+
+```sql
+-- Keep 30 days of refresh history
+SET pg_trickle.history_retention_days = 30;
 ```
 
 ---

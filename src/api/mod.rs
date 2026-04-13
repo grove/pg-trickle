@@ -22,6 +22,20 @@ use crate::wal_decoder;
 
 // ── G13-EH: Enriched error reporting ────────────────────────────────────────
 
+/// UX-7: Resolve a relation OID to a human-readable `schema.table` name.
+/// Falls back to `OID <n>` if the relation no longer exists.
+fn resolve_oid_to_name(oid: u32) -> String {
+    Spi::get_one_with_args::<String>(
+        "SELECT format('%I.%I', n.nspname, c.relname) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = $1",
+        &[pgrx::pg_sys::Oid::from(oid).into()],
+    )
+    .unwrap_or(None)
+    .unwrap_or_else(|| format!("OID {}", oid))
+}
+
 /// Raise a `PgTrickleError` as a PostgreSQL ERROR, adding DETAIL and HINT
 /// fields for well-known error types that benefit from additional context.
 ///
@@ -80,9 +94,10 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             unreachable!()
         }
         PgTrickleError::UpstreamSchemaChanged(oid) => {
+            let table_name = resolve_oid_to_name(*oid);
             ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_INVALID_TABLE_DEFINITION,
-                format!("upstream table schema changed: OID {}", oid),
+                format!("upstream table schema changed: {}", table_name),
                 "",
             )
             .set_detail(
@@ -192,6 +207,21 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        // SEC-1: Ownership check on drop/alter stream table.
+        PgTrickleError::PermissionDenied(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                format!("permission denied: {}", msg),
+                "",
+            )
+            .set_hint(
+                "Only the owner of the stream table's storage table (or a superuser) \
+                 can drop or alter the stream table."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
         // STAB-6: SQLSTATE coverage for remaining error variants.
         PgTrickleError::TypeMismatch(msg) => {
             ErrorReport::new(
@@ -208,9 +238,10 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             unreachable!()
         }
         PgTrickleError::UpstreamTableDropped(oid) => {
+            let table_name = resolve_oid_to_name(*oid);
             ErrorReport::new(
                 PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
-                format!("upstream table dropped: OID {}", oid),
+                format!("upstream table dropped: {}", table_name),
                 "",
             )
             .set_detail(
@@ -3232,6 +3263,9 @@ fn alter_stream_table_impl(
     let mut st = StreamTableMeta::get_by_name(&schema, &table_name)?;
     let qualified_name = format!("{schema}.{table_name}");
 
+    // SEC-1: Ownership check — only the owner (or superuser) can alter.
+    check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
+
     // ── Query migration (must run first, before other parameter changes) ──
     if let Some(new_query) = query {
         alter_stream_table_query(&st, &schema, &table_name, new_query)?;
@@ -3704,12 +3738,15 @@ fn alter_stream_table_impl(
 
 /// Drop a stream table, removing the storage table and all catalog entries.
 ///
-/// When `cascade` is `true` (the default) any downstream stream tables that
-/// depend on this one are automatically dropped first.  When `cascade` is
-/// `false` the function raises an error if any dependents exist, matching the
-/// behaviour of PostgreSQL's own `DROP TABLE … CASCADE | RESTRICT`.
+/// When `cascade` is `true` any downstream stream tables that depend on this
+/// one are automatically dropped first.  When `cascade` is `false` (the
+/// default) the function raises an error if any dependents exist, matching
+/// the behaviour of PostgreSQL's own `DROP TABLE … RESTRICT`.
+///
+/// Changed in v0.19.0 (UX-6): default flipped from `true` to `false` to
+/// prevent accidental cascading drops.
 #[pg_extern(schema = "pgtrickle")]
-fn drop_stream_table(name: &str, cascade: default!(bool, true)) {
+fn drop_stream_table(name: &str, cascade: default!(bool, false)) {
     let result = drop_stream_table_impl(name, cascade);
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -3731,6 +3768,13 @@ fn drop_stream_table_impl_inner(
 
     if !visited_pgt_ids.insert(st.pgt_id) {
         return Ok(());
+    }
+
+    // SEC-1: Ownership check — only the owner (or superuser) can drop.
+    // Only enforce on the top-level call (visited_pgt_ids has exactly 1 entry);
+    // cascaded drops inherit the permission from the top-level check.
+    if visited_pgt_ids.len() == 1 {
+        check_stream_table_ownership(st.pgt_relid, &schema, &table_name)?;
     }
 
     // CASCADE: drop all stream tables that depend on this one first.
@@ -3923,11 +3967,40 @@ fn refresh_stream_table(name: &str) {
     let result = refresh_stream_table_impl(name);
     if let Err(e) = result {
         // RefreshSkipped is a transient, non-fatal condition: another refresh
-        // is already in progress on this ST. Log it at DEBUG level and return
-        // successfully so that concurrent callers (e.g. the test's two racing
-        // connections) do not see a client-visible error.
-        if let PgTrickleError::RefreshSkipped(_) = &e {
+        // is already in progress on this ST. Log it at DEBUG level and emit
+        // a NOTICE (UX-8) so callers know the refresh was a no-op.
+        if let PgTrickleError::RefreshSkipped(ref msg) = e {
+            pgrx::notice!("refresh skipped: {}", msg);
             pgrx::debug1!("{}", e);
+        } else {
+            raise_error_with_context(e);
+        }
+    }
+}
+
+/// UX-5: Execute an arbitrary SQL statement (typically DML against a source
+/// table) and then immediately refresh the named stream table, all within the
+/// caller's transaction context.
+///
+/// This is a convenience wrapper for the common pattern:
+/// ```sql
+/// INSERT INTO orders VALUES (...);
+/// SELECT pgtrickle.refresh_stream_table('order_totals');
+/// ```
+///
+/// Calling `pgtrickle.write_and_refresh(sql, name)` guarantees the refresh
+/// sees the writes from `sql` because both run in the same transaction.
+#[pg_extern(schema = "pgtrickle")]
+fn write_and_refresh(sql: &str, stream_table_name: &str) {
+    // Execute the user-supplied SQL.
+    if let Err(e) = Spi::run(sql) {
+        pgrx::error!("write_and_refresh: user SQL failed: {}", e,);
+    }
+    // Refresh the stream table.
+    let result = refresh_stream_table_impl(stream_table_name);
+    if let Err(e) = result {
+        if let PgTrickleError::RefreshSkipped(ref msg) = e {
+            pgrx::notice!("refresh skipped: {}", msg);
         } else {
             raise_error_with_context(e);
         }
@@ -4243,7 +4316,7 @@ pub fn reinit_rewrite_if_needed(st: &StreamTableMeta) -> Result<StreamTableMeta,
 
 /// When user triggers are detected (and the GUC is not `"off"`), they are
 /// suppressed during the TRUNCATE + INSERT via `DISABLE TRIGGER USER` /
-/// `ENABLE TRIGGER USER`. A `NOTIFY pgtrickle_refresh` is emitted so
+/// `ENABLE TRIGGER USER`. A `NOTIFY pg_trickle_refresh` is emitted so
 /// listeners know a FULL refresh occurred.
 fn execute_manual_full_refresh(
     st: &StreamTableMeta,
@@ -4396,7 +4469,7 @@ fn execute_manual_full_refresh(
             let escaped_schema = schema.replace('\'', "''");
             // NOTIFY does not support parameterized payloads; single quotes are escaped above.
             let notify_sql = format!(
-                "NOTIFY pgtrickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
+                "NOTIFY pg_trickle_refresh, '{{\"stream_table\": \"{escaped_name}\", \
                  \"schema\": \"{escaped_schema}\", \"mode\": \"FULL\"}}'"
             );
             Spi::run(&notify_sql).map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

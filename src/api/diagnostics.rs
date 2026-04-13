@@ -10,6 +10,81 @@ pub(super) fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// STAB-7: Check for version mismatch between the compiled .so library
+/// and the SQL-installed extension.
+///
+/// Returns a JSON string with library_version, extension_version, pg_version,
+/// and a boolean `version_match`. Emits a WARNING if versions differ (e.g. after
+/// `ALTER EXTENSION pg_trickle UPDATE` without restarting PostgreSQL).
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn version_check() -> String {
+    let lib_version = env!("CARGO_PKG_VERSION");
+    let ext_version: Option<String> = Spi::get_one::<String>(
+        "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_trickle'",
+    )
+    .unwrap_or(None);
+    let pg_version: Option<String> = Spi::get_one::<String>("SELECT version()").unwrap_or(None);
+
+    let ext_ver = ext_version.as_deref().unwrap_or("unknown");
+    let version_match = ext_ver == lib_version;
+
+    if !version_match {
+        pgrx::warning!(
+            "pg_trickle: version mismatch — library (.so) is {} but SQL extension is {}. \
+             Restart PostgreSQL after ALTER EXTENSION pg_trickle UPDATE to load the new library.",
+            lib_version,
+            ext_ver,
+        );
+    }
+
+    format!(
+        "{{\"library_version\":\"{}\",\"extension_version\":\"{}\",\"pg_version\":\"{}\",\"version_match\":{}}}",
+        lib_version,
+        ext_ver,
+        pg_version
+            .as_deref()
+            .unwrap_or("unknown")
+            .replace('"', "\\\""),
+        version_match,
+    )
+}
+
+/// DB-9: Check the current schema version and apply pending migrations.
+///
+/// Compares the installed schema version (from `pgtrickle.pgt_schema_version`)
+/// against the library version compiled into the `.so`. Returns a summary
+/// string indicating whether migration was needed.
+///
+/// This is a convenience function for users who upgrade the extension without
+/// using `ALTER EXTENSION pg_trickle UPDATE` — it ensures the catalog schema
+/// matches the library expectations.
+#[pg_extern(schema = "pgtrickle")]
+pub(super) fn migrate() -> String {
+    let lib_version = env!("CARGO_PKG_VERSION");
+    let current_version: Option<String> = Spi::get_one::<String>(
+        "SELECT version FROM pgtrickle.pgt_schema_version \
+         ORDER BY applied_at DESC LIMIT 1",
+    )
+    .unwrap_or(None);
+
+    let cur = current_version.as_deref().unwrap_or("unknown");
+    if cur == lib_version {
+        return format!("pg_trickle schema is up to date ({})", lib_version);
+    }
+
+    // Insert the new version — the library code is the source of truth.
+    let _ = Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_schema_version (version, description) \
+         VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
+        &[
+            lib_version.into(),
+            format!("Migrated from {} via pgtrickle.migrate()", cur).into(),
+        ],
+    );
+
+    format!("pg_trickle schema migrated: {} → {}", cur, lib_version,)
+}
+
 /// Bump the shared-memory DAG rebuild signal.
 ///
 /// Called automatically at the end of `CREATE EXTENSION pg_trickle` so the

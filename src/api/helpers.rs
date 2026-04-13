@@ -318,6 +318,38 @@ pub(super) fn cleanup_cdc_for_source(
     Ok(())
 }
 
+/// SEC-1: Check that the current role owns the stream table's storage table.
+///
+/// Uses `pg_catalog.pg_class.relowner` to verify ownership. Superusers bypass
+/// the check (PostgreSQL convention). Returns `Ok(())` if the caller is the
+/// owner or a superuser, `Err(PermissionDenied)` otherwise.
+pub(super) fn check_stream_table_ownership(
+    pgt_relid: pgrx::pg_sys::Oid,
+    schema: &str,
+    table_name: &str,
+) -> Result<(), PgTrickleError> {
+    let is_owner_or_superuser = Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.pg_table_is_visible($1) IS NOT NULL \
+         AND (pg_has_role(current_user, \
+              (SELECT relowner FROM pg_catalog.pg_class WHERE oid = $1), \
+              'USAGE') \
+              OR (SELECT rolsuper FROM pg_catalog.pg_roles \
+                  WHERE rolname = current_user))",
+        &[pgt_relid.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+    .unwrap_or(false);
+
+    if !is_owner_or_superuser {
+        return Err(PgTrickleError::PermissionDenied(format!(
+            "must be owner of stream table {}.{}",
+            schema, table_name,
+        )));
+    }
+
+    Ok(())
+}
+
 /// Parse a possibly schema-qualified name into `(schema, table)`.
 pub(crate) fn parse_qualified_name_pub(name: &str) -> Result<(String, String), PgTrickleError> {
     parse_qualified_name(name)

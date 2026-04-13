@@ -39,6 +39,109 @@ For future plans and release milestones, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **CORR-1:** Removed the `delete_insert` merge strategy. Setting
+  `pg_trickle.merge_strategy = 'delete_insert'` now logs a WARNING and falls
+  back to `auto`. The strategy was semantically unsafe for aggregate and
+  DISTINCT queries because the DELETE half executed against already-mutated
+  state, producing phantom deletes.
+
+- **SEC-1:** `pgtrickle.drop_stream_table()` and
+  `pgtrickle.alter_stream_table()` now enforce ownership checks. Only the
+  owner of the stream table's storage table (or a superuser) can drop or alter
+  it. Non-owner callers receive `ERRCODE_INSUFFICIENT_PRIVILEGE`.
+
+- **UX-6:** `pgtrickle.drop_stream_table()` cascade parameter default changed
+  from `true` to `false` to prevent accidental cascading drops, matching
+  PostgreSQL's own `DROP TABLE` default of RESTRICT.
+
+- **DB-4:** The `pgtrickle_refresh` NOTIFY channel has been renamed to
+  `pg_trickle_refresh` for naming consistency. Applications using
+  `LISTEN pgtrickle_refresh` must update to `LISTEN pg_trickle_refresh`.
+
+### Added
+
+- **STAB-7:** New `pgtrickle.version_check()` function that returns library
+  version, SQL extension version, PostgreSQL version, and a version_match
+  boolean. Emits a WARNING when the compiled .so and installed SQL extension
+  versions differ (e.g. after `ALTER EXTENSION pg_trickle UPDATE` without
+  restarting PostgreSQL).
+
+- **STAB-1:** New `pg_trickle.connection_pooler_mode` GUC for cluster-wide
+  PgBouncer transaction-mode compatibility. Set to `'transaction'` to globally
+  disable prepared-statement reuse and suppress NOTIFY emissions.
+
+- **DB-2:** Added `ON DELETE CASCADE` foreign key on
+  `pgt_refresh_history.pgt_id` → `pgt_stream_tables.pgt_id`. Orphan history
+  rows are now automatically cleaned up when a stream table is dropped.
+
+- **DB-3:** New `pgtrickle.pgt_schema_version` table tracks which schema
+  migration versions have been applied to the database.
+
+- **DB-5:** New `pg_trickle.history_retention_days` GUC (default 90) with
+  daily scheduler cleanup of old `pgt_refresh_history` rows. Set to `0` to
+  disable.
+
+- **DB-6:** Public API stability contract documented in `docs/SQL_REFERENCE.md`
+  — specifies which surfaces are stable vs unstable across releases.
+
+- **DB-9:** New `pgtrickle.migrate()` function checks the installed schema
+  version and records library upgrades in `pgt_schema_version`.
+
+- **UX-5:** New `pgtrickle.write_and_refresh(sql, stream_table_name)` function
+  executes an arbitrary SQL statement and immediately refreshes the named stream
+  table within the same transaction.
+
+- **UX-8:** `pgtrickle.refresh_stream_table()` now emits a NOTICE when the
+  refresh is skipped (e.g. because another refresh is already in progress),
+  making it visible to interactive callers.
+
+- **UX-4:** Connection pooler compatibility guide added to
+  `docs/PRE_DEPLOYMENT.md` covering PgBouncer, pgcat, Supavisor, and CNPG.
+
+- **SCAL-1:** Read replica and hot standby section added to `docs/SCALING.md`.
+
+- **SCAL-3:** CNPG and Kubernetes operational runbook added to `docs/SCALING.md`.
+
+- **PERF-3:** `pgtrickle.explain_st()` now accepts an optional `with_analyze`
+  parameter. When true, includes `EXPLAIN (ANALYZE, BUFFERS)` output for the
+  defining query.
+
+- **PERF-4:** Added catalog indexes `idx_pgt_relid` and `idx_deps_pgt_id` for
+  faster scheduler hot-path lookups. Applied via upgrade SQL.
+
+### Fixed
+
+- **DB-1:** Fixed duplicate `'DIFFERENTIAL'` value in the
+  `pgt_refresh_history.action` CHECK constraint (present in deployments
+  upgraded from ≤ v0.11.0).
+
+- **CORR-6:** Replaced bare `.unwrap()` in the DVM filter operator's HAVING
+  path with a descriptive `.expect()` message. All other `.unwrap()` calls in
+  `src/dvm/operators/` are confirmed to be inside `#[cfg(test)]` blocks.
+
+- **UX-7:** Error messages for `UpstreamTableDropped` and
+  `UpstreamSchemaChanged` now resolve OIDs to human-readable `schema.table`
+  names.
+
+### Improved
+
+- **PERF-5:** Scheduler dispatch now uses `unit_by_id()` O(1) HashMap lookup
+  instead of O(n) `units().find()` linear scan for execution unit resolution.
+
+- **PERF-6:** `has_table_source_changes()` now uses a single batched
+  `UNION ALL` query instead of one SPI round-trip per source table.
+
+- **STAB-3:** Semgrep is now a blocking CI check on pull requests. Previously
+  advisory-only, unsuppressed findings now prevent merge.
+
+### Changed
+
+- **UX-9:** Updated `docs/CONFIGURATION.md` merge_strategy documentation to
+  reflect the removal of the `delete_insert` value. Added new GUC sections for
+  `connection_pooler_mode` and `history_retention_days`.
+
 ---
 
 ## [0.18.0] — 2026-04-12

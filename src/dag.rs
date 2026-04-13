@@ -1856,6 +1856,11 @@ impl ExecutionUnitDag {
         self.units.values()
     }
 
+    /// PERF-5: O(1) lookup by execution unit ID (replaces O(n) `units().find()`).
+    pub fn unit_by_id(&self, id: ExecutionUnitId) -> Option<&ExecutionUnit> {
+        self.units.get(&id)
+    }
+
     /// Return the number of execution units.
     pub fn unit_count(&self) -> usize {
         self.units.len()
