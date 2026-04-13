@@ -2055,15 +2055,13 @@ fn migrate_aux_columns(
     // Transition: __pgt_count
     if !old_needs_pgt_count && new_storage_needs_pgt_count && !new_needs_dual_count {
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     } else if old_needs_pgt_count && !new_storage_needs_pgt_count && !new_needs_dual_count {
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count",
+            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
@@ -2072,44 +2070,38 @@ fn migrate_aux_columns(
     // Transition: __pgt_count_l / __pgt_count_r
     if !old_needs_dual_count && new_needs_dual_count {
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_l BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_l BIGINT NOT NULL DEFAULT 0", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_r BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_r BIGINT NOT NULL DEFAULT 0", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         // Drop __pgt_count if it was there and no longer needed
         if old_needs_pgt_count {
             Spi::run(&format!(
-                // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-                "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count",
+                "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
                 quoted_table
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         }
     } else if old_needs_dual_count && !new_needs_dual_count {
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_l",
+            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_l", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run(&format!(
-            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_r",
+            "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_r", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         // Add __pgt_count if newly needed
         if new_storage_needs_pgt_count {
             Spi::run(&format!(
-                // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0", // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
                 quoted_table
             ))
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
