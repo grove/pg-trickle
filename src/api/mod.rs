@@ -1991,9 +1991,10 @@ fn rebuild_row_id_index(
     .unwrap_or(None);
 
     if let Some(idx_name) = existing {
-        Spi::run(&format!("DROP INDEX IF EXISTS {idx_name}")).map_err(|e| {
-            PgTrickleError::SpiError(format!("Failed to drop old row_id index: {e}"))
-        })?;
+        Spi::run(&format!("DROP INDEX IF EXISTS {idx_name}")) // nosemgrep: rust.spi.run.dynamic-format — DROP INDEX DDL cannot be parameterized; idx_name is obtained from pg_index via ::regclass::text.
+            .map_err(|e| {
+                PgTrickleError::SpiError(format!("Failed to drop old row_id index: {e}"))
+            })?;
     }
 
     // Rebuild with the new INCLUDE clause
@@ -2054,12 +2055,14 @@ fn migrate_aux_columns(
     // Transition: __pgt_count
     if !old_needs_pgt_count && new_storage_needs_pgt_count && !new_needs_dual_count {
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0",
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     } else if old_needs_pgt_count && !new_storage_needs_pgt_count && !new_needs_dual_count {
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count",
             quoted_table
         ))
@@ -2069,11 +2072,13 @@ fn migrate_aux_columns(
     // Transition: __pgt_count_l / __pgt_count_r
     if !old_needs_dual_count && new_needs_dual_count {
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_l BIGINT NOT NULL DEFAULT 0",
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count_r BIGINT NOT NULL DEFAULT 0",
             quoted_table
         ))
@@ -2081,6 +2086,7 @@ fn migrate_aux_columns(
         // Drop __pgt_count if it was there and no longer needed
         if old_needs_pgt_count {
             Spi::run(&format!(
+                // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
                 "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count",
                 quoted_table
             ))
@@ -2088,11 +2094,13 @@ fn migrate_aux_columns(
         }
     } else if old_needs_dual_count && !new_needs_dual_count {
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_l",
             quoted_table
         ))
         .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
         Spi::run(&format!(
+            // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             "ALTER TABLE {} DROP COLUMN IF EXISTS __pgt_count_r",
             quoted_table
         ))
@@ -2100,6 +2108,7 @@ fn migrate_aux_columns(
         // Add __pgt_count if newly needed
         if new_storage_needs_pgt_count {
             Spi::run(&format!(
+                // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
                 "ALTER TABLE {} ADD COLUMN IF NOT EXISTS __pgt_count BIGINT NOT NULL DEFAULT 0",
                 quoted_table
             ))
@@ -4273,7 +4282,7 @@ fn execute_manual_full_refresh(
     // Suppress user triggers during TRUNCATE + INSERT to prevent
     // spurious trigger invocations with wrong semantics.
     if has_triggers {
-        Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER"))
+        Spi::run(&format!("ALTER TABLE {quoted_table} DISABLE TRIGGER USER")) // nosemgrep: rust.spi.run.dynamic-format — ALTER TABLE DDL cannot be parameterized; quoted_table is a PostgreSQL-quoted identifier.
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
     }
 
