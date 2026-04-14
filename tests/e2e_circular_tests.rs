@@ -167,14 +167,24 @@ async fn test_circular_monotone_cycle_converges() {
     // direct-edge rows).  The transitive closure requires 2+ more iterations.
     // `last_fixpoint_iterations` is only set after all iterations converge, so
     // polling this column is the correct signal for data-correctness assertions.
+    //
+    // Nudge the scheduler periodically via pg_reload_conf() so that under
+    // Docker resource contention the background worker's latch is woken
+    // frequently enough to process the SCC fixpoint within the deadline.
     let fixpoint_converged = {
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(300);
+        let timeout = Duration::from_secs(600);
+        let mut last_nudge = start;
         loop {
             if start.elapsed() > timeout {
                 break false;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
+            // Nudge every 5 seconds to wake a CPU-starved scheduler worker.
+            if last_nudge.elapsed() >= Duration::from_secs(5) {
+                db.nudge_launcher_rescan().await;
+                last_nudge = std::time::Instant::now();
+            }
             let done: bool = db
                 .query_scalar(
                     "SELECT EXISTS( \
@@ -191,7 +201,7 @@ async fn test_circular_monotone_cycle_converges() {
     };
     assert!(
         fixpoint_converged,
-        "fixpoint did not converge within 120s (last_fixpoint_iterations never set)"
+        "fixpoint did not converge within 600s (last_fixpoint_iterations never set)"
     );
 
     // Both STs should be ACTIVE after convergence
