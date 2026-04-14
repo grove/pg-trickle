@@ -76,3 +76,22 @@ CREATE INDEX IF NOT EXISTS idx_pgt_relid
     ON pgtrickle.pgt_stream_tables (pgt_relid);
 CREATE INDEX IF NOT EXISTS idx_deps_pgt_id
     ON pgtrickle.pgt_dependencies (pgt_id);
+
+-- ── New functions in 0.19.0 ────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION pgtrickle."migrate"() RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'migrate_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."version_check"() RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'version_check_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."write_and_refresh"(
+    "sql" TEXT,
+    "stream_table_name" TEXT
+) RETURNS void
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'write_and_refresh_wrapper';
