@@ -148,8 +148,8 @@ SELECT
     -- Customers: use sparse key space (every 3rd customer has orders — matches TPC-H distribution)
     1 + ((i * 1013) % __SF_CUSTOMERS__) AS o_custkey,
     (ARRAY['O','F','P'])[1 + i % 3] AS o_orderstatus,
-    round((10000 + (i * 7919) % 500000)::numeric / 100, 2) AS o_totalprice,
-    DATE '1992-01-01' + ((i * 2609) % 2557)::int AS o_orderdate,  -- 7 years: 1992-01-01 to 1998-12-31
+    round((10000 + (i::bigint * 7919) % 500000)::numeric / 100, 2) AS o_totalprice,
+    DATE '1992-01-01' + ((i::bigint * 2609) % 2557)::int AS o_orderdate,  -- 7 years: 1992-01-01 to 1998-12-31
     (ARRAY['1-URGENT','2-HIGH','3-MEDIUM','4-NOT SPECIFIED','5-LOW'])[1 + i % 5] AS o_orderpriority,
     'Clerk#' || lpad((1 + i % 1000)::text, 9, '0') AS o_clerk,
     0 AS o_shippriority,
@@ -176,11 +176,11 @@ SELECT
     (ARRAY['A','N','R'])[1 + (o + ln) % 3] AS l_returnflag,
     (ARRAY['O','F'])[1 + (o + ln * 3) % 2] AS l_linestatus,
     -- shipdate: order date + 1..121 days
-    DATE '1992-01-01' + ((o * 2609) % 2557)::int + 1 + ((o * 3 + ln * 11) % 121) AS l_shipdate,
+    DATE '1992-01-01' + ((o::bigint * 2609) % 2557)::int + 1 + ((o * 3 + ln * 11) % 121) AS l_shipdate,
     -- commitdate: order date + 30..90 days
-    DATE '1992-01-01' + ((o * 2609) % 2557)::int + 30 + ((o * 7 + ln * 5) % 61) AS l_commitdate,
+    DATE '1992-01-01' + ((o::bigint * 2609) % 2557)::int + 30 + ((o * 7 + ln * 5) % 61) AS l_commitdate,
     -- receiptdate: shipdate + 1..30 days
-    DATE '1992-01-01' + ((o * 2609) % 2557)::int + 1 + ((o * 3 + ln * 11) % 121) + 1 + ((o + ln * 13) % 30) AS l_receiptdate,
+    DATE '1992-01-01' + ((o::bigint * 2609) % 2557)::int + 1 + ((o * 3 + ln * 11) % 121) + 1 + ((o + ln * 13) % 30) AS l_receiptdate,
     (ARRAY['DELIVER IN PERSON','COLLECT COD','NONE','TAKE BACK RETURN'])[1 + (o + ln) % 4] AS l_shipinstruct,
     (ARRAY['REG AIR','AIR','RAIL','SHIP','TRUCK','MAIL','FOB'])[1 + (o * 3 + ln) % 7] AS l_shipmode,
     'lineitem comment ' || o || '-' || ln AS l_comment
