@@ -394,18 +394,18 @@ async fn shared_container() -> &'static SharedContainer {
 
             // Retry getting the mapped port — Docker's port-mapping metadata is
             // occasionally not yet published immediately after the "ready"
-            // log line, causing a transient `PortNotExposed` error.
+            // log line, causing a transient `PortNotExposed` error.  Use up to
+            // 30 attempts with a fixed 1-second gap (≤ 30 s total) so that
+            // even heavily-loaded Docker daemons (e.g. macOS Docker Desktop)
+            // have time to register the port before we give up.
             let port = {
                 let mut attempt = 0u32;
                 loop {
                     match container.get_host_port_ipv4(5432).await {
                         Ok(p) => break p,
-                        Err(e) if attempt < 5 => {
+                        Err(e) if attempt < 30 => {
                             attempt += 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                500 * u64::from(attempt),
-                            ))
-                            .await;
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             let _ = e; // suppress unused-variable warning
                         }
                         Err(e) => panic!("Failed to get mapped port after retries: {e}"),
