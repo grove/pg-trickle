@@ -1,6 +1,6 @@
 # PLAN_AGENT_SKILLS.md — Agent Skill Proposals for pg_trickle
 
-**Status:** 📋 Proposal
+**Status:** � In progress
 **Last updated:** 2026-04-15
 
 ---
@@ -9,16 +9,20 @@
 
 The pg_trickle project has a rich, multi-layered development workflow spanning
 Rust extension code, SQL migration scripts, dbt Jinja macros, TUI development,
-Docker image building, benchmarking, and release management. Currently only two
+Docker image building, benchmarking, and release management. Currently three
 agent skills exist:
 
 1. **create-pull-request** — Safe PR creation with Unicode-correct body files
 2. **enrich-release-roadmap** — Roadmap enrichment across six quality pillars
+3. **implement-roadmap-version** — ✅ Created 2026-04-15 — Full implementation loop for a release milestone
 
 Many recurring development tasks are complex enough to benefit from codified
 agent skills — structured procedures that encode project-specific conventions
 and guard rails. This plan proposes 12 new skills, prioritised by frequency of
 use and error-proneness.
+
+> **`implement-roadmap-version`** has been implemented. See
+> `.github/skills/implement-roadmap-version/SKILL.md`.
 
 ---
 
