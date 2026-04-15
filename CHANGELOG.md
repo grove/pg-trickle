@@ -48,139 +48,209 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 **pg_trickle now monitors itself.** Instead of you having to check on
 pg_trickle's health manually, this release lets pg_trickle watch its own
-performance, spot problems early, and even fix some of them on its own.
+performance, spot problems early, and even fix some of them on its own. Five
+new stream tables sit in the `pgtrickle` schema and continuously analyse
+refresh history — the same technology you use for your own data, pointed
+inward. One SQL call sets everything up; one call tears it down.
 
 We call this *dog feeding* — pg_trickle uses its own stream-table technology
 to keep an eye on itself, just like it keeps your data views up to date.
 
 ### What's new
 
-- **One-click self-monitoring** — run `setup_dog_feeding()` and pg_trickle
-  creates five internal dashboards that continuously track how well it is
-  performing. Run `teardown_dog_feeding()` to remove them. Both are safe to
-  call as many times as you like.
+- **One-click self-monitoring** — run `SELECT pgtrickle.setup_dog_feeding()`
+  and pg_trickle creates five monitoring stream tables that continuously track
+  how well it is performing. Run `teardown_dog_feeding()` to remove them.
+  Both are idempotent — safe to call as many times as you like, even during
+  rolling upgrades.
 
-- **Health at a glance** — a new `dog_feeding_status()` function shows the
-  health of all monitoring views in one query, so you can quickly confirm
-  everything is running smoothly.
+- **Health at a glance** — the new `dog_feeding_status()` function shows the
+  status of all five monitoring views in one query: whether each one exists,
+  its refresh mode, and the last time it refreshed. Quick to run from a
+  monitoring script or dashboard.
 
-- **Automatic tuning** — set the `pg_trickle.dog_feeding_auto_apply` option
-  to `threshold_only` and pg_trickle will adjust its own refresh thresholds
-  when it is confident the change will help. Every adjustment is logged so you
-  can review what was changed and why.
+- **Threshold recommendations** — after enough refresh cycles accumulate
+  (typically 10–20 minutes of activity), `df_threshold_advice` starts
+  producing suggestions for each stream table. Each recommendation includes
+  a confidence level (HIGH / MEDIUM / LOW) and a reason — for example,
+  "DIFF is 73% faster — raise threshold to allow more DIFF". A
+  `sla_headroom_pct` column shows exactly how much faster incremental refresh
+  is versus full refresh for that table.
 
-- **Real-time alerts** — when pg_trickle detects something unusual (like a
-  sudden spike in refresh times), it sends a notification on the
-  `pgtrickle_alert` channel so your application or monitoring stack can react
-  immediately.
+- **Automatic tuning** — set `pg_trickle.dog_feeding_auto_apply = 'threshold_only'`
+  and pg_trickle will apply HIGH-confidence threshold recommendations
+  automatically. Changes are rate-limited to once per 10 minutes per stream
+  table, and every adjustment is logged to `pgt_refresh_history` with
+  `initiated_by = 'DOG_FEED'` so you have a full audit trail.
 
-- **Visual dependency graph** — the new `explain_dag()` function draws a map
-  of how your stream tables depend on each other, making it easy to understand
-  your refresh pipeline.
+- **Real-time alerts** — when pg_trickle detects an anomaly (duration spike
+  exceeding 3× the baseline, or two or more recent failures), it sends a
+  `NOTIFY` on the `pgtrickle_alert` channel with a JSON payload. Your
+  application, Alertmanager webhook, or `LISTEN` client can act immediately
+  without polling.
+
+- **Scheduling interference detection** — `df_scheduling_interference` tracks
+  pairs of stream tables that consistently overlap during refresh. When
+  overlap is heavy, the scheduler automatically backs off its poll interval
+  (up to 2× the configured base) to reduce contention.
+
+- **Visual dependency graph** — the new `explain_dag()` function renders
+  your full refresh pipeline as a Mermaid or Graphviz DOT diagram. User
+  stream tables appear in blue, dog-feeding tables in green, suspended tables
+  in red. Paste the output into any Mermaid renderer or `dot` to see exactly
+  how your tables depend on each other.
+
+- **Scheduler overhead report** — `scheduler_overhead()` returns metrics
+  for the last hour: total refreshes, how many were dog-feeding, the
+  fraction they represent, and average durations. Useful for confirming that
+  self-monitoring adds negligible cost.
 
 ### What pg_trickle watches
 
 | Monitoring view | What it tracks |
 |-----------------|----------------|
-| Efficiency rolling | How fast refreshes are running over time |
-| Anomaly signals | Unusual slowdowns, errors, or mode switches |
-| Threshold advice | Suggestions for better refresh settings, with a confidence level |
-| CDC buffer trends | Whether change-capture buffers are growing too quickly |
-| Scheduling interference | Whether refreshes are stepping on each other |
+| `df_efficiency_rolling` | Rolling-window refresh speed, change ratio, DIFF vs FULL counts |
+| `df_anomaly_signals` | Duration spikes (> 3× baseline), error bursts, mode oscillation |
+| `df_threshold_advice` | Per-table threshold recommendations with confidence level and reasoning |
+| `df_cdc_buffer_trends` | Change-capture buffer growth rate per source table; alerts on burst spikes |
+| `df_scheduling_interference` | Refresh overlap patterns; pairs with 3+ concurrent refreshes in the last hour |
 
 ### Faster and more reliable
 
-- Lookups into refresh history are significantly faster thanks to a new index.
-- Old history records are now cleaned up in small batches instead of one large
-  operation, which avoids blocking other work.
-- The scheduler automatically backs off when it detects refresh overlap,
-  reducing contention.
-- Health checks now warn you when change-capture buffers are growing unusually
-  fast, before they become a problem.
+- A new index on `pgt_refresh_history(pgt_id, start_time)` speeds up all
+  dog-feeding queries and general history lookups. Applied automatically
+  during the 0.19.0 → 0.20.0 upgrade.
+- Old history records are now pruned in batches of 1,000 rows per transaction
+  (previously one large DELETE), which avoids long lock holds on
+  `pgt_refresh_history` during the nightly cleanup.
+- `check_cdc_health()` is enriched with spill-risk alerts: if a source
+  table's max burst delta exceeds 10× its average, you get an early warning
+  before the buffer fills.
+- `explain_st()` now shows two new properties: `dog_feeding_coverage`
+  (none / partial / full) and `recommended_refresh_mode`, so diagnostics
+  automatically surface self-monitoring data when it is available.
 
 ### New documentation and tooling
 
-- The SQL reference, configuration guide, and getting-started guide all have
-  new sections covering self-monitoring and day-2 operations.
-- A ready-made Grafana dashboard with five panels is included.
-- A dbt macro (`pgtrickle_enable_monitoring`) makes it easy to enable
-  monitoring as part of your dbt workflow.
-- A quick-start SQL script is provided at `sql/dog_feeding_setup.sql`.
+- **SQL Reference** — a new "Dog Feeding — Self-Monitoring" section covers
+  all five stream tables, `setup_dog_feeding()`, `teardown_dog_feeding()`,
+  confidence levels, and the `sla_headroom_pct` column.
+- **Getting Started** — a new "Day 2 Operations" section walks through
+  enabling dog-feeding, reading recommendations, enabling auto-apply, and
+  visualising the DAG.
+- **Configuration** — `pg_trickle.dog_feeding_auto_apply` is fully
+  documented with values, rate-limiting behaviour, and the audit trail.
+- A ready-made **Grafana dashboard** (`pg_trickle_dog_feeding.json`) with
+  five panels covers refresh throughput, anomaly heatmap, threshold
+  calibration, CDC buffer growth, and the scheduling interference matrix.
+- A **dbt macro** (`pgtrickle_enable_monitoring`) enables monitoring as a
+  post-hook with one line in `dbt_project.yml`.
+- A **quick-start SQL script** at `sql/dog_feeding_setup.sql` walks through
+  setup, auto-apply, alert listening, and status verification in six steps.
 
 ---
 
 ## [0.19.0] — 2026-04-13
 
-**Safer, faster, easier to operate.** This release focuses on protecting your
-data, making pg_trickle simpler to run in production, and cleaning up rough
-edges. The scheduler is faster, error messages are clearer, and the database
-stays tidier over time.
+**Safer, faster, easier to operate.** This release closes several security
+and correctness gaps, adds new conveniences for operators and developers, and
+significantly improves performance for deployments with many stream tables.
+The background scheduler finds the next table to refresh 10–15× faster.
+Four breaking changes are included — all easy to adapt to, each one
+correcting behaviour that was a source of subtle bugs in production.
 
-### What changed
+### Breaking changes
 
-- **Only owners can modify their own stream tables** — other users can no
-  longer accidentally (or deliberately) drop or alter a stream table they
-  didn't create. Superusers can still make any change.
+- **Only owners can modify their own stream tables** — other database users
+  can no longer drop or alter a stream table they did not create. If shared
+  access is intentional, grant superuser or explicitly add the user as owner.
+  Superusers are unaffected.
 
-- **Dropping a stream table is safer** — it no longer automatically removes
-  dependent objects. If you need that behavior, you can ask for it explicitly
-  with `cascade => true`.
+- **Dropping a stream table no longer cascades** — `drop_stream_table()` now
+  behaves like PostgreSQL's own `DROP TABLE`: it refuses to drop if dependent
+  objects exist, unless you pass `cascade => true` explicitly. Previously it
+  silently removed all dependents, which surprised operators after restructuring.
 
-- **The refresh notification channel was renamed** — if you listen for refresh
-  events, update `LISTEN pgtrickle_refresh` to `LISTEN pg_trickle_refresh`
-  (note the extra underscore). The old name was inconsistent.
+- **The refresh notification channel was renamed** — change `LISTEN pgtrickle_refresh`
+  to `LISTEN pg_trickle_refresh` (note the added underscore). The old name
+  was inconsistent with every other channel in the extension.
 
-- **The `delete_insert` refresh strategy was removed** — it could silently
-  produce wrong results. pg_trickle now automatically switches to the safe
-  default and logs a warning if you were using it.
+- **The `delete_insert` refresh strategy was removed** — this strategy could
+  produce wrong results for queries containing aggregates or `DISTINCT`. If
+  you had it configured, pg_trickle logs a warning and automatically switches
+  to the safe `auto` strategy. No data is lost; the next refresh corrects
+  any affected rows.
 
 ### New features
 
-- **Installation health check** — `version_check()` tells you in one query
-  whether your extension version, library version, and PostgreSQL version all
-  match. If something is out of sync after an upgrade, you get a clear warning.
+- **Installation health check** — `version_check()` returns the installed
+  extension version, the loaded library version, and the PostgreSQL server
+  version in one row. If the extension was upgraded but the server has not
+  been restarted, you get an explicit warning. Useful in deploy scripts and
+  smoke tests.
 
-- **Write and refresh in one step** — `write_and_refresh()` lets you insert or
-  update data and immediately refresh a stream table in the same transaction,
-  guaranteeing the view is up to date before you continue.
+- **Write and refresh in one step** — `write_and_refresh(sql, st_name)`
+  executes an arbitrary SQL statement and immediately refreshes the named
+  stream table in the same transaction. Downstream readers see consistent
+  results as soon as the transaction commits — no polling loop needed.
 
-- **Better connection-pooler support** — a single global setting
-  (`pg_trickle.connection_pooler_mode`) configures pg_trickle for PgBouncer
-  and similar tools at the cluster level, instead of per stream table.
+- **Better connection-pooler support** — the new
+  `pg_trickle.connection_pooler_mode` GUC configures pg_trickle for
+  PgBouncer, pgcat, or Supavisor at the cluster level. Previously each
+  stream table had to be configured individually, which was error-prone on
+  large deployments.
 
-- **Automatic history cleanup** — refresh history is now automatically trimmed
-  after 90 days so it doesn't grow forever. You can change the retention period
-  or turn cleanup off entirely.
+- **Automatic refresh history cleanup** — `pgt_refresh_history` is now
+  trimmed automatically after 90 days (configurable with
+  `pg_trickle.history_retention_days`; set to `0` to disable). Without
+  this, the history table could grow by thousands of rows per day on
+  busy deployments.
 
-- **Upgrade tracking** — pg_trickle now records which schema migrations have
-  been applied, making future upgrades safer and easier to verify.
+- **Schema migration tracking** — pg_trickle now records which upgrade
+  scripts have been applied in `pgtrickle.pgt_schema_version`. This makes
+  it straightforward to verify that a deployment is fully up to date and
+  simplifies the rollback story.
 
-- **Clearer skip messages** — when a refresh is skipped because another one is
-  already running, you now get an explanatory message instead of silence.
+- **Clearer skip messages** — when a refresh is skipped because another
+  refresh of the same stream table is already running, you now see a
+  `NOTICE: skipping refresh of <name> — already running` message instead
+  of silence. Reduces confusion when debugging slow or stuck schedulers.
 
-- **Deeper diagnostics** — `explain_st()` can now run with full timing and
-  buffer statistics (`with_analyze`), giving you a detailed picture of what
-  each refresh actually does.
+- **Deeper diagnostics** — `explain_st()` gains a `with_analyze` parameter.
+  When set to `true`, it runs `EXPLAIN (ANALYZE, BUFFERS)` on the refresh
+  query and returns actual row counts, timing, and buffer hit/miss ratios —
+  the same information PostgreSQL's query planner provides for any query,
+  but surfaced inside the stream-table diagnostic tool.
 
-- **New docs for connection poolers and Kubernetes** — step-by-step guides
-  for deploying with PgBouncer, pgcat, Supavisor, CNPG, and in Kubernetes
-  environments.
+- **New deployment guides** — step-by-step documentation for PgBouncer,
+  pgcat, Supavisor, CNPG, and Kubernetes deployments, plus an operational
+  runbook for common Kubernetes failure modes.
 
 ### Bug fixes
 
-- Fixed a rare data inconsistency in databases upgraded from version 0.11.0
-  or earlier.
+- Fixed a constraint-validation inconsistency in databases upgraded from
+  0.11.0 or earlier where `pgt_refresh_history` had a duplicate check entry
+  in the catalog. Affected databases could see spurious constraint errors
+  on busy write paths.
 
-- Error messages now show human-readable table names instead of raw internal
-  identifiers.
+- Error messages throughout the extension now show human-readable table
+  names (e.g. `public.orders`) instead of raw PostgreSQL OIDs. This affects
+  "source table was dropped", "schema changed", and several other error
+  paths that were previously unreadable without a catalog lookup.
 
 ### Performance
 
-- The scheduler finds the next stream table to refresh roughly **10–15× faster**
-  when you have many stream tables.
+- **10–15× faster scheduler dispatch** — the scheduler now finds the next
+  stream table to process with a direct lookup instead of scanning the full
+  list on every poll cycle. On a deployment with 500 stream tables this
+  drops from ~650 µs to ~45 µs per poll, reducing background CPU overhead
+  significantly at scale.
 
-- Change detection now uses a single query for all source tables at once,
-  noticeably reducing overhead on larger deployments.
+- **Single-query change detection** — when the scheduler checks whether any
+  source tables have changed, it now issues one query covering all sources
+  at once instead of one query per source table. On deployments with 50+
+  source tables this meaningfully reduces the overhead of each scheduler
+  cycle, especially under PgBouncer transaction pooling.
 
 ---
 
