@@ -32,6 +32,10 @@ ignore = [
   # only unmaintained. Use of ciborium is the upstream recommendation but we
   # have no direct control over this dep.
   "RUSTSEC-2021-0127",
+  # rand 0.8.5 is pulled in by sqlx-postgres v0.8.x (dev-only path). The unsoundness
+  # requires a custom logger + specific log feature interaction. sqlx 0.8.x does not
+  # expose a patched 0.8.x; resolved in rand >=0.9.3 (our non-sqlx deps are updated).
+  "RUSTSEC-2026-0097",
 ]
 
 [bans]
@@ -57,16 +61,6 @@ skip = [
   { name = "windows-implement", version = "=0.57.0" },
   { name = "windows-interface", version = "=0.57.0" },
   { name = "windows-result",    version = "=0.1.2"  },
-  { name = "windows-sys",     version = "=0.60.2" },
-  { name = "windows-targets", version = "=0.52.6" },
-  { name = "windows_aarch64_gnullvm", version = "=0.52.6" },
-  { name = "windows_aarch64_msvc",    version = "=0.52.6" },
-  { name = "windows_i686_gnu",     version = "=0.52.6" },
-  { name = "windows_i686_gnullvm", version = "=0.52.6" },
-  { name = "windows_i686_msvc",    version = "=0.52.6" },
-  { name = "windows_x86_64_gnu",     version = "=0.52.6" },
-  { name = "windows_x86_64_gnullvm", version = "=0.52.6" },
-  { name = "windows_x86_64_msvc",    version = "=0.52.6" },
 ]
 
 [sources]
