@@ -2008,6 +2008,41 @@ SET pg_trickle.max_fixpoint_iterations = 50;
 
 ---
 
+### pg_trickle.dog_feeding_auto_apply
+
+> **Added in v0.20.0 (DF-G1).**
+
+Controls whether the dog-feeding analytics stream tables can automatically
+adjust stream table configuration.
+
+| Value | Behaviour |
+|-------|-----------|
+| `off` (default) | Advisory only — no automatic changes. Dog-feeding stream tables produce analytics that operators and dashboards can read, but nothing is applied automatically. |
+| `threshold_only` | After each 10-minute auto-apply cycle, reads `df_threshold_advice`. If a recommendation has HIGH confidence and the recommended threshold differs from the current threshold by more than 5%, applies `ALTER STREAM TABLE ... SET auto_threshold = <recommended>`. Changes are logged with `initiated_by = 'DOG_FEED'`. |
+| `full` | Same as `threshold_only`, plus applies scheduling hints from `df_scheduling_interference` (future enhancement). |
+
+**Default:** `off`
+
+```sql
+-- Enable threshold auto-apply.
+SET pg_trickle.dog_feeding_auto_apply = 'threshold_only';
+
+-- Check current setting.
+SHOW pg_trickle.dog_feeding_auto_apply;
+```
+
+**Prerequisites:** Dog-feeding stream tables must be created first via
+`SELECT pgtrickle.setup_dog_feeding()`. If the stream tables do not exist,
+the auto-apply worker is a no-op.
+
+**Rate limiting:** At most one threshold change per stream table per 10 minutes.
+
+**Audit trail:** All auto-apply changes are recorded in `pgt_refresh_history`
+with `initiated_by = 'DOG_FEED'` and a SKIP action describing the old and new
+threshold values.
+
+---
+
 ## GUC Interaction Matrix
 
 Some GUC variables interact with or depend on each other. The table below

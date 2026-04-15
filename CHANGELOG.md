@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.20.0 — Dog Feeding](#0200--dog-feeding)
 - [0.19.0 — 2026-04-13](#0190--2026-04-13)
 - [0.18.0 — 2026-04-12](#0180--2026-04-12)
 - [0.17.0 — 2026-04-08](#0170--2026-04-08)
@@ -40,6 +41,72 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## [Unreleased]
 
 <!-- No unreleased changes yet. -->
+
+---
+
+## [0.20.0] — Dog Feeding
+
+**pg_trickle monitors itself.** This release introduces *dog feeding* — five
+stream tables that analyse pg_trickle's own `pgt_refresh_history` to detect
+anomalies, recommend threshold changes, and optionally auto-tune configuration.
+One SQL call sets everything up; one call tears it down.
+
+### Things that change how you use pg_trickle
+
+- **New `setup_dog_feeding()` / `teardown_dog_feeding()` helpers** — a single
+  call creates (or drops) all five monitoring stream tables. Idempotent and
+  safe to call repeatedly.
+
+- **New `dog_feeding_status()` function** — returns the health, refresh mode,
+  and last-refresh time of every dog-feeding stream table in one query.
+
+- **New `scheduler_overhead()` function** — reports the scheduler's own CPU
+  and I/O overhead so operators can confirm dog-feeding adds negligible cost.
+
+- **New `explain_dag()` function** — renders the full refresh dependency graph
+  in Mermaid or DOT format, with dog-feeding nodes highlighted in green.
+
+- **New `pg_trickle.dog_feeding_auto_apply` GUC** — set to `threshold_only`
+  to let pg_trickle automatically adjust stream table thresholds based on
+  HIGH-confidence recommendations from `df_threshold_advice`. Changes are
+  rate-limited and logged with `initiated_by = 'DOG_FEED'`.
+
+### Stream tables created by `setup_dog_feeding()`
+
+| Name | Purpose |
+|------|---------|
+| `df_efficiency_rolling` | Rolling-window refresh statistics |
+| `df_anomaly_signals` | Duration spikes, error bursts, mode oscillation |
+| `df_threshold_advice` | Threshold recommendations with confidence levels |
+| `df_cdc_buffer_trends` | CDC buffer growth rates per source table |
+| `df_scheduling_interference` | Concurrent refresh overlap patterns |
+
+### Under the hood
+
+- **PERF-1:** New index on `pgt_refresh_history(pgt_id, start_time)` speeds
+  up all dog-feeding queries and general history lookups.
+
+- **DF-G3:** Auto-apply changes are audited in `pgt_refresh_history` with
+  `initiated_by = 'DOG_FEED'` — the CHECK constraint on that column now
+  includes this new value.
+
+- **CORR-1/3/5:** Threshold recommendations are clamped to [0.01, 0.80],
+  NaN/Inf values are guarded, and window boundaries use exclusive ranges.
+
+- **STAB-2/4:** The auto-apply worker handles ALTER failures gracefully and
+  verifies stream tables exist before applying changes.
+
+### Documentation
+
+- SQL_REFERENCE.md: new "Dog Feeding — Self-Monitoring" section
+- CONFIGURATION.md: `pg_trickle.dog_feeding_auto_apply` GUC docs
+- GETTING_STARTED.md: new "Day 2 Operations" section
+
+### Dashboard & dbt
+
+- New Grafana dashboard (`pg_trickle_dog_feeding.json`) with five panels
+- New dbt macro `pgtrickle_enable_monitoring` for post-hook integration
+- Quick-start SQL script at `sql/dog_feeding_setup.sql`
 
 ---
 

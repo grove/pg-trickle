@@ -124,13 +124,14 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_refresh_history (
     status          TEXT NOT NULL
                      CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED')),
     initiated_by    TEXT
-                     CHECK (initiated_by IN ('SCHEDULER', 'MANUAL', 'INITIAL')),
+                     CHECK (initiated_by IN ('SCHEDULER', 'MANUAL', 'INITIAL', 'DOG_FEED')),
     freshness_deadline TIMESTAMPTZ,
     tick_watermark_lsn PG_LSN,
     fixpoint_iteration INT
 );
 
 CREATE INDEX IF NOT EXISTS idx_hist_pgt_ts ON pgtrickle.pgt_refresh_history (pgt_id, data_timestamp);
+CREATE INDEX IF NOT EXISTS idx_hist_pgt_start ON pgtrickle.pgt_refresh_history (pgt_id, start_time);
 
 -- Per-source CDC slot tracking
 CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (

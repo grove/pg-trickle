@@ -2173,6 +2173,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut last_history_cleanup_ms: u64 = 0;
     const HISTORY_CLEANUP_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
+    // DF-G2: Dog-feeding auto-apply — timestamp-gated, rate-limited.
+    let mut last_auto_apply_ms: u64 = 0;
+    const AUTO_APPLY_INTERVAL_MS: u64 = 10 * 60 * 1000; // 10 minutes
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
@@ -2465,6 +2469,20 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }));
                 }
                 last_history_cleanup_ms = now_for_cleanup;
+            }
+        }
+
+        // DF-G2: Dog-feeding auto-apply — read df_threshold_advice, apply changes.
+        {
+            let now_for_auto_apply = current_epoch_ms();
+            if now_for_auto_apply.saturating_sub(last_auto_apply_ms) >= AUTO_APPLY_INTERVAL_MS {
+                let auto_apply_mode = config::pg_trickle_dog_feeding_auto_apply();
+                if auto_apply_mode != config::DogFeedingAutoApply::Off {
+                    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                        dog_feeding_auto_apply_tick();
+                    }));
+                }
+                last_auto_apply_ms = now_for_auto_apply;
             }
         }
 
@@ -3128,6 +3146,122 @@ fn check_extension_version_match() {
              or reinstall the matching shared library.",
             compiled_version,
             installed
+        );
+    }
+}
+
+// ── DF-G2: Dog-feeding auto-apply tick ──────────────────────────────────────
+
+/// Auto-apply threshold recommendations from `df_threshold_advice`.
+///
+/// Called once per `AUTO_APPLY_INTERVAL_MS` when `dog_feeding_auto_apply` GUC
+/// is not `off`. Reads HIGH-confidence recommendations where the recommended
+/// threshold differs from the current threshold by > 5%, then applies via
+/// `StreamTableMeta::update_adaptive_threshold`. Rate-limited to 1 change per
+/// ST per invocation (STAB-2, STAB-4).
+///
+/// DF-G3: Logs changes to `pgt_refresh_history` with `initiated_by = 'DOG_FEED'`.
+fn dog_feeding_auto_apply_tick() {
+    // STAB-4: Check that df_threshold_advice exists before reading.
+    let advice_exists: bool = Spi::get_one(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_stream_tables
+            WHERE pgt_schema = 'pgtrickle' AND pgt_name = 'df_threshold_advice'
+        )",
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !advice_exists {
+        return;
+    }
+
+    // Read recommendations with HIGH confidence and > 5% delta.
+    let recommendations: Vec<(i64, f64, f64, String)> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT ta.pgt_id, ta.recommended_threshold, ta.current_threshold,
+                    ta.pgt_schema || '.' || ta.pgt_name AS fq_name
+             FROM pgtrickle.df_threshold_advice ta
+             WHERE ta.confidence = 'HIGH'
+               AND ta.recommended_threshold IS NOT NULL
+               AND ta.current_threshold IS NOT NULL
+               AND abs(ta.recommended_threshold - ta.current_threshold)
+                   / NULLIF(ta.current_threshold, 0) > 0.05",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                pgrx::warning!("pg_trickle: auto-apply read failed: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let mut recs = Vec::new();
+        for row in result {
+            let pgt_id = row.get::<i64>(1).unwrap_or(None).unwrap_or(0);
+            let recommended = row.get::<f64>(2).unwrap_or(None).unwrap_or(0.0);
+            let current = row.get::<f64>(3).unwrap_or(None).unwrap_or(0.0);
+            let fq_name = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+            if pgt_id > 0 {
+                recs.push((pgt_id, recommended, current, fq_name));
+            }
+        }
+        recs
+    });
+
+    for (pgt_id, recommended, current, fq_name) in &recommendations {
+        // STAB-2: Handle ALTER failure gracefully — don't let one failure stop others.
+        match crate::catalog::StreamTableMeta::update_adaptive_threshold(
+            *pgt_id,
+            Some(*recommended),
+            None,
+        ) {
+            Ok(()) => {
+                log!(
+                    "pg_trickle: auto-apply threshold {} → {} for {} (DOG_FEED)",
+                    current,
+                    recommended,
+                    fq_name,
+                );
+                // DF-G3: Audit trail in pgt_refresh_history.
+                if let Ok(Some(now)) =
+                    Spi::get_one::<pgrx::prelude::TimestampWithTimeZone>("SELECT now()")
+                {
+                    let _ = crate::catalog::RefreshRecord::insert(
+                        *pgt_id,
+                        now,
+                        "SKIP",
+                        "COMPLETED",
+                        0,
+                        0,
+                        Some(&format!(
+                            "DOG_FEED: auto_threshold {} → {}",
+                            current, recommended
+                        )),
+                        Some("DOG_FEED"),
+                        None,
+                        0,
+                        None,
+                        false,
+                        None,
+                    );
+                }
+            }
+            Err(e) => {
+                pgrx::warning!(
+                    "pg_trickle: auto-apply threshold update failed for {}: {}",
+                    fq_name,
+                    e,
+                );
+            }
+        }
+    }
+
+    if !recommendations.is_empty() {
+        log!(
+            "pg_trickle: auto-apply applied {} threshold changes",
+            recommendations.len(),
         );
     }
 }

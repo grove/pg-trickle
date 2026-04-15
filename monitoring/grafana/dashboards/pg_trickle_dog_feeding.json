@@ -1,0 +1,88 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Dog-feeding analytics: pg_trickle monitoring itself via stream tables (DF-1 through DF-5).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Refresh Throughput (DF-1: avg_diff_ms over time)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "rawSql": "SELECT last_refresh_at AS time, pgt_name, avg_diff_ms FROM pgtrickle.df_efficiency_rolling WHERE avg_diff_ms IS NOT NULL ORDER BY last_refresh_at",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "lineWidth": 2 }
+        }
+      }
+    },
+    {
+      "title": "Anomaly Heatmap (DF-2: per-ST anomaly type)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "rawSql": "SELECT pgt_name, duration_anomaly, recent_failures, distinct_modes_recent, last_duration_ms, baseline_diff_ms FROM pgtrickle.df_anomaly_signals WHERE duration_anomaly IS NOT NULL OR recent_failures >= 2 ORDER BY pgt_name",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Threshold Calibration (DF-3: current vs recommended)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "rawSql": "SELECT pgt_name, current_threshold, recommended_threshold, confidence, reason, sla_headroom_pct FROM pgtrickle.df_threshold_advice WHERE confidence IN ('HIGH', 'MEDIUM') ORDER BY abs(recommended_threshold - current_threshold) DESC",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "CDC Buffer Growth (DF-4: per-source growth rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "rawSql": "SELECT pgt_name, avg_delta_per_refresh, max_delta_per_refresh, refreshes_last_hour FROM pgtrickle.df_cdc_buffer_trends ORDER BY avg_delta_per_refresh DESC NULLS LAST",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Scheduling Interference (DF-5: overlap matrix)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "rawSql": "SELECT st_name_a, st_name_b, overlap_count, round(avg_duration_a_ms::numeric, 1) AS avg_ms_a, round(avg_duration_b_ms::numeric, 1) AS avg_ms_b FROM pgtrickle.df_scheduling_interference ORDER BY overlap_count DESC",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["pg_trickle", "dog-feeding"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "pg_trickle Dog-Feeding Analytics",
+  "uid": "pg_trickle_dog_feeding",
+  "version": 1
+}
