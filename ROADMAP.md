@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-04-13
 > **Latest release:** 0.19.0 (2026-04-13)
-> **Current milestone:** v0.20.0 — PostgreSQL 17 Support
+> **Current milestone:** v0.20.0 — Dog-Feeding (pg_trickle Monitors Itself)
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -36,11 +36,12 @@ coverage, all in plain language.
 - [v0.17.0 — Query Intelligence & Stability](#v0170--query-intelligence--stability)
 - [v0.18.0 — Hardening & Delta Performance](#v0180--hardening--delta-performance)
 - [v0.19.0 — Production Gap Closure & Distribution](#v0190--production-gap-closure--distribution)
-- [v0.20.0 — PostgreSQL 17 Support](#v0200--postgresql-17-support)
-- [v0.21.0 — PGlite Proof of Concept](#v0210--pglite-proof-of-concept)
-- [v0.22.0 — Core Extraction (`pg_trickle_core`)](#v0220--core-extraction-pg_trickle_core)
-- [v0.23.0 — PGlite WASM Extension](#v0230--pglite-wasm-extension)
-- [v0.24.0 — PGlite Reactive Integration](#v0240--pglite-reactive-integration)
+- [v0.20.0 — Dog-Feeding](#v0200--dog-feeding-pg_trickle-monitors-itself)
+- [v0.21.0 — PostgreSQL 17 Support](#v0210--postgresql-17-support)
+- [v0.22.0 — PGlite Proof of Concept](#v0220--pglite-proof-of-concept)
+- [v0.23.0 — Core Extraction (`pg_trickle_core`)](#v0230--core-extraction-pg_trickle_core)
+- [v0.24.0 — PGlite WASM Extension](#v0240--pglite-wasm-extension)
+- [v0.25.0 — PGlite Reactive Integration](#v0250--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
@@ -82,11 +83,12 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.17.0 | Query intelligence & stability | ✅ Released |
 | **v0.18.0** | **Hardening & delta performance** | **✅ Released** |
 | **v0.19.0** | **Production gap closure & distribution** | **✅ Released** |
-| v0.20.0 | PostgreSQL 17 support | Planned |
-| v0.21.0 | PGlite proof of concept | Planned |
-| v0.22.0 | Core extraction (`pg_trickle_core`) | Planned |
-| v0.23.0 | PGlite WASM extension | Planned |
-| v0.24.0 | PGlite reactive integration | Planned |
+| v0.20.0 | Dog-feeding (pg_trickle monitors itself) | Planned |
+| v0.21.0 | PostgreSQL 17 support | Planned |
+| v0.22.0 | PGlite proof of concept | Planned |
+| v0.23.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v0.24.0 | PGlite WASM extension | Planned |
+| v0.25.0 | PGlite reactive integration | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
@@ -3932,7 +3934,7 @@ Dependencies: PERF-1 (applies to the merged delta builder). Schema change: No.
 > bitmask (`old.col IS DISTINCT FROM new.col`) in the CDC trigger; store as
 > `int8` or `bit(n)` alongside the change row. Phase 1 only: bitmask
 > computation + storage. Phase 2 (delta-scan filtering using the bitmask)
-> deferred to v0.21.0. Provides the foundation for 50–90% delta volume
+> deferred to v0.22.0. Provides the foundation for 50–90% delta volume
 > reduction on wide-table UPDATE workloads.
 
 Gate behind `pg_trickle.columnar_tracking` GUC (default `off`).
@@ -4076,7 +4078,7 @@ Dependencies: None. Schema change: No.
 > to crash-test oracle only for v0.18.0: SQLancer in Docker, configured to
 > feed randomized SQL to the parser and DVM pipeline. Zero-panic guarantee —
 > any input that crashes the extension is a bug. Equivalence oracle
-> (DIFFERENTIAL ≡ FULL) and stateful DML fuzzing deferred to v0.21.0.
+> (DIFFERENTIAL ≡ FULL) and stateful DML fuzzing deferred to v0.22.0.
 
 Verify: 10K+ fuzzed queries with zero panics.
 Dependencies: None. Schema change: No.
@@ -5242,12 +5244,99 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 
 ---
 
-## v0.20.0 — PostgreSQL 17 Support
+## v0.20.0 — Dog-Feeding (pg_trickle Monitors Itself)
+
+> **Release Theme**
+> This release implements *dog-feeding*: pg_trickle uses its own stream
+> tables to maintain reactive analytics over its internal catalog and
+> refresh-history tables. Five dog-feeding stream tables (`df_efficiency_rolling`,
+> `df_anomaly_signals`, `df_threshold_advice`, `df_cdc_buffer_trends`,
+> `df_scheduling_interference`) replace repeated full-scan diagnostic
+> functions with continuously-maintained incremental views, enable
+> multi-cycle trend detection for threshold tuning, and surface anomalies
+> reactively. An optional auto-apply policy layer can automatically adjust
+> `auto_threshold` when confidence is high. This validates pg_trickle on
+> its own non-trivial workload and demonstrates the incremental analytics
+> value proposition to users.
+>
+> See [plans/PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) for the full
+> design, architecture, and risk analysis.
+
+### Phase 1 — Foundation
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DF-F1 | **Verify CDC on `pgt_refresh_history`.** Confirm that `create_stream_table()` installs INSERT triggers on `pgt_refresh_history`. Fix schema-exclusion logic if the `pgtrickle` schema is skipped. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 1 |
+| DF-F2 | **Create `df_efficiency_rolling` (DF-1).** Maintained rolling-window aggregates over `pgt_refresh_history`. Replaces `refresh_efficiency()` full scans. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §5 DF-1 |
+| DF-F3 | **E2E test: DF-1 output matches `refresh_efficiency()`.** Insert synthetic history rows, refresh DF-1, assert aggregates agree. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+| DF-F4 | **`pgtrickle.setup_dog_feeding()` helper.** Single SQL call that creates all five `df_*` stream tables. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 4 |
+| DF-F5 | **`pgtrickle.teardown_dog_feeding()` helper.** Drops all `df_*` stream tables cleanly. | 1h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 4 |
+
+### Phase 2 — Anomaly Detection
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DF-A1 | **Create `df_anomaly_signals` (DF-2).** Detects duration spikes, error bursts, and mode oscillation by comparing recent behavior against DF-1 baselines. | 3–5h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §5 DF-2 |
+| DF-A2 | **Create `df_threshold_advice` (DF-3).** Multi-cycle threshold recommendation replacing the single-step `compute_adaptive_threshold()` convergence. | 3–5h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §5 DF-3 |
+| DF-A3 | **Verify DAG ordering.** DF-1 refreshes before DF-2 and DF-3. | 1–2h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 2 |
+| DF-A4 | **E2E test: threshold spike detection.** Inject synthetic history making DIFF consistently fast; assert DF-3 recommends raising the threshold. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+| DF-A5 | **E2E test: anomaly duration spike.** Inject a 3× duration spike; assert DF-2 detects it. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+
+### Phase 3 — CDC Buffer & Interference
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DF-C1 | **Create `df_cdc_buffer_trends` (DF-4).** Tracks change-buffer growth rates per source table. May require `pgtrickle.cdc_buffer_row_counts()` helper for dynamic table names. | 4–8h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §5 DF-4 |
+| DF-C2 | **Create `df_scheduling_interference` (DF-5).** Detects concurrent refresh overlap. FULL-refresh mode initially (bounded 1-hour window). | 3–5h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §5 DF-5 |
+| DF-C3 | **E2E test: scheduling overlap detection.** Create 3 STs with overlapping schedules; verify DF-5 detects overlap. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+
+### Phase 4 — GUC & Auto-Apply
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DF-G1 | **`pg_trickle.dog_feeding_auto_apply` GUC.** Values: `off` (default) / `threshold_only` / `full`. Registered in `src/config.rs`. | 1–2h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §6.2 |
+| DF-G2 | **Auto-apply worker (threshold_only).** Post-tick hook reads `df_threshold_advice`; applies `ALTER STREAM TABLE ... SET auto_threshold = <recommended>` when confidence is HIGH and delta > 5%. Rate-limited to 1 change per ST per 10 minutes. | 4–8h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 5 |
+| DF-G3 | **`initiated_by = 'DOG_FEED'` audit trail.** Log auto-apply changes to `pgt_refresh_history`. | 1–2h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §7 Phase 5 |
+| DF-G4 | **E2E test: auto-apply threshold.** Enable `threshold_only`, inject history making DIFF consistently faster, verify threshold increases automatically. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+| DF-G5 | **E2E test: rate limiting.** Verify no more than 1 threshold change per ST per 10 minutes. | 1–2h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+
+### Documentation & Safety
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DF-D1 | **SQL_REFERENCE.md: dog-feeding quick start.** Document `setup_dog_feeding()`, `teardown_dog_feeding()`, all five `df_*` stream tables, and the auto-apply GUC. | 2–4h | — |
+| DF-D2 | **CONFIGURATION.md: `pg_trickle.dog_feeding_auto_apply` GUC.** | 1h | — |
+| DF-D3 | **E2E test: control plane survives DF ST suspension.** Drop or suspend all `df_*` STs; verify the scheduler and refresh logic operate identically. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+| DF-D4 | **Soak test addition.** Add dog-feeding STs to the existing soak test; verify no memory growth or scheduler stalls under 1-hour sustained load. | 2–4h | [PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) §8 |
+
+> **v0.20.0 total: ~3–5 days**
+
+**Exit criteria:**
+- [ ] DF-F1: `pgt_refresh_history` receives CDC INSERT triggers when `create_stream_table()` is called
+- [ ] DF-F2: `df_efficiency_rolling` created and refreshes correctly in DIFFERENTIAL mode
+- [ ] DF-F3: DF-1 output matches `refresh_efficiency()` results on synthetic history
+- [ ] DF-F4: `setup_dog_feeding()` creates all five `df_*` stream tables in one call
+- [ ] DF-F5: `teardown_dog_feeding()` drops all `df_*` tables cleanly with no orphaned triggers
+- [ ] DF-A1: `df_anomaly_signals` created and detects 3× duration spikes
+- [ ] DF-A2: `df_threshold_advice` provides HIGH-confidence recommendations after ≥ 20 refresh cycles
+- [ ] DF-A3: DAG ensures DF-1 refreshes before DF-2 and DF-3 in every scheduler tick
+- [ ] DF-C1: `df_cdc_buffer_trends` created (FULL or DIFFERENTIAL mode)
+- [ ] DF-C2: `df_scheduling_interference` detects overlapping concurrent refreshes
+- [ ] DF-G1: `pg_trickle.dog_feeding_auto_apply` GUC registered with default `off`
+- [ ] DF-G2: Auto-apply adjusts threshold with ≥ 1 confirmed change in E2E test
+- [ ] DF-G5: Rate limiting verified — no more than 1 change per ST per 10 minutes
+- [ ] DF-D3: Suspending all `df_*` STs does not affect control-plane operation
+- [ ] Extension upgrade path tested (`0.19.0 → 0.20.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.21.0 — PostgreSQL 17 Support
 
 > **Release Theme**
 > This release adds PostgreSQL 17 as a supported target alongside
 > PostgreSQL 18. PGlite is built on PostgreSQL 17, so this is a hard
-> prerequisite for the PGlite proof of concept (v0.21.0). The pgrx 0.17.x
+> prerequisite for the PGlite proof of concept (v0.22.0). The pgrx 0.17.x
 > framework already supports PG 17 — the work is enabling the feature flag,
 > adapting version-sensitive code paths, expanding the CI matrix, and
 > validating the full test suite against a PG 17 instance.
@@ -5285,7 +5374,7 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 | PG17-12 | **Update docs and README.** Change "PostgreSQL 18 extension" to "PostgreSQL 17/18 extension" in `README.md`, `INSTALL.md`, `src/lib.rs` doc comments, and `ARCHITECTURE.md`. | 1–2h | — |
 | PG17-13 | **Docker Hub image variants.** Publish images tagged with both PG versions (e.g., `:0.20.0-pg17`, `:0.20.0-pg18`). | 2–4h | — |
 
-> **v0.20.0 total: ~2–4 days**
+> **v0.21.0 total: ~2–4 days**
 
 **Exit criteria:**
 - [ ] PG17-1: `cargo build --features pg17 --no-default-features` compiles cleanly
@@ -5296,12 +5385,12 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 - [ ] PG17-10: TPC-H differential refresh matches full refresh on PG 17
 - [ ] PG17-11: Extension upgrade path works on both PG 17 and PG 18
 - [ ] PG17-12: Documentation reflects PG 17/18 dual support
-- [ ] Extension upgrade path tested (`0.19.0 → 0.20.0`)
+- [ ] Extension upgrade path tested (`0.20.0 → 0.21.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.21.0 — PGlite Proof of Concept
+## v0.22.0 — PGlite Proof of Concept
 
 > **Release Theme**
 > This release validates whether PGlite users want real incremental view
@@ -5311,7 +5400,7 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > simple patterns — single-table aggregates, two-table inner joins, and
 > filtered scans. It deliberately limits scope to 3–5 SQL patterns to
 > keep effort low while generating a concrete demand signal. If adoption
-> materialises, the full core extraction (v0.22.0) and WASM build (v0.23.0)
+> materialises, the full core extraction (v0.23.0) and WASM build (v0.24.0)
 > proceed. The main pg_trickle PostgreSQL extension ships no functional
 > changes in this release — only version bumps and upgrade migration
 > plumbing.
@@ -5535,7 +5624,7 @@ Dependencies: PGL-0-4. Schema change: No.
 
 > **In plain terms:** A clear table showing which SQL patterns are and are
 > not supported, what error you get for unsupported patterns, and when full
-> support is expected (v0.23.0). This prevents user frustration and sets
+> support is expected (v0.24.0). This prevents user frustration and sets
 > expectations.
 
 Verify: decision table in README and npm page lists all tested patterns with
@@ -5547,7 +5636,7 @@ Dependencies: None. Schema change: No.
 > **In plain terms:** Every error thrown by the plugin must include the
 > table name, the failing operation, and a one-sentence hint. Example:
 > `"LEFT JOIN is not supported in pglite-lite. Use @pgtrickle/pglite
-> (v0.23.0+) for full SQL support, or rewrite as INNER JOIN."`
+> (v0.24.0+) for full SQL support, or rewrite as INNER JOIN."` 
 
 Verify: all error paths tested; every error message includes a remediation
 sentence.
@@ -5639,10 +5728,10 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 
 1. **Demand uncertainty is the primary risk.** This entire milestone is a bet
    that PGlite users want IVM beyond what pg_ivm provides. If Phase 0
-   generates no adoption signal, v0.22.0–v0.24.0 should be deprioritised and
+   generates no adoption signal, v0.23.0–v0.25.0 should be deprioritised and
    v1.0.0 proceeds without PGlite. Define a concrete adoption threshold
    (e.g., > 100 npm weekly downloads within 60 days of publication) as a
-   go/no-go gate for v0.22.0.
+   go/no-go gate for v0.23.0.
 
 2. **PGlite trigger infrastructure is unverified.** PGL-0-1 (trigger
    validation) is a hard prerequisite for everything else. If statement-level
@@ -5656,12 +5745,12 @@ Dependencies: None. Schema change: No (PG extension unchanged).
    Pin the minimum PGlite version in `package.json`.
 
 4. **No core Rust changes, but version bump required.** The main pg_trickle
-   extension needs a v0.21.0 version bump, upgrade migration SQL, and passing
+   extension needs a v0.22.0 version bump, upgrade migration SQL, and passing
    CI even though no functional code changes. This is low-risk but must not
    be forgotten.
 
 5. **ElectricSQL collaboration timing.** UX-5 (outreach) should happen
-   early — before v0.21.0 ships — to avoid building something ElectricSQL is
+   early — before v0.22.0 ships — to avoid building something ElectricSQL is
    already working on or would actively resist. If they signal interest in
    co-development, Phase 2 scope and timeline may shift.
 
@@ -5671,7 +5760,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
    compensate — consider porting the proptest approach to a JS property-
    testing library (e.g., fast-check).
 
-> **v0.21.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
+> **v0.22.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
 
 **Exit criteria:**
 - [ ] PGL-0-1: Statement-level triggers with transition tables confirmed working in PGlite
@@ -5693,12 +5782,12 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 - [ ] UX-4: TypeScript type definitions ship with strict-mode compatibility
 - [ ] TEST-1: > 50 correctness test cases pass on PGlite latest
 - [ ] TEST-2: CI tests pass against PGlite N, N-1, N-2
-- [ ] TEST-5: Extension upgrade path tested (`0.20.0 -> 0.21.0`)
+- [ ] TEST-5: Extension upgrade path tested (`0.21.0 -> 0.22.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.22.0 — Core Extraction (`pg_trickle_core`)
+## v0.23.0 — Core Extraction (`pg_trickle_core`)
 
 > **Release Theme**
 > This release surgically separates pg_trickle's "brain" — the DVM engine,
@@ -5707,7 +5796,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 > The extraction touches ~51,000 lines of code across 30+ source files but
 > produces zero user-visible behavior change: every existing test must pass
 > unchanged. The payoff is threefold: the core crate compiles to WASM
-> (enabling the PGlite extension in v0.23.0), pure-logic unit tests run
+> (enabling the PGlite extension in v0.24.0), pure-logic unit tests run
 > without a PostgreSQL instance (10x faster CI), and the main extension
 > gains a cleaner internal architecture. Approximately 500 unsafe blocks in
 > the parser require an abstraction layer over raw `pg_sys` node traversal,
@@ -5848,14 +5937,13 @@ Dependencies: PGL-1-1. Schema change: No.
 
 **STAB-4 — Extension upgrade path (0.19 to 0.20)**
 
-> **In plain terms:** v0.22.0 makes no SQL-visible changes (same functions,
+> **In plain terms:** v0.23.0 makes no SQL-visible changes (same functions,
 > same catalog schema), but the upgrade migration must still be tested.
 > `ALTER EXTENSION pg_trickle UPDATE` from 0.21.0 to 0.22.0 must leave
 > existing stream tables intact and refreshable.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.21.0 -> 0.22.0`.
-Dependencies: None. Schema change: No.
+ correctly after `0.22.0 -> 0.23.0`.
 
 **STAB-5 — Feature-flag isolation for WASM target**
 
@@ -5931,7 +6019,7 @@ Dependencies: PGL-1-1. Schema change: No.
 
 **SCAL-2 — Core crate binary size for WASM budget**
 
-> **In plain terms:** v0.23.0 targets < 2 MB WASM bundle. Measure the
+> **In plain terms:** v0.24.0 targets < 2 MB WASM bundle. Measure the
 > compiled size of `pg_trickle_core` for the WASM target now so the budget
 > is known before Phase 2. If > 5 MB, investigate `wasm-opt` stripping and
 > feature-gating large operator modules.
@@ -6062,8 +6150,8 @@ Dependencies: PGL-1-1. Schema change: No.
    item. If the abstraction proves too leaky (e.g., too many pg_sys node
    types to wrap), consider leaving `rewrites.rs` and `sublinks.rs` in the
    extension crate and extracting only operators + DAG + types to the core
-   crate. This reduces v0.22.0 scope but still delivers the WASM-compilable
-   operator engine for v0.23.0.
+   crate. This reduces v0.23.0 scope but still delivers the WASM-compilable
+   operator engine for v0.24.0.
 
 2. **PERF-1 must be validated before merging.** Introducing a
    `trait DatabaseBackend` could add vtable dispatch overhead on the hot
@@ -6093,7 +6181,7 @@ Dependencies: PGL-1-1. Schema change: No.
    extraction order: types -> operators -> DAG -> diff -> rewrites ->
    sublinks.
 
-> **v0.22.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
+> **v0.23.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
 
 **Exit criteria:**
 - [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
@@ -6110,7 +6198,7 @@ Dependencies: PGL-1-1. Schema change: No.
 - [ ] STAB-1: Zero `pg_sys::` references in `pg_trickle_core/src/`
 - [ ] STAB-2: `cargo build -p pg_trickle_core --no-default-features` passes in CI
 - [ ] STAB-3: `cargo pgrx package` and `cargo pgrx test` succeed with workspace layout
-- [ ] STAB-4: Extension upgrade path tested (`0.21.0 -> 0.22.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.22.0 -> 0.23.0`)
 - [ ] STAB-5: WASM target builds in CI
 - [ ] PERF-1: Criterion shows < 1% regression on `diff_operators` benchmark
 - [ ] PERF-2: Full benchmark suite passes with < 5% regression threshold
@@ -6125,12 +6213,12 @@ Dependencies: PGL-1-1. Schema change: No.
 
 ---
 
-## v0.23.0 — PGlite WASM Extension
+## v0.24.0 — PGlite WASM Extension
 
 > **Release Theme**
 > This release delivers the first working PGlite extension — the moment
 > pg_trickle's incremental view maintenance runs in the browser. By
-> wrapping `pg_trickle_core` (extracted in v0.22.0) in a thin C/FFI shim
+> wrapping `pg_trickle_core` (extracted in v0.23.0) in a thin C/FFI shim
 > and compiling to WASM via PGlite's Emscripten toolchain, we ship an npm
 > package (`@pgtrickle/pglite`) that gives PGlite users the full DVM
 > operator vocabulary — outer joins, window functions, subqueries,
@@ -6145,7 +6233,7 @@ Phase 2 for the full architecture.
 ### PGlite WASM Build (Phase 2)
 
 > **In plain terms:** This takes the `pg_trickle_core` crate extracted in
-> v0.22.0 and wraps it in a thin C shim that PGlite's Emscripten-based
+> v0.23.0 and wraps it in a thin C shim that PGlite's Emscripten-based
 > extension build system can compile to WASM. The result is a PGlite
 > extension package (`@pgtrickle/pglite`) that provides
 > `create_stream_table()`, `drop_stream_table()`, and `alter_stream_table()`
@@ -6274,15 +6362,14 @@ Verify: lifecycle test with memory profiling shows zero leaked allocations
 after unload/reload cycle.
 Dependencies: PGL-2-1, PGL-2-4. Schema change: No.
 
-**STAB-4 — Native extension upgrade path (0.21 → 0.22)**
+**STAB-4 — Native extension upgrade path (0.22 → 0.23)**
 
-> **In plain terms:** v0.23.0 adds PGlite support but makes no SQL-visible
+> **In plain terms:** v0.24.0 adds PGlite support but makes no SQL-visible
 > changes to the native extension. The upgrade migration from 0.21.0 to
 > 0.22.0 must leave existing stream tables intact and refreshable.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.22.0 -> 0.23.0`.
-Dependencies: None. Schema change: No.
+ correctly after `0.23.0 -> 0.24.0`.
 
 **STAB-5 — npm package version synchronization**
 
@@ -6562,7 +6649,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
    Add it to the existing CI matrix as a separate job that only runs when
    `pg_trickle_pglite/` or `pg_trickle_core/` files are modified.
 
-> **v0.23.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
+> **v0.24.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-2-1: C shim compiles and links against PGlite's WASM PostgreSQL headers
@@ -6578,7 +6665,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 - [ ] STAB-1: OOM stress test: PGlite survives with actionable error
 - [ ] STAB-2: Panic from invalid SQL returns SQL error, not WASM trap
 - [ ] STAB-3: Load/unload/reload lifecycle test: zero leaked allocations
-- [ ] STAB-4: Extension upgrade path tested (`0.22.0 -> 0.23.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.23.0 -> 0.24.0`)
 - [ ] PERF-1: WASM vs native benchmark report published (≤ 3× overhead)
 - [ ] PERF-2: WASM bundle ≤ 2 MB (CI gated)
 - [ ] PERF-3: Cold-start load time < 500 ms browser, < 200 ms Node.js
@@ -6594,7 +6681,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 
 ---
 
-## v0.24.0 — PGlite Reactive Integration
+## v0.25.0 — PGlite Reactive Integration
 
 > **Release Theme**
 > This release completes the PGlite story by bridging the gap between
@@ -6703,7 +6790,7 @@ Dependencies: PGL-3-1, PGL-3-2. Schema change: No.
 | STAB-1 | Memory leak prevention in long-lived hooks | M | P0 |
 | STAB-2 | Subscription cleanup on component unmount | S | P0 |
 | STAB-3 | Error boundary integration for hook failures | S | P0 |
-| STAB-4 | Native extension upgrade path (0.23 → 0.24) | S | P0 |
+| STAB-4 | Native extension upgrade path (0.24 → 0.25) | S | P0 |
 | STAB-5 | Framework version compatibility matrix | S | P1 |
 
 **STAB-1 — Memory leak prevention in long-lived hooks**
@@ -6745,16 +6832,16 @@ Verify: test dropping a stream table while `useStreamTable()` is active;
 assert error boundary catches the error with an actionable message.
 Dependencies: PGL-3-2, PGL-3-3. Schema change: No.
 
-**STAB-4 — Native extension upgrade path (0.23 → 0.24)**
+**STAB-4 — Native extension upgrade path (0.24 → 0.25)**
 
-> **In plain terms:** v0.24.0 adds reactive bindings at the TypeScript/npm
+> **In plain terms:** v0.25.0 adds reactive bindings at the TypeScript/npm
 > layer only. The native PostgreSQL extension and PGlite WASM extension
-> must continue to work unchanged. The upgrade migration from 0.22.0 to
-> 0.23.0 must leave existing stream tables and the `@pgtrickle/pglite`
+> must continue to work unchanged. The upgrade migration from 0.23.0 to
+> 0.24.0 must leave existing stream tables and the `@pgtrickle/pglite`
 > WASM extension intact.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.23.0 -> 0.24.0`. TypeScript API backward compatibility
+correctly after `0.24.0 -> 0.25.0`. TypeScript API backward compatibility
 verified.
 Dependencies: None. Schema change: No.
 
@@ -6940,11 +7027,11 @@ Dependencies: PGL-3-4, PERF-1. Schema change: No.
 > `live.changes()` bridge emits the correct change events for INSERT,
 > UPDATE, and DELETE on the source table. Replay events into an
 > accumulator and assert it matches `SELECT * FROM stream_table`. This
-> extends v0.23.0 TEST-1 (operator E2E) by adding the reactive layer.
+> extends v0.24.0 TEST-1 (operator E2E) by adding the reactive layer.
 
 Verify: ≥ 69 tests (23 operators × 3 DML types). Accumulator matches
 `SELECT *` for every test case.
-Dependencies: PGL-3-1, v0.23.0 TEST-1. Schema change: No.
+Dependencies: PGL-3-1, v0.24.0 TEST-1. Schema change: No.
 
 **TEST-2 — React hook lifecycle tests**
 
@@ -6997,7 +7084,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
    relatively new and its event format may change between PGlite releases.
    Pin the PGlite version and add an adapter layer so the bridge can
    accommodate event format changes without rewriting the React/Vue hooks.
-   If PGlite deprecates `live.changes()` before v0.24.0 ships, fall back
+   If PGlite deprecates `live.changes()` before v0.25.0 ships, fall back
    to `LISTEN/NOTIFY` with a custom channel.
 
 2. **CORR-2 (batch atomicity) and PERF-2 (single re-render) are coupled.**
@@ -7024,12 +7111,12 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
    and scope it to documentation + a proof-of-concept, not production-grade
    support.
 
-6. **No native extension changes in v0.24.0.** This release is entirely
+6. **No native extension changes in v0.25.0.** This release is entirely
    in the TypeScript/npm layer. Any temptation to add native features
    (e.g., `LISTEN/NOTIFY` bridge, WebSocket push) should be deferred to
    post-1.0. Keep the scope tight: reactive bindings + examples + docs.
 
-> **v0.24.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
+> **v0.25.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-3-1: Stream table changes appear in `live.changes()` event stream
@@ -7044,7 +7131,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
 - [ ] STAB-1: 4-hour soak test: heap growth < 10%
 - [ ] STAB-2: 100 mount/unmount cycles: zero leaked subscriptions
 - [ ] STAB-3: Stream table dropped while hook active: error boundary catches
-- [ ] STAB-4: Extension upgrade path tested (`0.23.0 -> 0.24.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.24.0 -> 0.25.0`)
 - [ ] STAB-5: CI matrix passes for React 18, React 19, Vue 3.4+
 - [ ] PERF-1: INSERT-to-render latency < 50% of `live.incrementalQuery()` at 10K rows
 - [ ] PERF-2: Render count = 1 for bulk DML (1, 10, 100, 1000 rows)
@@ -7074,7 +7161,7 @@ forward-compatibility.
 > audits every internal `pg_sys::*` API call for breaking changes, adds
 > conditional compilation gates, and validates the WAL decoder against any
 > pgoutput format changes introduced in PG 19. Moved here from the
-> earlier v0.21.0 milestone because PG 19 beta availability is uncertain.
+> earlier v0.22.0 milestone because PG 19 beta availability is uncertain.
 
 | Item | Description | Effort | Ref |
 |------|-------------|--------|-----|
@@ -7267,11 +7354,12 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
 | v0.19.0 — Production Gap Closure & Distribution | ~4–5 weeks | — | |
-| v0.20.0 — PostgreSQL 17 Support | ~2–4d | — | |
-| v0.21.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
-| v0.22.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
-| v0.23.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
-| v0.24.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
+| v0.20.0 — Dog-Feeding (pg_trickle monitors itself) | ~3–5d | — | |
+| v0.21.0 — PostgreSQL 17 Support | ~2–4d | — | |
+| v0.22.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
+| v0.23.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
+| v0.24.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
+| v0.25.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
 | v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
