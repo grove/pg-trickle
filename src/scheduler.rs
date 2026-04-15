@@ -2173,6 +2173,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut last_history_cleanup_ms: u64 = 0;
     const HISTORY_CLEANUP_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
+    // DF-G2: Dog-feeding auto-apply — timestamp-gated, rate-limited.
+    let mut last_auto_apply_ms: u64 = 0;
+    const AUTO_APPLY_INTERVAL_MS: u64 = 10 * 60 * 1000; // 10 minutes
+
     // Phase 10: Crash recovery — mark any interrupted RUNNING records
     BackgroundWorker::transaction(AssertUnwindSafe(|| {
         recover_from_crash();
@@ -2219,11 +2223,25 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut wake_stats_poll: u64 = 0;
     let mut wake_stats_last_log_ms: u64 = current_epoch_ms();
 
+    // OPS-6: Workload-aware poll — overlap count from df_scheduling_interference.
+    // Refreshed once per auto-apply cycle (10 min).
+    let mut interference_overlap_count: i64 = 0;
+
     loop {
         // DAG-2: Adaptive poll interval — exponential backoff (20ms → 200ms)
         // that resets to 20ms on worker completion, making parallel mode
         // competitive for cheap refreshes.
-        let base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        let mut base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+
+        // OPS-6: Workload-aware poll — if df_scheduling_interference detects
+        // heavy overlap, slightly increase the base interval to reduce
+        // contention. This is a gentle back-off: +10% per overlap pair,
+        // capped at 2× the configured interval.
+        if interference_overlap_count > 0 {
+            let boost = base_interval_ms / 10 * (interference_overlap_count as u64).min(10);
+            base_interval_ms = (base_interval_ms + boost).min(base_interval_ms * 2);
+        }
+
         let poll_ms = compute_adaptive_poll_ms(
             parallel_state.adaptive_poll_ms,
             parallel_state.completions_this_tick > 0,
@@ -2440,31 +2458,80 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             {
                 let retention_days = config::pg_trickle_history_retention_days();
                 if retention_days > 0 {
+                    // PERF-5: Batched DELETEs — delete up to 1000 rows per
+                    // transaction to limit lock contention on pgt_refresh_history.
+                    // Repeat until fewer than the batch size are deleted.
+                    let batch_size: i64 = 1000;
+                    let mut total_deleted: i64 = 0;
+                    loop {
+                        let deleted: i64 = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                            Spi::get_one_with_args::<i64>(
+                                "WITH batch AS (\
+                                        SELECT refresh_id FROM pgtrickle.pgt_refresh_history \
+                                        WHERE start_time < now() - make_interval(days => $1) \
+                                        LIMIT $2 \
+                                    ), deleted AS (\
+                                        DELETE FROM pgtrickle.pgt_refresh_history \
+                                        WHERE refresh_id IN (SELECT refresh_id FROM batch) \
+                                        RETURNING 1\
+                                    ) SELECT count(*) FROM deleted",
+                                &[retention_days.into(), batch_size.into()],
+                            )
+                            .unwrap_or(Some(0))
+                            .unwrap_or(0)
+                        }));
+                        total_deleted += deleted;
+                        if deleted < batch_size {
+                            break;
+                        }
+                    }
+                    if total_deleted > 0 {
+                        log!(
+                            "pg_trickle: history cleanup — deleted {} rows older than {} days (batched)",
+                            total_deleted,
+                            retention_days,
+                        );
+                    }
+                }
+                last_history_cleanup_ms = now_for_cleanup;
+            }
+        }
+
+        // DF-G2: Dog-feeding auto-apply — read df_threshold_advice, apply changes.
+        {
+            let now_for_auto_apply = current_epoch_ms();
+            if now_for_auto_apply.saturating_sub(last_auto_apply_ms) >= AUTO_APPLY_INTERVAL_MS {
+                let auto_apply_mode = config::pg_trickle_dog_feeding_auto_apply();
+                if auto_apply_mode != config::DogFeedingAutoApply::Off {
                     BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                        // Use a parameterised query (no format!) to avoid any
-                        // dynamic-SQL concerns raised by static analysis tools.
-                        // make_interval(days => $1) accepts the i32 GUC value
-                        // through the standard SPI bind-parameter path.
-                        let deleted = Spi::get_one_with_args::<i64>(
-                            "WITH deleted AS (\
-                                DELETE FROM pgtrickle.pgt_refresh_history \
-                                WHERE start_time < now() - make_interval(days => $1) \
-                                RETURNING 1\
-                            ) SELECT count(*) FROM deleted",
-                            &[retention_days.into()],
+                        dog_feeding_auto_apply_tick();
+                    }));
+                }
+                last_auto_apply_ms = now_for_auto_apply;
+
+                // OPS-6: Refresh interference overlap count for workload-aware poll.
+                // Only reads if the DF ST exists (safe even without dog-feeding).
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    let si_exists: bool = Spi::get_one(
+                        "SELECT EXISTS ( \
+                            SELECT 1 FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_schema = 'pgtrickle' \
+                              AND pgt_name = 'df_scheduling_interference' \
+                        )",
+                    )
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false);
+                    if si_exists {
+                        interference_overlap_count = Spi::get_one(
+                            "SELECT coalesce(sum(overlap_count), 0)::bigint \
+                             FROM pgtrickle.df_scheduling_interference",
                         )
                         .unwrap_or(Some(0))
                         .unwrap_or(0);
-                        if deleted > 0 {
-                            log!(
-                                "pg_trickle: history cleanup — deleted {} rows older than {} days",
-                                deleted,
-                                retention_days,
-                            );
-                        }
-                    }));
-                }
-                last_history_cleanup_ms = now_for_cleanup;
+                    } else {
+                        interference_overlap_count = 0;
+                    }
+                }));
             }
         }
 
@@ -3128,6 +3195,185 @@ fn check_extension_version_match() {
              or reinstall the matching shared library.",
             compiled_version,
             installed
+        );
+    }
+}
+
+// ── DF-G2: Dog-feeding auto-apply tick ──────────────────────────────────────
+
+/// Auto-apply threshold recommendations from `df_threshold_advice`.
+///
+/// Called once per `AUTO_APPLY_INTERVAL_MS` when `dog_feeding_auto_apply` GUC
+/// is not `off`. Reads HIGH-confidence recommendations where the recommended
+/// threshold differs from the current threshold by > 5%, then applies via
+/// `StreamTableMeta::update_adaptive_threshold`. Rate-limited to 1 change per
+/// ST per invocation (STAB-2, STAB-4).
+///
+/// DF-G3: Logs changes to `pgt_refresh_history` with `initiated_by = 'DOG_FEED'`.
+fn dog_feeding_auto_apply_tick() {
+    // STAB-4: Check that df_threshold_advice exists before reading.
+    let advice_exists: bool = Spi::get_one(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_stream_tables
+            WHERE pgt_schema = 'pgtrickle' AND pgt_name = 'df_threshold_advice'
+        )",
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !advice_exists {
+        return;
+    }
+
+    // Read recommendations with HIGH confidence and > 5% delta.
+    let recommendations: Vec<(i64, f64, f64, String)> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT ta.pgt_id, ta.recommended_threshold, ta.current_threshold,
+                    ta.pgt_schema || '.' || ta.pgt_name AS fq_name
+             FROM pgtrickle.df_threshold_advice ta
+             WHERE ta.confidence = 'HIGH'
+               AND ta.recommended_threshold IS NOT NULL
+               AND ta.current_threshold IS NOT NULL
+               AND abs(ta.recommended_threshold - ta.current_threshold)
+                   / NULLIF(ta.current_threshold, 0) > 0.05",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                pgrx::warning!("pg_trickle: auto-apply read failed: {}", e);
+                return Vec::new();
+            }
+        };
+
+        let mut recs = Vec::new();
+        for row in result {
+            let pgt_id = row.get::<i64>(1).unwrap_or(None).unwrap_or(0);
+            let recommended = row.get::<f64>(2).unwrap_or(None).unwrap_or(0.0);
+            let current = row.get::<f64>(3).unwrap_or(None).unwrap_or(0.0);
+            let fq_name = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+            if pgt_id > 0 {
+                recs.push((pgt_id, recommended, current, fq_name));
+            }
+        }
+        recs
+    });
+
+    for (pgt_id, recommended, current, fq_name) in &recommendations {
+        // STAB-2: Handle ALTER failure gracefully — don't let one failure stop others.
+        match crate::catalog::StreamTableMeta::update_adaptive_threshold(
+            *pgt_id,
+            Some(*recommended),
+            None,
+        ) {
+            Ok(()) => {
+                log!(
+                    "pg_trickle: auto-apply threshold {} → {} for {} (DOG_FEED)",
+                    current,
+                    recommended,
+                    fq_name,
+                );
+                // DF-G3: Audit trail in pgt_refresh_history.
+                if let Ok(Some(now)) =
+                    Spi::get_one::<pgrx::prelude::TimestampWithTimeZone>("SELECT now()")
+                {
+                    let _ = crate::catalog::RefreshRecord::insert(
+                        *pgt_id,
+                        now,
+                        "SKIP",
+                        "COMPLETED",
+                        0,
+                        0,
+                        Some(&format!(
+                            "DOG_FEED: auto_threshold {} → {}",
+                            current, recommended
+                        )),
+                        Some("DOG_FEED"),
+                        None,
+                        0,
+                        None,
+                        false,
+                        None,
+                    );
+                }
+            }
+            Err(e) => {
+                pgrx::warning!(
+                    "pg_trickle: auto-apply threshold update failed for {}: {}",
+                    fq_name,
+                    e,
+                );
+            }
+        }
+    }
+
+    if !recommendations.is_empty() {
+        log!(
+            "pg_trickle: auto-apply applied {} threshold changes",
+            recommendations.len(),
+        );
+    }
+
+    // UX-3: Check for anomalies and emit NOTIFY on pg_trickle_alert channel.
+    dog_feeding_anomaly_notify();
+}
+
+/// UX-3: Emit NOTIFY on `pgtrickle_alert` channel when anomalies are detected.
+///
+/// Reads `df_anomaly_signals` and sends a JSON notification for each stream
+/// table that has a duration anomaly or recent failures ≥ 2.
+fn dog_feeding_anomaly_notify() {
+    let signals_exist: bool = Spi::get_one(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_stream_tables
+            WHERE pgt_schema = 'pgtrickle' AND pgt_name = 'df_anomaly_signals'
+        )",
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !signals_exist {
+        return;
+    }
+
+    let anomalies: Vec<(String, Option<String>, i64)> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT a.pgt_schema || '.' || a.pgt_name AS fq_name,
+                    a.duration_anomaly,
+                    a.recent_failures
+             FROM pgtrickle.df_anomaly_signals a
+             WHERE a.duration_anomaly IS NOT NULL
+                OR a.recent_failures >= 2",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut out = Vec::new();
+        for row in result {
+            let fq_name = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let anomaly = row.get::<String>(2).unwrap_or(None);
+            let failures = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+            if !fq_name.is_empty() {
+                out.push((fq_name, anomaly, failures));
+            }
+        }
+        out
+    });
+
+    for (fq_name, anomaly, failures) in &anomalies {
+        let anomaly_str = anomaly.as_deref().unwrap_or("none");
+        let payload = format!(
+            r#"{{"event":"dog_feed_anomaly","stream_table":"{}","anomaly":"{}","recent_failures":{}}}"#,
+            fq_name.replace('"', r#"\""#),
+            anomaly_str.replace('"', r#"\""#),
+            failures,
+        );
+        let _ = Spi::run_with_args(
+            "SELECT pg_notify('pgtrickle_alert', $1)",
+            &[payload.as_str().into()],
         );
     }
 }

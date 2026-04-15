@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-04-13
 > **Latest release:** 0.19.0 (2026-04-13)
-> **Current milestone:** v0.20.0 — Dog-Feeding (pg_trickle Monitors Itself)
+> **Current milestone:** v0.21.0 — PostgreSQL 17 Support
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -83,7 +83,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.17.0 | Query intelligence & stability | ✅ Released |
 | **v0.18.0** | **Hardening & delta performance** | **✅ Released** |
 | **v0.19.0** | **Production gap closure & distribution** | **✅ Released** |
-| v0.20.0 | Dog-feeding (pg_trickle monitors itself) | Planned |
+| **v0.20.0** | **Dog-feeding (pg_trickle monitors itself)** | **✅ Released** |
 | v0.21.0 | PostgreSQL 17 support | Planned |
 | v0.22.0 | PGlite proof of concept | Planned |
 | v0.23.0 | Core extraction (`pg_trickle_core`) | Planned |
@@ -5245,6 +5245,9 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 ---
 
 ## v0.20.0 — Dog-Feeding (pg_trickle Monitors Itself)
+
+**Status: Released (2026-04-15).** All 62 items implemented, 1 skipped
+(PERF-6 already shipped in v0.19.0). See `plans/PLAN_0_20_0.md`.
 
 > **Release Theme**
 > This release implements *dog-feeding*: pg_trickle uses its own stream

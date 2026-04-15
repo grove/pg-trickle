@@ -3959,6 +3959,142 @@ WHERE fuse_mode != 'off';
 
 ---
 
+## Dog Feeding — Self-Monitoring (v0.20.0)
+
+> **Added in v0.20.0.**
+
+pg_trickle can monitor itself using its own stream tables. Five *dog-feeding*
+stream tables maintain reactive analytics over the internal catalog, replacing
+repeated full-scan diagnostic queries with continuously-maintained incremental
+views.
+
+### Quick Start
+
+```sql
+-- Create all five dog-feeding stream tables (idempotent).
+SELECT pgtrickle.setup_dog_feeding();
+
+-- Check status.
+SELECT * FROM pgtrickle.dog_feeding_status();
+
+-- View threshold recommendations (after 10+ refresh cycles).
+SELECT * FROM pgtrickle.df_threshold_advice
+WHERE confidence IN ('HIGH', 'MEDIUM');
+
+-- View anomalies.
+SELECT * FROM pgtrickle.df_anomaly_signals
+WHERE duration_anomaly IS NOT NULL;
+
+-- Enable auto-apply (optional).
+SET pg_trickle.dog_feeding_auto_apply = 'threshold_only';
+
+-- Clean up.
+SELECT pgtrickle.teardown_dog_feeding();
+```
+
+### `pgtrickle.setup_dog_feeding()`
+
+Creates all five dog-feeding stream tables. Idempotent — safe to call multiple
+times. Emits a warm-up warning if `pgt_refresh_history` has fewer than 50 rows.
+
+**Stream tables created:**
+
+| Name | Schedule | Mode | Purpose |
+|------|----------|------|---------|
+| `pgtrickle.df_efficiency_rolling` | 48s | AUTO | Rolling-window refresh statistics |
+| `pgtrickle.df_anomaly_signals` | 48s | AUTO | Duration spikes, error bursts, mode oscillation |
+| `pgtrickle.df_threshold_advice` | 96s | AUTO | Multi-cycle threshold recommendations |
+| `pgtrickle.df_cdc_buffer_trends` | 48s | AUTO | CDC buffer growth rates per source |
+| `pgtrickle.df_scheduling_interference` | 96s | FULL | Concurrent refresh overlap detection |
+
+### `pgtrickle.teardown_dog_feeding()`
+
+Drops all dog-feeding stream tables. Safe with partial setups — missing tables
+are silently skipped. User stream tables are never affected.
+
+### `pgtrickle.dog_feeding_status()`
+
+Returns the status of all five expected dog-feeding stream tables:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `st_name` | text | Stream table name |
+| `exists` | bool | Whether the ST exists |
+| `status` | text | Current status (ACTIVE, SUSPENDED, etc.) |
+| `refresh_mode` | text | Effective refresh mode |
+| `last_refresh_at` | text | Last successful refresh timestamp |
+| `total_refreshes` | bigint | Total completed refreshes |
+
+### `pgtrickle.scheduler_overhead()`
+
+Returns scheduler efficiency metrics for the last hour:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `total_refreshes_1h` | bigint | Total refreshes in the last hour |
+| `df_refreshes_1h` | bigint | Dog-feeding refreshes in the last hour |
+| `df_refresh_fraction` | float | Fraction of refreshes that are dog-feeding |
+| `avg_refresh_ms` | float | Average refresh duration (ms) |
+| `avg_df_refresh_ms` | float | Average DF refresh duration (ms) |
+| `total_refresh_time_s` | float | Total time spent refreshing (seconds) |
+| `df_refresh_time_s` | float | Time spent on DF refreshes (seconds) |
+
+### `pgtrickle.explain_dag(format)`
+
+Returns the full refresh DAG as a Mermaid markdown (default) or Graphviz DOT
+string. Node colours: user STs = blue, dog-feeding STs = green,
+suspended = red, fused = orange.
+
+```sql
+-- Mermaid format (default).
+SELECT pgtrickle.explain_dag();
+
+-- Graphviz DOT format.
+SELECT pgtrickle.explain_dag('dot');
+```
+
+### Auto-Apply Policy
+
+The `pg_trickle.dog_feeding_auto_apply` GUC controls whether analytics can
+automatically adjust stream table configuration:
+
+| Value | Behaviour |
+|-------|-----------|
+| `off` (default) | Advisory only — no automatic changes |
+| `threshold_only` | Apply threshold recommendations when confidence is HIGH and delta > 5% |
+| `full` | Also apply scheduling hints from interference analysis |
+
+Auto-apply is rate-limited to at most one threshold change per stream table
+per 10 minutes. Changes are logged to `pgt_refresh_history` with
+`initiated_by = 'DOG_FEED'`.
+
+### Confidence Levels and Sparse History
+
+`df_threshold_advice` assigns a confidence level to each recommendation:
+
+| Confidence | Criteria | What to expect |
+|------------|----------|----------------|
+| **HIGH** | ≥ 20 total refreshes, ≥ 5 DIFFERENTIAL, ≥ 2 FULL | Reliable recommendation — auto-apply will act on this |
+| **MEDIUM** | ≥ 10 total refreshes | Directionally useful, but may lack enough FULL/DIFF mix |
+| **LOW** | < 10 total refreshes | Insufficient data — recommendation equals the current threshold |
+
+**When you see LOW confidence:** This is normal during the first minutes after
+`setup_dog_feeding()`. The stream tables need time to accumulate refresh
+history. In typical deployments with a 1-minute schedule, expect:
+- **LOW** for the first ~10 minutes
+- **MEDIUM** after ~10 minutes
+- **HIGH** after ~20 minutes (requires at least 2 FULL refreshes — these
+  happen naturally when the auto-threshold triggers a mode switch)
+
+If a stream table uses `FULL` mode exclusively, the advice will remain
+at MEDIUM because no DIFFERENTIAL observations exist for comparison.
+
+The `sla_headroom_pct` column shows how much faster DIFFERENTIAL is compared
+to FULL as a percentage. A value of 70% means "DIFF is 70% faster than FULL".
+This column is `NULL` when either FULL or DIFF observations are missing.
+
+---
+
 ## Public API Stability Contract
 
 > **Added in v0.19.0 (DB-6).**

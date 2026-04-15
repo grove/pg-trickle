@@ -1398,6 +1398,82 @@ so deployments are always idempotent.
 
 ---
 
+## Day 2 Operations
+
+> **Added in v0.20.0 (UX-4).**
+
+Once your stream tables are running in production, pg_trickle can monitor
+itself using its own stream tables — a technique called *dog-feeding*.
+
+### Enabling Dog-Feeding
+
+```sql
+-- Create all five monitoring stream tables (idempotent, safe to repeat).
+SELECT pgtrickle.setup_dog_feeding();
+
+-- Check what was created.
+SELECT * FROM pgtrickle.dog_feeding_status();
+```
+
+This creates five stream tables in the `pgtrickle` schema:
+
+| Stream Table | Purpose |
+|-------------|---------|
+| `df_efficiency_rolling` | Rolling-window refresh statistics (replaces manual `refresh_efficiency()` calls) |
+| `df_anomaly_signals` | Detects duration spikes, error bursts, mode oscillation |
+| `df_threshold_advice` | Recommends threshold adjustments based on multi-cycle analysis |
+| `df_cdc_buffer_trends` | Tracks CDC buffer growth rates per source table |
+| `df_scheduling_interference` | Detects concurrent refresh overlap patterns |
+
+### Checking Recommendations
+
+After at least 10–20 refresh cycles have accumulated:
+
+```sql
+-- Which stream tables have poorly calibrated thresholds?
+SELECT pgt_name, current_threshold, recommended_threshold, confidence, reason
+FROM pgtrickle.df_threshold_advice
+WHERE confidence IN ('HIGH', 'MEDIUM')
+  AND abs(recommended_threshold - current_threshold) > 0.05;
+
+-- Are any stream tables experiencing anomalies?
+SELECT pgt_name, duration_anomaly, recent_failures
+FROM pgtrickle.df_anomaly_signals
+WHERE duration_anomaly IS NOT NULL OR recent_failures >= 2;
+```
+
+### Automatic Threshold Tuning
+
+To let pg_trickle automatically apply threshold recommendations:
+
+```sql
+SET pg_trickle.dog_feeding_auto_apply = 'threshold_only';
+```
+
+This applies changes only when confidence is HIGH and the recommended threshold
+differs by more than 5%. Changes are rate-limited to once per 10 minutes per
+stream table and logged with `initiated_by = 'DOG_FEED'`.
+
+### Visualizing the DAG
+
+```sql
+-- See the full refresh graph (Mermaid format, paste into any Mermaid renderer).
+SELECT pgtrickle.explain_dag();
+```
+
+Dog-feeding STs appear in green, user STs in blue, suspended in red.
+
+### Disabling Dog-Feeding
+
+```sql
+SELECT pgtrickle.teardown_dog_feeding();
+```
+
+This drops all monitoring stream tables. User stream tables are never affected.
+The control plane continues operating identically without dog-feeding.
+
+---
+
 ## What's Next?
 
 - **[TUI.md](TUI.md)** — Terminal UI & CLI tool for managing and monitoring stream tables from outside SQL

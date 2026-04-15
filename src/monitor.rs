@@ -956,6 +956,36 @@ fn explain_st_impl(
     let append_only_mode = if st.is_append_only { "on" } else { "off" };
     props.push(("append_only_mode".to_string(), append_only_mode.to_string()));
 
+    // UX-5: Dog-feeding coverage — show whether DF stream tables exist and
+    // whether this ST is being monitored.
+    {
+        let df_count: i64 = Spi::get_one(
+            "SELECT count(*) FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_schema = 'pgtrickle' AND pgt_name LIKE 'df_%'",
+        )
+        .unwrap_or(Some(0))
+        .unwrap_or(0);
+        let coverage = if df_count >= 5 {
+            "full (5/5 dog-feeding STs active)"
+        } else if df_count > 0 {
+            "partial"
+        } else {
+            "none (run setup_dog_feeding() to enable)"
+        };
+        props.push(("dog_feeding_coverage".to_string(), coverage.to_string()));
+    }
+
+    // UX-6: Refresh mode recommendation from recommend_refresh_mode().
+    {
+        let fq_name = format!("{}.{}", st.pgt_schema, st.pgt_name);
+        if let Ok(Some(rec)) = Spi::get_one_with_args::<String>(
+            "SELECT row_to_json(r)::text FROM pgtrickle.recommend_refresh_mode($1) r",
+            &[fq_name.as_str().into()],
+        ) {
+            props.push(("recommended_refresh_mode".to_string(), rec));
+        }
+    }
+
     // B-1: Aggregate fast-path status.
     // Detect whether the defining query has all-algebraic aggregates.
     let agg_fast_path_guc = crate::config::pg_trickle_aggregate_fast_path();
@@ -1362,6 +1392,67 @@ fn check_cdc_health() -> TableIterator<
                     alert,
                     selective,
                 ));
+            }
+        }
+    }
+
+    // OPS-2: Enrich with spill-risk data from df_cdc_buffer_trends (if it exists).
+    let buffer_trends: std::collections::HashMap<i64, (f64, f64)> = {
+        let trends_exist: bool = Spi::get_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_stream_tables
+                WHERE pgt_schema = 'pgtrickle' AND pgt_name = 'df_cdc_buffer_trends'
+            )",
+        )
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+
+        if trends_exist {
+            Spi::connect(|client| {
+                let result = match client.select(
+                    "SELECT source_relid, avg_delta_per_refresh, max_delta_per_refresh \
+                     FROM pgtrickle.df_cdc_buffer_trends \
+                     WHERE avg_delta_per_refresh IS NOT NULL",
+                    None,
+                    &[],
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return std::collections::HashMap::new(),
+                };
+                let mut m = std::collections::HashMap::new();
+                for row in result {
+                    let relid = row.get::<i64>(1).unwrap_or(None).unwrap_or(0);
+                    let avg_delta = row.get::<f64>(2).unwrap_or(None).unwrap_or(0.0);
+                    let max_delta = row.get::<f64>(3).unwrap_or(None).unwrap_or(0.0);
+                    if relid > 0 {
+                        m.insert(relid, (avg_delta, max_delta));
+                    }
+                }
+                m
+            })
+        } else {
+            std::collections::HashMap::new()
+        }
+    };
+
+    // Merge spill-risk alerts from df_cdc_buffer_trends into rows.
+    if !buffer_trends.is_empty() {
+        for row in &mut rows {
+            let source_relid = row.0;
+            if let Some(&(avg_delta, max_delta)) = buffer_trends.get(&source_relid) {
+                // Alert if max delta > 10× average (burst spill risk).
+                if avg_delta > 0.0 && max_delta > avg_delta * 10.0 {
+                    let spill_alert = format!(
+                        "CDC buffer spill risk: max_delta ({:.0}) is {:.0}× avg ({:.0})",
+                        max_delta,
+                        max_delta / avg_delta,
+                        avg_delta,
+                    );
+                    row.6 = Some(match &row.6 {
+                        Some(existing) => format!("{}; {}", existing, spill_alert),
+                        None => spill_alert,
+                    });
+                }
             }
         }
     }
