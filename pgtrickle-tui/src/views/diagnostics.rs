@@ -21,13 +21,35 @@ pub fn render(
         .and_then(|d| d.signals.as_ref())
         .is_some();
 
-    if has_signals {
+    // UX-7: Show scheduler overhead panel when dog-feeding is active.
+    let has_overhead = state.scheduler_overhead.is_some();
+
+    if has_signals && has_overhead {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(8),
+                Constraint::Length(12),
+                Constraint::Length(5),
+            ])
+            .split(area);
+        render_table(frame, chunks[0], state, theme, selected, filter);
+        render_signal_breakdown(frame, chunks[1], state, theme, selected);
+        render_scheduler_overhead(frame, chunks[2], state, theme);
+    } else if has_signals {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(12)])
             .split(area);
         render_table(frame, chunks[0], state, theme, selected, filter);
         render_signal_breakdown(frame, chunks[1], state, theme, selected);
+    } else if has_overhead {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(5)])
+            .split(area);
+        render_table(frame, chunks[0], state, theme, selected, filter);
+        render_scheduler_overhead(frame, chunks[1], state, theme);
     } else {
         render_table(frame, area, state, theme, selected, filter);
     }
@@ -173,4 +195,40 @@ fn render_signal_breakdown(
         .title(Span::styled(" Signals ", theme.title));
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// UX-7: Render scheduler overhead panel showing dog-feeding cost.
+fn render_scheduler_overhead(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let overhead = match &state.scheduler_overhead {
+        Some(o) => o,
+        None => return,
+    };
+
+    let frac_pct = overhead
+        .df_refresh_fraction
+        .map(|f| format!("{:.1}%", f * 100.0))
+        .unwrap_or_else(|| "—".to_string());
+    let avg_ms = overhead
+        .avg_df_refresh_ms
+        .map(|m| format!("{:.1}ms", m))
+        .unwrap_or_else(|| "—".to_string());
+    let total_s = overhead
+        .df_refresh_time_s
+        .map(|s| format!("{:.1}s", s))
+        .unwrap_or_else(|| "—".to_string());
+
+    let text = format!(
+        " Refreshes: {} total, {} DF ({}) │ Avg DF: {} │ DF time: {}",
+        overhead.total_refreshes_1h, overhead.df_refreshes_1h, frac_pct, avg_ms, total_s,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border)
+        .title(Span::styled(" Scheduler Overhead (1h) ", theme.title));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text, theme.dim))).block(block),
+        area,
+    );
 }

@@ -4068,6 +4068,31 @@ Auto-apply is rate-limited to at most one threshold change per stream table
 per 10 minutes. Changes are logged to `pgt_refresh_history` with
 `initiated_by = 'DOG_FEED'`.
 
+### Confidence Levels and Sparse History
+
+`df_threshold_advice` assigns a confidence level to each recommendation:
+
+| Confidence | Criteria | What to expect |
+|------------|----------|----------------|
+| **HIGH** | ≥ 20 total refreshes, ≥ 5 DIFFERENTIAL, ≥ 2 FULL | Reliable recommendation — auto-apply will act on this |
+| **MEDIUM** | ≥ 10 total refreshes | Directionally useful, but may lack enough FULL/DIFF mix |
+| **LOW** | < 10 total refreshes | Insufficient data — recommendation equals the current threshold |
+
+**When you see LOW confidence:** This is normal during the first minutes after
+`setup_dog_feeding()`. The stream tables need time to accumulate refresh
+history. In typical deployments with a 1-minute schedule, expect:
+- **LOW** for the first ~10 minutes
+- **MEDIUM** after ~10 minutes
+- **HIGH** after ~20 minutes (requires at least 2 FULL refreshes — these
+  happen naturally when the auto-threshold triggers a mode switch)
+
+If a stream table uses `FULL` mode exclusively, the advice will remain
+at MEDIUM because no DIFFERENTIAL observations exist for comparison.
+
+The `sla_headroom_pct` column shows how much faster DIFFERENTIAL is compared
+to FULL as a percentage. A value of 70% means "DIFF is 70% faster than FULL".
+This column is `NULL` when either FULL or DIFF observations are missing.
+
 ---
 
 ## Public API Stability Contract

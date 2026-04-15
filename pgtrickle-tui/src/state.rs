@@ -155,6 +155,8 @@ pub struct AppState {
     pub diag_signals: HashMap<String, serde_json::Value>,
     /// Dedup stats from pgtrickle.dedup_stats()
     pub dedup_stats: Option<DedupStats>,
+    /// UX-7: Scheduler overhead from pgtrickle.scheduler_overhead()
+    pub scheduler_overhead: Option<SchedulerOverhead>,
     /// CDC health from pgtrickle.check_cdc_health()
     pub cdc_health: Vec<CdcHealthEntry>,
     /// Quick health from pgtrickle.quick_health view
@@ -358,6 +360,18 @@ pub struct DedupStats {
     pub total_diff_refreshes: i64,
     pub dedup_needed: i64,
     pub dedup_ratio_pct: f64,
+}
+
+/// UX-7: Dog-feeding scheduler overhead metrics.
+#[derive(Clone, Serialize, Default)]
+pub struct SchedulerOverhead {
+    pub total_refreshes_1h: i64,
+    pub df_refreshes_1h: i64,
+    pub df_refresh_fraction: Option<f64>,
+    pub avg_refresh_ms: Option<f64>,
+    pub avg_df_refresh_ms: Option<f64>,
+    pub total_refresh_time_s: Option<f64>,
+    pub df_refresh_time_s: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]

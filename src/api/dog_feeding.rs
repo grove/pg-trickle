@@ -164,10 +164,11 @@ JOIN pgtrickle.pgt_refresh_history b
     ON a.pgt_id < b.pgt_id
    AND a.start_time < b.end_time
    AND b.start_time < a.end_time
+   AND b.start_time > now() - interval '1 hour'
+   AND b.status = 'COMPLETED'
 JOIN pgtrickle.pgt_stream_tables sta ON sta.pgt_id = a.pgt_id
 JOIN pgtrickle.pgt_stream_tables stb ON stb.pgt_id = b.pgt_id
 WHERE a.status = 'COMPLETED'
-  AND b.status = 'COMPLETED'
   AND a.start_time > now() - interval '1 hour'
 GROUP BY a.pgt_id, b.pgt_id, sta.pgt_name, stb.pgt_name
 HAVING count(*) >= 3";

@@ -2223,11 +2223,25 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     let mut wake_stats_poll: u64 = 0;
     let mut wake_stats_last_log_ms: u64 = current_epoch_ms();
 
+    // OPS-6: Workload-aware poll — overlap count from df_scheduling_interference.
+    // Refreshed once per auto-apply cycle (10 min).
+    let mut interference_overlap_count: i64 = 0;
+
     loop {
         // DAG-2: Adaptive poll interval — exponential backoff (20ms → 200ms)
         // that resets to 20ms on worker completion, making parallel mode
         // competitive for cheap refreshes.
-        let base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+        let mut base_interval_ms = config::pg_trickle_scheduler_interval_ms() as u64;
+
+        // OPS-6: Workload-aware poll — if df_scheduling_interference detects
+        // heavy overlap, slightly increase the base interval to reduce
+        // contention. This is a gentle back-off: +10% per overlap pair,
+        // capped at 2× the configured interval.
+        if interference_overlap_count > 0 {
+            let boost = base_interval_ms / 10 * (interference_overlap_count as u64).min(10);
+            base_interval_ms = (base_interval_ms + boost).min(base_interval_ms * 2);
+        }
+
         let poll_ms = compute_adaptive_poll_ms(
             parallel_state.adaptive_poll_ms,
             parallel_state.completions_this_tick > 0,
@@ -2444,29 +2458,40 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             {
                 let retention_days = config::pg_trickle_history_retention_days();
                 if retention_days > 0 {
-                    BackgroundWorker::transaction(AssertUnwindSafe(|| {
-                        // Use a parameterised query (no format!) to avoid any
-                        // dynamic-SQL concerns raised by static analysis tools.
-                        // make_interval(days => $1) accepts the i32 GUC value
-                        // through the standard SPI bind-parameter path.
-                        let deleted = Spi::get_one_with_args::<i64>(
-                            "WITH deleted AS (\
-                                DELETE FROM pgtrickle.pgt_refresh_history \
-                                WHERE start_time < now() - make_interval(days => $1) \
-                                RETURNING 1\
-                            ) SELECT count(*) FROM deleted",
-                            &[retention_days.into()],
-                        )
-                        .unwrap_or(Some(0))
-                        .unwrap_or(0);
-                        if deleted > 0 {
-                            log!(
-                                "pg_trickle: history cleanup — deleted {} rows older than {} days",
-                                deleted,
-                                retention_days,
-                            );
+                    // PERF-5: Batched DELETEs — delete up to 1000 rows per
+                    // transaction to limit lock contention on pgt_refresh_history.
+                    // Repeat until fewer than the batch size are deleted.
+                    let batch_size: i64 = 1000;
+                    let mut total_deleted: i64 = 0;
+                    loop {
+                        let deleted: i64 = BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                            Spi::get_one_with_args::<i64>(
+                                "WITH batch AS (\
+                                        SELECT refresh_id FROM pgtrickle.pgt_refresh_history \
+                                        WHERE start_time < now() - make_interval(days => $1) \
+                                        LIMIT $2 \
+                                    ), deleted AS (\
+                                        DELETE FROM pgtrickle.pgt_refresh_history \
+                                        WHERE refresh_id IN (SELECT refresh_id FROM batch) \
+                                        RETURNING 1\
+                                    ) SELECT count(*) FROM deleted",
+                                &[retention_days.into(), batch_size.into()],
+                            )
+                            .unwrap_or(Some(0))
+                            .unwrap_or(0)
+                        }));
+                        total_deleted += deleted;
+                        if deleted < batch_size {
+                            break;
                         }
-                    }));
+                    }
+                    if total_deleted > 0 {
+                        log!(
+                            "pg_trickle: history cleanup — deleted {} rows older than {} days (batched)",
+                            total_deleted,
+                            retention_days,
+                        );
+                    }
                 }
                 last_history_cleanup_ms = now_for_cleanup;
             }
@@ -2483,6 +2508,30 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }));
                 }
                 last_auto_apply_ms = now_for_auto_apply;
+
+                // OPS-6: Refresh interference overlap count for workload-aware poll.
+                // Only reads if the DF ST exists (safe even without dog-feeding).
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    let si_exists: bool = Spi::get_one(
+                        "SELECT EXISTS ( \
+                            SELECT 1 FROM pgtrickle.pgt_stream_tables \
+                            WHERE pgt_schema = 'pgtrickle' \
+                              AND pgt_name = 'df_scheduling_interference' \
+                        )",
+                    )
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false);
+                    if si_exists {
+                        interference_overlap_count = Spi::get_one(
+                            "SELECT coalesce(sum(overlap_count), 0)::bigint \
+                             FROM pgtrickle.df_scheduling_interference",
+                        )
+                        .unwrap_or(Some(0))
+                        .unwrap_or(0);
+                    } else {
+                        interference_overlap_count = 0;
+                    }
+                }));
             }
         }
 
@@ -3263,6 +3312,67 @@ fn dog_feeding_auto_apply_tick() {
             "pg_trickle: auto-apply applied {} threshold changes",
             recommendations.len(),
         );
+    }
+
+    // UX-3: Check for anomalies and emit NOTIFY on pg_trickle_alert channel.
+    dog_feeding_anomaly_notify();
+}
+
+/// UX-3: Emit NOTIFY on `pgtrickle_alert` channel when anomalies are detected.
+///
+/// Reads `df_anomaly_signals` and sends a JSON notification for each stream
+/// table that has a duration anomaly or recent failures ≥ 2.
+fn dog_feeding_anomaly_notify() {
+    let signals_exist: bool = Spi::get_one(
+        "SELECT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_stream_tables
+            WHERE pgt_schema = 'pgtrickle' AND pgt_name = 'df_anomaly_signals'
+        )",
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !signals_exist {
+        return;
+    }
+
+    let anomalies: Vec<(String, Option<String>, i64)> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT a.pgt_schema || '.' || a.pgt_name AS fq_name,
+                    a.duration_anomaly,
+                    a.recent_failures
+             FROM pgtrickle.df_anomaly_signals a
+             WHERE a.duration_anomaly IS NOT NULL
+                OR a.recent_failures >= 2",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut out = Vec::new();
+        for row in result {
+            let fq_name = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+            let anomaly = row.get::<String>(2).unwrap_or(None);
+            let failures = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+            if !fq_name.is_empty() {
+                out.push((fq_name, anomaly, failures));
+            }
+        }
+        out
+    });
+
+    for (fq_name, anomaly, failures) in &anomalies {
+        let anomaly_str = anomaly.as_deref().unwrap_or("none");
+        let payload = format!(
+            r#"{{"event":"dog_feed_anomaly","stream_table":"{}","anomaly":"{}","recent_failures":{}}}"#,
+            fq_name.replace('"', r#"\""#),
+            anomaly_str.replace('"', r#"\""#),
+            failures,
+        );
+        let escaped = payload.replace('\'', "''");
+        let _ = Spi::run(&format!("SELECT pg_notify('pgtrickle_alert', '{escaped}')"));
     }
 }
 

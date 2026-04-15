@@ -25,7 +25,7 @@ pub async fn poll_all(client: &Client, state: &mut AppState) {
     );
 
     // Phase 2: New SQL API polls run in parallel (graceful degradation)
-    let (r_dedup, r_cdc_h, r_qh, r_gates, r_wm_st, r_sbs, r_diamond, r_scc) = tokio::join!(
+    let (r_dedup, r_cdc_h, r_qh, r_gates, r_wm_st, r_sbs, r_diamond, r_scc, r_sched) = tokio::join!(
         poll_dedup_stats_query(client),
         poll_cdc_health_query(client),
         poll_quick_health_query(client),
@@ -34,6 +34,7 @@ pub async fn poll_all(client: &Client, state: &mut AppState) {
         poll_shared_buffer_stats_query(client),
         poll_diamond_groups_query(client),
         poll_scc_status_query(client),
+        poll_scheduler_overhead_query(client),
     );
 
     // Apply core results
@@ -170,6 +171,17 @@ pub async fn poll_all(client: &Client, state: &mut AppState) {
         }
         Err(_) => {
             state.scc_groups = vec![];
+            state.record_poll_failure();
+        }
+    }
+    // UX-7: Scheduler overhead
+    match r_sched {
+        Ok(v) => {
+            state.scheduler_overhead = v;
+            state.record_poll_success();
+        }
+        Err(_) => {
+            state.scheduler_overhead = None;
             state.record_poll_failure();
         }
     }
@@ -1051,4 +1063,28 @@ async fn poll_scc_status_query(client: &Client) -> Result<Vec<SccGroup>, PgErr> 
             last_converged_at: row.get(4),
         })
         .collect())
+}
+
+/// UX-7: Poll scheduler_overhead() for dog-feeding diagnostics.
+async fn poll_scheduler_overhead_query(
+    client: &Client,
+) -> Result<Option<SchedulerOverhead>, PgErr> {
+    let rows = client
+        .query(
+            "SELECT total_refreshes_1h, df_refreshes_1h,
+                    df_refresh_fraction, avg_refresh_ms, avg_df_refresh_ms,
+                    total_refresh_time_s, df_refresh_time_s
+             FROM pgtrickle.scheduler_overhead()",
+            &[],
+        )
+        .await?;
+    Ok(rows.first().map(|row| SchedulerOverhead {
+        total_refreshes_1h: row.get(0),
+        df_refreshes_1h: row.get(1),
+        df_refresh_fraction: row.get(2),
+        avg_refresh_ms: row.get(3),
+        avg_df_refresh_ms: row.get(4),
+        total_refresh_time_s: row.get(5),
+        df_refresh_time_s: row.get(6),
+    }))
 }

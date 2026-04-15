@@ -86,6 +86,12 @@ One SQL call sets everything up; one call tears it down.
 - **PERF-1:** New index on `pgt_refresh_history(pgt_id, start_time)` speeds
   up all dog-feeding queries and general history lookups.
 
+- **PERF-4:** DF-5 scheduling interference self-join now uses bounded index
+  scans (both sides time-bounded to 1 hour).
+
+- **PERF-5:** History pruning uses batched DELETEs (1000 rows per transaction)
+  to reduce lock contention on `pgt_refresh_history`.
+
 - **DF-G3:** Auto-apply changes are audited in `pgt_refresh_history` with
   `initiated_by = 'DOG_FEED'` — the CHECK constraint on that column now
   includes this new value.
@@ -95,6 +101,24 @@ One SQL call sets everything up; one call tears it down.
 
 - **STAB-2/4:** The auto-apply worker handles ALTER failures gracefully and
   verifies stream tables exist before applying changes.
+
+- **UX-3:** Anomaly detection emits `NOTIFY pgtrickle_alert` with JSON payload
+  when duration spikes or error bursts are detected.
+
+- **UX-5/6:** `explain_st()` now shows `dog_feeding_coverage` (none/partial/full)
+  and `recommended_refresh_mode` properties.
+
+- **OPS-2:** `check_cdc_health()` enriched with spill-risk alerts from
+  `df_cdc_buffer_trends` when burst deltas exceed 10× the average.
+
+- **OPS-6:** Scheduler poll interval adapts to scheduling interference —
+  +10% per overlap pair to reduce contention, capped at 2× base interval.
+
+- **UX-7:** TUI diagnostics panel shows `scheduler_overhead()` metrics
+  (total/DF refresh count, fraction, avg duration) below the recommendation table.
+
+- **UX-8:** `df_threshold_advice` includes `sla_headroom_pct` column showing
+  how much faster DIFFERENTIAL is compared to FULL.
 
 ### Documentation
 
