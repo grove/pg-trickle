@@ -350,16 +350,17 @@ async fn test_cdc_insert_only_trigger_on_refresh_history() {
     db.execute("SELECT pgtrickle.setup_dog_feeding()").await;
 
     // Verify that CDC triggers on pgt_refresh_history are INSERT-only.
-    // tgtype bitmask: INSERT=2, DELETE=4, UPDATE=8, TRUNCATE=16
-    // AFTER ROW INSERT = 2 | 1 (AFTER) | 0 (ROW) = 3 in some encodings,
-    // but the key check is that UPDATE (8) and DELETE (4) bits are not set.
+    // PostgreSQL tgtype bitmask (pg_trigger.h):
+    //   ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32
+    // To check for DELETE or UPDATE triggers: mask = 8 | 16 = 24.
+    // INSERT triggers have tgtype & 24 == 0, so they are correctly excluded.
     let has_non_insert: bool = db
         .query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM pg_trigger
                 WHERE tgrelid = 'pgtrickle.pgt_refresh_history'::regclass
                   AND tgname LIKE 'pg_trickle_cdc_%'
-                  AND (tgtype & 12) != 0  -- bits 4 (DELETE) or 8 (UPDATE) set
+                  AND (tgtype & 24) != 0  -- DELETE (8) or UPDATE (16) bits set
             )",
         )
         .await;
