@@ -589,7 +589,7 @@ fn explain_dag_impl(format: &str) -> Result<String, PgTrickleError> {
                 "SELECT DISTINCT d.pgt_id AS downstream_id, dep_st.pgt_id AS upstream_id
                  FROM pgtrickle.pgt_dependencies d
                  JOIN pgtrickle.pgt_stream_tables dep_st
-                   ON dep_st.table_oid = d.source_relid
+                   ON dep_st.pgt_relid = d.source_relid
                  ORDER BY upstream_id, downstream_id",
                 None,
                 &[],
