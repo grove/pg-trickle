@@ -287,6 +287,47 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Row 3b: Differential efficiency showcase -->
+  <div class="row g-3 mb-3">
+    <div class="col-7">
+      <div class="g-card h-100">
+        <div class="g-card-hdr">🔬 Merchant Tier Stats
+          <small style="color:var(--green);font-size:11px;margin-left:8px">
+            DIFFERENTIAL showcase — change ratio ~0.07
+          </small>
+        </div>
+        <div class="overflow-auto" style="max-height:220px;">
+          <table class="g-table">
+            <thead>
+              <tr><th>Merchant</th><th>Tier</th><th>Txns</th><th>Avg $</th><th>Users</th></tr>
+            </thead>
+            <tbody id="tb-tier-stats"></tbody>
+          </table>
+        </div>
+        <div class="p-2" style="font-size:11px;color:var(--muted);border-top:1px solid var(--border)">
+          Only 1 of 15 rows changes per cycle (1 transaction hits 1 merchant).
+          Tier rotates ~every 30 cycles. The Mode Advisor recommends
+          <span style="color:var(--green)">KEEP DIFFERENTIAL</span> here.
+        </div>
+      </div>
+    </div>
+    <div class="col-5">
+      <div class="g-card h-100">
+        <div class="g-card-hdr">🏷️ Live Merchant Risk Tiers
+          <small style="color:var(--muted);font-size:11px;margin-left:8px">rotates ~every 30 cycles</small>
+        </div>
+        <div class="overflow-auto" style="max-height:260px;">
+          <table class="g-table">
+            <thead>
+              <tr><th>Merchant</th><th>Category</th><th>Tier</th></tr>
+            </thead>
+            <tbody id="tb-tiers"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Row 4: alert_summary + risk_scores by category -->
   <div class="row g-3 mb-3">
     <div class="col-5">
@@ -636,6 +677,27 @@ async function refreshInternals() {
        <td style="color:var(--muted);font-size:11px">${esc(r.reason||'')}</td>
      </tr>`;
   }).join(''));
+  // ── Merchant tier stats (DIFFERENTIAL showcase) ──────────────────────────
+  const tierColors = { HIGH: 'var(--red)', ELEVATED: 'var(--yellow)', STANDARD: 'var(--green)' };
+  setRows('tb-tier-stats', (d.merchant_tier_stats||[]).map(r => {
+    const col = tierColors[r.merchant_tier] || 'inherit';
+    return `<tr>
+       <td>${esc(r.merchant_name)}</td>
+       <td style="color:${col};font-weight:bold">${esc(r.merchant_tier)}</td>
+       <td>${fmt(r.txn_count)}</td>
+       <td>${fmtM(r.avg_amount)}</td>
+       <td>${r.unique_users}</td>
+     </tr>`;
+  }).join(''));
+
+  setRows('tb-tiers', (d.merchant_tiers||[]).map(r => {
+    const col = tierColors[r.tier] || 'inherit';
+    return `<tr>
+       <td>${esc(r.merchant_name)}</td>
+       <td style="color:var(--muted);font-size:11px">${esc(r.category||'')}</td>
+       <td style="color:${col};font-weight:bold">${esc(r.tier)}</td>
+     </tr>`;
+  }).join(''));
 }
 
 // fetch internals immediately when the tab is opened
@@ -680,8 +742,17 @@ DAG_DIAGRAM = r"""
   └────────────┘         │  (DIFFERENTIAL)  │
                          └──────────────────┘
 
+  ┌───────────────────┐
+  │ merchant_risk_tier│──┐
+  │ (slowly-changing) │  │  ┌─────────────────────┐
+  └───────────────────┘  └─►│ merchant_tier_stats │  ← DIFFERENTIAL SHOWCASE
+  transactions ─────────────►│   (DIFFERENTIAL 5s) │    change ratio ~0.07
+                             └─────────────────────┘
+
   transactions feeds user_velocity AND merchant_stats — a genuine diamond.
   risk_scores is the convergence node that joins both Layer 1 outputs.
+  merchant_tier_stats demonstrates low change ratio: only 1/15 rows changes
+  per cycle (1 transaction touches 1 merchant; tier rotates ~every 30 cycles).
 """
 
 
@@ -757,6 +828,22 @@ def api_data():
             ORDER  BY high_pct DESC NULLS LAST
         """)
 
+        merchant_tier_stats = safe_query(conn, """
+            SELECT mts.merchant_id, m.name AS merchant_name, m.category,
+                   mts.merchant_tier, mts.txn_count, mts.total_amount,
+                   mts.avg_amount, mts.unique_users
+            FROM   merchant_tier_stats mts
+            JOIN   merchants m ON m.id = mts.merchant_id
+            ORDER  BY mts.merchant_id
+        """)
+
+        merchant_tiers = safe_query(conn, """
+            SELECT mrt.merchant_id, m.name AS merchant_name, mrt.tier, mrt.updated_at
+            FROM   merchant_risk_tier mrt
+            JOIN   merchants m ON m.id = mrt.merchant_id
+            ORDER  BY mrt.merchant_id
+        """)
+
         return jsonify(
             {
                 "recent_alerts":       serialize(recent_alerts),
@@ -767,6 +854,8 @@ def api_data():
                 "category_volume":     serialize(category_volume),
                 "st_status":           serialize(st_status),
                 "risk_by_category":    serialize(risk_by_category),
+                "merchant_tier_stats": serialize(merchant_tier_stats),
+                "merchant_tiers":      serialize(merchant_tiers),
             }
         )
     except Exception as exc:

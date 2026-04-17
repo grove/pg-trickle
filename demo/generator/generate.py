@@ -30,6 +30,11 @@ CATEGORY_AMOUNTS: dict[str, tuple[float, float]] = {
 
 RISKY_CATEGORIES = {"Crypto", "Gambling"}
 
+# Slowly-changing tier rotation — the merchant_tier_stats stream table
+# has DIFFERENTIAL refresh: only the updated merchant's row changes each cycle.
+TIER_ORDER = ["STANDARD", "ELEVATED", "HIGH"]
+TIER_UPDATE_INTERVAL = 30  # rotate one merchant tier every ~N cycles
+
 
 def connect(url: str):
     """Retry until the database is ready."""
@@ -64,6 +69,28 @@ def sample_amount(category: str, multiplier: float = 1.0) -> float:
     mu = math.log((lo + hi) / 2.0)
     raw = random.lognormvariate(mu, 0.55) * multiplier
     return round(max(1.0, min(raw, 9_999.99)), 2)
+
+
+def rotate_merchant_tier(conn, merchant_id: int) -> None:
+    """Rotate one merchant's risk tier to the next value (STANDARD→ELEVATED→HIGH→…)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT tier FROM merchant_risk_tier WHERE merchant_id = %s",
+            (merchant_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            current = row[0] if row[0] in TIER_ORDER else TIER_ORDER[0]
+            new_tier = TIER_ORDER[(TIER_ORDER.index(current) + 1) % len(TIER_ORDER)]
+            cur.execute(
+                "UPDATE merchant_risk_tier SET tier = %s, updated_at = now() "
+                "WHERE merchant_id = %s",
+                (new_tier, merchant_id),
+            )
+            print(
+                f"[TIER]  merchant {merchant_id:>2} → {new_tier}",
+                flush=True,
+            )
 
 
 def insert_txn(conn, user_id: int, merchant_id: int, amount: float) -> int:
@@ -105,6 +132,16 @@ def main() -> None:
                 f"({burst_remaining} rapid txns)",
                 flush=True,
             )
+
+        # Slowly rotate one merchant's risk tier (~once every TIER_UPDATE_INTERVAL cycles).
+        # This drives the merchant_tier_stats stream table's DIFFERENTIAL refresh,
+        # keeping its change ratio well below 1.0 and making KEEP DIFFERENTIAL correct.
+        if cycle % TIER_UPDATE_INTERVAL == 0:
+            tier_merchant = random.choice(all_ids)
+            try:
+                rotate_merchant_tier(conn, tier_merchant)
+            except psycopg2.Error as exc:
+                print(f"[GENERATOR] Tier update error: {exc}", flush=True)
 
         try:
             if burst_remaining > 0 and burst_user is not None:

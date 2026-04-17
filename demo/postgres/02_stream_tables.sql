@@ -191,3 +191,35 @@ SELECT pgtrickle.create_stream_table(
     schedule     => 'calculated',
     refresh_mode => 'DIFFERENTIAL'
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DIFFERENTIAL EFFICIENCY SHOWCASE
+-- ─────────────────────────────────────────────────────────────────────────────
+-- merchant_tier_stats demonstrates a low change ratio by reading from
+-- merchant_risk_tier — a slowly-changing lookup that the generator updates
+-- for only one merchant every ~30 cycles (roughly once per minute).
+--
+-- Per-cycle change profile:
+--   • 1 new transaction is inserted → only that merchant's row changes.
+--   • ~every 30 cycles, one merchant's tier is rotated → only that row changes.
+--
+-- Result: change ratio ≈ 0.07 (1 of 15 rows per cycle), compared to 1.0
+-- for the aggregation tables above.  The Refresh Mode Advisor will show
+-- KEEP DIFFERENTIAL here while recommending FULL for the others.
+SELECT pgtrickle.create_stream_table(
+    name     => 'merchant_tier_stats',
+    query    => $$
+        SELECT
+            mrt.merchant_id,
+            mrt.tier                                     AS merchant_tier,
+            COUNT(t.id)                                  AS txn_count,
+            COALESCE(SUM(t.amount),           0)         AS total_amount,
+            COALESCE(ROUND(AVG(t.amount), 2), 0)         AS avg_amount,
+            COUNT(DISTINCT t.user_id)                    AS unique_users
+        FROM merchant_risk_tier mrt
+        LEFT JOIN transactions t ON t.merchant_id = mrt.merchant_id
+        GROUP BY mrt.merchant_id, mrt.tier
+    $$,
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
