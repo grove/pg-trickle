@@ -6052,7 +6052,28 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 | PG17-12 | **Update docs and README.** Change "PostgreSQL 18 extension" to "PostgreSQL 17/18 extension" in `README.md`, `INSTALL.md`, `src/lib.rs` doc comments, and `ARCHITECTURE.md`. | 1–2h | — |
 | PG17-13 | **Docker Hub image variants.** Publish images tagged with both PG versions (e.g., `:0.20.0-pg17`, `:0.20.0-pg18`). | 2–4h | — |
 
-> **v0.21.0 total: ~2–4 days**
+### PostgreSQL 18/19 Feature Integration
+
+Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md). These are quick wins with minimal code effort or documentation-only updates.
+
+#### Documentation-Only Items (Zero Code)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGFEAT-1 | **Document `extension_control_path` in INSTALL.md.** Add `extension_control_path` GUC as an alternative to the default `sharedir` for non-standard installations (NixOS, custom Kubernetes init containers). | 30min | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#low-extension_control_path) |
+| PGFEAT-2 | **Update CONFIGURATION.md for idle replication slot timeout.** Document PG 18's `idle_replication_slot_timeout` GUC and its interaction with pg_trickle's WAL-mode CDC. Add health check note. | 1h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#low-idle-replication-slot-timeout) |
+| PGFEAT-3 | **Verify & document logical replication of generated columns.** Confirm WAL decoder correctly handles stored generated columns in change buffer schemas. Add E2E test and documentation note. | 1–2h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#low-logical-replication-of-generated-columns) |
+
+#### Code Changes (Low Effort)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PGFEAT-4 | **Add NOT ENFORCED constraints to storage tables.** Add `NOT ENFORCED` foreign keys and check constraints during `CREATE EXTENSION` and stream table creation to document relationships (FK to source) and invariants (`__pgt_count > 0`) without runtime overhead. | 2–3h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#high-not-enforced-constraints) |
+| PGFEAT-5 | **AIO subsystem benchmarking.** Re-run E2E refresh benchmarks on PG 18 with `io_method = io_uring` (Linux) enabled. Document recommended settings in CONFIGURATION.md and BENCHMARK.md. | 3–4h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#high-asynchronous-io-subsystem) |
+
+> **PostgreSQL feature integration subtotal: ~4–5 hours**
+
+> **v0.21.0 total: ~2–4 days** (PG 17 support) **+ ~4–5 hours** (PostgreSQL feature integration)
 
 **Exit criteria:**
 - [ ] PG17-1: `cargo build --features pg17 --no-default-features` compiles cleanly
@@ -6063,6 +6084,11 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 - [ ] PG17-10: TPC-H differential refresh matches full refresh on PG 17
 - [ ] PG17-11: Extension upgrade path works on both PG 17 and PG 18
 - [ ] PG17-12: Documentation reflects PG 17/18 dual support
+- [ ] PGFEAT-1: INSTALL.md documents `extension_control_path` alternative
+- [ ] PGFEAT-2: CONFIGURATION.md documents `idle_replication_slot_timeout` interaction
+- [ ] PGFEAT-3: WAL decoder tested with stored generated columns; E2E test passes
+- [ ] PGFEAT-4: Storage tables have NOT ENFORCED FK and CHECK constraints; no runtime overhead
+- [ ] PGFEAT-5: E2E refresh benchmarks run with `io_method = io_uring`; CONFIGURATION.md updated with recommended settings
 - [ ] Extension upgrade path tested (`0.20.0 → 0.21.0`)
 - [ ] `just check-version-sync` passes
 
