@@ -125,7 +125,7 @@ fn generate_queries(base_seed: u64, count: usize) -> Vec<GeneratedQuery> {
     let mut queries = Vec::with_capacity(count);
 
     for idx in 0..count {
-        let seed = base_seed.wrapping_add(idx as u64 * 0x9e3779b97f4a7c15);
+        let seed = base_seed.wrapping_add((idx as u64).wrapping_mul(0x9e3779b97f4a7c15));
         let mut rng = Lcg::new(seed);
 
         let query = generate_one_query(&mut rng, idx);
@@ -376,7 +376,7 @@ async fn run_crash_oracle() {
         // Create tables and insert data.
         for tbl in &gq.tables {
             db.execute(&tbl.ddl()).await;
-            let mut rng = Lcg::new(gq.seed ^ (i as u64 * 0x1234567890abcdef));
+            let mut rng = Lcg::new(gq.seed ^ (i as u64).wrapping_mul(0x1234567890abcdef));
             db.execute(&tbl.insert_dml(&mut rng)).await;
         }
 
@@ -472,7 +472,7 @@ async fn run_equivalence_oracle() {
         // Create source tables.
         for tbl in &gq.tables {
             db.execute(&tbl.ddl()).await;
-            let mut rng = Lcg::new(gq.seed ^ (i as u64 * 0x1234567890abcdef));
+            let mut rng = Lcg::new(gq.seed ^ (i as u64).wrapping_mul(0x1234567890abcdef));
             db.execute(&tbl.insert_dml(&mut rng)).await;
         }
 
