@@ -2955,11 +2955,19 @@ fn resolve_columns(table_oid: u32) -> Result<Vec<Column>, PgTrickleError> {
     // on stream table storage tables. These are implementation details
     // and must not participate in row_id computation or delta queries.
     // Mirrors the filter in resolve_st_output_columns().
+    //
+    // Also filter out generated columns (attgenerated <> '').  PostgreSQL
+    // GENERATED ALWAYS AS … STORED columns are excluded from change buffer
+    // tables by resolve_source_column_defs() (which uses AND attgenerated = '').
+    // If we include them here, the DVM would emit c."new_<col>" references
+    // that do not exist in the change buffer, causing errors like
+    // "column c.new_mid does not exist" at refresh time.
     let sql = format!(
         "SELECT attname::text, atttypid, attnotnull \
          FROM pg_attribute \
          WHERE attrelid = {} AND attnum > 0 AND NOT attisdropped \
            AND attname::text NOT LIKE '__pgt_%%' \
+           AND attgenerated = '' \
          ORDER BY attnum",
         table_oid,
     );
