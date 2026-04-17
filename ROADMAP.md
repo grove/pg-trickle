@@ -6079,10 +6079,13 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 | PGFEAT-7 | **Skip Scan index optimization evaluation.** Evaluate multi-column B-tree indexes on change buffer tables `(source_relid, change_lsn)` to enable skip scan for multi-source delta lookups. Run `EXPLAIN` benchmarks on existing delta queries to quantify benefit. Create indexes if beneficial. | 2–3h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#medium-skip-scan-for-b-tree-indexes) |
 | PGFEAT-8 | **OLD/NEW in MERGE RETURNING integration.** Refactor `build_merge_sql()` in `src/refresh.rs` to use `MERGE ... RETURNING OLD.*, NEW.*` for capturing displaced rows in a single round-trip. Eliminates separate pre-refresh snapshots for ST-to-ST change buffers. Improves full-refresh delta computation performance. | 4–6h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#high-oldnew-in-returning-for-merge) |
 | PGFEAT-9 | **Virtual generated columns CDC support.** Verify and test that pg_trickle's trigger-based CDC correctly excludes virtual generated columns from change buffer schemas. Update `resolve_referenced_column_defs()` function if needed. Add E2E tests with virtual generated column sources and storage tables. | 4–6h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#high-virtual-generated-columns) |
+| PGFEAT-10 | **Extension Cumulative Statistics API integration.** Replace ad-hoc refresh statistics (shared memory counters + custom views) with proper PostgreSQL `pg_stat` infrastructure. Implement custom stats kind and register collectors for per-stream-table metrics (refresh count, delta rows, latency). Enables pgwatch, Datadog, and cloud providers to discover metrics natively. | 3–4h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#medium-extension-cumulative-statistics-api) |
+| PGFEAT-11 | **Custom EXPLAIN options for delta queries.** Register custom `EXPLAIN` option (`EXPLAIN (DELTA)` or `EXPLAIN (PGTRICKLE)`) to display delta query plans alongside original query plans. Integrate with existing `pgtrickle.explain_delta()` function to expose diagnostic information through standard PostgreSQL `EXPLAIN` syntax. | 3–4h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#medium-custom-explain-options-for-extensions) |
+| PGFEAT-12 | **Temporal constraints support for stream tables.** Verify and test that pg_trickle's CDC triggers correctly handle temporal PK columns with `WITHOUT OVERLAPS` semantics. Ensure `pk_hash` computation includes range columns. Add E2E tests for SCD Type 2 and temporal data sources. Document "as-of" query patterns for temporal aggregates. | 3–4h | [PLAN_POSTGRESQL_FEATURES.md](plans/sql/PLAN_POSTGRESQL_FEATURES.md#medium-temporal-constraints-without-overlaps) |
 
-> **PostgreSQL feature integration subtotal: ~4–5 hours** (PGFEAT-1 through PGFEAT-5) **+ ~10–18 hours** (PGFEAT-6 through PGFEAT-9, optional but recommended)
+> **PostgreSQL feature integration subtotal: ~4–5 hours** (PGFEAT-1 through PGFEAT-5) **+ ~19–30 hours** (PGFEAT-6 through PGFEAT-12, recommended for operational excellence)
 
-> **v0.21.0 total: ~2–4 days** (PG 17 support) **+ ~14–23 hours** (PostgreSQL feature integration, all items)
+> **v0.21.0 total: ~2–4 days** (PG 17 support) **+ ~23–35 hours** (PostgreSQL feature integration, all 12 items)
 
 **Exit criteria:**
 - [ ] PG17-1: `cargo build --features pg17 --no-default-features` compiles cleanly
@@ -6102,6 +6105,9 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 - [ ] PGFEAT-7: Skip scan index optimization evaluated; benchmarks quantify benefit; indexes created if beneficial
 - [ ] PGFEAT-8: `MERGE ... RETURNING OLD.*, NEW.*` integrated in `build_merge_sql()`; ST-to-ST change buffer performance improved
 - [ ] PGFEAT-9: Virtual generated columns correctly excluded from CDC change buffer schemas; E2E tests pass with virtual column sources
+- [ ] PGFEAT-10: Extension Cumulative Statistics API integrated; per-stream-table metrics (refresh count, delta rows, latency) discoverable by third-party tools
+- [ ] PGFEAT-11: Custom `EXPLAIN (DELTA)` option implemented and integrated with `pgtrickle.explain_delta()`; shows delta query plans
+- [ ] PGFEAT-12: Temporal constraints correctly handled in CDC; `pk_hash` includes range columns; E2E tests with SCD Type 2 / temporal data pass
 - [ ] Extension upgrade path tested (`0.20.0 → 0.21.0`)
 - [ ] `just check-version-sync` passes
 
