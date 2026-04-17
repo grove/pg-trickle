@@ -1,7 +1,7 @@
 # Build pg_trickle from source for demo/testing
 # Usage: docker build -t pg_trickle:demo -f Dockerfile.demo .
 
-FROM rust:nightly-bookworm AS builder
+FROM rust:nightly AS builder
 
 # Install PostgreSQL 18 dev dependencies
 # Add PostgreSQL official repository for PG 18
