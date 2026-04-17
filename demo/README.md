@@ -9,19 +9,19 @@ variable:
 
 | Scenario | Default? | Description |
 |----------|----------|-------------|
-| `fraud` | ✅ | Financial fraud detection pipeline — 9-node DAG over a transaction stream |
-| `ecommerce` | — | E-commerce analytics — 6-node DAG over a continuous order stream |
+| `fraud` | — | Financial fraud detection pipeline — 9-node DAG over a transaction stream |
+| `ecommerce` | ✅ | E-commerce analytics — 6-node DAG over a continuous order stream |
 
 ## Quick start
 
 ```bash
 cd demo
 
-# Fraud detection (default)
+# E-commerce analytics (default)
 docker compose up
 
-# E-commerce analytics
-DEMO_SCENARIO=ecommerce docker compose up
+# Fraud detection
+DEMO_SCENARIO=fraud docker compose up
 ```
 
 Then open **http://localhost:8080** in your browser.
@@ -79,7 +79,7 @@ The `PG_TRICKLE_IMAGE` environment variable overrides the default pre-built imag
 
 ---
 
-## Scenario: fraud (default)
+## Scenario: ecommerce (default)
 
 The demo models a real-time **financial fraud detection system**.
 Three services start together:
@@ -101,7 +101,7 @@ illustrating that `merchant_tier_stats` detects this change differentially.
 
 ---
 
-## DAG topology
+## DAG topology (fraud scenario)
 
 ```
   Base tables            Layer 1 — Silver        Layer 2 — Gold          Layer 3 — Platinum

@@ -8,8 +8,8 @@ Two scenarios are available via the `DEMO_SCENARIO` environment variable:
 
 | Scenario | Default? | Pipeline |
 |----------|----------|----------|
-| `fraud` | ✅ | Financial fraud detection — 9-node, 4-layer DAG over a transaction stream |
-| `ecommerce` | — | E-commerce analytics — 6-node DAG over a continuous order stream |
+| `fraud` | — | Financial fraud detection — 9-node, 4-layer DAG over a transaction stream |
+| `ecommerce` | ✅ | E-commerce analytics — 6-node DAG over a continuous order stream |
 
 Each scenario includes two purpose-built **differential efficiency showcases**:
 stream tables with sub-1.0 change ratios that demonstrate when DIFFERENTIAL
@@ -25,11 +25,11 @@ DAG-aware scheduling work together on data you can watch moving.
 ```bash
 cd demo
 
-# Fraud detection (default)
+# E-commerce analytics (default)
 docker compose up --build
 
-# E-commerce analytics
-DEMO_SCENARIO=ecommerce docker compose up --build
+# Fraud detection
+DEMO_SCENARIO=fraud docker compose up --build
 ```
 
 Open **http://localhost:8080** — the dashboard refreshes every 2 seconds.
@@ -64,7 +64,7 @@ same Docker Compose services.
 
 ---
 
-## Scenario: fraud (default)
+## Scenario: fraud
 
 The demo models the data pipeline a financial institution might build to
 spot suspicious activity as it happens, not hours later in a batch job.
@@ -517,7 +517,7 @@ The two showcase tables make this concrete:
 
 ---
 
-## Scenario: ecommerce
+## Scenario: ecommerce (default)
 
 The e-commerce scenario models a real-time **online store analytics pipeline**
 with orders streaming in continuously.
