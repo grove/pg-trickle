@@ -30,7 +30,7 @@ COPY . /build
 RUN cargo install cargo-pgrx && \
     PGRX_HOME=/pgrx \
     PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config \
-    cargo pgrx init --pg18 system && \
+    cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config && \
     cargo pgrx package
 
 # Final stage: PostgreSQL with built extension
