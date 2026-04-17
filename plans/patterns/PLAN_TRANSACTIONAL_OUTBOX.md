@@ -696,26 +696,60 @@ orders.orderstatuschanged → Fulfillment Service consumers
 orders.>                  → Audit Service (wildcard: receives everything)
 ```
 
-**Hypothetical `pg_nats` extension:**
+**`pgnats` — Direct NATS publishing from PostgreSQL SQL:**
 
-A PostgreSQL extension providing direct NATS publishing from SQL (analogous to
-`pg_amqp` for RabbitMQ) could eliminate the external relay process entirely:
+[pgnats](https://github.com/luxms/pgnats) (by [luxms](https://github.com/luxms),
+MIT license, written in Rust with pgrx) is a real PostgreSQL extension that
+provides direct NATS publishing from SQL — analogous to `pg_amqp` for
+RabbitMQ. It eliminates the external relay process entirely for simple
+topologies.
+
+**pgnats features:**
+
+| Feature | API |
+|---------|-----|
+| Core NATS publish (text/binary/JSON/JSONB) | `nats_publish_text/binary/json/jsonb()` |
+| JetStream persistent publish | `nats_publish_text/json/jsonb_stream()` |
+| JetStream publish with headers | `nats_publish_jsonb_stream(subj, payload, headers)` |
+| NATS subscriptions (invoke PG functions) | `nats_subscribe(subject, handler::regproc)` |
+| Request/reply | `nats_request_json/text/binary/jsonb()` |
+| Key-Value storage | `nats_put/get_json/text/binary/jsonb()` |
+| Object storage | `nats_put/get_file()` |
+| TLS / mTLS | Via FDW server options |
+
+**Configuration via Foreign Data Wrapper:**
 
 ```sql
--- Hypothetical pg_nats API
-CREATE EXTENSION pg_nats;
+CREATE EXTENSION pgnats;
 
-SELECT nats.connect('default', 'nats://localhost:4222');
+-- One-time connection setup
+CREATE SERVER nats_server
+    FOREIGN DATA WRAPPER pgnats_fdw
+    OPTIONS (
+        host 'localhost',
+        port '4222',
+        -- Optional TLS:
+        -- tls_ca_path   '/etc/ssl/nats-ca.pem',
+        -- tls_cert_path '/etc/ssl/nats-client.pem',
+        -- tls_key_path  '/etc/ssl/nats-client-key.pem'
+    );
+```
 
--- Publish within a trigger on the outbox table
+**Publishing to NATS JetStream directly from a trigger:**
+
+```sql
+-- Publish to JetStream (durable, at-least-once) with deduplication header
 CREATE OR REPLACE FUNCTION fn_publish_to_nats() RETURNS TRIGGER AS $$
 BEGIN
-    PERFORM nats.js_publish(
-        'default',                              -- connection name
-        'orders.' || lower(NEW.event_type),     -- subject
-        NEW.payload::text,                      -- message body
-        headers => jsonb_build_object(
-            'Nats-Msg-Id', NEW.event_id::text   -- dedup key
+    PERFORM nats_publish_jsonb_stream(
+        'orders.' || lower(NEW.event_type),           -- subject
+        NEW.payload || jsonb_build_object(            -- payload + event metadata
+            'event_id',      NEW.event_id,
+            'aggregate_id',  NEW.aggregate_id,
+            'created_at',    NEW.created_at
+        ),
+        json_build_object(
+            'Nats-Msg-Id', NEW.event_id::text         -- JetStream deduplication key
         )
     );
     RETURN NEW;
@@ -727,11 +761,39 @@ CREATE TRIGGER trg_outbox_nats
     FOR EACH ROW EXECUTE FUNCTION fn_publish_to_nats();
 ```
 
-> **Caution:** In-transaction publishing couples the transaction to NATS
-> availability. If NATS is down, the source transaction blocks or fails. The
-> relay pattern (async, outside the transaction) is safer for production use.
-> The in-transaction approach is best suited for scenarios where NATS is
-> co-located and highly available (e.g., sidecar or leaf node).
+**Subscribing to NATS subjects from PostgreSQL (inbox use case):**
+
+```sql
+-- PostgreSQL function called for every inbound NATS message
+CREATE OR REPLACE FUNCTION public.handle_inbound_event(payload bytea)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    msg jsonb := convert_from(payload, 'UTF8')::jsonb;
+BEGIN
+    INSERT INTO inbox_events (event_id, event_type, payload)
+    VALUES (
+        msg->>'event_id',
+        msg->>'event_type',
+        msg
+    )
+    ON CONFLICT (event_id) DO NOTHING;
+END;
+$$;
+
+-- Subscribe: NATS delivers messages to this PG function via a background worker
+SELECT nats_subscribe('orders.>', 'public.handle_inbound_event'::regproc);
+
+-- Unsubscribe when no longer needed
+-- SELECT nats_unsubscribe('orders.>', 'public.handle_inbound_event'::regproc);
+```
+
+> **Caution:** In-transaction publishing (trigger-based) couples the
+> transaction to NATS availability. If NATS is down or slow, the source
+> transaction blocks or fails. The relay pattern (async, outside the
+> transaction) is safer for production use. The trigger approach is best
+> suited for scenarios where NATS is co-located and highly available
+> (e.g., sidecar or leaf node in a Kubernetes pod). pgnats also supports
+> TLS and mTLS to mitigate availability risk.
 
 **When to choose NATS over Kafka/RabbitMQ:**
 - Low operational overhead (single binary, zero external dependencies).
@@ -1516,5 +1578,6 @@ CREATE POLICY relay_log_insert_only ON outbox_relay_log
 - [Debezium CDC Platform](https://debezium.io/)
 - [NATS.io — Cloud-Native Messaging](https://nats.io/)
 - [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
+- [pgnats — PostgreSQL extension for NATS messaging](https://github.com/luxms/pgnats) (MIT, Rust/pgrx)
 - Krzysztof Atłasik, [Microservices 101: Transactional Outbox and Inbox](https://softwaremill.com/microservices-101/)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)

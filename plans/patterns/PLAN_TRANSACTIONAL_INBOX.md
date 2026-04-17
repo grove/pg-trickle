@@ -736,7 +736,7 @@ pub/sub, request/reply, and durable streaming with sub-millisecond latency.
 │  Upstream Services                                                     │
 │  (Order Service, Shipping Service, ...)                                │
 │       │                                                                │
-│       │ nats.js_publish('payments.order_created', payload)             │
+│       │ await js.publish('payments.order_created', payload)            │
 │       ▼                                                                │
 │  ┌──────────────────────────────────────┐                              │
 │  │ NATS JetStream                       │                              │
@@ -852,6 +852,46 @@ async def inbox_writer():
 - Existing Kafka ecosystem (Connect, Schema Registry, ksqlDB).
 - Multi-datacenter replication with MirrorMaker.
 - Very high throughput (millions of messages/sec) with long retention.
+
+**Using `pgnats` for direct PostgreSQL-side subscription:**
+
+Rather than running a separate inbox-writer process, the real
+[pgnats](https://github.com/luxms/pgnats) extension can subscribe to NATS
+subjects and call a PostgreSQL function for each inbound message, entirely
+within the database:
+
+```sql
+CREATE EXTENSION pgnats;
+
+-- Configure the NATS connection once
+CREATE SERVER nats_server
+    FOREIGN DATA WRAPPER pgnats_fdw
+    OPTIONS (host 'nats.internal', port '4222');
+
+-- Handler function: receives raw bytea payload from NATS
+CREATE OR REPLACE FUNCTION public.nats_inbox_handler(raw bytea)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    msg jsonb := convert_from(raw, 'UTF8')::jsonb;
+BEGIN
+    INSERT INTO inbox_events (event_id, event_type, source, payload)
+    VALUES (
+        msg->>'event_id',
+        msg->>'event_type',
+        msg->>'source',
+        msg
+    )
+    ON CONFLICT (event_id) DO NOTHING;
+END;
+$$;
+
+-- Subscribe: NATS messages on 'payments.>' trigger the handler via a background worker
+SELECT nats_subscribe('payments.>', 'public.nats_inbox_handler'::regproc);
+```
+
+This eliminates the separate inbox-writer process entirely, though note
+that the subscription is always active \u2014 pgnats uses a background worker
+to call the handler function for each message.
 
 ---
 
@@ -1583,5 +1623,6 @@ SELECT pgtrickle.create_stream_table('message_health',
 - [pg_partman — Partition Management](https://github.com/pgpartman/pg_partman)
 - [NATS.io — Cloud-Native Messaging](https://nats.io/)
 - [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
+- [pgnats — PostgreSQL extension for NATS messaging](https://github.com/luxms/pgnats) (MIT, Rust/pgrx)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)
 - [PLAN_TRANSACTIONAL_OUTBOX.md](PLAN_TRANSACTIONAL_OUTBOX.md) — companion document for the outbox pattern
