@@ -29,7 +29,7 @@ COPY . /build
 # Use cargo pgrx package to build against the installed PostgreSQL dev headers
 RUN cargo install cargo-pgrx && \
     PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config \
-    cargo pgrx package --release
+    cargo pgrx package
 
 # Final stage: PostgreSQL with built extension
 FROM postgres:18.3-bookworm
