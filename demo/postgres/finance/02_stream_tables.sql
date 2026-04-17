@@ -107,7 +107,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE np.net_quantity <> 0
     $$,
     schedule     => 'calculated',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ SELECT pgtrickle.create_stream_table(
         GROUP BY pv.account_id, pv.account_name, pv.portfolio_id
     $$,
     schedule     => 'calculated',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -254,7 +254,7 @@ SELECT pgtrickle.create_stream_table(
         WHERE pv.market_value IS NOT NULL
     $$,
     schedule     => 'calculated',
-    refresh_mode => 'FULL'
+    refresh_mode => 'DIFFERENTIAL'
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
