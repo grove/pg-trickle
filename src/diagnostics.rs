@@ -1486,6 +1486,11 @@ pub fn gather_change_ratio(st: &StreamTableMeta) -> Option<f64> {
 pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistoryStats {
     let mut stats = HistoryStats::default();
 
+    // Convert OID to i64 for SPI parameter passing (pgrx requires this to
+    // avoid a silent type mismatch that causes `WHERE oid = $param` to return
+    // NULL, collapsing the denominator to 1.0 and producing ratio ≈ 1.0).
+    let target_relid_i64: i64 = target_relid.to_u32() as i64;
+
     // Total history row count
     stats.total_rows = Spi::get_one_with_args::<i64>(
         "SELECT count(*) FROM pgtrickle.pgt_refresh_history \
@@ -1510,7 +1515,7 @@ pub fn gather_history_stats(pgt_id: i64, target_relid: pg_sys::Oid) -> HistorySt
                FROM pgtrickle.pgt_refresh_history \
                WHERE pgt_id = $1 AND status = 'COMPLETED' \
                ORDER BY start_time DESC LIMIT 100) sub",
-        &[pgt_id.into(), target_relid.into()],
+        &[pgt_id.into(), target_relid_i64.into()],
     )
     .unwrap_or(None);
 
