@@ -329,6 +329,33 @@ HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Row 3c: Top-10 leaderboard showcase -->
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="g-card">
+        <div class="g-card-hdr">🏆 Top 10 Risky Merchants Leaderboard
+          <small style="color:var(--green);font-size:11px;margin-left:8px">
+            DIFFERENTIAL showcase — change ratio ~0.2–0.3
+          </small>
+        </div>
+        <div class="overflow-auto" style="max-height:280px;">
+          <table class="g-table">
+            <thead>
+              <tr><th>Rank</th><th>Merchant</th><th>Category</th><th>Total Txns</th><th>High</th><th>Medium</th><th>Risk%</th></tr>
+            </thead>
+            <tbody id="tb-top-10"></tbody>
+          </table>
+        </div>
+        <div class="p-2" style="font-size:11px;color:var(--muted);border-top:1px solid var(--border)">
+          Fixed cardinality (10 rows) means only rank shifts change, not 100% of
+          output rows. Change ratio ≈ 0.2–0.3 (typically 2–3 merchants move in/out
+          per cycle). Mode Advisor recommends
+          <span style="color:var(--green)">KEEP DIFFERENTIAL</span> here.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Row 4: alert_summary + risk_scores by category -->
   <div class="row g-3 mb-3">
     <div class="col-5">
@@ -621,6 +648,22 @@ async function refresh() {
        <td style="color:${col};font-weight:bold">${esc(r.tier)}</td>
      </tr>`;
   }).join(''));
+
+  // ── Top 10 risky merchants leaderboard (DIFFERENTIAL showcase) ─────────────
+  setRows('tb-top-10', (d.top_10_risky||[]).map(r => {
+    const riskClass = r.risk_rate_pct >= 50 ? 'color:var(--red)'
+                    : r.risk_rate_pct >= 25 ? 'color:var(--yellow)'
+                    : 'color:var(--green)';
+    return `<tr>
+       <td style="font-weight:bold;text-align:center">#${r.rank}</td>
+       <td>${esc(r.merchant_name)}</td>
+       <td style="color:var(--muted);font-size:11px">${esc(r.merchant_category)}</td>
+       <td style="text-align:right">${fmt(r.total_txns)}</td>
+       <td style="color:var(--red);text-align:right">${r.high_risk_count}</td>
+       <td style="color:var(--yellow);text-align:right">${r.medium_risk_count}</td>
+       <td style="${riskClass};text-align:right;font-weight:bold">${r.risk_rate_pct}%</td>
+     </tr>`;
+  }).join(''));
 }
 
 // ── Internals tab ────────────────────────────────────────────────────────────
@@ -746,7 +789,7 @@ DAG_DIAGRAM = r"""
                          └──────────────────┘
 
   ┌───────────────────┐   ┌─────────────────────┐
-  │ merchant_risk_tier│──►│ merchant_tier_stats │  ← DIFFERENTIAL SHOWCASE
+  │ merchant_risk_tier│──►│ merchant_tier_stats │  ← DIFFERENTIAL SHOWCASE #1
   │ (slowly-changing) │   │   (DIFFERENTIAL 5s) │    change ratio ~0.07
   └───────────────────┘   │                     │    (no fast-change sources)
   ┌────────────┐           │                     │
@@ -754,10 +797,19 @@ DAG_DIAGRAM = r"""
   │  (static)  │           └─────────────────────┘
   └────────────┘
 
+  ┌──────────────────────┐   ┌─────────────────────┐
+  │ top_risky_merchants  │──►│ top_10_risky_       │  ← DIFFERENTIAL SHOWCASE #2
+  │  (all merchants)     │   │  merchants          │    change ratio ~0.2–0.3
+  │  (DIFFERENTIAL)      │   │  (DIFFERENTIAL 5s)  │    (fixed cardinality:
+  └──────────────────────┘   │  (LIMIT 10)         │     only rank shifts)
+                             └─────────────────────┘
+
   transactions feeds user_velocity AND merchant_stats — a genuine diamond.
   risk_scores is the convergence node that joins both Layer 1 outputs.
-  merchant_tier_stats has NO fast-growing sources: only merchant_risk_tier
-  changes (~1 of 15 rows per 30 cycles), giving change ratio ≈ 0.07.
+  Showcase #1: merchant_tier_stats depends only on merchant_risk_tier
+  (1 of 15 rows changes per ~30 cycles) → change ratio ≈ 0.07.
+  Showcase #2: top_10_risky_merchants is LIMIT 10 of top_risky_merchants
+  (only 2–3 ranks shift per cycle) → change ratio ≈ 0.2–0.3.
 """
 
 
@@ -847,18 +899,26 @@ def api_data():
             ORDER  BY mrt.merchant_id
         """)
 
+        top_10_risky = safe_query(conn, """
+            SELECT rank, merchant_name, merchant_category,
+                   total_txns, high_risk_count, medium_risk_count, risk_rate_pct
+            FROM   top_10_risky_merchants
+            ORDER  BY rank
+        """)
+
         return jsonify(
             {
-                "recent_alerts":       serialize(recent_alerts),
-                "alert_summary":       serialize(alert_summary),
-                "top_risky_merchants": serialize(top_risky_merchants),
-                "user_velocity":       serialize(user_velocity),
-                "country_risk":        serialize(country_risk),
-                "category_volume":     serialize(category_volume),
-                "st_status":           serialize(st_status),
-                "risk_by_category":    serialize(risk_by_category),
-                "merchant_tier_stats": serialize(merchant_tier_stats),
-                "merchant_tiers":      serialize(merchant_tiers),
+                "recent_alerts":        serialize(recent_alerts),
+                "alert_summary":        serialize(alert_summary),
+                "top_risky_merchants":  serialize(top_risky_merchants),
+                "user_velocity":        serialize(user_velocity),
+                "country_risk":         serialize(country_risk),
+                "category_volume":      serialize(category_volume),
+                "st_status":            serialize(st_status),
+                "risk_by_category":     serialize(risk_by_category),
+                "merchant_tier_stats":  serialize(merchant_tier_stats),
+                "merchant_tiers":       serialize(merchant_tiers),
+                "top_10_risky":         serialize(top_10_risky),
             }
         )
     except Exception as exc:
