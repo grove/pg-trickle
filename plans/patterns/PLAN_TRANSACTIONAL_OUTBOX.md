@@ -33,6 +33,9 @@
   - [Extension 3: pgmq Integration](#extension-3-pgmq-integration)
   - [Extension 4: Webhook Dispatcher](#extension-4-webhook-dispatcher)
 - [Design Considerations](#design-considerations)
+- [Event Sourcing vs. Transactional Outbox](#event-sourcing-vs-transactional-outbox)
+- [CloudEvents Standard](#cloudevents-standard)
+- [Exactly-Once Semantics — Clarified](#exactly-once-semantics--clarified)
 - [Schema Evolution & Message Versioning](#schema-evolution--message-versioning)
 - [Observability & Distributed Tracing](#observability--distributed-tracing)
 - [Testing Strategies](#testing-strategies)
@@ -40,6 +43,9 @@
 - [Multi-Tenancy](#multi-tenancy)
 - [Cost Analysis](#cost-analysis)
 - [Security Considerations](#security-considerations)
+- [Disaster Recovery & Backup-Restore](#disaster-recovery--backup-restore)
+- [Operational Runbooks](#operational-runbooks)
+- [Migration Guide](#migration-guide)
 - [Comparison with Traditional Approaches](#comparison-with-traditional-approaches)
 - [References](#references)
 
@@ -903,6 +909,35 @@ circuit breaker patterns. Consider using pg_net extension as the HTTP layer.
 | Across source tables | Independent refresh schedules; no cross-table ordering |
 | Within a diamond dependency group | Atomic refresh group ensures consistency |
 
+#### Strict Total Ordering Edge Cases
+
+**Global ordering is fundamentally impossible** with the outbox pattern without
+a single global lock — which defeats the purpose of microservice decoupling.
+Specific edge cases to be aware of:
+
+1. **PK gaps:** PostgreSQL sequences can produce gaps (transaction rollback,
+   `nextval()` without `INSERT`). Gaps in `event_id` are normal and consumers
+   must tolerate them. Never use "next expected ID" logic for gap detection
+   on the outbox side.
+
+2. **Relay batch duplication:** If the relay publishes events 1–10, crashes
+   before marking them as published, then restarts and re-publishes 1–10,
+   the broker now has two copies. Meanwhile events 11–20 arrive normally.
+   Consumers see: 1–10, 1–10 (deduped), 11–20. With broker-level dedup
+   (`Nats-Msg-Id`), the second 1–10 batch is silently dropped.
+
+3. **Cross-aggregate causal ordering:** Order A creates a payment that
+   triggers an inventory check. The events for Order and Payment have
+   independent sequences. If you need causal ordering, include a
+   `causation_id` (the event ID that triggered this event) in the payload
+   and let the consumer reconstruct the causal chain.
+
+4. **Competing relays:** Multiple relay instances using `FOR UPDATE SKIP
+   LOCKED` process different batches concurrently. Events within each batch
+   are ordered, but batches may arrive at the broker out of order (relay A
+   publishes 11–20 before relay B publishes 1–10). **Fix:** Use a single
+   relay instance per aggregate key, or accept per-aggregate ordering only.
+
 ### Idempotency
 
 The outbox pattern provides **at-least-once** delivery. Consumers MUST handle
@@ -954,6 +989,237 @@ When the relay falls behind:
 | PostgreSQL crashes after COMMIT | Events durable in WAL | Normal crash recovery; outbox intact |
 | Stream table refresh fails | Relay reads stale data | pg_trickle retries with backoff; alert emitted |
 | Broker unreachable | Relay retries | Events queue in outbox; monitor staleness |
+
+---
+
+## Event Sourcing vs. Transactional Outbox
+
+These two patterns are frequently confused but serve fundamentally different
+purposes. Understanding the distinction prevents over-engineering.
+
+| Aspect | Transactional Outbox | Event Sourcing |
+|--------|---------------------|----------------|
+| **Purpose** | Notify other services of state changes | Store state *as* a sequence of events |
+| **Source of truth** | Traditional tables (orders, users) | The event log itself |
+| **Event role** | Notification — can be lost and re-derived | Authoritative — losing events = losing state |
+| **Retention** | Temporary (garbage-collect after publishing) | Permanent (append-only, never delete) |
+| **Replay** | Not required; events are disposable | Essential; state is rebuilt from replay |
+| **Schema** | JSONB payload, loosely structured | Strongly typed, versioned events |
+| **pg_trickle role** | CDC + stream table + relay | CDC captures the append to the event store |
+
+**Can they coexist?** Yes. A common architecture:
+
+1. **Event Store** (e.g., `order_events` append-only table) is the source of
+   truth.
+2. **Projection tables** (e.g., `orders_current_state`) are pg_trickle stream
+   tables that materialize the latest state from the event store.
+3. **Outbox** publishes selected events to external services — the stream
+   table over the event store acts as the outbox view.
+
+```sql
+-- Event store: append-only, never UPDATE or DELETE
+CREATE TABLE order_events (
+    event_id    BIGSERIAL PRIMARY KEY,
+    order_id    UUID NOT NULL,
+    event_type  TEXT NOT NULL,
+    payload     JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Projection: current order state (derived from events)
+SELECT pgtrickle.create_stream_table(
+    'orders_current_state',
+    $$SELECT DISTINCT ON (order_id)
+            order_id, event_type AS last_event, payload, created_at
+      FROM order_events
+      ORDER BY order_id, event_id DESC$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Outbox: events not yet published to external services
+SELECT pgtrickle.create_stream_table(
+    'pending_external_events',
+    $$SELECT event_id, order_id, event_type, payload
+      FROM order_events
+      WHERE event_id > (SELECT COALESCE(MAX(last_published_id), 0)
+                        FROM outbox_watermark)$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+> **Rule of thumb:** If your team debates "should we event-source this?",
+> start with the outbox pattern. It's strictly simpler. You can always
+> migrate to event sourcing later — the outbox trigger captures the same
+> change events either way.
+
+---
+
+## CloudEvents Standard
+
+[CloudEvents](https://cloudevents.io/) (CNCF graduated) is a vendor-neutral
+specification for describing event data in a common way. Adopting it makes
+outbox events interoperable across brokers, languages, and frameworks.
+
+### Why CloudEvents?
+
+- Standard envelope format understood by NATS, Kafka, Azure Event Grid,
+  AWS EventBridge, Knative, and many others.
+- SDKs available for Go, Java, Python, Rust, JavaScript, .NET, and more.
+- Schema validation tools (`ce-schema`) ensure payload correctness.
+- [AsyncAPI](https://www.asyncapi.com/) can document CloudEvents contracts
+  (like OpenAPI but for event-driven APIs).
+
+### CloudEvents-Formatted Outbox
+
+```sql
+-- CloudEvents v1.0 envelope stored in the outbox
+CREATE TABLE outbox_events (
+    event_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),  -- 'id'
+    source         TEXT NOT NULL DEFAULT '/orders',             -- 'source'
+    spec_version   TEXT NOT NULL DEFAULT '1.0',                 -- 'specversion'
+    event_type     TEXT NOT NULL,                               -- 'type'
+    subject        TEXT,                                        -- 'subject'
+    time           TIMESTAMPTZ NOT NULL DEFAULT now(),          -- 'time'
+    data_content_type TEXT NOT NULL DEFAULT 'application/json', -- 'datacontenttype'
+    data           JSONB NOT NULL,                              -- 'data'
+    -- Extension attributes
+    aggregate_id   UUID,
+    trace_id       UUID,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    -- Relay state
+    published_at   TIMESTAMPTZ
+);
+
+-- Trigger that writes CloudEvents-formatted events
+CREATE OR REPLACE FUNCTION fn_order_outbox_ce() RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO outbox_events (event_type, subject, aggregate_id, data)
+    VALUES (
+        'com.example.orders.' || CASE TG_OP
+            WHEN 'INSERT' THEN 'created'
+            WHEN 'UPDATE' THEN 'updated'
+            WHEN 'DELETE' THEN 'deleted'
+        END,
+        '/orders/' || COALESCE(NEW.id, OLD.id)::text,
+        COALESCE(NEW.id, OLD.id),
+        CASE TG_OP
+            WHEN 'DELETE' THEN to_jsonb(OLD)
+            ELSE to_jsonb(NEW)
+        END
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### Publishing as CloudEvents Wire Format
+
+```python
+# Relay publishes in CloudEvents JSON format
+import json
+
+def to_cloudevent_json(row: dict) -> bytes:
+    ce = {
+        "specversion": row["spec_version"],
+        "id":          str(row["event_id"]),
+        "source":      row["source"],
+        "type":        row["event_type"],
+        "time":        row["time"].isoformat(),
+        "datacontenttype": row["data_content_type"],
+        "data":        row["data"],
+    }
+    if row.get("subject"):
+        ce["subject"] = row["subject"]
+    return json.dumps(ce).encode()
+
+# With NATS + pgnats:
+# SELECT nats_publish_jsonb_stream(
+#     'orders.created',
+#     to_jsonb(outbox_row),  -- already CloudEvents-shaped
+#     json_build_object('Nats-Msg-Id', event_id::text,
+#                       'ce-specversion', '1.0')
+# );
+```
+
+### Documenting with AsyncAPI
+
+AsyncAPI provides an OpenAPI-like contract for event-driven APIs:
+
+```yaml
+# asyncapi.yaml (v3.0)
+asyncapi: 3.0.0
+info:
+  title: Order Service Events
+  version: 1.0.0
+channels:
+  orderCreated:
+    address: orders.created
+    messages:
+      OrderCreated:
+        payload:
+          $ref: '#/components/schemas/Order'
+        headers:
+          type: object
+          properties:
+            ce-specversion: { type: string, const: '1.0' }
+            ce-type: { type: string }
+            ce-source: { type: string }
+            Nats-Msg-Id: { type: string }
+components:
+  schemas:
+    Order:
+      type: object
+      required: [order_id, amount, status]
+      properties:
+        order_id: { type: string, format: uuid }
+        amount: { type: number }
+        status: { type: string, enum: [pending, confirmed, shipped] }
+```
+
+---
+
+## Exactly-Once Semantics — Clarified
+
+The term "exactly-once" is used loosely in messaging. There are three distinct
+levels, and confusing them leads to over- or under-engineering.
+
+### Three Levels of Exactly-Once
+
+| Level | What It Means | Who Provides It |
+|-------|--------------|------------------|
+| **Broker-level dedup** | The broker stores a message at most once per dedup key | NATS `Nats-Msg-Id`, Kafka idempotent producer |
+| **Consumer-level dedup** | The consumer processes a message at most once per ID | Inbox `ON CONFLICT (event_id) DO NOTHING` |
+| **End-to-end exactly-once** | From source write to final side-effect, the event has exactly one effect | Both broker-level + consumer-level together |
+
+### How Each pg_trickle Approach Maps
+
+| Approach | Broker-Level | Consumer-Level | End-to-End |
+|----------|-------------|----------------|------------|
+| Stream table + polling relay to Kafka | Kafka idempotent producer (`acks=all`) | Consumer dedup table | Yes (with careful config) |
+| Stream table + NATS relay | `Nats-Msg-Id` = `event_id` | Consumer dedup table | Yes (built-in) |
+| pgnats trigger → NATS JetStream | `Nats-Msg-Id` header in trigger | Consumer dedup table | Yes (simplest path) |
+| CDC buffer → Debezium → Kafka | Debezium event ID | Consumer dedup table | Yes |
+| pgmq (intra-PostgreSQL) | `pgmq.send()` is transactional | Same-DB dedup | Yes (single DB boundary) |
+
+### Common Pitfalls
+
+1. **Relay crash between publish and `UPDATE published_at`:** The event is in
+   the broker but not marked as published. On restart, the relay re-publishes
+   → duplicate. **Fix:** Use broker-level dedup (`Nats-Msg-Id` or Kafka
+   idempotent producer).
+2. **Consumer crash between processing and ack:** The broker redelivers.
+   **Fix:** Inbox `ON CONFLICT DO NOTHING` or idempotent state mutation.
+3. **`event_id` is unique but not deterministic:** If the same business
+   operation can generate multiple events with different IDs (e.g., retried
+   application logic), dedup by `event_id` won't help. **Fix:** Use a
+   deterministic idempotency key derived from business state (e.g.,
+   `order_id || status || version`).
+
+> **Recommendation:** Always implement *both* broker-level and consumer-level
+> dedup. The cost is minimal (one `ON CONFLICT` clause + one header), and it
+> makes the system resilient to any single-component failure.
 
 ---
 
@@ -1554,6 +1820,246 @@ CREATE POLICY relay_log_insert_only ON outbox_relay_log
 
 ---
 
+## Disaster Recovery & Backup-Restore
+
+The outbox pattern has a critical edge case during disaster recovery that
+can silently cause duplicate event publishing.
+
+### The Backup-Restore Trap
+
+When restoring PostgreSQL from a backup (e.g., `pg_basebackup`, PITR, or
+a cloud snapshot):
+
+1. Backup was taken at time T₀.
+2. Between T₀ and the restore point, the relay published events E₁..Eₙ to
+   the broker and marked them `published_at IS NOT NULL`.
+3. After restore, the database is back at T₀ — those events show
+   `published_at IS NULL` again.
+4. The relay re-publishes E₁..Eₙ → **duplicates at the broker**.
+
+```
+Timeline:
+  T₀ (backup)  ────── T₁ (crash) ────── T₂ (restore to T₀)
+                 ↑                         ↑
+          Events E₁..Eₙ published    E₁..Eₙ now appear
+          and marked done            unpublished again
+                                     → relay re-publishes
+```
+
+### Mitigation Strategies
+
+| Strategy | How | Trade-off |
+|----------|-----|----------|
+| **Broker-level dedup** | `Nats-Msg-Id` / Kafka idempotent producer | Best defense; requires deterministic event IDs |
+| **Consumer idempotency** | `ON CONFLICT (event_id) DO NOTHING` at inbox | Always needed anyway |
+| **High-watermark table** | Store `last_published_event_id` in a broker-side checkpoint | Requires broker-to-DB feedback loop |
+| **Outbox watermark in WAL** | After restore, compare broker's latest known ID with DB state | Complex but definitive |
+
+### Recommended: Deterministic Event IDs
+
+Make event IDs deterministic so that re-publishing after restore produces the
+same IDs:
+
+```sql
+-- Instead of BIGSERIAL (which resets on restore), use a content-derived UUID:
+CREATE OR REPLACE FUNCTION fn_deterministic_event_id(
+    aggregate_id UUID,
+    event_type   TEXT,
+    version      INTEGER
+) RETURNS UUID AS $$
+    SELECT uuid_generate_v5(
+        'a1b2c3d4-e5f6-7890-abcd-ef1234567890'::UUID,  -- namespace
+        aggregate_id::text || event_type || version::text
+    );
+$$ LANGUAGE SQL IMMUTABLE;
+```
+
+With deterministic IDs, re-publishing after restore produces the same events
+that the broker already has — dedup handles them transparently.
+
+### Point-in-Time Recovery (PITR) Considerations
+
+- **Recovery target:** Always recover to a consistent point *after* the last
+  completed relay batch, if possible.
+- **WAL archiving:** Ensure WAL segments are archived frequently enough that
+  recovery can reach a point close to the crash time.
+- **Logical replication slots:** If using WAL CDC mode, the replication slot
+  position is part of the database state — it also rolls back on restore.
+  Debezium/WAL-tailing relays need to handle this.
+
+### Replica Promotion / Failover
+
+When promoting a standby to primary:
+
+1. The new primary's outbox state matches the last replicated position.
+2. If the relay was connected to the old primary, it must reconnect.
+3. **Risk:** Async replication lag means the new primary might be *behind*
+   the old primary — some published events may not exist yet.
+4. **Fix:** Use synchronous replication for the outbox table, or accept
+   duplicate re-publishing with broker-level dedup.
+
+---
+
+## Operational Runbooks
+
+Practical procedures for common operational scenarios.
+
+### Graceful Relay Shutdown
+
+```python
+import signal, asyncio
+
+class OutboxRelay:
+    def __init__(self):
+        self.running = True
+        self.current_batch = None
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        """Drain current batch before exiting."""
+        self.running = False
+        # Do NOT abort mid-batch — let the current batch complete
+
+    async def run(self):
+        while self.running:
+            self.current_batch = await self.fetch_batch()
+            if self.current_batch:
+                await self.publish_and_mark(self.current_batch)
+            else:
+                await asyncio.sleep(0.5)
+
+        # Final drain: publish any remaining batch
+        if self.current_batch:
+            await self.publish_and_mark(self.current_batch)
+        print("Relay shut down gracefully.")
+```
+
+### pg_trickle Upgrade Procedure
+
+When upgrading pg_trickle, stream tables may need recreation:
+
+```bash
+# 1. Stop the relay process
+systemctl stop outbox-relay
+
+# 2. Upgrade pg_trickle
+ALTER EXTENSION pg_trickle UPDATE;
+
+# 3. Verify stream tables are intact
+SELECT pgt_name, pgt_status, pgt_refresh_mode
+  FROM pgtrickle.pgt_stream_tables;
+
+# 4. If stream tables need recreation (rare, noted in release notes):
+SELECT pgtrickle.drop_stream_table('pending_outbox_events');
+SELECT pgtrickle.create_stream_table('pending_outbox_events', ...);
+
+# 5. Restart the relay
+systemctl start outbox-relay
+```
+
+### Kubernetes Deployment Model
+
+| Model | Pros | Cons |
+|-------|------|------|
+| **Sidecar** (relay in same pod as app) | Shares DB connection pool, simple lifecycle | Scales with app, not with outbox depth |
+| **Standalone Deployment** (relay as separate service) | Scales independently, multiple replicas | Extra service to manage |
+| **CronJob** (relay as periodic batch job) | Simple, no long-running process | Higher latency, no event-driven wake |
+| **pg_trickle BGW** (proposed Extension 2) | Zero external processes | Requires pg_trickle extension support |
+
+**Recommended:** Standalone Deployment with `SKIP LOCKED` for competing
+instances, plus a Kubernetes `readinessProbe` that checks the relay's
+health endpoint.
+
+### Stuck Events Investigation
+
+```sql
+-- Find events stuck for more than 5 minutes
+SELECT event_id, event_type, aggregate_id, created_at,
+       EXTRACT(EPOCH FROM (now() - created_at)) AS age_seconds
+FROM outbox_events
+WHERE published_at IS NULL
+  AND created_at < now() - INTERVAL '5 minutes'
+ORDER BY created_at
+LIMIT 20;
+
+-- Check if the stream table is refreshing
+SELECT pgtrickle.get_staleness('pending_outbox_events');
+
+-- Force a manual refresh
+SELECT pgtrickle.refresh('pending_outbox_events');
+```
+
+---
+
+## Migration Guide
+
+Migrating from a hand-rolled outbox to pg_trickle without downtime.
+
+### Prerequisites
+
+- Existing outbox table (e.g., `domain_events` with `published` column)
+- Existing relay process (e.g., cron job or custom poller)
+- pg_trickle installed and `pg_trickle.enabled = true`
+
+### Step 1: Add pg_trickle CDC (Non-Destructive)
+
+```sql
+-- Register the existing outbox table as a pg_trickle source
+-- This adds a CDC trigger but does NOT change existing behavior
+SELECT pgtrickle.create_stream_table(
+    'pending_outbox_v2',
+    $$SELECT event_id, event_type, aggregate_id, payload, created_at
+      FROM domain_events
+      WHERE published = false$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+Your existing relay still works — `domain_events` is unchanged.
+
+### Step 2: Shadow Read (Validate)
+
+Run both the old relay and a new relay reading from `pending_outbox_v2` in
+**read-only mode** (log events but don't publish):
+
+```python
+async def shadow_relay():
+    rows = await conn.fetch("SELECT * FROM pending_outbox_v2 ORDER BY event_id")
+    for row in rows:
+        logger.info(f"Shadow relay would publish: {row['event_id']}")
+        # Verify: does this match what the old relay published?
+```
+
+### Step 3: Cut Over
+
+```bash
+# Stop the old relay
+systemctl stop old-outbox-relay
+
+# Start the new pg_trickle-based relay
+systemctl start new-outbox-relay
+```
+
+### Step 4: Clean Up
+
+```sql
+-- Once confident, drop old indexes/columns that are no longer needed
+-- (keep the table structure if it's still the source of events)
+```
+
+### Blue/Green Migration
+
+For zero-downtime migration with verification:
+
+1. **Green:** New relay reads from pg_trickle stream table.
+2. **Blue:** Old relay reads from `domain_events` directly.
+3. Run both simultaneously — green publishes, blue validates.
+4. Once green is stable for 24h, decommission blue.
+5. Both relays use broker-level dedup, so parallel publishing is safe.
+
+---
+
 ## Comparison with Traditional Approaches
 
 | Aspect | Traditional Outbox | pg_trickle Outbox | Debezium CDC | pg_trickle + NATS JetStream |
@@ -1579,5 +2085,7 @@ CREATE POLICY relay_log_insert_only ON outbox_relay_log
 - [NATS.io — Cloud-Native Messaging](https://nats.io/)
 - [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
 - [pgnats — PostgreSQL extension for NATS messaging](https://github.com/luxms/pgnats) (MIT, Rust/pgrx)
+- [CloudEvents — CNCF Event Data Specification](https://cloudevents.io/)
+- [AsyncAPI — Event-Driven API Documentation](https://www.asyncapi.com/)
 - Krzysztof Atłasik, [Microservices 101: Transactional Outbox and Inbox](https://softwaremill.com/microservices-101/)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)

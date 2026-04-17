@@ -35,12 +35,20 @@
   - [Extension 3: Dead Letter Queue Stream Table](#extension-3-dead-letter-queue-stream-table)
   - [Extension 4: Inbox Health Dashboard](#extension-4-inbox-health-dashboard)
 - [Design Considerations](#design-considerations)
+- [Poison Message Handling](#poison-message-handling)
+- [Webhook Inbox (Inbound HTTP Events)](#webhook-inbox-inbound-http-events)
+- [Priority Queues](#priority-queues)
+- [CloudEvents Standard](#cloudevents-standard)
+- [Exactly-Once Semantics — Clarified](#exactly-once-semantics--clarified)
 - [Schema Evolution & Message Versioning](#schema-evolution--message-versioning)
 - [Observability & Distributed Tracing](#observability--distributed-tracing)
 - [Testing Strategies](#testing-strategies)
 - [Multi-Tenancy](#multi-tenancy)
 - [Cost Analysis](#cost-analysis)
 - [Security Considerations](#security-considerations)
+- [Disaster Recovery & Backup-Restore](#disaster-recovery--backup-restore)
+- [Operational Runbooks](#operational-runbooks)
+- [Migration Guide](#migration-guide)
 - [Combining Outbox and Inbox Patterns](#combining-outbox-and-inbox-patterns)
 - [Comparison with Traditional Approaches](#comparison-with-traditional-approaches)
 - [References](#references)
@@ -713,7 +721,7 @@ notify).
 ### NATS / JetStream — As the Inbox Transport Layer
 
 [NATS](https://nats.io/) with its persistent streaming layer **JetStream**
-can serve as the transport that delivers messages into the PostgreSQL inbox
+can serve as the transport that delivers messages into« the PostgreSQL inbox
 table. NATS is a CNCF incubating project — a single ~10 MB binary providing
 pub/sub, request/reply, and durable streaming with sub-millisecond latency.
 
@@ -1047,6 +1055,433 @@ pg_trickle provides built-in monitoring that maps naturally to inbox health:
 | Queue backing up | `pg_trickle_alert` → `stale_data` event |
 | Refresh failures | `pg_trickle_alert` → `refresh_failed` event |
 | Throughput | `pgtrickle.st_refresh_stats` → rows_inserted/deleted per refresh |
+
+---
+
+## Poison Message Handling
+
+A **poison message** is one that crashes or gets stuck in the processor
+indefinitely, blocking all subsequent messages. The DLQ captures messages that
+exhaust retries, but you also need to handle DLQ messages operationally.
+
+### Detecting Poison Messages
+
+```sql
+-- Stream table that surfaces messages failing faster than backoff allows
+SELECT pgtrickle.create_stream_table(
+    'inbox_poison_candidates',
+    $$SELECT event_id, event_type, retry_count, last_error,
+             received_at,
+             EXTRACT(EPOCH FROM (now() - received_at)) AS age_seconds
+      FROM inbox_events
+      WHERE processed_at IS NULL
+        AND retry_count >= 3
+        AND retry_count < 5  -- not yet in DLQ
+      ORDER BY retry_count DESC$$,
+    schedule => '10s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Processor-Level Circuit Breaker
+
+Prevent a single bad message from crashing the processor in a tight loop
+*before* it hits the retry limit:
+
+```python
+import time
+
+class PoisonMessageGuard:
+    """Track consecutive failures; pause processing if threshold breached."""
+
+    def __init__(self, max_consecutive_failures=5, cooldown_seconds=30):
+        self.max_failures = max_consecutive_failures
+        self.cooldown = cooldown_seconds
+        self.consecutive_failures = 0
+
+    def record_success(self):
+        self.consecutive_failures = 0
+
+    def record_failure(self, event_id: str, error: str):
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.max_failures:
+            logger.error(
+                f"Poison message guard: {self.consecutive_failures} consecutive "
+                f"failures, pausing for {self.cooldown}s. Last: {event_id}: {error}"
+            )
+            time.sleep(self.cooldown)
+            self.consecutive_failures = 0  # retry after cooldown
+```
+
+### DLQ Operations Runbook
+
+```sql
+-- 1. Inspect DLQ messages
+SELECT event_id, event_type, last_error, retry_count, received_at
+FROM inbox_events
+WHERE processed_at IS NULL AND retry_count >= 5
+ORDER BY received_at;
+
+-- 2. Replay after fix: reset retry_count to allow re-processing
+UPDATE inbox_events
+SET retry_count = 0, last_error = NULL
+WHERE event_id = 'evt-broken-001'
+  AND retry_count >= 5;
+
+-- 3. Permanently discard: mark as processed with a DLQ outcome
+UPDATE inbox_events
+SET processed_at = now(),
+    last_error = 'DISCARDED: permanently invalid, see ticket JIRA-1234'
+WHERE event_id = 'evt-hopeless-002';
+
+-- 4. Bulk discard by event type (e.g., deprecated events)
+UPDATE inbox_events
+SET processed_at = now(),
+    last_error = 'DISCARDED: event type deprecated'
+WHERE event_type = 'LegacyEvent'
+  AND processed_at IS NULL
+  AND retry_count >= 5;
+```
+
+### DLQ Alerting SLA
+
+| Severity | Condition | Action |
+|----------|-----------|--------|
+| **Warning** | DLQ depth > 0 for > 15 min | Slack notification |
+| **Error** | DLQ depth > 10 for > 1 hour | PagerDuty alert |
+| **Critical** | DLQ depth growing for > 4 hours | On-call page, stop upstream if needed |
+
+---
+
+## Webhook Inbox (Inbound HTTP Events)
+
+The inbox pattern is equally applicable to inbound **webhooks** (Stripe,
+GitHub, Shopify, etc.), not just broker messages. Webhook-specific concerns
+require additional handling.
+
+### Architecture: Webhook → Inbox → pg_trickle
+
+```
+External Service (Stripe, GitHub, ...)
+     │
+     │ POST /webhooks/stripe
+     │ Headers: Stripe-Signature, Content-Type: application/json
+     ▼
+┌─────────────────────────────────────────┐
+│ Webhook Receiver (HTTP handler)       │
+│                                       │
+│ 1. Verify HMAC signature              │
+│ 2. INSERT INTO inbox_events            │
+│    ON CONFLICT DO NOTHING              │
+│ 3. Return HTTP 200 immediately         │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│ PostgreSQL                             │
+│  inbox_events → pending_inbox           │
+│  (stream table, DIFFERENTIAL)          │
+│       │                                 │
+│       ▼                                 │
+│  Processor (reads from stream table)   │
+└─────────────────────────────────────────┘
+```
+
+### Key Rule: Respond 200 Before Processing
+
+Webhook senders (Stripe, GitHub) expect a fast HTTP 200 response. If you
+process synchronously and the handler takes > 5s, the sender retries —
+causing duplicates and wasted work.
+
+**The inbox pattern solves this perfectly:** INSERT → 200, then process async.
+
+### HMAC Signature Verification
+
+**Never process a webhook without verifying its signature.** This prevents
+forgery and replay attacks.
+
+```python
+import hmac, hashlib
+from fastapi import FastAPI, Request, HTTPException
+
+app = FastAPI()
+STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    body = await request.body()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    # Step 1: Verify HMAC signature BEFORE any database write
+    try:
+        event = stripe.Webhook.construct_event(body, sig_header, STRIPE_WEBHOOK_SECRET)
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # Step 2: Write to inbox (idempotent)
+    event_id = event["id"]  # Stripe event ID is globally unique
+    await pg_conn.execute(
+        """INSERT INTO inbox_events (event_id, event_type, source, payload)
+           VALUES ($1, $2, 'stripe', $3)
+           ON CONFLICT (event_id) DO NOTHING""",
+        event_id, event["type"], json.dumps(event),
+    )
+
+    # Step 3: Return 200 immediately — processing happens async
+    return {"status": "received"}
+```
+
+### Webhook Retry Behavior
+
+| Provider | Retry Strategy | Timeout | Max Retries |
+|----------|---------------|---------|-------------|
+| Stripe | Exponential backoff | 20s | 3 days |
+| GitHub | Exponential backoff | 10s | ~4 hours |
+| Shopify | Fixed intervals | 5s | 48 hours |
+| Twilio | Exponential backoff | 15s | ~24 hours |
+
+All providers retry on non-2xx responses. The inbox's `ON CONFLICT DO NOTHING`
+handles all retries idempotently.
+
+### Webhook-Specific Inbox Schema
+
+```sql
+CREATE TABLE webhook_inbox_events (
+    event_id       TEXT PRIMARY KEY,        -- provider's event ID
+    provider       TEXT NOT NULL,           -- 'stripe', 'github', etc.
+    event_type     TEXT NOT NULL,
+    payload        JSONB NOT NULL,
+    raw_headers    JSONB,                   -- for audit/replay
+    signature      TEXT,                    -- original signature header
+    received_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at   TIMESTAMPTZ,
+    retry_count    INTEGER NOT NULL DEFAULT 0,
+    last_error     TEXT
+);
+
+-- Stream table for pending webhooks by provider
+SELECT pgtrickle.create_stream_table(
+    'pending_webhooks',
+    $$SELECT event_id, provider, event_type, payload, received_at
+      FROM webhook_inbox_events
+      WHERE processed_at IS NULL AND retry_count < 5$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+---
+
+## Priority Queues
+
+In production, not all inbox messages are equally urgent. A `payment.failed`
+event should be processed before `newsletter.sent`.
+
+### Priority Column
+
+```sql
+ALTER TABLE inbox_events ADD COLUMN priority INTEGER NOT NULL DEFAULT 5;
+-- 1 = highest (critical), 5 = normal, 9 = lowest (background)
+
+CREATE INDEX idx_inbox_priority ON inbox_events (priority, received_at)
+    WHERE processed_at IS NULL;
+```
+
+### Per-Priority Stream Tables
+
+```sql
+-- Critical priority: 1s refresh
+SELECT pgtrickle.create_stream_table(
+    'inbox_critical',
+    $$SELECT event_id, event_type, payload, received_at
+      FROM inbox_events
+      WHERE processed_at IS NULL AND priority <= 2 AND retry_count < 5$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Normal priority: 5s refresh
+SELECT pgtrickle.create_stream_table(
+    'inbox_normal',
+    $$SELECT event_id, event_type, payload, received_at
+      FROM inbox_events
+      WHERE processed_at IS NULL AND priority BETWEEN 3 AND 6 AND retry_count < 5$$,
+    schedule => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Low priority: 30s refresh
+SELECT pgtrickle.create_stream_table(
+    'inbox_background',
+    $$SELECT event_id, event_type, payload, received_at
+      FROM inbox_events
+      WHERE processed_at IS NULL AND priority >= 7 AND retry_count < 5$$,
+    schedule => '30s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Priority-Aware Processing
+
+```python
+async def prioritized_processor():
+    """Process highest-priority messages first, with starvation prevention."""
+    priority_tiers = [
+        ("inbox_critical",   1),  # process 1 batch from critical
+        ("inbox_normal",     1),  # then 1 batch from normal
+        ("inbox_background", 1),  # then 1 batch from background
+    ]
+
+    while True:
+        any_work = False
+        for table, weight in priority_tiers:
+            for _ in range(weight):
+                batch = await fetch_batch(table, limit=20)
+                if batch:
+                    await process_batch(batch)
+                    any_work = True
+
+        if not any_work:
+            await asyncio.sleep(0.5)
+```
+
+### Starvation Prevention
+
+Without starvation prevention, a flood of critical messages could starve
+normal and background processing indefinitely. Strategies:
+
+- **Round-robin with weights:** Process N critical, 1 normal, 1 background
+  per cycle (shown above).
+- **Age-based promotion:** Auto-promote messages older than 5 minutes to
+  the next priority tier.
+- **Separate worker pools:** Dedicate different worker instances to different
+  priority tiers.
+
+---
+
+## CloudEvents Standard
+
+[CloudEvents](https://cloudevents.io/) (CNCF graduated) is a vendor-neutral
+specification for describing event data. Adopting it for inbound messages
+makes the inbox interoperable across providers and frameworks.
+
+### CloudEvents-Formatted Inbox
+
+```sql
+-- Inbox table aligned with CloudEvents v1.0 envelope
+CREATE TABLE inbox_events (
+    event_id          TEXT PRIMARY KEY,              -- 'id'
+    source            TEXT NOT NULL,                 -- 'source'
+    spec_version      TEXT NOT NULL DEFAULT '1.0',   -- 'specversion'
+    event_type        TEXT NOT NULL,                 -- 'type'
+    subject           TEXT,                          -- 'subject'
+    time              TIMESTAMPTZ,                   -- 'time'
+    data_content_type TEXT DEFAULT 'application/json',-- 'datacontenttype'
+    data              JSONB NOT NULL,                -- 'data'
+    -- Processing state
+    received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at      TIMESTAMPTZ,
+    retry_count       INTEGER NOT NULL DEFAULT 0,
+    last_error        TEXT
+);
+```
+
+### Validating CloudEvents on Ingest
+
+```python
+CLOUDEVENTS_REQUIRED = {"specversion", "id", "source", "type"}
+
+async def inbox_writer(msg):
+    payload = json.loads(msg.data)
+
+    # Validate CloudEvents required attributes
+    missing = CLOUDEVENTS_REQUIRED - set(payload.keys())
+    if missing:
+        logger.warning(f"Invalid CloudEvent, missing: {missing}")
+        await msg.ack()  # ack to prevent redelivery of invalid messages
+        return
+
+    await pg_conn.execute(
+        """INSERT INTO inbox_events (event_id, source, spec_version, event_type, data)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (event_id) DO NOTHING""",
+        payload["id"], payload["source"], payload["specversion"],
+        payload["type"], json.dumps(payload.get("data", {})),
+    )
+    await msg.ack()
+```
+
+### Documenting with AsyncAPI
+
+Use [AsyncAPI](https://www.asyncapi.com/) to document event contracts:
+
+```yaml
+asyncapi: 3.0.0
+info:
+  title: Payment Service Inbox Events
+  version: 1.0.0
+channels:
+  orderCreated:
+    address: orders.created
+    messages:
+      OrderCreated:
+        payload:
+          $ref: '#/components/schemas/OrderCreated'
+        headers:
+          type: object
+          properties:
+            ce-specversion: { type: string, const: '1.0' }
+            ce-source: { type: string }
+            Nats-Msg-Id: { type: string }
+components:
+  schemas:
+    OrderCreated:
+      type: object
+      required: [order_id, amount]
+      properties:
+        order_id: { type: string, format: uuid }
+        amount: { type: number }
+```
+
+---
+
+## Exactly-Once Semantics — Clarified
+
+The term "exactly-once" is used loosely. There are three distinct levels, and
+confusing them leads to over- or under-engineering deduplication logic.
+
+### Three Levels of Exactly-Once
+
+| Level | What It Means | Who Provides It |
+|-------|--------------|------------------|
+| **Broker-level dedup** | The broker delivers a message at most once per dedup key | NATS `Nats-Msg-Id`, Kafka idempotent producer |
+| **Inbox-level dedup** | The inbox stores a message at most once per event ID | `ON CONFLICT (event_id) DO NOTHING` |
+| **Processing-level dedup** | The processor applies business logic at most once per event | Processed events log, version checking |
+
+### How Each Component Contributes
+
+| Component | Dedup Mechanism | What It Prevents |
+|-----------|----------------|-------------------|
+| NATS JetStream | `Nats-Msg-Id` header | Duplicate message storage in stream |
+| pgnats `nats_subscribe()` | Background worker delivery | (No built-in dedup; rely on inbox) |
+| Inbox INSERT | `ON CONFLICT (event_id) DO NOTHING` | Duplicate inbox rows |
+| Processor | Check `processed_at IS NOT NULL` | Duplicate business side effects |
+| `FOR UPDATE SKIP LOCKED` | Row-level locking | Two workers processing same message |
+
+### End-to-End Exactly-Once
+
+True end-to-end exactly-once requires *all three levels* working together:
+
+1. **Broker dedup** prevents the inbox writer from seeing the same message
+   twice (reduces load, not strictly required).
+2. **Inbox dedup** ensures each event exists exactly once in the database.
+3. **Processing dedup** ensures the business side-effect happens at most once
+   (the processor checks `processed_at IS NULL` and uses `FOR UPDATE SKIP
+   LOCKED` for concurrent workers).
+
+> **Recommendation:** Always implement inbox-level + processing-level dedup.
+> Broker-level dedup is a bonus that reduces wasted INSERT attempts but should
+> never be the sole defense.
 
 ---
 
@@ -1540,6 +1975,212 @@ CREATE POLICY log_insert_only ON inbox_processing_log
 
 ---
 
+## Disaster Recovery & Backup-Restore
+
+The inbox pattern has a specific edge case during disaster recovery that
+can cause duplicate message processing.
+
+### The Backup-Restore Trap
+
+When restoring PostgreSQL from a backup:
+
+1. Backup was taken at time T₀.
+2. Between T₀ and the crash, the processor processed messages M₁..Mₙ and
+   marked them `processed_at IS NOT NULL`. Acks were sent to the broker.
+3. After restore, the database is back at T₀ — those messages show
+   `processed_at IS NULL` again.
+4. The processor re-processes M₁..Mₙ → **duplicate side effects**.
+
+```
+Timeline:
+  T₀ (backup)  ────── T₁ (crash) ────── T₂ (restore to T₀)
+                 ↑                         ↑
+          M₁..Mₙ processed and        M₁..Mₙ now appear
+          acked to broker             unprocessed again
+                                      → processor re-runs
+```
+
+### Mitigation Strategies
+
+| Strategy | How | Trade-off |
+|----------|-----|----------|
+| **Idempotent processors** | Business logic tolerates replays | Best defense; may require schema changes |
+| **Processing log in external system** | Persist processed IDs outside PostgreSQL | Complex; introduces another dependency |
+| **High-watermark at the broker** | Broker tracks consumer position | Only works if broker supports checkpointing |
+| **Deterministic state mutations** | `UPDATE ... SET status = 'x'` (same result on replay) | Not all operations are naturally idempotent |
+
+### Recommended: Idempotent Business Logic
+
+Design processors so that re-processing a message produces the same outcome:
+
+```sql
+-- Idempotent: INSERT with ON CONFLICT (no duplicate payment intents)
+INSERT INTO payment_intents (order_id, amount, status)
+VALUES ($1, $2, 'pending')
+ON CONFLICT (order_id) DO NOTHING;
+
+-- Idempotent: UPDATE with version check
+UPDATE orders
+SET status = 'confirmed', version = version + 1
+WHERE id = $1 AND version = $2;
+-- If version doesn't match (already processed), zero rows affected.
+```
+
+### Replica Promotion / Failover
+
+When promoting a standby to primary:
+
+1. If using async replication, some processed messages may not have
+   replicated — they reappear as unprocessed.
+2. The broker still considers them acked (no redelivery from broker side).
+3. The `pending_inbox` stream table will show them as pending again.
+4. **Fix:** Idempotent processors handle this transparently. For critical
+   paths, use synchronous replication for the inbox table.
+
+---
+
+## Operational Runbooks
+
+Practical procedures for common operational scenarios.
+
+### Graceful Processor Shutdown
+
+```python
+import signal, asyncio
+
+class InboxProcessor:
+    def __init__(self):
+        self.running = True
+        self.current_batch = None
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        """Drain current batch before exiting."""
+        self.running = False
+
+    async def run(self):
+        while self.running:
+            self.current_batch = await self.fetch_batch()
+            if self.current_batch:
+                await self.process_and_mark(self.current_batch)
+            else:
+                await asyncio.sleep(0.5)
+
+        # Final drain: complete any in-progress batch
+        if self.current_batch:
+            await self.process_and_mark(self.current_batch)
+        print("Processor shut down gracefully.")
+```
+
+### pg_trickle Upgrade Procedure
+
+```bash
+# 1. Stop the processor
+systemctl stop inbox-processor
+
+# 2. Upgrade pg_trickle
+ALTER EXTENSION pg_trickle UPDATE;
+
+# 3. Verify stream tables are intact
+SELECT pgt_name, pgt_status, pgt_refresh_mode
+  FROM pgtrickle.pgt_stream_tables;
+
+# 4. If stream tables need recreation (rare, noted in release notes):
+SELECT pgtrickle.drop_stream_table('pending_inbox');
+SELECT pgtrickle.create_stream_table('pending_inbox', ...);
+
+# 5. Restart the processor
+systemctl start inbox-processor
+```
+
+### Kubernetes Deployment Model
+
+| Model | Pros | Cons |
+|-------|------|------|
+| **Sidecar** (processor in same pod) | Shares DB conn pool, simple lifecycle | Scales with app, not with inbox depth |
+| **Standalone** (processor as separate service) | Scales independently | Extra service to manage |
+| **CronJob** (periodic batch processor) | Simple, no long-running process | Higher latency |
+| **pgnats `nats_subscribe()`** (in-DB) | Zero external processes | Limited processing complexity |
+
+### Stuck Messages Investigation
+
+```sql
+-- Find messages stuck for more than 5 minutes
+SELECT event_id, event_type, retry_count, last_error, received_at,
+       EXTRACT(EPOCH FROM (now() - received_at)) AS age_seconds
+FROM inbox_events
+WHERE processed_at IS NULL
+  AND retry_count < 5
+  AND received_at < now() - INTERVAL '5 minutes'
+ORDER BY received_at
+LIMIT 20;
+
+-- Check if the stream table is refreshing
+SELECT pgtrickle.get_staleness('pending_inbox');
+
+-- Force a manual refresh
+SELECT pgtrickle.refresh('pending_inbox');
+```
+
+---
+
+## Migration Guide
+
+Migrating from a hand-rolled inbox to pg_trickle without downtime.
+
+### Prerequisites
+
+- Existing inbox table (e.g., `inbound_messages` with `processed` column)
+- Existing processor (e.g., cron job or custom poller)
+- pg_trickle installed and `pg_trickle.enabled = true`
+
+### Step 1: Add pg_trickle Stream Table (Non-Destructive)
+
+```sql
+-- Create a stream table over the existing inbox — does NOT change existing behavior
+SELECT pgtrickle.create_stream_table(
+    'pending_inbox_v2',
+    $$SELECT message_id, event_type, payload, received_at
+      FROM inbound_messages
+      WHERE processed = false$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+Your existing processor still works — `inbound_messages` is unchanged.
+
+### Step 2: Shadow Read (Validate)
+
+Run both the old processor and a new processor reading from `pending_inbox_v2`
+in **read-only mode**:
+
+```python
+async def shadow_processor():
+    rows = await conn.fetch("SELECT * FROM pending_inbox_v2")
+    for row in rows:
+        logger.info(f"Shadow would process: {row['message_id']}")
+        # Verify: does this match the old processor's view?
+```
+
+### Step 3: Cut Over
+
+```bash
+systemctl stop old-inbox-processor
+systemctl start new-inbox-processor
+```
+
+### Step 4: Rename / Harmonize
+
+```sql
+-- If desired, rename the old table to match pg_trickle conventions
+ALTER TABLE inbound_messages RENAME TO inbox_events;
+ALTER TABLE inbox_events RENAME COLUMN processed TO processed_at;
+-- (Update stream table SQL accordingly)
+```
+
+---
+
 ## Combining Outbox and Inbox Patterns
 
 In a microservice architecture, services typically use BOTH patterns:
@@ -1624,5 +2265,7 @@ SELECT pgtrickle.create_stream_table('message_health',
 - [NATS.io — Cloud-Native Messaging](https://nats.io/)
 - [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
 - [pgnats — PostgreSQL extension for NATS messaging](https://github.com/luxms/pgnats) (MIT, Rust/pgrx)
+- [CloudEvents — CNCF Event Data Specification](https://cloudevents.io/)
+- [AsyncAPI — Event-Driven API Documentation](https://www.asyncapi.com/)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)
 - [PLAN_TRANSACTIONAL_OUTBOX.md](PLAN_TRANSACTIONAL_OUTBOX.md) — companion document for the outbox pattern
