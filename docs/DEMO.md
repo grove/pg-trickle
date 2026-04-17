@@ -1,15 +1,19 @@
-# Real-time Demo — Fraud Detection Pipeline
+# Real-time Demo
 
-This demo shows pg_trickle doing real work: a continuous stream of financial
-transactions flows into PostgreSQL, and a **9-node, 4-layer DAG of stream
-tables** keeps a live fraud-detection view of that data up to date —
-automatically, incrementally, and within seconds.
+This demo shows pg_trickle doing real work: a continuous stream of events
+flows into PostgreSQL, and a **DAG of stream tables** keeps a live view of
+that data up to date — automatically, incrementally, and within seconds.
 
-Two of those stream tables are purpose-built **differential efficiency
-showcases**: they depend on slowly-changing data so their change ratio stays
-low (~0.07 and ~0.25 respectively), letting the Refresh Mode Advisor confirm
-that DIFFERENTIAL mode is the right choice even while every other table
-justifiably runs at a change ratio near 1.0.
+Two scenarios are available via the `DEMO_SCENARIO` environment variable:
+
+| Scenario | Default? | Pipeline |
+|----------|----------|----------|
+| `fraud` | ✅ | Financial fraud detection — 9-node, 4-layer DAG over a transaction stream |
+| `ecommerce` | — | E-commerce analytics — 6-node DAG over a continuous order stream |
+
+Each scenario includes two purpose-built **differential efficiency showcases**:
+stream tables with sub-1.0 change ratios that demonstrate when DIFFERENTIAL
+mode is clearly the right choice.
 
 It is the fastest way to see how stream tables, differential refresh, and
 DAG-aware scheduling work together on data you can watch moving.
@@ -20,7 +24,12 @@ DAG-aware scheduling work together on data you can watch moving.
 
 ```bash
 cd demo
+
+# Fraud detection (default)
 docker compose up --build
+
+# E-commerce analytics
+DEMO_SCENARIO=ecommerce docker compose up --build
 ```
 
 Open **http://localhost:8080** — the dashboard refreshes every 2 seconds.
@@ -31,6 +40,12 @@ To stop and remove all data:
 docker compose down -v
 ```
 
+> **Switching scenarios** requires removing the old data volume:
+> ```bash
+> docker compose down -v
+> DEMO_SCENARIO=ecommerce docker compose up
+> ```
+
 ---
 
 ## What the Demo Does
@@ -40,16 +55,16 @@ Three Docker services start together:
 | Service | Role |
 |---------|------|
 | **postgres** | PostgreSQL 18 with pg_trickle; initialises the schema, seed data, and all stream tables on first boot |
-| **generator** | Python script that inserts roughly one transaction per second; every ~45 seconds it triggers a suspicious burst to drive HIGH-risk alerts |
+| **generator** | Python script that continuously inserts events; periodically triggers bursts that stress-test differential refresh |
 | **dashboard** | Flask web app served at http://localhost:8080; reads from stream tables and auto-refreshes every 2 seconds |
 
-You write nothing to the database yourself. The generator is your data source.
-Watch the dashboard and you will see the stream tables track the transaction
-stream in near real time.
+The `DEMO_SCENARIO` variable controls which SQL files are loaded on startup
+and which generator/dashboard module is activated. Both scenarios share the
+same Docker Compose services.
 
 ---
 
-## The Fraud Detection Scenario
+## Scenario: fraud (default)
 
 The demo models the data pipeline a financial institution might build to
 spot suspicious activity as it happens, not hours later in a batch job.
@@ -84,10 +99,10 @@ column on the dashboard.
 
 ---
 
-## The DAG of Stream Tables
+## The DAG of Stream Tables (fraud)
 
-This is the heart of the demo. All nine stream tables are defined in
-[demo/postgres/02_stream_tables.sql](../demo/postgres/02_stream_tables.sql).
+All nine stream tables are defined in
+[demo/postgres/fraud/02_stream_tables.sql](../demo/postgres/fraud/02_stream_tables.sql).
 
 ```
   Base tables             Layer 1 — Silver           Layer 2 — Gold              Layer 3 — Platinum
@@ -325,7 +340,7 @@ reference while exploring the database directly.
 
 ---
 
-## Exploring the Database
+## Exploring the Database (fraud)
 
 Connect directly to inspect the stream tables and pg_trickle internals:
 
@@ -391,27 +406,35 @@ SELECT pgtrickle.refresh_stream_table('risk_scores');
 
 ```
 demo/
-├── docker-compose.yml          # Service definitions
-├── README.md                   # Quick start
+├── docker-compose.yml          # Service definitions; DEMO_SCENARIO selects the scenario
+├── README.md                   # Quick start + scenario descriptions
 │
 ├── postgres/
-│   ├── 01_schema.sql           # Base tables + seed data (30 users, 15 merchants,
-│   │                           # 40 initial transactions, merchant_risk_tier)
-│   └── 02_stream_tables.sql    # All 9 stream table definitions (CREATE EXTENSION,
-│                               # Layers 1–3 + 2 differential showcase tables)
+│   ├── fraud/
+│   │   ├── 01_schema.sql       # Base tables + seed data (30 users, 15 merchants,
+│   │   │                       # 40 initial transactions, merchant_risk_tier)
+│   │   └── 02_stream_tables.sql# All 9 stream table definitions (Layers 1–3 + showcases)
+│   └── ecommerce/
+│       ├── 01_schema.sql       # Base tables + seed data (customers, products,
+│       │                       # categories, orders, product_catalog)
+│       └── 02_stream_tables.sql# All 6 stream table definitions (Layers 1–3 + showcases)
 │
 ├── generator/
 │   ├── Dockerfile
 │   ├── requirements.txt        # psycopg2-binary only
-│   └── generate.py             # Transaction generator; normal mode + burst mode;
-│                               # rotates one merchant tier every ~30 cycles
+│   ├── generate.py             # Scenario dispatcher; reads DEMO_SCENARIO
+│   └── scenarios/
+│       ├── fraud.py            # Transaction generator (normal + burst mode)
+│       └── ecommerce.py        # Order generator (normal + flash sale mode)
 │
 └── dashboard/
     ├── Dockerfile
     ├── requirements.txt        # flask + psycopg2-binary
-    └── app.py                  # Flask app: /  → HTML dashboard
-                                #             /api/data → JSON for JS polling
-                                #             /api/internals → stream table metadata
+    ├── app.py                  # Scenario dispatcher: / → HTML, /api/data → JSON,
+    │                           #   /api/internals → stream table metadata (shared)
+    └── scenarios/
+        ├── fraud.py            # Fraud HTML, DAG diagram, and data queries
+        └── ecommerce.py        # E-commerce HTML, DAG diagram, and data queries
 ```
 
 ---
@@ -491,3 +514,125 @@ The two showcase tables make this concrete:
 | `top_10_risky_merchants` | ≈ 0.25 | ✓ KEEP DIFFERENTIAL |
 | `risk_scores` | ≈ 1.0 | KEEP FULL (append-only source) |
 | `alert_summary` | ≈ 1.0 | KEEP FULL (small table; delta overhead dominates) |
+
+---
+
+## Scenario: ecommerce
+
+The e-commerce scenario models a real-time **online store analytics pipeline**
+with orders streaming in continuously.
+
+```bash
+cd demo
+DEMO_SCENARIO=ecommerce docker compose up --build
+```
+
+### Source Data
+
+| Table | Contents |
+|-------|----------|
+| `customers` | 30 customers with name and country |
+| `products` | 15 products across 8 categories (Electronics, Clothing, Sports, etc.) |
+| `categories` | 8 product categories |
+| `orders` | The live stream — the generator inserts here continuously |
+| `product_catalog` | Slowly-changing current price per product; the generator reprices one product every ~30 cycles |
+
+`orders` is the only table that grows continuously. `product_catalog` changes
+occasionally (about one row per minute). Everything else is static.
+
+### Normal vs. Flash Sale Traffic
+
+**Normal orders** — a random customer orders a random product in quantity 1–2 at
+roughly the catalog price (±15%). Inserted at roughly one per second.
+
+**Flash sale burst** — every ~45 seconds, the generator picks one category and
+fires 8–18 rapid orders (0.10–0.35 s apart) at a 70–90% discount. This creates
+a visible revenue spike in the Category Revenue panel.
+
+### The DAG of Stream Tables (ecommerce)
+
+All six stream tables are defined in
+[demo/postgres/ecommerce/02_stream_tables.sql](../demo/postgres/ecommerce/02_stream_tables.sql).
+
+```
+  Base tables          Layer 1 — Silver           Layer 2 — Gold         Layer 3 — Platinum
+  ────────────         ──────────────────────      ─────────────────────  ──────────────────────
+
+  ┌────────────┐       ┌──────────────────┐
+  │ customers  │──────►│ customer_stats   │──────────────────────────────►┌──────────────────┐
+  └────────────┘       │  DIFFERENTIAL 1s │                               │ country_revenue  │
+                       └──────────────────┘                               │  DIFF, calc      │
+                                │                                          └──────────────────┘
+  ┌────────────┐                │
+  │  orders    │────────────────┘
+  │ (stream)   │────────────────────────────────►┌────────────────┐
+  └────────────┘       ┌────────────────┐         │ product_sales  │
+  ┌────────────┐       │category_revenue│         │ DIFFERENTIAL   │
+  │  products  │──────►│ DIFFERENTIAL   │         │ 1s             │
+  │ categories │──────►│ 1s             │         └────────────────┘
+  └─────┬──────┘       └────────────────┘
+        │
+  ┌─────▼──────────────┐   ┌──────────────────────┐
+  │  product_catalog   │──►│ catalog_price_impact │  ← DIFFERENTIAL SHOWCASE #1
+  │  (slowly-changing) │   │   DIFFERENTIAL 5s    │    change ratio ≈ 0.07
+  └────────────────────┘   └──────────────────────┘
+
+  ┌──────────────────┐   ┌──────────────────┐
+  │  customer_stats  │──►│  top_10_customers│  ← DIFFERENTIAL SHOWCASE #2
+  │  DIFFERENTIAL 1s │   │  DIFFERENTIAL    │    change ratio ≈ 0.1–0.2
+  └──────────────────┘   │  calc, LIMIT 10  │
+                         └──────────────────┘
+```
+
+### Stream Tables (ecommerce)
+
+| Name | Layer | Mode | Schedule | What it computes |
+|------|-------|------|----------|-----------------|
+| `product_sales` | L1 | DIFFERENTIAL | 1 s | Per-product: units sold, revenue, avg selling price |
+| `customer_stats` | L1 | DIFFERENTIAL | 1 s | Per-customer: order count, total spent, avg order value |
+| `category_revenue` | L1 | DIFFERENTIAL | 1 s | Per-category: orders, units, revenue |
+| `country_revenue` | L2 | DIFFERENTIAL | calculated | Per-country: roll-up from customer_stats |
+| `catalog_price_impact` | showcase | DIFFERENTIAL | 5 s | Per-product: current vs. base price delta |
+| `top_10_customers` | showcase | DIFFERENTIAL | calculated | Top 10 customers by total spend (LIMIT 10) |
+
+### Differential efficiency showcases (ecommerce)
+
+**`catalog_price_impact`** — Showcase #1: slowly-changing price catalog
+
+Joins `products` (static) with `product_catalog` (15 rows, one repriced per
+~30 cycles). Only the repriced product's row changes each cycle:
+
+- Change ratio ≈ 1/15 ≈ 0.07
+- Refresh Mode Advisor recommendation: ✓ KEEP DIFFERENTIAL
+- The `price_delta` and `pct_change` columns highlight repriced products in real time.
+
+**`top_10_customers`** — Showcase #2: fixed-cardinality leaderboard
+
+Reads `customer_stats` (all 30 customers) and applies `LIMIT 10`. Only rank
+boundary crossings produce net output changes:
+
+- Change ratio ≈ 0.1–0.2
+- Refresh Mode Advisor recommendation: ✓ KEEP DIFFERENTIAL
+
+### Exploring the Database (ecommerce)
+
+```bash
+docker compose exec postgres psql -U demo -d ecommerce_demo
+```
+
+```sql
+-- See category revenue live
+SELECT category, order_count, units_sold, revenue
+FROM   category_revenue ORDER BY revenue DESC;
+
+-- Top 10 customers leaderboard
+SELECT * FROM top_10_customers;
+
+-- Price changes vs. base price
+SELECT product_name, base_price, current_price, pct_change
+FROM   catalog_price_impact ORDER BY ABS(pct_change) DESC;
+
+-- Refresh efficiency comparison across all stream tables
+SELECT pgt_name, avg_diff_ms, diff_speedup, avg_change_ratio
+FROM   pgtrickle.refresh_efficiency() ORDER BY pgt_name;
+```
