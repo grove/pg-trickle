@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: ghcr.io/grove/pg_trickle:latest
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.postgres
     environment:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo
