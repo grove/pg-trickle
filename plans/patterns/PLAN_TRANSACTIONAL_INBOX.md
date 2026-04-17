@@ -28,6 +28,7 @@
   - [pg_cron — Scheduled Inbox Cleanup](#pg_cron--scheduled-inbox-cleanup)
   - [pg_partman — Inbox Table Partitioning](#pg_partman--inbox-table-partitioning)
   - [pgflow — Durable Inbox Processing Workflows](#pgflow--durable-inbox-processing-workflows)
+  - [NATS / JetStream — As the Inbox Transport Layer](#nats--jetstream--as-the-inbox-transport-layer)
 - [Potential pg_trickle Extensions](#potential-pg_trickle-extensions)
   - [Extension 1: Inbox Table Helper](#extension-1-inbox-table-helper)
   - [Extension 2: Deduplication Stream Table](#extension-2-deduplication-stream-table)
@@ -703,6 +704,149 @@ compensation logic.
 orchestrates the processing workflow (e.g., validate → enrich → store →
 notify).
 
+### NATS / JetStream — As the Inbox Transport Layer
+
+[NATS](https://nats.io/) with its persistent streaming layer **JetStream**
+can serve as the transport that delivers messages into the PostgreSQL inbox
+table. NATS is a CNCF incubating project — a single ~10 MB binary providing
+pub/sub, request/reply, and durable streaming with sub-millisecond latency.
+
+**Key JetStream features relevant to the inbox pattern:**
+
+| Feature | Benefit for Inbox |
+|---------|-------------------|
+| Durable consumers | Resume from last ack after consumer restart |
+| Exactly-once delivery | Double-ack protocol prevents duplicate delivery to consumer |
+| Per-subject ordering | Messages for the same entity arrive in order |
+| Redelivery with backoff | Unacked messages redeliver with configurable backoff |
+| Work queue mode | Automatic load balancing across multiple inbox writers |
+| Dead letter (`MaxDeliver`) | Messages exceeding max delivery attempts are surfaced |
+| Wildcard subscriptions | `payments.>` receives all payment-related events |
+
+**Architecture: NATS JetStream → PostgreSQL Inbox → pg_trickle:**
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Upstream Services                                                     │
+│  (Order Service, Shipping Service, ...)                                │
+│       │                                                                │
+│       │ nats.js_publish('payments.order_created', payload)             │
+│       ▼                                                                │
+│  ┌──────────────────────────────────────┐                              │
+│  │ NATS JetStream                       │                              │
+│  │ Stream: PAYMENTS                     │                              │
+│  │ Subjects: payments.>                 │                              │
+│  │ Retention: WorkQueue                 │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │ Pull consumer (durable)                               │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────┐                              │
+│  │ Inbox Writer (application worker)    │                              │
+│  │ 1. msg = consumer.fetch(batch=50)    │                              │
+│  │ 2. INSERT INTO inbox ON CONFLICT     │                              │
+│  │    DO NOTHING                        │                              │
+│  │ 3. msg.ack()                         │                              │
+│  └──────────────┬───────────────────────┘                              │
+│                 │                                                       │
+│                 ▼                                                       │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ PostgreSQL                                                       │  │
+│  │                                                                  │  │
+│  │  inbox_events table                                              │  │
+│  │       │ CDC trigger (automatic)                                  │  │
+│  │       ▼                                                          │  │
+│  │  pending_inbox (stream table, DIFFERENTIAL, 1s)                  │  │
+│  │       │                                                          │  │
+│  │       ▼                                                          │  │
+│  │  Processing workers                                              │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Inbox writer consuming from NATS JetStream:**
+
+```python
+import nats
+from nats.js import JetStreamContext
+import psycopg2
+import json
+import asyncio
+
+async def inbox_writer():
+    nc = await nats.connect("nats://localhost:4222")
+    js = nc.jetstream()
+
+    # Create a durable pull consumer for the PAYMENTS stream
+    consumer = await js.pull_subscribe(
+        "payments.>",
+        durable="payment-inbox-writer",
+        stream="PAYMENTS",
+    )
+
+    conn = psycopg2.connect("postgresql://localhost/mydb")
+
+    while True:
+        try:
+            messages = await consumer.fetch(batch=50, timeout=5)
+        except nats.errors.TimeoutError:
+            continue
+
+        with conn.cursor() as cur:
+            for msg in messages:
+                payload = json.loads(msg.data)
+                event_id = msg.headers.get("Nats-Msg-Id", msg.reply)
+
+                cur.execute("""
+                    INSERT INTO inbox_events (event_id, event_type, source, payload)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (event_id) DO NOTHING
+                """, (
+                    event_id,
+                    msg.subject.split(".")[-1],   # e.g. 'order_created'
+                    msg.headers.get("Source", "unknown"),
+                    json.dumps(payload),
+                ))
+
+                await msg.ack()  # Ack AFTER successful INSERT
+
+            conn.commit()
+```
+
+**Double-ack exactly-once flow:**
+
+1. NATS delivers message to the inbox writer (visibility timeout starts).
+2. Writer INSERTs into `inbox_events` with `ON CONFLICT DO NOTHING`.
+3. Writer calls `msg.ack()` — NATS marks the message as consumed.
+4. If the writer crashes between step 2 and 3, NATS redelivers. The
+   `ON CONFLICT` clause deduplicates, so no duplicate processing occurs.
+5. pg_trickle's stream table materializes the new pending event within ~1s.
+6. Processing workers pick up the event from the stream table.
+
+**NATS vs. Kafka/RabbitMQ as inbox transport:**
+
+| Factor | Kafka | RabbitMQ | NATS JetStream |
+|--------|-------|----------|----------------|
+| Publish latency | ~5-10ms | ~2-5ms | <1ms |
+| Operational complexity | High (ZooKeeper/KRaft, brokers) | Medium (Erlang cluster) | Low (single binary) |
+| Binary size | ~500 MB+ | ~250 MB+ | ~10 MB |
+| Built-in deduplication | Manual (idempotent producer) | Manual | `Nats-Msg-Id` header |
+| Consumer groups | Built-in (partition-based) | Queue-based | Work queue mode |
+| Dead letter handling | Manual DLQ topic | Built-in DLX | `MaxDeliver` + advisory |
+| Ordering | Per-partition | Per-queue | Per-subject |
+| Edge deployment | Impractical | Possible | Designed for edge |
+
+**When to choose NATS for the inbox transport:**
+- Low-ops environments where running Kafka is too heavy.
+- Edge or IoT deployments with constrained resources.
+- Sub-millisecond message delivery latency is important.
+- You want built-in deduplication and redelivery without custom logic.
+- You already use NATS for service-to-service communication.
+
+**When Kafka is still preferred:**
+- Existing Kafka ecosystem (Connect, Schema Registry, ksqlDB).
+- Multi-datacenter replication with MirrorMaker.
+- Very high throughput (millions of messages/sec) with long retention.
+
 ---
 
 ## Potential pg_trickle Extensions
@@ -917,18 +1061,18 @@ SELECT pgtrickle.create_stream_table('message_health',
 
 ## Comparison with Traditional Approaches
 
-| Aspect | Traditional Inbox | pg_trickle Inbox | pgmq Inbox |
-|--------|-------------------|-------------------|------------|
-| Processing queue view | Custom SQL query each time | Pre-materialized stream table | Built-in `pgmq.read()` |
-| Deduplication | Manual `ON CONFLICT` | `ON CONFLICT` + `DISTINCT ON` stream table | Manual (by `msg_id`) |
-| Ordering | Manual `ORDER BY` + gap tracking | Stream table with gap detection | FIFO within queue |
-| Dead letter queue | Manual query | Materialized stream table with alerts | Manual (check `read_ct`) |
-| Monitoring | Custom queries | Built-in staleness, alerts, stats | Basic (`read_ct`, queue depth) |
-| Competing consumers | `FOR UPDATE SKIP LOCKED` | `FOR UPDATE SKIP LOCKED` + stream table stats | Visibility timeout |
-| Retry backoff | Manual calculation | Stream table with backoff filter | Visibility timeout extension |
-| Infrastructure | PostgreSQL only | PostgreSQL only | PostgreSQL only |
-| Throughput overhead | Full-table scan per poll | DIFFERENTIAL (only changed rows) | Index scan per read |
-| Latency | Poll interval | ~1s (DIFFERENTIAL) or ~0ms (IMMEDIATE) | ~0ms (direct read) |
+| Aspect | Traditional Inbox | pg_trickle Inbox | pgmq Inbox | pg_trickle + NATS JetStream |
+|--------|-------------------|-------------------|------------|-----------------------------|
+| Processing queue view | Custom SQL query each time | Pre-materialized stream table | Built-in `pgmq.read()` | Stream table (post-ingest) |
+| Deduplication | Manual `ON CONFLICT` | `ON CONFLICT` + `DISTINCT ON` stream table | Manual (by `msg_id`) | `Nats-Msg-Id` + `ON CONFLICT` |
+| Ordering | Manual `ORDER BY` + gap tracking | Stream table with gap detection | FIFO within queue | Per-subject (JetStream) + stream table |
+| Dead letter queue | Manual query | Materialized stream table with alerts | Manual (check `read_ct`) | `MaxDeliver` + DLQ stream table |
+| Monitoring | Custom queries | Built-in staleness, alerts, stats | Basic (`read_ct`, queue depth) | pg_trickle alerts + NATS advisories |
+| Competing consumers | `FOR UPDATE SKIP LOCKED` | `FOR UPDATE SKIP LOCKED` + stream table stats | Visibility timeout | JetStream work queues → inbox table |
+| Retry backoff | Manual calculation | Stream table with backoff filter | Visibility timeout extension | NATS redelivery backoff + stream table |
+| Infrastructure | PostgreSQL only | PostgreSQL only | PostgreSQL only | PostgreSQL + NATS (~10 MB binary) |
+| Throughput overhead | Full-table scan per poll | DIFFERENTIAL (only changed rows) | Index scan per read | NATS push + DIFFERENTIAL |
+| Latency | Poll interval | ~1s (DIFFERENTIAL) or ~0ms (IMMEDIATE) | ~0ms (direct read) | <1ms (NATS) + ~1s (stream table) |
 
 ---
 
@@ -941,5 +1085,7 @@ SELECT pgtrickle.create_stream_table('message_health',
 - [pgmq — PostgreSQL Message Queue](https://github.com/pgmq/pgmq)
 - [pgflow — Durable Workflow Engine](https://pgflow.dev/)
 - [pg_partman — Partition Management](https://github.com/pgpartman/pg_partman)
+- [NATS.io — Cloud-Native Messaging](https://nats.io/)
+- [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)
 - [PLAN_TRANSACTIONAL_OUTBOX.md](PLAN_TRANSACTIONAL_OUTBOX.md) — companion document for the outbox pattern

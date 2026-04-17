@@ -26,6 +26,7 @@
   - [pg_amqp — AMQP Publishing from PostgreSQL](#pg_amqp--amqp-publishing-from-postgresql)
   - [pgflow — Durable Workflow Engine](#pgflow--durable-workflow-engine)
   - [Debezium — External CDC Platform](#debezium--external-cdc-platform)
+  - [NATS / JetStream — Lightweight Messaging Fabric](#nats--jetstream--lightweight-messaging-fabric)
 - [Potential pg_trickle Extensions](#potential-pg_trickle-extensions)
   - [Extension 1: Outbox Table Helper](#extension-1-outbox-table-helper)
   - [Extension 2: Message Relay Background Worker](#extension-2-message-relay-background-worker)
@@ -613,6 +614,131 @@ conceptually similar to what Debezium uses.
 - Events are consumed by services that can query PostgreSQL directly.
 - You want to avoid operating an additional infrastructure component.
 
+### NATS / JetStream — Lightweight Messaging Fabric
+
+[NATS](https://nats.io/) is a high-performance, cloud-native messaging system
+(CNCF incubating project) that provides pub/sub, request/reply, and persistent
+streaming via **JetStream** — all through a single ~10 MB binary with
+sub-millisecond latency. It is a compelling alternative to Kafka or RabbitMQ
+for the outbox relay target, especially in edge, IoT, or low-ops environments.
+
+**Key JetStream features relevant to the outbox relay:**
+
+| Feature | Benefit for Outbox Relay |
+|---------|-------------------------|
+| Built-in deduplication (`Nats-Msg-Id` header) | Prevents duplicate event delivery without consumer-side logic |
+| Exactly-once semantics | Double-ack protocol between publisher and consumer |
+| Per-subject ordering | Events for the same aggregate stay ordered |
+| Durable consumers | Consumers resume from last acknowledged position after restart |
+| Work queue mode | Automatic load balancing across competing relay consumers |
+| Wildcard subscriptions | `orders.>` matches `orders.created`, `orders.shipped`, etc. |
+| Stream retention policies | Limits-based, interest-based, or work-queue retention |
+
+**Relay pattern with NATS JetStream:**
+
+```python
+import nats
+from nats.js import JetStreamContext
+import psycopg2
+import json
+import asyncio
+
+async def outbox_relay():
+    nc = await nats.connect("nats://localhost:4222")
+    js = nc.jetstream()
+
+    # Ensure the stream exists (idempotent)
+    await js.add_stream(name="ORDERS", subjects=["orders.>"])
+
+    conn = psycopg2.connect("postgresql://localhost/mydb")
+
+    while True:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT event_id, event_type, aggregate_id, payload
+                FROM pending_outbox_events
+                ORDER BY event_id
+                LIMIT 100
+            """)
+            rows = cur.fetchall()
+
+            for event_id, event_type, aggregate_id, payload in rows:
+                subject = f"orders.{event_type.lower()}"
+                await js.publish(
+                    subject,
+                    json.dumps(payload).encode(),
+                    headers={
+                        "Nats-Msg-Id": str(event_id),  # deduplication key
+                        "Aggregate-Id": aggregate_id,
+                    },
+                )
+                cur.execute(
+                    "UPDATE outbox_events SET published_at = now() WHERE event_id = %s",
+                    (event_id,),
+                )
+            conn.commit()
+
+        await asyncio.sleep(0.5)
+```
+
+**Subject-based routing example:**
+
+```
+orders.ordercreated       → Order Service consumers
+orders.orderstatuschanged → Fulfillment Service consumers
+orders.>                  → Audit Service (wildcard: receives everything)
+```
+
+**Hypothetical `pg_nats` extension:**
+
+A PostgreSQL extension providing direct NATS publishing from SQL (analogous to
+`pg_amqp` for RabbitMQ) could eliminate the external relay process entirely:
+
+```sql
+-- Hypothetical pg_nats API
+CREATE EXTENSION pg_nats;
+
+SELECT nats.connect('default', 'nats://localhost:4222');
+
+-- Publish within a trigger on the outbox table
+CREATE OR REPLACE FUNCTION fn_publish_to_nats() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM nats.js_publish(
+        'default',                              -- connection name
+        'orders.' || lower(NEW.event_type),     -- subject
+        NEW.payload::text,                      -- message body
+        headers => jsonb_build_object(
+            'Nats-Msg-Id', NEW.event_id::text   -- dedup key
+        )
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_outbox_nats
+    AFTER INSERT ON outbox_events
+    FOR EACH ROW EXECUTE FUNCTION fn_publish_to_nats();
+```
+
+> **Caution:** In-transaction publishing couples the transaction to NATS
+> availability. If NATS is down, the source transaction blocks or fails. The
+> relay pattern (async, outside the transaction) is safer for production use.
+> The in-transaction approach is best suited for scenarios where NATS is
+> co-located and highly available (e.g., sidecar or leaf node).
+
+**When to choose NATS over Kafka/RabbitMQ:**
+- Low operational overhead (single binary, zero external dependencies).
+- Sub-millisecond publish latency is critical.
+- Edge or IoT deployments where a full Kafka cluster is impractical.
+- You need both pub/sub and request/reply in the same system.
+- Built-in deduplication simplifies consumer logic.
+
+**When Kafka is still preferred:**
+- You need the Kafka Connect ecosystem (hundreds of connectors).
+- Multi-datacenter replication with MirrorMaker.
+- Schema registry and Avro/Protobuf serialization.
+- Existing Kafka infrastructure and team expertise.
+
 ---
 
 ## Potential pg_trickle Extensions
@@ -764,16 +890,17 @@ When the relay falls behind:
 
 ## Comparison with Traditional Approaches
 
-| Aspect | Traditional Outbox | pg_trickle Outbox | Debezium CDC |
-|--------|--------------------|-------------------|--------------|
-| Additional write overhead | 1 extra INSERT per event | Zero (CDC trigger is automatic) | Zero (WAL tail) |
-| Relay mechanism | Custom polling worker | Stream table + NOTIFY | Kafka Connect |
-| Latency | Depends on poll interval | ~1s (DIFFERENTIAL) or ~0ms (IMMEDIATE) | ~1-5s |
-| Ordering | PK-ordered | PK-ordered + LSN-ordered | LSN-ordered |
-| Infrastructure | PostgreSQL only | PostgreSQL only | PostgreSQL + Kafka + Debezium |
-| Monitoring | Custom | Built-in (staleness, alerts, stats) | Kafka + Debezium metrics |
-| Competing consumers | FOR UPDATE SKIP LOCKED | FOR UPDATE SKIP LOCKED or pgmq | Kafka consumer groups |
-| Garbage collection | Manual DELETE/partition | Manual or partitioned | Kafka retention |
+| Aspect | Traditional Outbox | pg_trickle Outbox | Debezium CDC | pg_trickle + NATS JetStream |
+|--------|--------------------|-------------------|--------------|-----------------------------|
+| Additional write overhead | 1 extra INSERT per event | Zero (CDC trigger is automatic) | Zero (WAL tail) | Zero (CDC trigger is automatic) |
+| Relay mechanism | Custom polling worker | Stream table + NOTIFY | Kafka Connect | Stream table + NATS publish |
+| Latency | Depends on poll interval | ~1s (DIFFERENTIAL) or ~0ms (IMMEDIATE) | ~1-5s | ~1s (DIFFERENTIAL) + <1ms (NATS) |
+| Ordering | PK-ordered | PK-ordered + LSN-ordered | LSN-ordered | Per-subject ordered (JetStream) |
+| Infrastructure | PostgreSQL only | PostgreSQL only | PostgreSQL + Kafka + Debezium | PostgreSQL + NATS (~10 MB binary) |
+| Monitoring | Custom | Built-in (staleness, alerts, stats) | Kafka + Debezium metrics | pg_trickle alerts + NATS metrics |
+| Competing consumers | FOR UPDATE SKIP LOCKED | FOR UPDATE SKIP LOCKED or pgmq | Kafka consumer groups | JetStream work queues |
+| Garbage collection | Manual DELETE/partition | Manual or partitioned | Kafka retention | JetStream retention policies |
+| Deduplication | Manual | Manual | Kafka idempotent producer | Built-in (`Nats-Msg-Id`) |
 
 ---
 
@@ -783,5 +910,7 @@ When the relay falls behind:
 - Microsoft, [Implement the Transactional Outbox Pattern](https://learn.microsoft.com/en-us/azure/architecture/best-practices/transactional-outbox-cosmos)
 - [pgmq — PostgreSQL Message Queue](https://github.com/pgmq/pgmq)
 - [Debezium CDC Platform](https://debezium.io/)
+- [NATS.io — Cloud-Native Messaging](https://nats.io/)
+- [NATS JetStream Documentation](https://docs.nats.io/nats-concepts/jetstream)
 - Krzysztof Atłasik, [Microservices 101: Transactional Outbox and Inbox](https://softwaremill.com/microservices-101/)
 - pg_trickle [ARCHITECTURE.md](../../docs/ARCHITECTURE.md), [PATTERNS.md](../../docs/PATTERNS.md), [SQL_REFERENCE.md](../../docs/SQL_REFERENCE.md)
