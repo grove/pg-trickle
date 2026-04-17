@@ -1,19 +1,37 @@
-# pg_trickle Real-time Demo — Fraud Detection Pipeline
+# pg_trickle Real-time Demo
 
-A self-contained Docker Compose demo that shows real data flowing through a
-**9-node DAG** of stream tables built on top of a continuous transaction feed.
-Two showcase tables demonstrate differential refresh efficiency at sub-1.0
-change ratios.
+A self-contained Docker Compose demo showing real data flowing through stream
+tables built on top of a continuous event feed.  Two showcase tables in each
+scenario demonstrate differential refresh efficiency at sub-1.0 change ratios.
+
+Two scenarios are available, selectable via the `DEMO_SCENARIO` environment
+variable:
+
+| Scenario | Default? | Description |
+|----------|----------|-------------|
+| `fraud` | ✅ | Financial fraud detection pipeline — 9-node DAG over a transaction stream |
+| `ecommerce` | — | E-commerce analytics — 6-node DAG over a continuous order stream |
 
 ## Quick start
 
 ```bash
 cd demo
+
+# Fraud detection (default)
 docker compose up
+
+# E-commerce analytics
+DEMO_SCENARIO=ecommerce docker compose up
 ```
 
 Then open **http://localhost:8080** in your browser.
 The dashboard auto-refreshes every 2 seconds.
+
+> **Switching scenarios** requires removing the old data volume:
+> ```bash
+> docker compose down -v
+> DEMO_SCENARIO=ecommerce docker compose up
+> ```
 
 ---
 
@@ -46,6 +64,8 @@ Once built, run the demo with your custom image:
 cd demo
 PG_TRICKLE_IMAGE=pg_trickle:demo docker compose down -v
 PG_TRICKLE_IMAGE=pg_trickle:demo docker compose up
+# or for ecommerce:
+PG_TRICKLE_IMAGE=pg_trickle:demo DEMO_SCENARIO=ecommerce docker compose up
 ```
 
 The `PG_TRICKLE_IMAGE` environment variable overrides the default pre-built image. The `-v` flag removes old volumes so the database reinitializes with the new extension.
@@ -59,7 +79,7 @@ The `PG_TRICKLE_IMAGE` environment variable overrides the default pre-built imag
 
 ---
 
-## What you'll see
+## Scenario: fraud (default)
 
 The demo models a real-time **financial fraud detection system**.
 Three services start together:
@@ -77,6 +97,7 @@ merchants, driving HIGH-risk scores and alerting the dashboard in real time.
 Every ~30 generator cycles (roughly once per minute) the generator also
 **rotates one merchant's risk tier** (STANDARD → ELEVATED → HIGH → STANDARD),
 illustrating that `merchant_tier_stats` detects this change differentially.
+
 
 ---
 
@@ -209,6 +230,93 @@ SELECT st.pgt_name, rh.action, rh.status,
 FROM pgtrickle.pgt_refresh_history rh
 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = rh.pgt_id
 ORDER  BY rh.start_time DESC LIMIT 20;
+```
+
+---
+
+## Scenario: ecommerce
+
+The e-commerce scenario models a real-time **online store analytics pipeline**
+with orders streaming in continuously.
+
+```bash
+cd demo
+DEMO_SCENARIO=ecommerce docker compose up
+```
+
+Every ~45 seconds the generator triggers a **flash sale** for one category:
+a burst of 8–18 orders at a discount (70–90% of current price) floods in,
+visible as a spike in the Revenue by Category panel.
+
+Every ~30 generator cycles (roughly once per minute) the generator also
+**reprices one product** in `product_catalog` (±20% of base price), driving a
+targeted update in `catalog_price_impact` while leaving all other rows untouched.
+
+### DAG topology (ecommerce)
+
+```
+  Base tables          Layer 1 — Silver           Layer 2 — Gold         Layer 3 — Platinum
+  ────────────         ──────────────────────      ─────────────────────  ──────────────────────
+
+  ┌────────────┐       ┌──────────────────┐
+  │ customers  │──────►│ customer_stats   │──────────────────────────────►┌──────────────────┐
+  └────────────┘       │  (DIFFERENTIAL)  │                               │ country_revenue  │
+                       └──────────────────┘                               │  (DIFFERENTIAL)  │
+                                │                                          └──────────────────┘
+  ┌────────────┐                │
+  │  orders    │────────────────┘
+  │ (stream)   │────────────────────────────────►┌────────────────┐
+  └────────────┘       ┌────────────────┐         │ product_sales  │
+  ┌────────────┐       │category_revenue│         │ (DIFFERENTIAL) │
+  │  products  │──────►│ (DIFFERENTIAL) │         └────────────────┘
+  │ categories │──────►│                │
+  └─────┬──────┘       └────────────────┘
+        │
+  ┌─────▼──────────────┐   ┌──────────────────────┐
+  │  product_catalog   │──►│ catalog_price_impact │  ← DIFFERENTIAL SHOWCASE #1
+  │  (slowly-changing) │   │   (DIFFERENTIAL 5s)  │    change ratio ~0.07
+  └────────────────────┘   └──────────────────────┘
+
+  ┌──────────────────┐   ┌──────────────────┐
+  │  customer_stats  │──►│  top_10_customers│  ← DIFFERENTIAL SHOWCASE #2
+  │  (DIFFERENTIAL)  │   │  (DIFFERENTIAL)  │    change ratio ~0.1–0.2
+  └──────────────────┘   │  LIMIT 10        │
+                         └──────────────────┘
+```
+
+### Stream tables (ecommerce)
+
+| Name                   | Layer    | Mode         | Schedule   | What it computes                                        |
+|------------------------|----------|--------------|------------|---------------------------------------------------------|
+| `product_sales`        | L1       | DIFFERENTIAL | 1 s        | Per-product: units sold, revenue, avg price             |
+| `customer_stats`       | L1       | DIFFERENTIAL | 1 s        | Per-customer: order count, total spent, avg order value |
+| `category_revenue`     | L1       | DIFFERENTIAL | 1 s        | Per-category: orders, units, revenue, avg price         |
+| `country_revenue`      | L2       | DIFFERENTIAL | calculated | Per-country: roll-up from customer_stats                |
+| `catalog_price_impact` | showcase | DIFFERENTIAL | 5 s        | Per-product: current vs base price (slowly-changing)    |
+| `top_10_customers`     | showcase | DIFFERENTIAL | calculated | Top 10 customers by total spend (LIMIT 10)              |
+
+### Playing with the ecommerce demo
+
+```bash
+docker compose exec postgres psql -U demo -d ecommerce_demo
+```
+
+```sql
+-- See category revenue live
+SELECT * FROM category_revenue ORDER BY revenue DESC;
+
+-- Top 10 customers leaderboard
+SELECT * FROM top_10_customers;
+
+-- Price changes in the catalog
+SELECT product_name, base_price, current_price, pct_change
+FROM   catalog_price_impact
+ORDER  BY ABS(pct_change) DESC;
+
+-- Refresh efficiency comparison
+SELECT pgt_name, avg_diff_ms, diff_speedup, avg_change_ratio
+FROM   pgtrickle.refresh_efficiency()
+ORDER  BY pgt_name;
 ```
 
 ---

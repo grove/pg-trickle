@@ -1,188 +1,15 @@
 """
-pg_trickle demo — dashboard dispatcher.
+pg_trickle demo — fraud detection scenario: HTML, DAG, and data queries.
 
-Reads DEMO_SCENARIO env var (default: fraud) and delegates to the matching
-scenario module in scenarios/.  Each scenario exposes:
-  HTML         — complete page HTML
-  DAG_DIAGRAM  — ASCII art DAG for the {{ dag }} placeholder
+Exposes:
+  HTML         — complete page HTML with {{ dag }} placeholder
+  DAG_DIAGRAM  — ASCII art DAG to substitute into {{ dag }}
   get_data(conn, safe_query, serialize) → dict for /api/data
-
-The /api/internals endpoint is scenario-agnostic (queries pgtrickle system
-tables) and is served from this module directly.
 """
 
-import os
-from datetime import datetime
-from decimal import Decimal
+# ── Full page HTML ─────────────────────────────────────────────────────────────
 
-import psycopg2
-import psycopg2.extras
-from flask import Flask, jsonify
-
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://demo:demo@postgres/fraud_demo"
-)
-DEMO_SCENARIO = os.environ.get("DEMO_SCENARIO", "fraud")
-
-KNOWN_SCENARIOS = ("fraud", "ecommerce")
-
-if DEMO_SCENARIO not in KNOWN_SCENARIOS:
-    raise ValueError(
-        f"Unknown DEMO_SCENARIO={DEMO_SCENARIO!r}. "
-        f"Valid options: {', '.join(KNOWN_SCENARIOS)}"
-    )
-
-if DEMO_SCENARIO == "ecommerce":
-    from scenarios.ecommerce import HTML, DAG_DIAGRAM, get_data as _get_scenario_data
-else:
-    from scenarios.fraud import HTML, DAG_DIAGRAM, get_data as _get_scenario_data
-
-app = Flask(__name__)
-
-
-def get_conn():
-    return psycopg2.connect(
-        DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor
-    )
-
-
-def safe_query(conn, sql: str, default=None):
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            return cur.fetchall()
-    except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        print(f"[DASHBOARD] Query error: {exc}", flush=True)
-        return default or []
-
-
-def serialize(rows) -> list[dict]:
-    """Convert RealDictRows with Decimal/datetime values to plain dicts."""
-    out = []
-    for row in rows:
-        d = {}
-        for k, v in row.items():
-            if isinstance(v, Decimal):
-                d[k] = float(v)
-            elif isinstance(v, datetime):
-                d[k] = v.isoformat()
-            else:
-                d[k] = v
-        out.append(d)
-    return out
-
-
-# ── Flask routes ──────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    return HTML.replace("{{ dag }}", DAG_DIAGRAM)
-
-
-@app.route("/api/data")
-def api_data():
-    conn = None
-    try:
-        conn = get_conn()
-        return jsonify(_get_scenario_data(conn, safe_query, serialize))
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
-@app.route("/api/internals")
-def api_internals():
-    conn = None
-    try:
-        conn = get_conn()
-
-        st_health = safe_query(conn, """
-            SELECT name, status, refresh_mode, is_populated, schedule
-            FROM   pgtrickle.pgt_status()
-            ORDER  BY name
-        """)
-
-        latest_ref = safe_query(conn, """
-            SELECT DISTINCT ON (st.pgt_schema, st.pgt_name)
-                st.pgt_schema || '.' || st.pgt_name AS name,
-                h.start_time  AS last_refresh,
-                ROUND(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
-                              AS duration_ms,
-                (h.rows_inserted + h.rows_deleted) AS rows_affected
-            FROM pgtrickle.pgt_refresh_history h
-            JOIN pgtrickle.pgt_stream_tables   st ON st.pgt_id = h.pgt_id
-            WHERE h.status = 'COMPLETED'
-            ORDER BY st.pgt_schema, st.pgt_name, h.start_time DESC
-        """)
-
-        dep_tree = safe_query(conn, """
-            SELECT tree_line FROM pgtrickle.dependency_tree()
-        """)
-
-        refresh_hist = safe_query(conn, """
-            SELECT st.pgt_schema || '.' || st.pgt_name AS name,
-                   h.action          AS refresh_mode,
-                   h.start_time,
-                   ROUND(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
-                                     AS duration_ms,
-                   (h.rows_inserted + h.rows_deleted) AS rows_affected,
-                   h.status,
-                   h.was_full_fallback
-            FROM pgtrickle.pgt_refresh_history h
-            JOIN pgtrickle.pgt_stream_tables   st ON st.pgt_id = h.pgt_id
-            WHERE h.status IN ('COMPLETED', 'FAILED')
-            ORDER BY h.start_time DESC
-            LIMIT 40
-        """)
-
-        efficiency = safe_query(conn, """
-            SELECT pgt_name AS name, total_refreshes, diff_count, full_count,
-                   avg_diff_ms, avg_full_ms, avg_change_ratio, diff_speedup
-            FROM pgtrickle.refresh_efficiency()
-            ORDER BY pgt_name
-        """)
-
-        opt_hints = safe_query(conn, """
-            SELECT pgt_name AS name, current_mode, effective_mode,
-                   recommended_mode, confidence, reason
-            FROM pgtrickle.recommend_refresh_mode()
-            ORDER BY pgt_name
-        """)
-
-        latest_by_name = {r['name']: r for r in serialize(latest_ref)}
-        health_out = []
-        for row in serialize(st_health):
-            enriched = dict(row)
-            if row['name'] in latest_by_name:
-                lr = latest_by_name[row['name']]
-                enriched['last_refresh']  = lr.get('last_refresh')
-                enriched['duration_ms']   = lr.get('duration_ms')
-                enriched['rows_affected'] = lr.get('rows_affected')
-            health_out.append(enriched)
-
-        return jsonify({
-            "st_health":       health_out,
-            "dep_tree":        [r['tree_line'] for r in dep_tree],
-            "refresh_history": serialize(refresh_hist),
-            "efficiency":      serialize(efficiency),
-            "opt_hints":       serialize(opt_hints),
-        })
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
-
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -204,14 +31,10 @@ if __name__ == "__main__":
     }
     html, body { background: var(--bg); color: var(--text); font-size: 14px; }
     a { color: var(--green); }
-
-    /* cards */
     .g-card { background: var(--card); border: 1px solid var(--border);
                border-radius: 8px; overflow: hidden; }
     .g-card-hdr { background: var(--hdr); padding: 8px 14px;
                   font-size: 13px; font-weight: 600; letter-spacing: .4px; }
-
-    /* tables */
     .g-table { width: 100%; border-collapse: collapse; }
     .g-table th { color: var(--muted); font-weight: 500; font-size: 12px;
                   border-bottom: 1px solid var(--border); padding: 6px 10px; }
@@ -219,34 +42,22 @@ if __name__ == "__main__":
     .g-table tr:last-child td { border-bottom: none; }
     .g-table tr.risk-HIGH  td { color: #ff7b72; }
     .g-table tr.risk-MED   td { color: #e3b341; }
-
-    /* KPI counters */
     .kpi-val { font-size: 2.2rem; font-weight: 700; line-height: 1; }
     .kpi-lbl { font-size: 11px; color: var(--muted); margin-top: 4px; }
-
-    /* badge */
     .rbadge { display: inline-block; padding: 2px 7px; border-radius: 12px;
               font-size: 11px; font-weight: 700; }
     .rbadge-LOW    { background: #1a4620; color: var(--green); }
     .rbadge-MEDIUM { background: #422d09; color: var(--yellow); }
     .rbadge-HIGH   { background: #3d1114; color: var(--red); }
-
-    /* DAG box */
     .dag-pre { font-family: 'SFMono-Regular', Consolas, monospace;
                font-size: 12px; color: var(--muted); background: var(--bg);
                padding: 14px; border-radius: 6px; white-space: pre;
                overflow-x: auto; margin: 0; }
-
-    /* live dot */
     .live-dot { width: 9px; height: 9px; border-radius: 50%;
                 background: var(--green); display: inline-block;
                 margin-right: 8px; animation: blink 1.8s ease-in-out infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
-
-    /* risk bar */
     .risk-bar { height: 8px; border-radius: 4px; }
-
-    /* nav tabs dark theme */
     .nav-tabs { border-bottom-color: var(--border); }
     .nav-tabs .nav-link { color: var(--muted); border: 1px solid transparent;
                           border-radius: 6px 6px 0 0; padding: 6px 16px; }
@@ -254,12 +65,9 @@ if __name__ == "__main__":
                                 background: var(--hdr); }
     .nav-tabs .nav-link.active { color: var(--text); background: var(--card);
                                  border-color: var(--border) var(--border) var(--card); }
-    /* inline code in card headers */
     .g-card-hdr code { font-size: 11px; background: rgba(99,110,123,0.2);
                        border-radius: 3px; padding: 1px 5px; font-weight: 400; }
-    /* g-table td code */
     .g-table td code { font-size: 11px; }
-    /* score colours */
     .score-keep   { color: var(--muted); }
     .score-switch { color: var(--yellow); }
     .conf-high    { color: var(--green); }
@@ -283,8 +91,8 @@ if __name__ == "__main__":
   <!-- Tab navigation -->
   <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
     <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="tab-fraud-btn"
-              data-bs-toggle="tab" data-bs-target="#tab-fraud"
+      <button class="nav-link active" id="tab-main-btn"
+              data-bs-toggle="tab" data-bs-target="#tab-main"
               type="button" role="tab">🔍 Fraud Detection</button>
     </li>
     <li class="nav-item" role="presentation">
@@ -295,7 +103,7 @@ if __name__ == "__main__":
   </ul>
 
   <div class="tab-content">
-  <div class="tab-pane fade show active" id="tab-fraud" role="tabpanel">
+  <div class="tab-pane fade show active" id="tab-main" role="tabpanel">
 
   <!-- KPI row -->
   <div class="row g-3 mb-3">
@@ -343,10 +151,8 @@ if __name__ == "__main__":
         <div class="overflow-auto" style="max-height:280px;">
           <table class="g-table">
             <thead>
-              <tr>
-                <th>#</th><th>User</th><th>Merchant</th>
-                <th>Category</th><th>Amount</th><th>Risk</th>
-              </tr>
+              <tr><th>#</th><th>User</th><th>Merchant</th>
+                  <th>Category</th><th>Amount</th><th>Risk</th></tr>
             </thead>
             <tbody id="tb-alerts"></tbody>
           </table>
@@ -411,7 +217,7 @@ if __name__ == "__main__":
     </div>
   </div>
 
-  <!-- Row 3b: Differential efficiency showcase -->
+  <!-- Row 3b: Differential efficiency showcase #1 -->
   <div class="row g-3 mb-3">
     <div class="col-7">
       <div class="g-card h-100">
@@ -453,7 +259,7 @@ if __name__ == "__main__":
     </div>
   </div>
 
-  <!-- Row 3c: Top-10 leaderboard showcase -->
+  <!-- Row 3c: Top-10 leaderboard showcase #2 -->
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="g-card">
@@ -480,7 +286,7 @@ if __name__ == "__main__":
     </div>
   </div>
 
-  <!-- Row 4: alert_summary + risk_scores by category -->
+  <!-- Row 4: alert_summary + risk by category -->
   <div class="row g-3 mb-3">
     <div class="col-5">
       <div class="g-card h-100">
@@ -536,12 +342,11 @@ if __name__ == "__main__":
     </div>
   </div>
 
-  </div><!-- /tab-pane tab-fraud -->
+  </div><!-- /tab-pane tab-main -->
 
   <!-- ═══════════════════ TAB 2: pg_trickle Internals ═══════════════════ -->
   <div class="tab-pane fade" id="tab-internals" role="tabpanel">
 
-    <!-- I-1: Stream table health (full width) -->
     <div class="g-card mb-3">
       <div class="g-card-hdr">🏥 Stream Table Health — <code>pgtrickle.pgt_status()</code></div>
       <div class="overflow-auto">
@@ -555,7 +360,6 @@ if __name__ == "__main__":
       </div>
     </div>
 
-    <!-- I-2: Dep tree + Refresh history -->
     <div class="row g-3 mb-3">
       <div class="col-4">
         <div class="g-card h-100">
@@ -578,7 +382,6 @@ if __name__ == "__main__":
       </div>
     </div>
 
-    <!-- I-3: Efficiency (full width) -->
     <div class="g-card mb-3">
       <div class="g-card-hdr">⚡ Refresh Efficiency — <code>pgtrickle.refresh_efficiency()</code></div>
       <div class="overflow-auto">
@@ -592,7 +395,6 @@ if __name__ == "__main__":
       </div>
     </div>
 
-    <!-- I-4: Mode advisor (full width) -->
     <div class="g-card">
       <div class="g-card-hdr">🤖 Refresh Mode Advisor — <code>pgtrickle.recommend_refresh_mode()</code></div>
       <div class="overflow-auto">
@@ -638,7 +440,6 @@ async function refresh() {
 
   $('ts').textContent = 'Last refresh: ' + new Date().toLocaleTimeString();
 
-  // ── KPIs from alert_summary ────────────────────────────────────────────
   let low=0, med=0, high=0, total=0;
   (d.alert_summary||[]).forEach(r => {
     const n = r.txn_count|0;
@@ -652,30 +453,22 @@ async function refresh() {
   $('kpi-med').textContent   = fmt(med);
   $('kpi-high').textContent  = fmt(high);
 
-  // Risk bar
   if (total > 0) {
-    const lp = (low/total*100).toFixed(1), mp = (med/total*100).toFixed(1), hp = (100-lp-mp).toFixed(1);
+    const lp = (low/total*100).toFixed(1), mp = (med/total*100).toFixed(1), hp = (100-parseFloat(lp)-parseFloat(mp)).toFixed(1);
     $('risk-bar').innerHTML =
       `<div class="risk-bar flex-fill" style="background:#1a4620;width:${lp}%" title="LOW ${lp}%"></div>` +
       `<div class="risk-bar flex-fill" style="background:#422d09;width:${mp}%" title="MED ${mp}%"></div>` +
       `<div class="risk-bar flex-fill" style="background:#3d1114;width:${hp}%" title="HIGH ${hp}%"></div>`;
   }
 
-  // ── Recent alerts ──────────────────────────────────────────────────────
   setRows('tb-alerts', (d.recent_alerts||[]).map(r =>
     `<tr class="risk-${r.risk_level==='HIGH'?'HIGH':r.risk_level==='MEDIUM'?'MED':''}">
-       <td>#${esc(r.txn_id)}</td>
-       <td>${esc(r.user_name)}</td>
-       <td>${esc(r.merchant_name)}</td>
-       <td>${esc(r.merchant_category)}</td>
-       <td>${fmtM(r.amount)}</td>
-       <td>${badge(r.risk_level)}</td>
+       <td>#${esc(r.txn_id)}</td><td>${esc(r.user_name)}</td><td>${esc(r.merchant_name)}</td>
+       <td>${esc(r.merchant_category)}</td><td>${fmtM(r.amount)}</td><td>${badge(r.risk_level)}</td>
      </tr>`).join(''));
 
-  // ── Merchant leaderboard ───────────────────────────────────────────────
   const sortedM = [...(d.top_risky_merchants||[])].sort(
-    (a,b) => (b.high_risk_count-a.high_risk_count) || (b.medium_risk_count-a.medium_risk_count)
-  );
+    (a,b) => (b.high_risk_count-a.high_risk_count) || (b.medium_risk_count-a.medium_risk_count));
   setRows('tb-merchants', sortedM.slice(0,10).map(r =>
     `<tr>
        <td>${esc(r.merchant_name)}</td>
@@ -685,49 +478,37 @@ async function refresh() {
        <td>${r.risk_rate_pct}%</td>
      </tr>`).join(''));
 
-  // ── User velocity ──────────────────────────────────────────────────────
   const sortedU = [...(d.user_velocity||[])].sort((a,b)=>b.txn_count-a.txn_count);
   setRows('tb-velocity', sortedU.slice(0,10).map(r =>
     `<tr>
-       <td>${esc(r.user_name)}</td>
-       <td>${esc(r.country)}</td>
-       <td>${r.txn_count}</td>
-       <td>${fmtM(r.avg_txn_amount)}</td>
+       <td>${esc(r.user_name)}</td><td>${esc(r.country)}</td>
+       <td>${r.txn_count}</td><td>${fmtM(r.avg_txn_amount)}</td>
      </tr>`).join(''));
 
-  // ── Country overview ───────────────────────────────────────────────────
   const sortedC = [...(d.country_risk||[])].sort((a,b)=>b.total_txns-a.total_txns);
   setRows('tb-country', sortedC.slice(0,10).map(r =>
     `<tr>
-       <td>${esc(r.country)}</td>
-       <td>${r.user_count}</td>
-       <td>${r.total_txns}</td>
-       <td>${fmtM(r.total_volume)}</td>
+       <td>${esc(r.country)}</td><td>${r.user_count}</td>
+       <td>${r.total_txns}</td><td>${fmtM(r.total_volume)}</td>
      </tr>`).join(''));
 
-  // ── Category volume ────────────────────────────────────────────────────
   const sortedCat = [...(d.category_volume||[])].sort((a,b)=>b.total_volume-a.total_volume);
   setRows('tb-category', sortedCat.map(r =>
     `<tr>
-       <td>${esc(r.category)}</td>
-       <td>${r.txn_count}</td>
-       <td>${fmtM(r.avg_txn_amount)}</td>
-       <td>${r.unique_users}</td>
+       <td>${esc(r.category)}</td><td>${r.txn_count}</td>
+       <td>${fmtM(r.avg_txn_amount)}</td><td>${r.unique_users}</td>
      </tr>`).join(''));
 
-  // ── Alert summary detail ──────────────────────────────────────────────
   const riskColors = { HIGH: 'var(--red)', MEDIUM: 'var(--yellow)', LOW: 'var(--green)' };
   setRows('tb-alert-summary', (d.alert_summary||[]).map(r => {
     const col = riskColors[r.risk_level] || 'inherit';
     return `<tr>
        <td><span class="rbadge rbadge-${esc(r.risk_level)}">${esc(r.risk_level)}</span></td>
        <td style="color:${col}">${fmt(r.txn_count)}</td>
-       <td>${fmtM(r.avg_amount)}</td>
-       <td>${fmtM(r.total_amount)}</td>
+       <td>${fmtM(r.avg_amount)}</td><td>${fmtM(r.total_amount)}</td>
      </tr>`;
   }).join(''));
 
-  // ── Risk distribution by category ─────────────────────────────────────
   setRows('tb-risk-by-cat', (d.risk_by_category||[]).map(r =>
     `<tr>
        <td><span class="rbadge" style="background:#21262d;color:#ccc">${esc(r.merchant_category)}</span></td>
@@ -737,7 +518,6 @@ async function refresh() {
        <td>${r.high_pct}%</td>
      </tr>`).join(''));
 
-  // ── Stream table status ────────────────────────────────────────────────
   setRows('tb-sts', (d.st_status||[]).map(r => {
     const dot = r.is_populated
       ? '<span style="color:var(--green)">●</span>'
@@ -750,7 +530,6 @@ async function refresh() {
      </tr>`;
   }).join(''));
 
-  // ── Merchant tier stats (DIFFERENTIAL showcase) ──────────────────────────
   const tierColors = { HIGH: 'var(--red)', ELEVATED: 'var(--yellow)', STANDARD: 'var(--green)' };
   setRows('tb-tier-stats', (d.merchant_tier_stats||[]).map(r => {
     const col = tierColors[r.merchant_tier] || 'inherit';
@@ -773,7 +552,6 @@ async function refresh() {
      </tr>`;
   }).join(''));
 
-  // ── Top 10 risky merchants leaderboard (DIFFERENTIAL showcase) ─────────────
   setRows('tb-top-10', (d.top_10_risky||[]).map(r => {
     const riskClass = r.risk_rate_pct >= 50 ? 'color:var(--red)'
                     : r.risk_rate_pct >= 25 ? 'color:var(--yellow)'
@@ -790,7 +568,6 @@ async function refresh() {
   }).join(''));
 }
 
-// ── Internals tab ────────────────────────────────────────────────────────────
 async function refreshInternals() {
   let d;
   try {
@@ -798,7 +575,6 @@ async function refreshInternals() {
     d = await r.json();
   } catch(e) { return; }
 
-  // Health
   setRows('tb-int-health', (d.st_health||[]).map(r => {
     const dot = r.is_populated
       ? '<span style="color:var(--green)">●</span>'
@@ -818,11 +594,9 @@ async function refreshInternals() {
      </tr>`;
   }).join(''));
 
-  // Dependency tree
   document.getElementById('pre-dep-tree').textContent =
     (d.dep_tree||[]).join('\n') || '(no dependency data)';
 
-  // Refresh history
   setRows('tb-int-history', (d.refresh_history||[]).map(r => {
     const fallback = r.was_full_fallback
       ? ' <span style="color:var(--yellow);font-size:10px" title="fell back to FULL">▲</span>' : '';
@@ -838,7 +612,6 @@ async function refreshInternals() {
      </tr>`;
   }).join(''));
 
-  // Efficiency
   setRows('tb-int-eff', (d.efficiency||[]).map(r =>
     `<tr>
        <td style="font-family:monospace">${esc(r.name)}</td>
@@ -851,7 +624,6 @@ async function refreshInternals() {
        <td style="text-align:right">${r.avg_change_ratio != null ? Number(r.avg_change_ratio).toFixed(3) : '—'}</td>
      </tr>`).join(''));
 
-  // Mode advisor
   setRows('tb-int-advisor', (d.opt_hints||[]).map(r => {
     const keep = r.recommended_mode === 'KEEP';
     const recHtml = keep
@@ -870,7 +642,6 @@ async function refreshInternals() {
   }).join(''));
 }
 
-// fetch internals immediately when the tab is opened
 document.getElementById('tab-internals-btn')
   .addEventListener('shown.bs.tab', refreshInternals);
 
@@ -881,6 +652,8 @@ setInterval(refreshInternals, 5000);
 </body>
 </html>
 """
+
+# ── DAG diagram ────────────────────────────────────────────────────────────────
 
 DAG_DIAGRAM = r"""
   Base tables            Layer 1 — Silver        Layer 2 — Gold          Layer 3 — Platinum
@@ -915,227 +688,109 @@ DAG_DIAGRAM = r"""
   ┌───────────────────┐   ┌─────────────────────┐
   │ merchant_risk_tier│──►│ merchant_tier_stats │  ← DIFFERENTIAL SHOWCASE #1
   │ (slowly-changing) │   │   (DIFFERENTIAL 5s) │    change ratio ~0.07
-  └───────────────────┘   │                     │    (no fast-change sources)
-  ┌────────────┐           │                     │
-  │ merchants  │──────────►│                     │
-  │  (static)  │           └─────────────────────┘
-  └────────────┘
+  └───────────────────┘   └─────────────────────┘
 
   ┌──────────────────────┐   ┌─────────────────────┐
   │ top_risky_merchants  │──►│ top_10_risky_       │  ← DIFFERENTIAL SHOWCASE #2
-  │  (all merchants)     │   │  merchants          │    change ratio ~0.2–0.3
-  │  (DIFFERENTIAL)      │   │  (DIFFERENTIAL 5s)  │    (fixed cardinality:
-  └──────────────────────┘   │  (LIMIT 10)         │     only rank shifts)
+  │  (DIFFERENTIAL)      │   │  merchants          │    change ratio ~0.2–0.3
+  └──────────────────────┘   │  (DIFFERENTIAL 5s)  │
                              └─────────────────────┘
-
-  transactions feeds user_velocity AND merchant_stats — a genuine diamond.
-  risk_scores is the convergence node that joins both Layer 1 outputs.
-  Showcase #1: merchant_tier_stats depends only on merchant_risk_tier
-  (1 of 15 rows changes per ~30 cycles) → change ratio ≈ 0.07.
-  Showcase #2: top_10_risky_merchants is LIMIT 10 of top_risky_merchants
-  (only 2–3 ranks shift per cycle) → change ratio ≈ 0.2–0.3.
 """
 
 
-# ── Flask routes ──────────────────────────────────────────────────────────────
+# ── Data queries ───────────────────────────────────────────────────────────────
 
-@app.route("/")
-def index():
-    return HTML.replace("{{ dag }}", DAG_DIAGRAM)
+def get_data(conn, safe_query, serialize) -> dict:
+    recent_alerts = safe_query(conn, """
+        SELECT txn_id, user_name, merchant_name, merchant_category,
+               amount, risk_level
+        FROM   risk_scores
+        WHERE  risk_level IN ('HIGH', 'MEDIUM')
+        ORDER  BY txn_id DESC
+        LIMIT  15
+    """)
 
+    alert_summary = safe_query(conn, """
+        SELECT risk_level, txn_count, total_amount, avg_amount
+        FROM   alert_summary
+        ORDER  BY CASE risk_level
+                      WHEN 'HIGH'   THEN 0
+                      WHEN 'MEDIUM' THEN 1
+                      ELSE 2 END
+    """)
 
-@app.route("/api/data")
-def api_data():
-    conn = None
-    try:
-        conn = get_conn()
+    top_risky_merchants = safe_query(conn, """
+        SELECT merchant_name, merchant_category, total_txns,
+               high_risk_count, medium_risk_count, risk_rate_pct
+        FROM   top_risky_merchants
+    """)
 
-        recent_alerts = safe_query(conn, """
-            SELECT txn_id, user_name, merchant_name, merchant_category,
-                   amount, risk_level
-            FROM   risk_scores
-            WHERE  risk_level IN ('HIGH', 'MEDIUM')
-            ORDER  BY txn_id DESC
-            LIMIT  15
-        """)
+    user_velocity = safe_query(conn, """
+        SELECT user_name, country, txn_count, total_spent, avg_txn_amount
+        FROM   user_velocity
+        WHERE  txn_count > 0
+    """)
 
-        alert_summary = safe_query(conn, """
-            SELECT risk_level, txn_count, total_amount, avg_amount
-            FROM   alert_summary
-            ORDER  BY CASE risk_level
-                          WHEN 'HIGH'   THEN 0
-                          WHEN 'MEDIUM' THEN 1
-                          ELSE 2 END
-        """)
+    country_risk = safe_query(conn, """
+        SELECT country, user_count, total_txns, total_volume
+        FROM   country_risk
+    """)
 
-        top_risky_merchants = safe_query(conn, """
-            SELECT merchant_name, merchant_category, total_txns,
-                   high_risk_count, medium_risk_count, risk_rate_pct
-            FROM   top_risky_merchants
-        """)
+    category_volume = safe_query(conn, """
+        SELECT category, txn_count, total_volume, avg_txn_amount, unique_users
+        FROM   category_volume
+        WHERE  txn_count > 0
+    """)
 
-        user_velocity = safe_query(conn, """
-            SELECT user_name, country, txn_count, total_spent, avg_txn_amount
-            FROM   user_velocity
-            WHERE  txn_count > 0
-        """)
+    st_status = safe_query(conn, """
+        SELECT name, status, refresh_mode, is_populated, schedule
+        FROM   pgtrickle.pgt_status()
+        ORDER  BY name
+    """)
 
-        country_risk = safe_query(conn, """
-            SELECT country, user_count, total_txns, total_volume
-            FROM   country_risk
-        """)
+    risk_by_category = safe_query(conn, """
+        SELECT merchant_category,
+               COUNT(*) FILTER (WHERE risk_level = 'LOW')    AS low_count,
+               COUNT(*) FILTER (WHERE risk_level = 'MEDIUM') AS medium_count,
+               COUNT(*) FILTER (WHERE risk_level = 'HIGH')   AS high_count,
+               ROUND(100.0 * COUNT(*) FILTER (WHERE risk_level = 'HIGH')
+                     / NULLIF(COUNT(*), 0), 1)               AS high_pct
+        FROM   risk_scores
+        GROUP  BY merchant_category
+        ORDER  BY high_pct DESC NULLS LAST
+    """)
 
-        category_volume = safe_query(conn, """
-            SELECT category, txn_count, total_volume, avg_txn_amount, unique_users
-            FROM   category_volume
-            WHERE  txn_count > 0
-        """)
+    merchant_tier_stats = safe_query(conn, """
+        SELECT merchant_id, merchant_name, category,
+               merchant_tier, risk_score, tier_last_changed
+        FROM   merchant_tier_stats
+        ORDER  BY merchant_id
+    """)
 
-        st_status = safe_query(conn, """
-            SELECT name, status, refresh_mode, is_populated, schedule
-            FROM   pgtrickle.pgt_status()
-            ORDER  BY name
-        """)
+    merchant_tiers = safe_query(conn, """
+        SELECT mrt.merchant_id, m.name AS merchant_name, mrt.tier, mrt.updated_at
+        FROM   merchant_risk_tier mrt
+        JOIN   merchants m ON m.id = mrt.merchant_id
+        ORDER  BY mrt.merchant_id
+    """)
 
-        risk_by_category = safe_query(conn, """
-            SELECT merchant_category,
-                   COUNT(*) FILTER (WHERE risk_level = 'LOW')    AS low_count,
-                   COUNT(*) FILTER (WHERE risk_level = 'MEDIUM') AS medium_count,
-                   COUNT(*) FILTER (WHERE risk_level = 'HIGH')   AS high_count,
-                   ROUND(100.0 * COUNT(*) FILTER (WHERE risk_level = 'HIGH')
-                         / NULLIF(COUNT(*), 0), 1)               AS high_pct
-            FROM   risk_scores
-            GROUP  BY merchant_category
-            ORDER  BY high_pct DESC NULLS LAST
-        """)
+    top_10_risky = safe_query(conn, """
+        SELECT rank, merchant_name, merchant_category,
+               total_txns, high_risk_count, medium_risk_count, risk_rate_pct
+        FROM   top_10_risky_merchants
+        ORDER  BY rank
+    """)
 
-        merchant_tier_stats = safe_query(conn, """
-            SELECT merchant_id, merchant_name, category,
-                   merchant_tier, risk_score, tier_last_changed
-            FROM   merchant_tier_stats
-            ORDER  BY merchant_id
-        """)
-
-        merchant_tiers = safe_query(conn, """
-            SELECT mrt.merchant_id, m.name AS merchant_name, mrt.tier, mrt.updated_at
-            FROM   merchant_risk_tier mrt
-            JOIN   merchants m ON m.id = mrt.merchant_id
-            ORDER  BY mrt.merchant_id
-        """)
-
-        top_10_risky = safe_query(conn, """
-            SELECT rank, merchant_name, merchant_category,
-                   total_txns, high_risk_count, medium_risk_count, risk_rate_pct
-            FROM   top_10_risky_merchants
-            ORDER  BY rank
-        """)
-
-        return jsonify(
-            {
-                "recent_alerts":        serialize(recent_alerts),
-                "alert_summary":        serialize(alert_summary),
-                "top_risky_merchants":  serialize(top_risky_merchants),
-                "user_velocity":        serialize(user_velocity),
-                "country_risk":         serialize(country_risk),
-                "category_volume":      serialize(category_volume),
-                "st_status":            serialize(st_status),
-                "risk_by_category":     serialize(risk_by_category),
-                "merchant_tier_stats":  serialize(merchant_tier_stats),
-                "merchant_tiers":       serialize(merchant_tiers),
-                "top_10_risky":         serialize(top_10_risky),
-            }
-        )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
-@app.route("/api/internals")
-def api_internals():
-    conn = None
-    try:
-        conn = get_conn()
-
-        st_health = safe_query(conn, """
-            SELECT name, status, refresh_mode, is_populated, schedule
-            FROM   pgtrickle.pgt_status()
-            ORDER  BY name
-        """)
-
-        latest_ref = safe_query(conn, """
-            SELECT DISTINCT ON (st.pgt_schema, st.pgt_name)
-                st.pgt_schema || '.' || st.pgt_name AS name,
-                h.start_time  AS last_refresh,
-                ROUND(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
-                              AS duration_ms,
-                (h.rows_inserted + h.rows_deleted) AS rows_affected
-            FROM pgtrickle.pgt_refresh_history h
-            JOIN pgtrickle.pgt_stream_tables   st ON st.pgt_id = h.pgt_id
-            WHERE h.status = 'COMPLETED'
-            ORDER BY st.pgt_schema, st.pgt_name, h.start_time DESC
-        """)
-
-        dep_tree = safe_query(conn, """
-            SELECT tree_line FROM pgtrickle.dependency_tree()
-        """)
-
-        refresh_hist = safe_query(conn, """
-            SELECT st.pgt_schema || '.' || st.pgt_name AS name,
-                   h.action          AS refresh_mode,
-                   h.start_time,
-                   ROUND(EXTRACT(EPOCH FROM (h.end_time - h.start_time)) * 1000)::bigint
-                                     AS duration_ms,
-                   (h.rows_inserted + h.rows_deleted) AS rows_affected,
-                   h.status,
-                   h.was_full_fallback
-            FROM pgtrickle.pgt_refresh_history h
-            JOIN pgtrickle.pgt_stream_tables   st ON st.pgt_id = h.pgt_id
-            WHERE h.status IN ('COMPLETED', 'FAILED')
-            ORDER BY h.start_time DESC
-            LIMIT 40
-        """)
-
-        efficiency = safe_query(conn, """
-            SELECT pgt_name AS name, total_refreshes, diff_count, full_count,
-                   avg_diff_ms, avg_full_ms, avg_change_ratio, diff_speedup
-            FROM pgtrickle.refresh_efficiency()
-            ORDER BY pgt_name
-        """)
-
-        opt_hints = safe_query(conn, """
-            SELECT pgt_name AS name, current_mode, effective_mode,
-                   recommended_mode, confidence, reason
-            FROM pgtrickle.recommend_refresh_mode()
-            ORDER BY pgt_name
-        """)
-
-        # Enrich health rows with latest refresh timing
-        latest_by_name = {r['name']: r for r in serialize(latest_ref)}
-        health_out = []
-        for row in serialize(st_health):
-            enriched = dict(row)
-            if row['name'] in latest_by_name:
-                lr = latest_by_name[row['name']]
-                enriched['last_refresh']  = lr.get('last_refresh')
-                enriched['duration_ms']   = lr.get('duration_ms')
-                enriched['rows_affected'] = lr.get('rows_affected')
-            health_out.append(enriched)
-
-        return jsonify({
-            "st_health":       health_out,
-            "dep_tree":        [r['tree_line'] for r in dep_tree],
-            "refresh_history": serialize(refresh_hist),
-            "efficiency":      serialize(efficiency),
-            "opt_hints":       serialize(opt_hints),
-        })
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    return {
+        "recent_alerts":        serialize(recent_alerts),
+        "alert_summary":        serialize(alert_summary),
+        "top_risky_merchants":  serialize(top_risky_merchants),
+        "user_velocity":        serialize(user_velocity),
+        "country_risk":         serialize(country_risk),
+        "category_volume":      serialize(category_volume),
+        "st_status":            serialize(st_status),
+        "risk_by_category":     serialize(risk_by_category),
+        "merchant_tier_stats":  serialize(merchant_tier_stats),
+        "merchant_tiers":       serialize(merchant_tiers),
+        "top_10_risky":         serialize(top_10_risky),
+    }
