@@ -1,9 +1,15 @@
 # Real-time Demo — Fraud Detection Pipeline
 
 This demo shows pg_trickle doing real work: a continuous stream of financial
-transactions flows into PostgreSQL, and a **7-node, 3-layer DAG of stream
+transactions flows into PostgreSQL, and a **9-node, 4-layer DAG of stream
 tables** keeps a live fraud-detection view of that data up to date —
 automatically, incrementally, and within seconds.
+
+Two of those stream tables are purpose-built **differential efficiency
+showcases**: they depend on slowly-changing data so their change ratio stays
+low (~0.07 and ~0.25 respectively), letting the Refresh Mode Advisor confirm
+that DIFFERENTIAL mode is the right choice even while every other table
+justifiably runs at a change ratio near 1.0.
 
 It is the fastest way to see how stream tables, differential refresh, and
 DAG-aware scheduling work together on data you can watch moving.
@@ -50,15 +56,17 @@ spot suspicious activity as it happens, not hours later in a batch job.
 
 ### Source Data
 
-Three **regular PostgreSQL tables** hold the reference data:
+Four **regular PostgreSQL tables** hold the reference data:
 
 | Table | Contents |
 |-------|----------|
 | `users` | 30 users, each with a name, country, and account age |
 | `merchants` | 15 merchants across categories: Retail, Electronics, Travel, Food, Pharmacy, Gambling, Crypto |
 | `transactions` | The live stream — the generator inserts here continuously |
+| `merchant_risk_tier` | Slowly-changing risk tier (STANDARD / ELEVATED / HIGH) for each merchant; the generator rotates one merchant's tier every ~30 cycles |
 
-`transactions` is the only table that grows. Everything else flows from it.
+`transactions` is the only table that grows continuously. `merchant_risk_tier`
+changes occasionally (about one row per minute). Everything else is static.
 
 ### Normal vs. Suspicious Traffic
 
@@ -78,37 +86,46 @@ column on the dashboard.
 
 ## The DAG of Stream Tables
 
-This is the heart of the demo. All seven stream tables are defined in
+This is the heart of the demo. All nine stream tables are defined in
 [demo/postgres/02_stream_tables.sql](../demo/postgres/02_stream_tables.sql).
 
 ```
-  Base tables           Layer 1 — Silver          Layer 2 — Gold           Layer 3 — Platinum
-  ────────────          ──────────────────────     ─────────────────────    ──────────────────────
+  Base tables             Layer 1 — Silver           Layer 2 — Gold              Layer 3 — Platinum
+  ────────────            ──────────────────────     ─────────────────────       ──────────────────────
 
-  ┌──────────┐          ┌──────────────────┐
-  │  users   │─────────►│  user_velocity   │──────────────────────────────►┌──────────────┐
-  └──────────┘          │  DIFFERENTIAL 1s │                               │ country_risk │
-                        └──────┬───────────┘                               │  DIFF, calc  │
-                               │                                            └──────────────┘
-  ┌──────────────┐             │  ┌──────────────────┐
-  │ transactions │─────────────┼─►│  merchant_stats  │
-  │  (stream)    │             │  │  DIFFERENTIAL 1s │
-  └──────────────┘             │  └──────┬───────────┘
-          │                    │         │
-          │         ┌──────────┴─────────┘ ← DIAMOND DEPENDENCY
-          │         │
-          │         ▼                                                        ┌─────────────────┐
-          │    ┌────────────────────┐                                        │  alert_summary  │
-          │    │    risk_scores     │───────────────────────────────────────►│   DIFF, calc    │
-          │    │   FULL, calc       │                                        └─────────────────┘
-          │    └────────────────────┘
-          │                                                                   ┌──────────────────────┐
-          └──────────────────────────────────────────────────────────────────►│ top_risky_merchants  │
-                                                                              │   DIFF, calc         │
-  ┌──────────┐          ┌──────────────────┐                                  └──────────────────────┘
-  │merchants │─────────►│ category_volume  │
-  └──────────┘          │  DIFFERENTIAL 1s │
-                        └──────────────────┘
+  ┌──────────┐            ┌──────────────────┐
+  │  users   │───────────►│  user_velocity   │──────────────────────────────────►┌──────────────┐
+  └──────────┘            │  DIFFERENTIAL 1s │                                   │ country_risk │
+                          └──────┬───────────┘                                   │  DIFF, calc  │
+                                 │                                                └──────────────┘
+  ┌──────────────┐               │  ┌──────────────────┐
+  │ transactions │───────────────┼─►│  merchant_stats  │
+  │  (stream)    │               │  │  DIFFERENTIAL 1s │
+  └──────────────┘               │  └──────┬───────────┘
+          │                      │         │
+          │          ┌───────────┴─────────┘ ← DIAMOND DEPENDENCY
+          │          │
+          │          ▼                                                             ┌─────────────────┐
+          │     ┌────────────────────┐                                             │  alert_summary  │
+          │     │    risk_scores     │────────────────────────────────────────────►│   DIFF, calc    │
+          │     │   FULL, calc       │                                             └─────────────────┘
+          │     └────────────────────┘
+          │                                                                         ┌───────────────────────┐
+          │                                                                         │  top_risky_merchants  │
+          └─────────────────────────────────────────────────────────────────────►  │   DIFF, calc          │
+                                                                                    └───────────┬───────────┘
+  ┌──────────┐            ┌──────────────────┐                                                 │
+  │merchants │───────────►│ category_volume  │          ┌──────────────────────────────────────▼──────┐
+  └──────────┘            │  DIFFERENTIAL 1s │          │       top_10_risky_merchants                │
+                          └──────────────────┘          │  DIFFERENTIAL 5s  ← SHOWCASE #2             │
+                                                         │  change ratio ≈ 0.25 (LIMIT 10)             │
+  ┌───────────────────┐   ┌──────────────────────┐      └─────────────────────────────────────────────┘
+  │ merchant_risk_tier│──►│ merchant_tier_stats  │  ← SHOWCASE #1
+  │ (slowly-changing) │   │   DIFFERENTIAL 5s    │     change ratio ≈ 0.07
+  └───────────────────┘   │                      │
+  ┌──────────┐            │                      │
+  │merchants │───────────►│                      │
+  └──────────┘            └──────────────────────┘
 ```
 
 ### Layer 1 — Silver: Direct Aggregates
@@ -218,6 +235,38 @@ MEDIUM transactions each merchant has seen, plus a risk-rate percentage.
 Operationally this is where a fraud team would start when deciding which
 merchants to review or block.
 
+### Differential Efficiency Showcases
+
+Two additional stream tables sit outside the main fraud pipeline. Their purpose
+is to demonstrate that DIFFERENTIAL mode can achieve a meaningfully sub-1.0
+change ratio when the output cardinality is constrained.
+
+**`merchant_tier_stats`** — Showcase #1: slowly-changing lookup source
+
+Joins `merchants` (static) with `merchant_risk_tier` (a 15-row lookup that the
+generator updates one row per ~30 cycles). Because no fast-growing table is in
+the query, only the one rotated merchant's row changes each cycle:
+
+- Change ratio ≈ 1/15 ≈ 0.07
+- Refresh Mode Advisor recommendation: ✓ KEEP DIFFERENTIAL
+- Schedule: 5 s (independent of the main DAG)
+
+This is the counterpoint to `risk_scores`. `risk_scores` correctly uses FULL
+because its change ratio is ~1.0; `merchant_tier_stats` correctly uses
+DIFFERENTIAL because its change ratio is ~0.07. Seeing both on the same
+dashboard makes the advisor's logic concrete.
+
+**`top_10_risky_merchants`** — Showcase #2: fixed-cardinality output
+
+Reads `top_risky_merchants` (Layer 3) and applies `LIMIT 10`. Even though the
+upstream changes heavily every cycle, only the merchants whose rank crosses the
+top-10 boundary produce a net change in the output. Typically 2–3 merchants
+enter or leave the top 10 per refresh cycle:
+
+- Change ratio ≈ 0.2–0.3
+- Refresh Mode Advisor recommendation: ✓ KEEP DIFFERENTIAL
+- Schedule: 5 s
+
 ---
 
 ## The Dashboard
@@ -247,6 +296,22 @@ Three side-by-side tables driven by the Layer 1 stream tables. These are the
 most-refreshed tables in the DAG (every second); watching user velocity change
 in real time illustrates why DIFFERENTIAL mode matters — only the affected rows
 move.
+
+### Merchant Tier Stats and Tiers
+
+Two panels driven by `merchant_tier_stats`. The left panel shows the full 15-row
+output (merchant ID, name, category, current tier, risk score, and when the tier
+last changed). The right panel shows a compact tier-only view. Tiers are
+colour-coded: HIGH = red, ELEVATED = amber, STANDARD = green. Tiers rotate
+visibly every ~30 generator cycles (roughly once per minute).
+
+### Top 10 Risky Merchants Leaderboard
+
+A live leaderboard driven by `top_10_risky_merchants`. Shows rank, merchant
+name, category, total transactions, HIGH and MEDIUM risk counts, and a
+risk-rate percentage. The percentage column is coloured green (<25%), amber
+(25–49%), or red (≥50%). Watch the rankings shift as the generator's burst
+patterns accumulate.
 
 ### Stream Table Status
 
@@ -331,20 +396,22 @@ demo/
 │
 ├── postgres/
 │   ├── 01_schema.sql           # Base tables + seed data (30 users, 15 merchants,
-│   │                           # 40 initial transactions)
-│   └── 02_stream_tables.sql    # All 7 stream table definitions (CREATE EXTENSION,
-│                               # Layers 1–3 in topological order)
+│   │                           # 40 initial transactions, merchant_risk_tier)
+│   └── 02_stream_tables.sql    # All 9 stream table definitions (CREATE EXTENSION,
+│                               # Layers 1–3 + 2 differential showcase tables)
 │
 ├── generator/
 │   ├── Dockerfile
 │   ├── requirements.txt        # psycopg2-binary only
-│   └── generate.py             # Transaction generator; normal mode + burst mode
+│   └── generate.py             # Transaction generator; normal mode + burst mode;
+│                               # rotates one merchant tier every ~30 cycles
 │
 └── dashboard/
     ├── Dockerfile
     ├── requirements.txt        # flask + psycopg2-binary
     └── app.py                  # Flask app: /  → HTML dashboard
                                 #             /api/data → JSON for JS polling
+                                #             /api/internals → stream table metadata
 ```
 
 ---
@@ -400,8 +467,27 @@ details.
 ### Empirical optimization: FULL vs DIFFERENTIAL by change ratio
 
 The demo illustrates a practical rule of thumb: when a stream table's **change
-ratio** (fraction of rows that are new or modified per refresh cycle) is high
-(>0.5), FULL mode is often faster than DIFFERENTIAL because the delta overhead
-dominates the benefit. Use `pgtrickle.recommend_refresh_mode(table_name)` to
-check — it analyzes actual refresh history and recommends the best mode with
+ratio** (fraction of output rows that are inserted or deleted per refresh cycle)
+is high (>0.5), FULL mode is often faster than DIFFERENTIAL because the delta
+overhead dominates the benefit. Use `pgtrickle.recommend_refresh_mode(table_name)`
+to check — it analyzes actual refresh history and recommends the best mode with
 confidence scores.
+
+The Refresh Mode Advisor computes change ratio as:
+
+```
+change_ratio = (rows_inserted + rows_deleted) / max(reltuples, 1)
+```
+
+where `reltuples` is the stream table's current row count from `pg_class`. This
+gives a meaningful fraction: 0.07 means 7% of output rows changed last cycle;
+1.0 means the entire output turned over.
+
+The two showcase tables make this concrete:
+
+| Table | Change ratio | Advisor says |
+|-------|-------------|--------------|
+| `merchant_tier_stats` | ≈ 0.07 | ✓ KEEP DIFFERENTIAL |
+| `top_10_risky_merchants` | ≈ 0.25 | ✓ KEEP DIFFERENTIAL |
+| `risk_scores` | ≈ 1.0 | KEEP FULL (append-only source) |
+| `alert_summary` | ≈ 1.0 | KEEP FULL (small table; delta overhead dominates) |

@@ -1,8 +1,9 @@
 # pg_trickle Real-time Demo — Fraud Detection Pipeline
 
 A self-contained Docker Compose demo that shows real data flowing through a
-**7-node, 3-layer DAG** of stream tables built on top of a continuous
-transaction feed.
+**9-node DAG** of stream tables built on top of a continuous transaction feed.
+Two showcase tables demonstrate differential refresh efficiency at sub-1.0
+change ratios.
 
 ## Quick start
 
@@ -30,6 +31,10 @@ Three services start together:
 Every ~45 seconds the generator triggers a **suspicious burst**: one user
 fires 6–14 rapid, escalating-amount transactions at Crypto / Gambling
 merchants, driving HIGH-risk scores and alerting the dashboard in real time.
+
+Every ~30 generator cycles (roughly once per minute) the generator also
+**rotates one merchant's risk tier** (STANDARD → ELEVATED → HIGH → STANDARD),
+illustrating that `merchant_tier_stats` detects this change differentially.
 
 ---
 
@@ -59,24 +64,34 @@ merchants, driving HIGH-risk scores and alerting the dashboard in real time.
         │                                                               ┌───────────────────────┐
         │                                                               │  top_risky_merchants  │
         └──────────────────────────────────────────────────────────────►│    (DIFFERENTIAL)     │
-                                                                        └───────────────────────┘
-  ┌────────────┐         ┌──────────────────┐
-  │ merchants  │────────►│ category_volume  │
-  └────────────┘         │  (DIFFERENTIAL)  │
-                         └──────────────────┘
+                                                                        └──────────┬────────────┘
+  ┌────────────┐         ┌──────────────────┐                                      │
+  │ merchants  │────────►│ category_volume  │            ┌────────────────────────▼────────────┐
+  └────────────┘         │  (DIFFERENTIAL)  │            │   top_10_risky_merchants            │
+                         └──────────────────┘            │   DIFFERENTIAL 5s  ← SHOWCASE #2   │
+                                                         │   change ratio ≈ 0.25 (LIMIT 10)   │
+  ┌────────────────────┐  ┌──────────────────────┐       └─────────────────────────────────────┘
+  │ merchant_risk_tier │─►│ merchant_tier_stats  │  ← SHOWCASE #1
+  │ (slowly-changing)  │  │  DIFFERENTIAL 5s     │     change ratio ≈ 0.07
+  └────────────────────┘  │                      │
+  ┌────────────┐           │                      │
+  │ merchants  │──────────►│                      │
+  └────────────┘           └──────────────────────┘
 ```
 
 ### Stream tables
 
-| Name                  | Layer | Mode         | Schedule    | What it computes                                  |
-|-----------------------|-------|--------------|-------------|---------------------------------------------------|
-| `user_velocity`       | L1    | DIFFERENTIAL | 1 s         | Per-user: txn count, total spend, avg amount      |
-| `merchant_stats`      | L1    | DIFFERENTIAL | 1 s         | Per-merchant: txn count, avg amount, unique users |
-| `category_volume`     | L1    | DIFFERENTIAL | 1 s         | Per-category: volume, avg amount, unique users    |
-| `risk_scores`         | L2    | FULL         | calculated  | Per-transaction: enriched with L1 + risk level   |
-| `country_risk`        | L2    | DIFFERENTIAL | calculated  | Per-country: roll-up from user_velocity           |
-| `alert_summary`       | L3    | DIFFERENTIAL | calculated  | Per-risk-level: counts + totals from risk_scores  |
-| `top_risky_merchants` | L3    | DIFFERENTIAL | calculated  | Per-merchant: risk counts from risk_scores        |
+| Name                      | Layer    | Mode         | Schedule   | What it computes                                        |
+|---------------------------|----------|--------------|------------|---------------------------------------------------------|
+| `user_velocity`           | L1       | DIFFERENTIAL | 1 s        | Per-user: txn count, total spend, avg amount            |
+| `merchant_stats`          | L1       | DIFFERENTIAL | 1 s        | Per-merchant: txn count, avg amount, unique users       |
+| `category_volume`         | L1       | DIFFERENTIAL | 1 s        | Per-category: volume, avg amount, unique users          |
+| `risk_scores`             | L2       | FULL         | calculated | Per-transaction: enriched with L1 + risk level          |
+| `country_risk`            | L2       | DIFFERENTIAL | calculated | Per-country: roll-up from user_velocity                 |
+| `alert_summary`           | L3       | DIFFERENTIAL | calculated | Per-risk-level: counts + totals from risk_scores        |
+| `top_risky_merchants`     | L3       | DIFFERENTIAL | calculated | Per-merchant: risk counts from risk_scores              |
+| `merchant_tier_stats`     | showcase | DIFFERENTIAL | 5 s        | Per-merchant: risk tier from slowly-changing lookup     |
+| `top_10_risky_merchants`  | showcase | DIFFERENTIAL | 5 s        | Top-10 merchants by risk count (LIMIT 10 of L3)         |
 
 ### Why the diamond matters
 
@@ -102,6 +117,20 @@ base table and two stream tables simultaneously is not yet implemented, so
 FULL mode re-evaluates the entire join on each cycle.  The L3 tables
 (`alert_summary`, `top_risky_merchants`) are DIFFERENTIAL because they only
 read from the single ST upstream (`risk_scores`).
+
+### Differential efficiency showcases
+
+Two tables sit outside the main fraud pipeline to show the advisor in action
+with sub-1.0 change ratios:
+
+- **`merchant_tier_stats`** (Showcase #1) — joins `merchant_risk_tier` (15 rows,
+  one updated per ~30 cycles) with `merchants` (static). Change ratio ≈ 0.07;
+  the Refresh Mode Advisor confirms ✓ KEEP DIFFERENTIAL.
+
+- **`top_10_risky_merchants`** (Showcase #2) — applies `LIMIT 10` to
+  `top_risky_merchants`. Even though the upstream changes heavily, only rank
+  boundary crossings produce output changes. Change ratio ≈ 0.25; advisor
+  confirms ✓ KEEP DIFFERENTIAL.
 
 ---
 
