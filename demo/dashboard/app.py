@@ -597,6 +597,28 @@ async function refresh() {
        <td>${dot} ${esc(r.status)}</td>
      </tr>`;
   }).join(''));
+
+  // ── Merchant tier stats (DIFFERENTIAL showcase) ──────────────────────────
+  const tierColors = { HIGH: 'var(--red)', ELEVATED: 'var(--yellow)', STANDARD: 'var(--green)' };
+  setRows('tb-tier-stats', (d.merchant_tier_stats||[]).map(r => {
+    const col = tierColors[r.merchant_tier] || 'inherit';
+    return `<tr>
+       <td>${esc(r.merchant_name)}</td>
+       <td style="color:${col};font-weight:bold">${esc(r.merchant_tier)}</td>
+       <td>${fmt(r.txn_count)}</td>
+       <td>${fmtM(r.avg_amount)}</td>
+       <td>${r.unique_users}</td>
+     </tr>`;
+  }).join(''));
+
+  setRows('tb-tiers', (d.merchant_tiers||[]).map(r => {
+    const col = tierColors[r.tier] || 'inherit';
+    return `<tr>
+       <td>${esc(r.merchant_name)}</td>
+       <td style="color:var(--muted);font-size:11px">${esc(r.category||'')}</td>
+       <td style="color:${col};font-weight:bold">${esc(r.tier)}</td>
+     </tr>`;
+  }).join(''));
 }
 
 // ── Internals tab ────────────────────────────────────────────────────────────
@@ -675,27 +697,6 @@ async function refreshInternals() {
        <td>${recHtml}</td>
        <td class="${confClass}" style="font-size:11px">${esc(r.confidence||'—')}</td>
        <td style="color:var(--muted);font-size:11px">${esc(r.reason||'')}</td>
-     </tr>`;
-  }).join(''));
-  // ── Merchant tier stats (DIFFERENTIAL showcase) ──────────────────────────
-  const tierColors = { HIGH: 'var(--red)', ELEVATED: 'var(--yellow)', STANDARD: 'var(--green)' };
-  setRows('tb-tier-stats', (d.merchant_tier_stats||[]).map(r => {
-    const col = tierColors[r.merchant_tier] || 'inherit';
-    return `<tr>
-       <td>${esc(r.merchant_name)}</td>
-       <td style="color:${col};font-weight:bold">${esc(r.merchant_tier)}</td>
-       <td>${fmt(r.txn_count)}</td>
-       <td>${fmtM(r.avg_amount)}</td>
-       <td>${r.unique_users}</td>
-     </tr>`;
-  }).join(''));
-
-  setRows('tb-tiers', (d.merchant_tiers||[]).map(r => {
-    const col = tierColors[r.tier] || 'inherit';
-    return `<tr>
-       <td>${esc(r.merchant_name)}</td>
-       <td style="color:var(--muted);font-size:11px">${esc(r.category||'')}</td>
-       <td style="color:${col};font-weight:bold">${esc(r.tier)}</td>
      </tr>`;
   }).join(''));
 }
