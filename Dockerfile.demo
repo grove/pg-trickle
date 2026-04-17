@@ -8,11 +8,12 @@ RUN rustup install nightly && rustup default nightly
 
 # Install PostgreSQL 18 dev dependencies
 # Add PostgreSQL official repository for PG 18 (using modern GPG key method)
+# Use trixie-pgdg repo since rust:latest is based on Debian Trixie (13)
 RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     && curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
-    && echo "deb [signed-by=/etc/apt/trusted.gpg.d/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && echo "deb [signed-by=/etc/apt/trusted.gpg.d/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y \
     postgresql-server-dev-18 \
     pkg-config \
