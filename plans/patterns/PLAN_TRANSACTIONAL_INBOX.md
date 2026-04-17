@@ -35,6 +35,12 @@
   - [Extension 3: Dead Letter Queue Stream Table](#extension-3-dead-letter-queue-stream-table)
   - [Extension 4: Inbox Health Dashboard](#extension-4-inbox-health-dashboard)
 - [Design Considerations](#design-considerations)
+- [Schema Evolution & Message Versioning](#schema-evolution--message-versioning)
+- [Observability & Distributed Tracing](#observability--distributed-tracing)
+- [Testing Strategies](#testing-strategies)
+- [Multi-Tenancy](#multi-tenancy)
+- [Cost Analysis](#cost-analysis)
+- [Security Considerations](#security-considerations)
 - [Combining Outbox and Inbox Patterns](#combining-outbox-and-inbox-patterns)
 - [Comparison with Traditional Approaches](#comparison-with-traditional-approaches)
 - [References](#references)
@@ -1001,6 +1007,496 @@ pg_trickle provides built-in monitoring that maps naturally to inbox health:
 | Queue backing up | `pg_trickle_alert` → `stale_data` event |
 | Refresh failures | `pg_trickle_alert` → `refresh_failed` event |
 | Throughput | `pgtrickle.st_refresh_stats` → rows_inserted/deleted per refresh |
+
+---
+
+## Schema Evolution & Message Versioning
+
+As upstream services evolve, the shape of inbound messages changes. A robust
+inbox implementation must accept multiple schema versions gracefully.
+
+### Versioning Strategies
+
+| Strategy | Description | Pros | Cons |
+|----------|-------------|------|------|
+| **Version field in inbox row** | `schema_version INTEGER` column | Filter per version in stream table | Extra column |
+| **Event type suffix** | `OrderCreated.v2` in `event_type` | Easy routing; clear in DLQ | Type proliferation |
+| **Version in JSONB payload** | `payload->>'schema_version'` | No schema change required | Consumers must parse payload |
+| **Schema registry** | External Confluent / Apicurio lookup | Centralised governance | Additional dependency |
+
+### Backward Compatibility Best Practices
+
+- **Add** optional payload fields freely — existing processors ignore unknown keys.
+- **Never remove** required fields without a grace period and version bump.
+- **Document** every schema version in a companion `inbox_schema_versions` table.
+
+```sql
+CREATE TABLE inbox_schema_versions (
+    event_type      TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL,
+    introduced_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deprecated_at   TIMESTAMPTZ,
+    json_schema     JSONB,  -- optional: store JSON Schema for validation
+    PRIMARY KEY (event_type, schema_version)
+);
+```
+
+### Version-Aware Processing Stream Tables
+
+```sql
+-- Route v1 events to a processor that handles the old schema
+SELECT pgtrickle.create_stream_table(
+    'inbox_pending_v1',
+    $$SELECT event_id, event_type, payload, received_at
+      FROM inbox_events
+      WHERE processed_at IS NULL
+        AND (payload->>'schema_version')::int = 1$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Route v2+ events to a processor that handles the new schema
+SELECT pgtrickle.create_stream_table(
+    'inbox_pending_v2',
+    $$SELECT event_id, event_type, payload, received_at
+      FROM inbox_events
+      WHERE processed_at IS NULL
+        AND (payload->>'schema_version')::int >= 2$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Rolling Schema Migration
+
+1. **Deploy** inbox writer that accepts both old and new schema.
+2. **Deploy** processors that handle both versions.
+3. **Drain** old-version `inbox_pending_v1` to zero.
+4. **Retire** the v1 processing path once the upstream producer is fully migrated.
+
+---
+
+## Observability & Distributed Tracing
+
+End-to-end visibility across broker → inbox writer → processor is essential for
+diagnosing duplicate delivery, ordering gaps, and processing failures.
+
+### Correlation IDs
+
+Propagate trace context from the inbound message into the inbox row:
+
+```sql
+ALTER TABLE inbox_events
+    ADD COLUMN trace_id UUID,
+    ADD COLUMN span_id  UUID;
+
+-- Store NATS/Kafka trace headers when writing to inbox
+-- (set by the inbox writer process before INSERT)
+```
+
+```python
+async def inbox_writer(msg):
+    headers = msg.headers or {}
+    await pg_conn.execute(
+        """INSERT INTO inbox_events
+               (event_id, event_type, aggregate_id, payload, trace_id)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (event_id) DO NOTHING""",
+        msg_id, event_type, aggregate_id, payload,
+        headers.get("X-Trace-Id"),  # propagate distributed trace
+    )
+```
+
+### Monitoring Dashboard Stream Table
+
+```sql
+SELECT pgtrickle.create_stream_table(
+    'inbox_observability',
+    $$SELECT
+        event_type,
+        COUNT(*) FILTER (WHERE processed_at IS NULL)         AS pending_count,
+        COUNT(*) FILTER (WHERE processed_at IS NOT NULL)     AS processed_count,
+        COUNT(*) FILTER (WHERE retry_count >= 5)             AS dlq_count,
+        AVG(EXTRACT(EPOCH FROM (processed_at - received_at)))
+            FILTER (WHERE processed_at IS NOT NULL)          AS avg_processing_latency_sec,
+        MAX(EXTRACT(EPOCH FROM (now() - received_at)))
+            FILTER (WHERE processed_at IS NULL
+              AND retry_count < 5)                           AS max_pending_age_sec
+      FROM inbox_events
+      GROUP BY event_type$$,
+    schedule => '10s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### pg_trickle Alert Integration
+
+```python
+async def monitor_inbox_pipeline(dsn: str):
+    conn = await asyncpg.connect(dsn)
+
+    async def handle_alert(conn, pid, channel, payload):
+        alert = json.loads(payload)
+        match alert["type"]:
+            case "stale_data":
+                if "pending_inbox" in alert["stream_table"]:
+                    sentry.capture_message(
+                        f"Inbox queue backing up: {alert['staleness_seconds']}s"
+                    )
+            case "refresh_failed":
+                pagerduty.trigger(f"Inbox stream table failed: {alert['detail']}")
+
+    await conn.add_listener("pg_trickle_alert", handle_alert)
+    await asyncio.sleep(float("inf"))
+```
+
+### OpenTelemetry Spans in the Processor
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer("inbox-processor")
+
+async def process_event(event: dict):
+    with tracer.start_as_current_span(
+        "inbox.process",
+        context=trace_context_from_id(event.get("trace_id")),
+        attributes={
+            "event.id":      event["event_id"],
+            "event.type":    event["event_type"],
+            "aggregate.id":  str(event["aggregate_id"]),
+            "retry.count":   event["retry_count"],
+        }
+    ) as span:
+        await apply_business_logic(event)
+        span.set_attribute("processing.outcome", "success")
+```
+
+### Key Metrics to Track
+
+| Metric | How to Measure | Alert Threshold |
+|--------|---------------|------------------|
+| **Inbox depth** | `pending_count` in `inbox_observability` | > 1 000 events |
+| **Processing latency p99** | `avg_processing_latency_sec` | > 60 s |
+| **DLQ depth** | `dlq_count` or `dead_letters` stream table | > 0 |
+| **Oldest pending message** | `max_pending_age_sec` | > 5 min |
+| **Stream table refresh failure** | `pg_trickle_alert` → `refresh_failed` | Built-in |
+| **Ordering gaps** | `inbox_ordering_gaps` stream table row count | Any gap > 30 s |
+
+---
+
+## Testing Strategies
+
+Testing the transactional inbox requires verifying idempotency, ordering, and
+processor recovery under failure.
+
+### Unit Tests — Deduplication
+
+Verify that duplicate messages are silently dropped:
+
+```sql
+-- pgTAP: second insert of same event_id is a no-op
+INSERT INTO inbox_events (event_id, event_type, payload)
+    VALUES ('evt-001', 'PaymentReceived', '{"amount": 100}');
+
+INSERT INTO inbox_events (event_id, event_type, payload)
+    VALUES ('evt-001', 'PaymentReceived', '{"amount": 100}')
+    ON CONFLICT (event_id) DO NOTHING;
+
+SELECT is(
+    (SELECT COUNT(*)::int FROM inbox_events WHERE event_id = 'evt-001'),
+    1,
+    'Duplicate event_id silently dropped by ON CONFLICT'
+);
+```
+
+### Integration Tests — Stream Table Refresh
+
+```rust
+#[tokio::test]
+async fn test_pending_inbox_reflects_unprocessed_events() {
+    let ctx = TestContext::new().await;
+
+    ctx.execute("INSERT INTO inbox_events (event_id, event_type, payload)
+                 VALUES ('e1', 'PaymentReceived', '{\"amount\": 50}')").await;
+
+    ctx.execute("SELECT pgtrickle.refresh('pending_inbox')").await;
+
+    let count: i64 = ctx.query_one(
+        "SELECT COUNT(*) FROM pending_inbox WHERE event_type = 'PaymentReceived'"
+    ).await;
+    assert_eq!(count, 1);
+
+    // Mark as processed — must disappear from stream table on next refresh
+    ctx.execute("UPDATE inbox_events SET processed_at = now() WHERE event_id = 'e1'").await;
+    ctx.execute("SELECT pgtrickle.refresh('pending_inbox')").await;
+
+    let count_after: i64 = ctx.query_one(
+        "SELECT COUNT(*) FROM pending_inbox"
+    ).await;
+    assert_eq!(count_after, 0, "Processed event must leave the stream table");
+}
+```
+
+### End-to-End Tests — Inbox Writer + Processor
+
+```python
+@pytest.mark.asyncio
+async def test_message_processed_exactly_once(nats_client, pg_conn):
+    """Message published to NATS must be processed exactly once in PostgreSQL."""
+    # Publish the same event twice (simulates at-least-once broker delivery)
+    payload = json.dumps({"amount": 75.00, "order_id": "ord-1"})
+    for _ in range(2):
+        await js.publish(
+            "payments.received",
+            payload.encode(),
+            headers={"Nats-Msg-Id": "evt-dedup-001"},
+        )
+
+    await asyncio.sleep(3.0)  # allow inbox writer and processor to run
+
+    processed = await pg_conn.fetchval(
+        "SELECT COUNT(*) FROM inbox_events WHERE event_id = 'evt-dedup-001'"
+    )
+    assert processed == 1, "Duplicate delivery must result in exactly one inbox row"
+```
+
+### Chaos Tests — Processor Failure & Retry
+
+```python
+@pytest.mark.asyncio
+async def test_failed_event_retried_with_backoff(pg_conn, processor):
+    """Events that fail processing are retried according to backoff schedule."""
+    # Insert an event that will fail on first attempt
+    await pg_conn.execute(
+        "INSERT INTO inbox_events (event_id, event_type, payload)"
+        " VALUES ('fail-evt', 'PaymentReceived', '{\"amount\": -1}')"  # invalid
+    )
+
+    await processor.run_once()  # first attempt — should fail and increment retry_count
+
+    retry_count = await pg_conn.fetchval(
+        "SELECT retry_count FROM inbox_events WHERE event_id = 'fail-evt'"
+    )
+    assert retry_count == 1, "retry_count must increment after failed processing"
+
+    error_msg = await pg_conn.fetchval(
+        "SELECT last_error FROM inbox_events WHERE event_id = 'fail-evt'"
+    )
+    assert error_msg is not None, "last_error must be populated on failure"
+```
+
+---
+
+## Multi-Tenancy
+
+In multi-tenant SaaS applications, the inbox pipeline must isolate messages per
+tenant and prevent cross-tenant processing.
+
+### Tenant-Per-Row Isolation
+
+```sql
+-- Add tenant_id to inbox table
+ALTER TABLE inbox_events ADD COLUMN tenant_id UUID NOT NULL;
+
+-- Row-Level Security to prevent cross-tenant access
+ALTER TABLE inbox_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY inbox_tenant_isolation ON inbox_events
+    USING (tenant_id = current_setting('app.tenant_id')::UUID);
+
+-- Tenant-aware pending stream table (processor sets app.tenant_id per connection)
+SELECT pgtrickle.create_stream_table(
+    'pending_inbox_tenant_scoped',
+    $$SELECT event_id, tenant_id, event_type, payload, retry_count
+      FROM inbox_events
+      WHERE processed_at IS NULL
+        AND retry_count < 5$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Tenant-Per-Schema Isolation
+
+```sql
+CREATE SCHEMA tenant_abc;
+CREATE TABLE tenant_abc.inbox_events (LIKE public.inbox_events INCLUDING ALL);
+
+SELECT pgtrickle.create_stream_table(
+    'tenant_abc.pending_inbox',
+    $$SELECT * FROM tenant_abc.inbox_events
+      WHERE processed_at IS NULL AND retry_count < 5$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Multi-Tenant Inbox Writer
+
+```python
+async def inbox_writer(msg):
+    headers = msg.headers or {}
+    tenant_id = headers.get("X-Tenant-Id") or extract_tenant_from_subject(msg.subject)
+
+    # Validate tenant before writing — never trust broker subjects alone
+    if not is_valid_tenant_id(tenant_id):
+        await msg.nak()  # reject; do not persist
+        return
+
+    await pg_conn.execute(
+        """INSERT INTO inbox_events
+               (event_id, tenant_id, event_type, aggregate_id, payload)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (event_id) DO NOTHING""",
+        msg_id, tenant_id, event_type, aggregate_id, payload,
+    )
+    await msg.ack()
+```
+
+---
+
+## Cost Analysis
+
+### Storage Cost
+
+| Component | Typical Size per Message | Notes |
+|-----------|--------------------------|-------|
+| `inbox_events` row | ~200–600 bytes | JSONB payload dominates |
+| `processed_events` dedup log | ~50–100 bytes | event_id + timestamps only |
+| Stream table | ~same as inbox rows | Materialized view |
+| Index overhead | ~40–60% of table size | PK + event_type + processed_at indexes |
+
+**Example:** 500 000 messages/day × 400 bytes = ~200 MB/day. With 14-day
+retention: ~2.8 GB. With monthly partitioning, expired months drop instantly.
+
+### Refresh CPU Overhead
+
+| Mode | CPU Impact | Latency | Use When |
+|------|------------|---------|----------|
+| DIFFERENTIAL | Low (only changed rows) | ~50–200 ms | Default for most inbox cases |
+| FULL | High (full table scan) | seconds | Complex DISTINCT ON + aggregations |
+| IMMEDIATE | Minimal (synchronous) | ~0 ms additional | Synchronous, transactional processing |
+
+### Infrastructure Comparison
+
+| Setup | Additional Infrastructure | Estimated Monthly Cost (small–medium) |
+|-------|--------------------------|----------------------------------------|
+| PostgreSQL + pgmq only | None | $0 additional |
+| PostgreSQL + NATS | ~10 MB binary | ~$5–20/mo |
+| PostgreSQL + Kafka | KRaft cluster + brokers | $50–500/mo (managed) |
+| PostgreSQL + Debezium | Kafka + Kafka Connect | $100–1 000/mo (managed) |
+
+> **Note:** For inbox workloads under 100 000 messages/sec, NATS JetStream
+> with durable pull consumers is often the lowest-ops choice.
+
+---
+
+## Security Considerations
+
+### Validating Inbound Messages
+
+Never trust message payloads from external sources — validate before inserting
+into the inbox:
+
+```python
+import jsonschema
+
+ORDER_CREATED_SCHEMA_V2 = {
+    "type": "object",
+    "required": ["order_id", "amount", "customer_id"],
+    "properties": {
+        "order_id":    {"type": "string", "format": "uuid"},
+        "amount":      {"type": "number", "minimum": 0},
+        "customer_id": {"type": "string"},
+    },
+    "additionalProperties": True,  # tolerate forward-compatible additions
+}
+
+async def validated_inbox_writer(msg):
+    payload = json.loads(msg.data)
+    try:
+        jsonschema.validate(payload, ORDER_CREATED_SCHEMA_V2)
+    except jsonschema.ValidationError as e:
+        # Write to DLQ instead of inbox; do NOT nak — prevents infinite redelivery
+        await pg_conn.execute(
+            "INSERT INTO inbox_dead_letters (event_id, reason, payload)"
+            " VALUES ($1, $2, $3)",
+            msg_id, str(e), json.dumps(payload),
+        )
+        await msg.ack()  # ack to prevent redelivery of permanently-invalid messages
+        return
+
+    await write_to_inbox(msg, payload)
+```
+
+### Payload Encryption for Sensitive Data
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Encrypt PII fields before storing in the inbox
+INSERT INTO inbox_events (event_id, event_type, payload)
+VALUES (
+    $1,
+    'PaymentReceived',
+    jsonb_build_object(
+        'order_id', $2,
+        'amount',   $3,
+        -- Encrypt cardholder data at rest; processor decrypts on access
+        'card_pii', encode(
+            pgp_sym_encrypt($4::bytea, current_setting('app.encryption_key')),
+            'base64'
+        )
+    )
+);
+```
+
+### Database-Level Access Controls
+
+```sql
+-- Dedicated role for the inbox writer — INSERT only, no SELECT
+CREATE ROLE inbox_writer LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA public TO inbox_writer;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM inbox_writer;
+GRANT INSERT ON inbox_events TO inbox_writer;
+
+-- Dedicated role for the processor — SELECT + UPDATE only
+CREATE ROLE inbox_processor LOGIN PASSWORD '...';
+GRANT SELECT, UPDATE ON inbox_events TO inbox_processor;
+GRANT SELECT ON pending_inbox TO inbox_processor;
+```
+
+### TLS and Broker Authentication
+
+```python
+import ssl, nats
+
+# Always use TLS + credentials for broker connections in production
+nc = await nats.connect(
+    servers=["tls://nats.example.com:4222"],
+    tls=ssl.create_default_context(cafile="/etc/ssl/nats-ca.pem"),
+    tls_hostname="nats.example.com",
+    user_credentials="/etc/nats/inbox-writer.creds",
+)
+```
+
+### Immutable Processing Log
+
+```sql
+-- Record every processing attempt; never UPDATE or DELETE
+CREATE TABLE inbox_processing_log (
+    id           BIGSERIAL PRIMARY KEY,
+    event_id     TEXT NOT NULL REFERENCES inbox_events(event_id),
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    outcome      TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'duplicate')),
+    error_detail TEXT,
+    processor_id TEXT  -- hostname or pod name
+);
+
+ALTER TABLE inbox_processing_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY log_insert_only ON inbox_processing_log
+    FOR INSERT WITH CHECK (TRUE);
+```
 
 ---
 

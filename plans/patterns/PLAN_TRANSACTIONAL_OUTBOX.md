@@ -33,6 +33,13 @@
   - [Extension 3: pgmq Integration](#extension-3-pgmq-integration)
   - [Extension 4: Webhook Dispatcher](#extension-4-webhook-dispatcher)
 - [Design Considerations](#design-considerations)
+- [Schema Evolution & Message Versioning](#schema-evolution--message-versioning)
+- [Observability & Distributed Tracing](#observability--distributed-tracing)
+- [Testing Strategies](#testing-strategies)
+- [Saga Pattern & Compensating Transactions](#saga-pattern--compensating-transactions)
+- [Multi-Tenancy](#multi-tenancy)
+- [Cost Analysis](#cost-analysis)
+- [Security Considerations](#security-considerations)
 - [Comparison with Traditional Approaches](#comparison-with-traditional-approaches)
 - [References](#references)
 
@@ -885,6 +892,603 @@ When the relay falls behind:
 | PostgreSQL crashes after COMMIT | Events durable in WAL | Normal crash recovery; outbox intact |
 | Stream table refresh fails | Relay reads stale data | pg_trickle retries with backoff; alert emitted |
 | Broker unreachable | Relay retries | Events queue in outbox; monitor staleness |
+
+---
+
+## Schema Evolution & Message Versioning
+
+As services evolve, event schemas change. A robust outbox implementation must
+handle versioning gracefully to avoid breaking downstream consumers.
+
+### Versioning Strategies
+
+| Strategy | Description | Pros | Cons |
+|----------|-------------|------|------|
+| **Embedded version field** | `event_type = 'OrderCreated.v2'` | Easy to route, clear in logs | Type proliferation |
+| **Semantic versioning in payload** | `{"schema_version": 2, ...}` in JSONB | Single event type, flexible | Consumers must inspect payload |
+| **Envelope pattern** | Wrap payload in `{"v": 2, "data": {...}}` | Uniform structure | Extra wrapper object |
+| **Content-type header** | `application/vnd.orders.created+json; version=2` | Standards-based | Requires rich broker support |
+
+### Compatibility Rules
+
+Follow the **Postel's Law** principle for schema changes:
+
+- **Backward-compatible** (safe): Add optional fields, widen types, add enum values.
+- **Forward-compatible** (safe with care): Remove optional fields, rename with alias.
+- **Breaking** (avoid or version bump): Remove required fields, change field types, alter semantics.
+
+### Implementation with pg_trickle
+
+```sql
+-- Version the outbox table columns
+ALTER TABLE outbox_events
+    ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;
+
+-- Stream table filtered by version for v1 consumers only
+SELECT pgtrickle.create_stream_table(
+    'pending_outbox_v1',
+    $$SELECT event_id, aggregate_id, event_type, payload
+      FROM outbox_events
+      WHERE published_at IS NULL
+        AND schema_version = 1$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- Separate view for v2+ consumers
+SELECT pgtrickle.create_stream_table(
+    'pending_outbox_v2',
+    $$SELECT event_id, aggregate_id, event_type, payload
+      FROM outbox_events
+      WHERE published_at IS NULL
+        AND schema_version >= 2$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Rolling Schema Migration
+
+1. **Deploy** the producer with new schema alongside old schema (dual-write).
+2. **Migrate** consumers to accept both versions.
+3. **Cut over** the producer to write only the new schema.
+4. **Drain** the old `pending_outbox_v1` view to zero.
+5. **Drop** old version support after all consumers are updated.
+
+---
+
+## Observability & Distributed Tracing
+
+Distributed systems require end-to-end visibility to diagnose issues. A
+well-instrumented outbox pipeline correlates events from database → relay →
+broker → consumer.
+
+### Correlation IDs
+
+Include a `trace_id` in every event to correlate across service boundaries:
+
+```sql
+ALTER TABLE outbox_events
+    ADD COLUMN trace_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    ADD COLUMN span_id  UUID;
+
+-- Embed trace context in payload for downstream services
+CREATE OR REPLACE FUNCTION outbox_embed_trace() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.payload := NEW.payload ||
+        jsonb_build_object(
+            '_trace_id', NEW.trace_id::text,
+            '_span_id',  NEW.span_id::text
+        );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER outbox_embed_trace_tg
+    BEFORE INSERT ON outbox_events
+    FOR EACH ROW EXECUTE FUNCTION outbox_embed_trace();
+```
+
+### Monitoring Dashboard Stream Table
+
+```sql
+-- Real-time outbox observability
+SELECT pgtrickle.create_stream_table(
+    'outbox_observability',
+    $$SELECT
+        event_type,
+        COUNT(*) FILTER (WHERE published_at IS NULL)          AS pending_count,
+        COUNT(*) FILTER (WHERE published_at IS NOT NULL)      AS published_count,
+        AVG(EXTRACT(EPOCH FROM (published_at - created_at)))
+            FILTER (WHERE published_at IS NOT NULL)           AS avg_publish_latency_sec,
+        MAX(EXTRACT(EPOCH FROM (now() - created_at)))
+            FILTER (WHERE published_at IS NULL)               AS max_pending_age_sec,
+        COUNT(*) FILTER (
+            WHERE published_at IS NULL
+              AND created_at < now() - INTERVAL '5 minutes')  AS stuck_events_count
+      FROM outbox_events
+      GROUP BY event_type$$,
+    schedule => '10s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### pg_trickle Alert Integration
+
+Subscribe to `pg_trickle_alert` for push-based relay health notifications:
+
+```python
+import asyncio, asyncpg, json
+
+async def monitor_outbox_pipeline(dsn: str):
+    conn = await asyncpg.connect(dsn)
+
+    async def handle_alert(conn, pid, channel, payload):
+        alert = json.loads(payload)
+        match alert["type"]:
+            case "stale_data":
+                if alert["stream_table"] in ("pending_outbox", "outbox_observability"):
+                    sentry.capture_message(f"Outbox lag: {alert['staleness_seconds']}s")
+            case "refresh_failed":
+                pagerduty.trigger(f"Outbox stream table failed: {alert['detail']}")
+            case "buffer_growth_warning":
+                slack.post(f"CDC buffer growing: {alert['stream_table']}")
+
+    await conn.add_listener("pg_trickle_alert", handle_alert)
+    await asyncio.sleep(float("inf"))  # run indefinitely
+```
+
+### OpenTelemetry Spans in the Relay
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer("outbox-relay")
+
+async def relay_event(event: dict):
+    trace_id = event.get("payload", {}).get("_trace_id")
+    with tracer.start_as_current_span(
+        "outbox.relay",
+        context=trace_context_from_id(trace_id),
+        attributes={
+            "event.id":      event["event_id"],
+            "event.type":    event["event_type"],
+            "aggregate.id":  str(event["aggregate_id"]),
+        }
+    ) as span:
+        await broker.publish(event)
+        span.set_attribute("broker.subject", event["event_type"])
+```
+
+### Key Metrics to Track
+
+| Metric | How to Measure | Alert Threshold |
+|--------|---------------|------------------|
+| **Outbox depth** | `pending_count` in `outbox_observability` | > 1 000 events |
+| **Publish latency p99** | `avg_publish_latency_sec` | > 30 s |
+| **Stuck events** | `stuck_events_count > 0` for 5+ min | Any stuck > 5 min |
+| **CDC buffer size** | `pg_trickle_alert` → `buffer_growth_warning` | Built-in |
+| **Stream table refresh failure** | `pg_trickle_alert` → `refresh_failed` | Built-in |
+| **Relay process liveness** | External health-check endpoint | 1 missed heartbeat |
+
+---
+
+## Testing Strategies
+
+Testing the transactional outbox requires verifying both the atomicity guarantee
+and the relay pipeline end-to-end.
+
+### Unit Tests — Event Generation
+
+Verify events are inserted atomically and rolled back correctly:
+
+```sql
+-- pgTAP: event generated on INSERT
+BEGIN;
+INSERT INTO orders (customer_id, amount, status) VALUES (42, 100.00, 'pending');
+SELECT is(
+    (SELECT COUNT(*)::int FROM outbox_events WHERE event_type = 'OrderCreated'),
+    1,
+    'OrderCreated event generated on INSERT'
+);
+ROLLBACK;
+
+-- After ROLLBACK, event must not exist
+SELECT is(
+    (SELECT COUNT(*)::int FROM outbox_events WHERE event_type = 'OrderCreated'),
+    0,
+    'No event persisted after ROLLBACK'
+);
+```
+
+### Integration Tests — Stream Table Refresh
+
+```rust
+#[tokio::test]
+async fn test_outbox_stream_table_reflects_new_events() {
+    let ctx = TestContext::new().await;
+
+    // Insert order — CDC trigger fires
+    ctx.execute("INSERT INTO orders (customer_id, amount, status)
+                 VALUES (1, 99.99, 'pending')").await;
+
+    // Trigger immediate refresh
+    ctx.execute("SELECT pgtrickle.refresh('pending_outbox')").await;
+
+    let count: i64 = ctx.query_one(
+        "SELECT COUNT(*) FROM pending_outbox WHERE event_type = 'OrderCreated'"
+    ).await;
+    assert_eq!(count, 1, "Stream table must contain the new event");
+}
+```
+
+### End-to-End Tests — Full Relay Pipeline
+
+```python
+import pytest, asyncio, json
+
+@pytest.mark.asyncio
+async def test_event_reaches_broker_after_db_commit(pg_conn, nats_client):
+    """Full pipeline: INSERT → stream table → relay → NATS → subscriber."""
+    received: asyncio.Future = asyncio.get_event_loop().create_future()
+
+    async def on_message(msg):
+        received.set_result(json.loads(msg.data))
+        await msg.ack()
+
+    sub = await nats_client.subscribe("orders.created", cb=on_message)
+    await pg_conn.execute(
+        "INSERT INTO orders (customer_id, amount, status) VALUES ($1, $2, $3)",
+        1, 100.0, "pending"
+    )
+    event = await asyncio.wait_for(received, timeout=5.0)
+    assert event["event_type"] == "OrderCreated"
+    await sub.unsubscribe()
+
+@pytest.mark.asyncio
+async def test_no_event_on_rollback(pg_conn, nats_client):
+    """Events within a rolled-back transaction must NOT reach the broker."""
+    events_received = []
+
+    async def on_message(msg):
+        events_received.append(msg)
+
+    sub = await nats_client.subscribe("orders.created", cb=on_message)
+    try:
+        async with pg_conn.transaction():
+            await pg_conn.execute(
+                "INSERT INTO orders (customer_id, amount, status) VALUES ($1, $2, $3)",
+                2, 50.0, "pending"
+            )
+            raise Exception("Forced rollback")
+    except Exception:
+        pass
+
+    await asyncio.sleep(2.0)  # wait for a relay cycle
+    assert len(events_received) == 0, "No events should reach broker after ROLLBACK"
+    await sub.unsubscribe()
+```
+
+### Chaos Tests — Relay Crash Recovery
+
+```python
+@pytest.mark.asyncio
+async def test_relay_recovers_after_crash(pg_conn, relay_process):
+    """Events queued while relay is down must be delivered after restart."""
+    await relay_process.stop()
+
+    for i in range(10):
+        await pg_conn.execute(
+            "INSERT INTO orders (customer_id, amount) VALUES ($1, $2)", i, 10.0
+        )
+
+    await relay_process.start()
+    await asyncio.sleep(5.0)  # allow relay to catch up
+
+    count = await pg_conn.fetchval(
+        "SELECT COUNT(*) FROM outbox_events WHERE published_at IS NOT NULL"
+    )
+    assert count == 10, "All events delivered after relay restart"
+```
+
+---
+
+## Saga Pattern & Compensating Transactions
+
+The Transactional Outbox pattern is the foundation of the **Saga Pattern** for
+distributed transactions. A saga is a sequence of local transactions, each
+publishing an event that triggers the next step. If any step fails, compensating
+transactions roll back prior steps.
+
+### Choreography-Based Saga
+
+Each service reacts to events and publishes its own next-step events:
+
+```sql
+-- Order service: saga step 1 — emit InventoryReservationRequested on OrderCreated
+CREATE OR REPLACE FUNCTION trigger_saga_step_after_order()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO outbox_events (aggregate_id, event_type, payload)
+    VALUES (
+        NEW.id,
+        'InventoryReservationRequested',
+        jsonb_build_object(
+            'order_id', NEW.id,
+            'items',    NEW.items,
+            'saga_id',  NEW.saga_id,
+            'step',     1
+        )
+    );
+    RETURN NEW;
+END;
+$$;
+```
+
+### Compensating Transaction Events
+
+```sql
+-- Track which saga steps need compensation if a later step fails
+CREATE TABLE saga_compensation_events (
+    saga_id        UUID NOT NULL,
+    step           INTEGER NOT NULL,
+    aggregate_id   UUID NOT NULL,
+    compensate_fn  TEXT NOT NULL,  -- e.g., 'ReleaseInventory'
+    compensated_at TIMESTAMPTZ,
+    PRIMARY KEY (saga_id, step)
+);
+
+-- Stream table: sagas awaiting compensation (in reverse step order)
+SELECT pgtrickle.create_stream_table(
+    'sagas_needing_compensation',
+    $$SELECT s.saga_id, s.step, s.compensate_fn, s.aggregate_id
+      FROM saga_compensation_events s
+      JOIN orders o ON o.saga_id = s.saga_id
+      WHERE o.status = 'failed'
+        AND s.compensated_at IS NULL
+      ORDER BY s.step DESC$$,
+    schedule => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Orchestration-Based Saga
+
+A central orchestrator drives the saga state machine:
+
+```sql
+CREATE TABLE order_saga_state (
+    saga_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id     UUID REFERENCES orders(id),
+    current_step TEXT NOT NULL DEFAULT 'STARTED',
+    -- STARTED → INVENTORY_RESERVED → PAYMENT_CHARGED → COMPLETED
+    -- STARTED → INVENTORY_RESERVATION_FAILED → COMPENSATING → COMPENSATED
+    failed_step  TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Orchestrator polls this stream table to decide the next action
+SELECT pgtrickle.create_stream_table(
+    'saga_pending_actions',
+    $$SELECT s.saga_id, s.order_id, s.current_step, o.amount, o.customer_id
+      FROM order_saga_state s
+      JOIN orders o ON o.id = s.order_id
+      WHERE s.current_step NOT IN ('COMPLETED', 'COMPENSATED')$$,
+    schedule => '2s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Saga Timeout Detection
+
+```sql
+SELECT pgtrickle.create_stream_table(
+    'stalled_sagas',
+    $$SELECT saga_id, order_id, current_step,
+             EXTRACT(EPOCH FROM (now() - updated_at)) AS stuck_seconds
+      FROM order_saga_state
+      WHERE current_step NOT IN ('COMPLETED', 'COMPENSATED')
+        AND updated_at < now() - INTERVAL '10 minutes'$$,
+    schedule => '60s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+---
+
+## Multi-Tenancy
+
+In multi-tenant SaaS applications, the outbox pipeline must isolate tenant data
+and allow independent scaling per tenant.
+
+### Tenant-Per-Row Isolation
+
+```sql
+-- Add tenant_id to all relevant tables
+ALTER TABLE orders        ADD COLUMN tenant_id UUID NOT NULL;
+ALTER TABLE outbox_events ADD COLUMN tenant_id UUID NOT NULL;
+
+-- Row-Level Security to prevent cross-tenant access
+ALTER TABLE outbox_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbox_tenant_isolation ON outbox_events
+    USING (tenant_id = current_setting('app.tenant_id')::UUID);
+
+-- Tenant-scoped stream table (relay sets app.tenant_id per connection)
+SELECT pgtrickle.create_stream_table(
+    'pending_outbox_tenant_scoped',
+    $$SELECT event_id, tenant_id, aggregate_id, event_type, payload
+      FROM outbox_events
+      WHERE published_at IS NULL$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Tenant-Per-Schema Isolation
+
+For stronger isolation, give each tenant its own schema:
+
+```sql
+-- Create a tenant-specific outbox
+CREATE SCHEMA tenant_abc;
+CREATE TABLE tenant_abc.outbox_events (LIKE public.outbox_events INCLUDING ALL);
+
+-- Tenant-specific stream table
+SELECT pgtrickle.create_stream_table(
+    'tenant_abc.pending_outbox',
+    $$SELECT * FROM tenant_abc.outbox_events WHERE published_at IS NULL$$,
+    schedule => '1s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### Multi-Tenant Relay Routing
+
+Route events to tenant-specific broker subjects:
+
+```python
+async def relay_event(event: dict):
+    tenant_id = event["tenant_id"]
+    subject = f"tenant.{tenant_id}.{event['event_type'].lower()}"
+    # e.g., "tenant.abc123.ordercreated"
+    await js.publish(subject, json.dumps(event).encode(), headers={
+        "Nats-Msg-Id": str(event["event_id"]),  # JetStream deduplication
+    })
+```
+
+---
+
+## Cost Analysis
+
+Understanding the operational cost of the outbox pipeline helps choose the
+right implementation approach.
+
+### Storage Cost
+
+| Component | Typical Size per Event | Notes |
+|-----------|----------------------|-------|
+| `outbox_events` row | ~200–500 bytes | JSONB payload dominates |
+| CDC buffer row | ~100–300 bytes | Typed columns, no JSONB overhead |
+| Stream table | ~same as source rows | Materialized view |
+| Index overhead | ~40% of table size | Typical for BTREE indexes |
+
+**Example:** 1 million events/day × 400 bytes = ~400 MB/day. With 7-day
+retention: ~2.8 GB. With monthly partitioning, expired partitions drop
+instantly via `DETACH PARTITION` + `DROP TABLE`.
+
+### Refresh CPU Overhead
+
+| Mode | CPU Impact | Latency | Use When |
+|------|------------|---------|----------|
+| DIFFERENTIAL | Low (only changed rows) | ~50–200 ms | Default; > 99% of cases |
+| FULL | High (full table scan) | seconds–minutes | Forced by complex aggregations |
+| IMMEDIATE | Minimal (synchronous) | ~0 ms additional | Zero-lag requirement |
+
+### Infrastructure Comparison
+
+| Setup | Additional Infrastructure | Estimated Monthly Cost (small–medium) |
+|-------|--------------------------|----------------------------------------|
+| PostgreSQL only | None | $0 additional |
+| PostgreSQL + NATS | ~10 MB binary, single process | ~$5–20/mo (small VM or managed) |
+| PostgreSQL + Kafka | KRaft cluster + brokers | $50–500/mo (managed) |
+| PostgreSQL + Debezium | Kafka + Kafka Connect | $100–1 000/mo (managed) |
+
+> **Note:** NATS offers near-Kafka throughput at a fraction of the operational
+> cost. For fewer than 100 000 events/sec, NATS JetStream is usually sufficient.
+
+---
+
+## Security Considerations
+
+Protecting event data across the outbox pipeline requires attention at every
+boundary.
+
+### Payload Encryption for Sensitive Data
+
+Never store PII or secrets in plaintext within the outbox payload:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Encrypt sensitive fields in the outbox capture trigger
+CREATE OR REPLACE FUNCTION outbox_capture_order() RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO outbox_events (aggregate_id, event_type, payload)
+    VALUES (
+        NEW.id,
+        'OrderCreated',
+        jsonb_build_object(
+            'order_id',    NEW.id,
+            'amount',      NEW.amount,
+            -- Encrypt PII at rest; relay decrypts before publishing
+            'customer_pii', encode(
+                pgp_sym_encrypt(
+                    (NEW.customer_email || '|' || NEW.shipping_address)::bytea,
+                    current_setting('app.encryption_key')
+                ),
+                'base64'
+            )
+        )
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+```
+
+### Database-Level Access Controls
+
+```sql
+-- Dedicated role for the relay process — minimal privileges
+CREATE ROLE outbox_relay LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA public TO outbox_relay;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM outbox_relay;
+GRANT SELECT, UPDATE ON outbox_events TO outbox_relay;
+GRANT SELECT ON pending_outbox TO outbox_relay;
+```
+
+### Broker Credential Management
+
+- Never hardcode broker credentials in application code.
+- Use environment variables, HashiCorp Vault, AWS Secrets Manager, or
+  Kubernetes Secrets.
+- Rotate credentials regularly. NATS supports
+  [NKey authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth)
+  with Ed25519 keypairs for zero-secret broker authentication.
+
+### TLS in Transit
+
+```python
+import ssl, nats
+
+# Always use TLS for broker connections in production
+nc = await nats.connect(
+    servers=["tls://nats.example.com:4222"],
+    tls=ssl.create_default_context(cafile="/etc/ssl/nats-ca.pem"),
+    tls_hostname="nats.example.com",
+    user_credentials="/etc/nats/relay.creds",
+)
+```
+
+### Immutable Audit Log
+
+```sql
+-- Record every relay attempt; never UPDATE or DELETE rows in this table
+CREATE TABLE outbox_relay_log (
+    id          BIGSERIAL PRIMARY KEY,
+    event_id    BIGINT NOT NULL REFERENCES outbox_events(event_id),
+    relay_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    outcome     TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'duplicate')),
+    broker_ack  TEXT,   -- broker-returned message ID or error
+    relay_host  TEXT    -- for multi-relay-process setups
+);
+
+-- Append-only policy: deny UPDATE and DELETE
+ALTER TABLE outbox_relay_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY relay_log_insert_only ON outbox_relay_log
+    FOR INSERT WITH CHECK (TRUE);
+-- No UPDATE or DELETE policy = denied by default
+```
 
 ---
 
