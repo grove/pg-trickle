@@ -8,7 +8,7 @@ INSERT INTO orders (o_orderkey, o_custkey, o_orderstatus, o_totalprice, o_orderd
                     o_orderpriority, o_clerk, o_shippriority, o_comment)
 SELECT
     __NEXT_ORDERKEY__ + i AS o_orderkey,
-    1 + ((__NEXT_ORDERKEY__ + i) * 1013 % __SF_CUSTOMERS__) AS o_custkey,
+    1 + ((__NEXT_ORDERKEY__::bigint + i) * 1013 % __SF_CUSTOMERS__) AS o_custkey,
     (ARRAY['O','F','P'])[1 + i % 3] AS o_orderstatus,
     round((10000 + (i * 7919) % 500000)::numeric / 100, 2) AS o_totalprice,
     DATE '1995-01-01' + (i % 1000)::int AS o_orderdate,
