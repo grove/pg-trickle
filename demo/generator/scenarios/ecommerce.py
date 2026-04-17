@@ -1,14 +1,14 @@
 """
 pg_trickle demo — e-commerce scenario generator.
 
-Demonstrates differential refresh effectiveness with **very low churn**:
-  - Slow, sparse order stream (1 order every 5-15 seconds)
-  - Extreme concentration: only 5-10% of customers/products are active
-  - Highly infrequent price updates (every ~1000 cycles, ~2+ hours)
-  - Rare "flash sale" bursts (every 2000 cycles, ~4+ hours)
+Demonstrates differential refresh effectiveness with **realistic low-churn**:
+  - Steady order stream (0.5–2 orders per second)
+  - Modest concentration: 15% of customers, 20% of products drive most activity
+  - Infrequent price updates (every ~30-60 minutes)
+  - Occasional "flash sale" bursts (every 5-10 minutes)
 
-Result: Stream table aggregates have very low change ratios (~0.05-0.2) where
-differential refresh provides massive efficiency gains over full refresh.
+Result: Stream table aggregates have low-moderate change ratios (~0.2-0.4) where
+differential refresh significantly outperforms full refresh in a realistic workload.
 """
 
 import random
@@ -17,18 +17,18 @@ import time
 import psycopg2
 
 # Price multiplier range (discount/premium) applied during normal orders
-PRICE_VARIANCE = 0.05  # ±5% from current catalog price (tight range)
+PRICE_VARIANCE = 0.10  # ±10% from current catalog price
 
 # Price drift applied when a product "reprices" (slowly-changing dimension)
-PRICE_DRIFT_PCT = (-0.05, 0.05)  # –5% to +5% from base_price (minimal drift)
+PRICE_DRIFT_PCT = (-0.10, 0.10)  # –10% to +10% from base_price
 
-PRICE_UPDATE_INTERVAL = 1000  # reprice one product every ~N cycles (~2+ hours)
-FLASH_SALE_INTERVAL   = 2000  # trigger a flash sale every ~N cycles (~4+ hours)
-FLASH_SALE_SIZE       = (2, 4)  # very small flash sale bursts
+PRICE_UPDATE_INTERVAL = 1500  # reprice one product every ~N cycles (~30-60 min)
+FLASH_SALE_INTERVAL   = 300   # trigger a flash sale every ~N cycles (~5-10 min)
+FLASH_SALE_SIZE       = (8, 16)  # moderate flash sale bursts
 
-# Order generation intervals (seconds) — extremely sparse
-ORDER_INTERVAL_NORMAL = (5.0, 15.0)  # normal orders: every 5-15 seconds
-ORDER_INTERVAL_FLASH  = (0.5, 1.5)  # flash sale burst: moderate sequence
+# Order generation intervals (seconds) — steady, visible activity
+ORDER_INTERVAL_NORMAL = (0.5, 2.0)  # normal orders: every 0.5-2 seconds
+ORDER_INTERVAL_FLASH  = (0.10, 0.35)  # flash sale burst: rapid sequence
 
 
 def fetch_lookups(conn):
@@ -94,20 +94,20 @@ def run(conn) -> None:
     product_by_id = {p[0]: p for p in products}  # id → (id, base, current, cat_id)
     all_product_ids = [p[0] for p in products]
 
-    # Implement extreme concentration: only 5-10% of customers/products are active.
-    # This creates very stable aggregates where only 1-2 rows change per refresh cycle,
-    # showcasing differential refresh's massive efficiency advantage.
-    top_pct = int(max(1, len(customers) * 0.075))  # 7.5% = 3-4 out of ~50 customers
-    active_customers = customers[:top_pct]
+    # Implement realistic concentration: 15% of customers and 20% of products
+    # drive most activity. This creates low-moderate change ratios where
+    # differential refresh is clearly more efficient than full refresh.
+    top_customers_pct = int(max(1, len(customers) * 0.15))  # 15% active
+    active_customers = customers[:top_customers_pct]
     
-    top_pct_prod = int(max(1, len(products) * 0.10))  # 10% = 1-2 out of ~15 products
-    active_products = all_product_ids[:top_pct_prod]
+    top_products_pct = int(max(1, len(products) * 0.20))  # 20% active
+    active_products = all_product_ids[:top_products_pct]
 
     print(
         f"[GENERATOR] ecommerce (differential-optimized): "
         f"{len(active_customers)} active customers (of {len(customers)}), "
         f"{len(active_products)} active products (of {len(products)}). "
-        f"Sparse order stream: 1 every 5-15 sec. Starting…",
+        f"Steady order stream: 0.5-2 per sec. Starting…",
         flush=True,
     )
 
@@ -119,7 +119,7 @@ def run(conn) -> None:
     while True:
         cycle += 1
 
-        # Flash sale: extremely rare burst of orders for one category
+        # Flash sale: occasional burst of orders for one category
         if flash_remaining == 0 and cycle % FLASH_SALE_INTERVAL == 0:
             flash_category = random.choice(categories)
             flash_products = [p[0] for p in products if p[3] == flash_category]
@@ -131,7 +131,7 @@ def run(conn) -> None:
                     flush=True,
                 )
 
-        # Price update: extremely infrequent slowly-changing dimension
+        # Price update: slowly-changing dimension
         if cycle % PRICE_UPDATE_INTERVAL == 0:
             pid, base, current, cat_id = random.choice(products)
             try:
@@ -145,18 +145,17 @@ def run(conn) -> None:
                 # During flash sale: any customer, but flash sale products
                 customer_id  = random.choice(customers)
                 product_id   = random.choice(flash_products)
-                quantity     = random.randint(1, 2)
+                quantity     = random.randint(1, 3)
                 _, base, current, _ = product_by_id[product_id]
-                # Flash sale = discounted price (70–80% of current)
-                unit_price   = current * random.uniform(0.70, 0.80)
+                # Flash sale = discounted price (70–85% of current)
+                unit_price   = current * random.uniform(0.70, 0.85)
                 flash_remaining -= 1
                 if flash_remaining == 0:
                     flash_category = None
                     flash_products = []
                 sleep_s = random.uniform(*ORDER_INTERVAL_FLASH)
             else:
-                # Normal orders: strictly limited to active customers and products
-                # This extreme concentration keeps aggregates almost static
+                # Normal orders: prefer active customers and products
                 customer_id  = random.choice(active_customers)
                 product_id   = random.choice(active_products)
                 quantity     = random.randint(1, 2)
