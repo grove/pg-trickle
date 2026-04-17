@@ -9,11 +9,28 @@ change ratios.
 
 ```bash
 cd demo
-docker compose up --build
+docker compose up
 ```
 
 Then open **http://localhost:8080** in your browser.
 The dashboard auto-refreshes every 2 seconds.
+
+### Using a locally-built pg_trickle extension
+
+To build pg_trickle from your current source code and use it in the demo:
+
+```bash
+# From project root
+just build-demo
+
+# From demo directory, use the locally-built image
+cd demo
+PG_TRICKLE_IMAGE=pg_trickle:demo docker compose down -v
+PG_TRICKLE_IMAGE=pg_trickle:demo docker compose up
+```
+
+This is useful for testing changes to the extension without waiting for a new
+official release.
 
 ---
 
