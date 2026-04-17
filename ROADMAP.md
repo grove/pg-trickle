@@ -6085,6 +6085,20 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 | DOC-21 | **`docs/GETTING_STARTED.md` Day 2 update.** Document dog-feeding CLI and TUI integration for new users. | 1h | [PLAN_TUI_PART_3.md](plans/ui/PLAN_TUI_PART_3.md) §T20 |
 | DOC-22 | **`docs/SQL_REFERENCE.md` update.** Document `df_threshold_advice.sla_breach_risk` column. | 0.5h | [PLAN_TUI_PART_3.md](plans/ui/PLAN_TUI_PART_3.md) §T20 |
 
+### Phase 6 — Operational Polish & Hardening
+
+Complementary features that enhance dog-feeding observability and operational ergonomics. Recommended from [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| OP-1 | **DAG runtime overlay in `explain_dag()`.** Colour nodes by p95 latency, width by rows/refresh using `pgt_refresh_history`. Enhances `explain_dag()` visualization for TUI/CLI. | XS (2d) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.11 |
+| OP-2 | **Prometheus HTTP endpoint in bgworker.** Tiny HTTP server (port configurable via `pg_trickle.metrics_port`) emitting all monitoring metrics in OpenMetrics format. Removes "bring your own exporter" hurdle. | S (1w) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.6 |
+| OP-3 | **`pgtrickle.pause_all()` / `resume_all()` helpers.** Idempotent SQL wrappers for suspending all stream tables during maintenance (e.g. `pg_dump` of source tables). | XS (1d) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.1 |
+| OP-4 | **`pgtrickle.refresh_if_stale(name, max_age)` convenience wrapper.** Application-level staleness gating without custom procedural code. | XS (1d) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.1 |
+| OP-5 | **`pgtrickle.stream_table_definition(name)` helper.** Single-row fetch of original query, refresh mode, schedule, and status for auditing / blue-green migrations. | XS (1d) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §9.1 |
+| OP-6 | **Non-deterministic function warning / rejection.** Reject or warn at `create_stream_table` time if query uses `now()`, `random()`, volatile UDFs without explicit `non_deterministic => true`. Pre-v1.0 safety gate. | S (2d) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §2.6 |
+| OP-7 | **Q15 IMMEDIATE-mode allowlist hygiene.** Add Q15 to `IMMEDIATE_SKIP_ALLOWLIST` in test suite pending EC-01 fix. | XS (1h) | [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) §6.4 |
+
 ### Implementation Phases
 
 | Phase | Description | Duration |
@@ -6095,8 +6109,9 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 | T18 | Backend Enhancements — DF-21 through DF-24, proptest, upgrade SQL | Days 9–12 |
 | T19 | CLI Integration — `pgtrickle dog-feeding`, `pgtrickle graph --format` | Days 12–13 |
 | T20 | Documentation, Polish & Final Testing — docs, cross-cutting tests, coverage audit | Days 13–15 |
+| T21 (OP) | Operational Polish — DAG overlay, Prometheus, API helpers, volatile-fn warning, test hygiene | Days 15–17 (parallel or interleaved) |
 
-> **v0.21.0 total: ~3–4 weeks** (TUI dog-feeding integration: architecture + 16 views + 4 backend items + 2 CLI commands + tests + docs)
+> **v0.21.0 total: ~3.5–4.5 weeks** (TUI dog-feeding integration + operational polish: architecture + 16 views + 4 backend items + 2 CLI commands + 7 operational enhancements + tests + docs)
 
 **Exit criteria:**
 - [ ] T15: `AppState` uses 8 domain structs; all existing tests pass; `just lint` clean
