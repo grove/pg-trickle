@@ -1,15 +1,14 @@
 """
 pg_trickle demo — e-commerce scenario generator.
 
-Demonstrates differential refresh effectiveness by generating:
-  - Slow, steady order stream (1 order every 2-4 seconds)
-  - Skewed customer/product distribution (80/20 rule: 20% of customers/products
-    account for 80% of orders)
-  - Infrequent price updates (every ~300 cycles, ~15+ minutes)
-  - Occasional "flash sale" bursts to show spikes in specific categories
+Demonstrates differential refresh effectiveness with **very low churn**:
+  - Slow, sparse order stream (1 order every 5-15 seconds)
+  - Extreme concentration: only 5-10% of customers/products are active
+  - Highly infrequent price updates (every ~1000 cycles, ~2+ hours)
+  - Rare "flash sale" bursts (every 2000 cycles, ~4+ hours)
 
-Result: Stream table aggregates have low change ratios (~0.1-0.3) where
-differential refresh significantly outperforms full refresh.
+Result: Stream table aggregates have very low change ratios (~0.05-0.2) where
+differential refresh provides massive efficiency gains over full refresh.
 """
 
 import random
@@ -18,18 +17,18 @@ import time
 import psycopg2
 
 # Price multiplier range (discount/premium) applied during normal orders
-PRICE_VARIANCE = 0.10  # ±10% from current catalog price (reduced for stability)
+PRICE_VARIANCE = 0.05  # ±5% from current catalog price (tight range)
 
 # Price drift applied when a product "reprices" (slowly-changing dimension)
-PRICE_DRIFT_PCT = (-0.10, 0.10)  # –10% to +10% from base_price (reduced range)
+PRICE_DRIFT_PCT = (-0.05, 0.05)  # –5% to +5% from base_price (minimal drift)
 
-PRICE_UPDATE_INTERVAL = 300  # reprice one product every ~N cycles (~15 min)
-FLASH_SALE_INTERVAL   = 180  # trigger a flash sale every ~N cycles (~9 min)
-FLASH_SALE_SIZE       = (12, 25)  # orders in a flash sale burst
+PRICE_UPDATE_INTERVAL = 1000  # reprice one product every ~N cycles (~2+ hours)
+FLASH_SALE_INTERVAL   = 2000  # trigger a flash sale every ~N cycles (~4+ hours)
+FLASH_SALE_SIZE       = (2, 4)  # very small flash sale bursts
 
-# Order generation intervals (seconds) — slowed down significantly
-ORDER_INTERVAL_NORMAL = (2.0, 4.0)  # normal orders: every 2-4 seconds
-ORDER_INTERVAL_FLASH  = (0.15, 0.35)  # flash sale burst: rapid sequence
+# Order generation intervals (seconds) — extremely sparse
+ORDER_INTERVAL_NORMAL = (5.0, 15.0)  # normal orders: every 5-15 seconds
+ORDER_INTERVAL_FLASH  = (0.5, 1.5)  # flash sale burst: moderate sequence
 
 
 def fetch_lookups(conn):
@@ -95,19 +94,20 @@ def run(conn) -> None:
     product_by_id = {p[0]: p for p in products}  # id → (id, base, current, cat_id)
     all_product_ids = [p[0] for p in products]
 
-    # Implement 80/20 distribution: 20% of customers/products drive 80% of activity.
-    # This creates stable aggregates where only a few rows change per cycle,
-    # showcasing differential refresh effectiveness.
-    top_20pct = int(max(1, len(customers) * 0.20))
-    active_customers = customers[:top_20pct]  # First 20% (typically lower IDs)
+    # Implement extreme concentration: only 5-10% of customers/products are active.
+    # This creates very stable aggregates where only 1-2 rows change per refresh cycle,
+    # showcasing differential refresh's massive efficiency advantage.
+    top_pct = int(max(1, len(customers) * 0.075))  # 7.5% = 3-4 out of ~50 customers
+    active_customers = customers[:top_pct]
     
-    top_20pct_prod = int(max(1, len(products) * 0.20))
-    active_products = all_product_ids[:top_20pct_prod]
+    top_pct_prod = int(max(1, len(products) * 0.10))  # 10% = 1-2 out of ~15 products
+    active_products = all_product_ids[:top_pct_prod]
 
     print(
-        f"[GENERATOR] ecommerce: {len(customers)} total customers "
-        f"({len(active_customers)} active), {len(products)} total products "
-        f"({len(active_products)} active). Starting stream…",
+        f"[GENERATOR] ecommerce (differential-optimized): "
+        f"{len(active_customers)} active customers (of {len(customers)}), "
+        f"{len(active_products)} active products (of {len(products)}). "
+        f"Sparse order stream: 1 every 5-15 sec. Starting…",
         flush=True,
     )
 
@@ -119,7 +119,7 @@ def run(conn) -> None:
     while True:
         cycle += 1
 
-        # Flash sale: burst of orders for one category
+        # Flash sale: extremely rare burst of orders for one category
         if flash_remaining == 0 and cycle % FLASH_SALE_INTERVAL == 0:
             flash_category = random.choice(categories)
             flash_products = [p[0] for p in products if p[3] == flash_category]
@@ -131,8 +131,7 @@ def run(conn) -> None:
                     flush=True,
                 )
 
-        # Price update: slowly-changing dimension
-        # Much less frequent to keep catalog_price_impact more stable
+        # Price update: extremely infrequent slowly-changing dimension
         if cycle % PRICE_UPDATE_INTERVAL == 0:
             pid, base, current, cat_id = random.choice(products)
             try:
@@ -143,20 +142,21 @@ def run(conn) -> None:
 
         try:
             if flash_remaining > 0 and flash_products:
-                # During flash sale: use any customer, but flash sale products
+                # During flash sale: any customer, but flash sale products
                 customer_id  = random.choice(customers)
                 product_id   = random.choice(flash_products)
-                quantity     = random.randint(1, 3)
+                quantity     = random.randint(1, 2)
                 _, base, current, _ = product_by_id[product_id]
-                # Flash sale = discounted price (70–85% of current, slightly tighter)
-                unit_price   = current * random.uniform(0.70, 0.85)
+                # Flash sale = discounted price (70–80% of current)
+                unit_price   = current * random.uniform(0.70, 0.80)
                 flash_remaining -= 1
                 if flash_remaining == 0:
                     flash_category = None
                     flash_products = []
                 sleep_s = random.uniform(*ORDER_INTERVAL_FLASH)
             else:
-                # Normal orders: prefer active customers and products (80/20 rule)
+                # Normal orders: strictly limited to active customers and products
+                # This extreme concentration keeps aggregates almost static
                 customer_id  = random.choice(active_customers)
                 product_id   = random.choice(active_products)
                 quantity     = random.randint(1, 2)
