@@ -33,6 +33,11 @@ build-hub:
 build-hub-latest:
     docker build -t pgtrickle/pg_trickle:latest -f Dockerfile.hub .
 
+# Build pg_trickle from source for demo use
+[group: "build"]
+build-demo:
+    docker build -t pg_trickle:demo -f Dockerfile.demo .
+
 # ── Lint & Format ─────────────────────────────────────────────────────────
 
 # Format source code

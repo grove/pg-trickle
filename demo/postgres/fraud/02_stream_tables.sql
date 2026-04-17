@@ -191,3 +191,75 @@ SELECT pgtrickle.create_stream_table(
     schedule     => 'calculated',
     refresh_mode => 'DIFFERENTIAL'
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DIFFERENTIAL EFFICIENCY SHOWCASE
+-- ─────────────────────────────────────────────────────────────────────────────
+-- merchant_tier_stats demonstrates a low change ratio by depending ONLY on
+-- merchant_risk_tier — a slowly-changing lookup that the generator updates
+-- for one merchant every ~30 cycles (roughly once per minute).
+--
+-- Per-cycle change profile:
+--   • merchant_risk_tier: 1 row updated every ~30 cycles → 1 of 15 rows changes.
+--   • merchants: static lookup — never updated, 0 changes ever.
+--   • transactions is intentionally NOT included to keep the source fast-change
+--     free.  Joining it would force every output row to update every cycle.
+--
+-- Result: change ratio ≈ 1/15 ≈ 0.07 — the Refresh Mode Advisor will show
+-- KEEP DIFFERENTIAL here while recommending FULL for tables that join the
+-- ever-growing transactions stream.
+SELECT pgtrickle.create_stream_table(
+    name     => 'merchant_tier_stats',
+    query    => $$
+        SELECT
+            mrt.merchant_id,
+            m.name           AS merchant_name,
+            m.category,
+            mrt.tier         AS merchant_tier,
+            CASE mrt.tier
+                WHEN 'HIGH'     THEN 3
+                WHEN 'ELEVATED' THEN 2
+                ELSE                 1
+            END              AS risk_score,
+            mrt.updated_at   AS tier_last_changed
+        FROM merchant_risk_tier mrt
+        JOIN merchants m ON m.id = mrt.merchant_id
+    $$,
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TOP-10 LEADERBOARD SHOWCASE
+-- ─────────────────────────────────────────────────────────────────────────────
+-- top_10_risky_merchants demonstrates low change ratio via fixed cardinality:
+-- only the top 10 merchants are output, so only rank shifts matter.
+--
+-- Per-cycle change profile:
+--   • top_risky_merchants (upstream) can change arbitrarily (depends on
+--     risk_scores which depends on transactions).
+--   • top_10_risky_merchants: LIMIT 10 → only ~20–30% of rows change per
+--     cycle (a merchant enters/leaves top 10), not 100%.
+--
+-- Result: change ratio ≈ 0.2–0.3 (only top-10 rank shifts, not full table).
+-- The Refresh Mode Advisor will show KEEP DIFFERENTIAL here because the
+-- fixed-cardinality output (10 rows) provides significant differential speedup.
+SELECT pgtrickle.create_stream_table(
+    name     => 'top_10_risky_merchants',
+    query    => $$
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY high_risk_count DESC, merchant_name) AS rank,
+            merchant_name,
+            merchant_category,
+            total_txns,
+            high_risk_count,
+            medium_risk_count,
+            low_risk_count,
+            risk_rate_pct
+        FROM top_risky_merchants
+        ORDER BY high_risk_count DESC, merchant_name
+        LIMIT 10
+    $$,
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);

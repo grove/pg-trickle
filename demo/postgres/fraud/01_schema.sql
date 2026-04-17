@@ -1,7 +1,7 @@
 -- =============================================================================
 -- pg_trickle Real-time Fraud Detection Demo — Schema & Seed Data
 --
--- DAG topology (7 stream tables across 3 layers):
+-- DAG topology (8 stream tables across 3 layers):
 --
 --   users ──────┐
 --   transactions┼──→  user_velocity   (L1, DIFFERENTIAL, 1s)
@@ -17,8 +17,14 @@
 --   user_velocity + users ──→  country_risk   (L2, DIFF, calculated)
 --                                        └──→  top_risky_merchants  (L3, DIFF, calculated)
 --
+--   merchant_risk_tier ─────────────────────────────────────────────────────────
+--   (slowly-changing lookup; generator rotates 1 row every ~30 cycles)
+--   merchant_risk_tier + transactions →  merchant_tier_stats (DIFFERENTIAL, 5s)
+--
 -- Diamond: transactions feeds BOTH user_velocity AND merchant_stats,
 --          which BOTH feed risk_scores — a genuine diamond dependency.
+-- Differential showcase: merchant_tier_stats has change ratio ~0.07 because
+--   only 1 of 15 merchant rows is touched per cycle.
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pg_trickle;
@@ -100,6 +106,35 @@ INSERT INTO merchants (name, category, country) VALUES
     ('Walmart',            'Retail',       'US'),
     ('Uber Eats',          'Food',         'US'),
     ('Best Buy',           'Electronics',  'US');
+
+-- ── Slowly-changing merchant risk tier lookup ────────────────────────────────
+-- The generator updates one merchant's tier every ~30 cycles (≈ once per
+-- minute). The merchant_tier_stats stream table JOINs against this table
+-- using DIFFERENTIAL refresh, so only the affected merchant's row is
+-- re-processed — giving a change ratio of ~0.07 instead of 1.0.
+CREATE TABLE merchant_risk_tier (
+    merchant_id  BIGINT      PRIMARY KEY REFERENCES merchants(id),
+    tier         TEXT        NOT NULL DEFAULT 'STANDARD'
+                             CHECK (tier IN ('STANDARD', 'ELEVATED', 'HIGH')),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO merchant_risk_tier (merchant_id, tier) VALUES
+    (1,  'STANDARD'),   -- Amazon
+    (2,  'STANDARD'),   -- Apple Store
+    (3,  'STANDARD'),   -- Expedia
+    (4,  'STANDARD'),   -- Airbnb
+    (5,  'ELEVATED'),   -- BetOnSports
+    (6,  'HIGH'),       -- CryptoExchange Pro
+    (7,  'STANDARD'),   -- McDonald's
+    (8,  'STANDARD'),   -- Walgreens
+    (9,  'STANDARD'),   -- Samsung Shop
+    (10, 'STANDARD'),   -- Booking.com
+    (11, 'ELEVATED'),   -- Lucky Casino
+    (12, 'HIGH'),       -- BitSwap
+    (13, 'STANDARD'),   -- Walmart
+    (14, 'STANDARD'),   -- Uber Eats
+    (15, 'STANDARD');   -- Best Buy
 
 -- ── Seed transactions (primes the stream tables with initial data) ─────────────
 
