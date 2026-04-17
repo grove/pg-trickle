@@ -1058,6 +1058,7 @@ impl StDag {
 
     /// Recursive DFS helper for Tarjan's algorithm.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::unwrap_used)] // SCC invariant: v and w are always inserted into maps before use
     fn tarjan_strongconnect(
         &self,
         v: NodeId,
@@ -1792,7 +1793,8 @@ impl ExecutionUnitDag {
         );
 
         // Collect external downstream edges of the LAST unit in the chain.
-        let last_id = *chain.last().unwrap(); // nosemgrep: rust.panic-in-sql-path — chain is always non-empty by construction in build_execution_units
+        let last_id = *chain.last() // nosemgrep: rust.panic-in-sql-path — chain is always non-empty by construction in build_execution_units
+            .expect("chain is always non-empty by construction in build_execution_units");
         let external_downstream: Vec<ExecutionUnitId> =
             self.edges.get(&last_id).cloned().unwrap_or_default();
 

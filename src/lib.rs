@@ -17,6 +17,9 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
+// SAF-3: Deny .unwrap() in non-test production code.
+// Tests are explicitly exempt (cfg(test) blocks allow free use of unwrap).
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 use pgrx::prelude::*;
 
@@ -31,6 +34,7 @@ pub mod error;
 mod hash;
 mod hooks;
 mod ivm;
+pub(crate) mod metrics_server;
 mod monitor;
 mod refresh;
 pub mod scheduler;

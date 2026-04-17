@@ -11,6 +11,23 @@
 //! values — skipping SQL parsing, DVM differentiation, and MERGE SQL
 //! string formatting. This eliminates ~45ms of overhead per refresh
 //! (29.6ms planning + 15ms generate_delta).
+//!
+//! ## ARCH-1: Module structure
+//!
+//! This file (`mod.rs`) is the monolith that will be split into focused
+//! sub-modules.  The sub-module files exist as landing zones; code will be
+//! migrated incrementally in follow-up PRs with zero behaviour change.
+//!
+//! - [`orchestrator`] — refresh scheduling, adaptive mode, reinitialize
+//! - [`codegen`]      — SQL template builders and MERGE SQL cache
+//! - [`phd1`]         — PH-D1 phantom-cleanup DELETE+INSERT strategy
+//! - [`merge`]        — differential / full / topk MERGE executors
+
+// ARCH-1: Sub-module landing zones (stub files; code migration is incremental)
+pub(crate) mod codegen;
+pub(crate) mod merge;
+pub(crate) mod orchestrator;
+pub(crate) mod phd1;
 
 use pgrx::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -138,6 +155,30 @@ pub fn take_last_temp_blks_written() -> i64 {
         c.set(-1);
         v
     })
+}
+
+// ── ARCH-2: Refresh reason tracking ──────────────────────────────────────
+//
+// Captures the machine-readable reason when the executor takes a non-default
+// path (e.g. recomputation fallback for non-monotone recursive CTEs).
+// Written to `pgt_refresh_history.refresh_reason` via the scheduler.
+
+thread_local! {
+    static LAST_REFRESH_REASON: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+}
+
+/// Set the refresh reason for the current execution.
+///
+/// Called whenever a non-default execution path is taken; the scheduler
+/// reads this with `take_refresh_reason()` and writes it to history.
+pub(crate) fn set_refresh_reason(reason: &'static str) {
+    LAST_REFRESH_REASON.with(|r| *r.borrow_mut() = Some(reason));
+}
+
+/// Take (read and reset) the refresh reason set by the current execution path.
+/// Returns `None` if the default path was taken.
+pub fn take_refresh_reason() -> Option<&'static str> {
+    LAST_REFRESH_REASON.with(|r| r.borrow_mut().take())
 }
 
 use crate::dag::RefreshMode;

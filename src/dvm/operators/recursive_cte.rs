@@ -140,12 +140,14 @@ pub fn diff_recursive_cte(
     // When non-monotone operators are detected, fall back to
     // recomputation which is always correct.
     if let Some(reason) = recursive_term_is_non_monotone(recursive) {
-        pgrx::info!(
-            "Recursive CTE \"{}\" has non-monotone recursive term ({}). \
-             Using recomputation strategy for correctness.",
+        pgrx::notice!(
+            "[pg_trickle] ARCH-2: Recursive CTE \"{}\" has non-monotone recursive term ({}). \
+             Falling back to recomputation strategy (refresh_reason = 'recursive_cte_fallback').",
             alias,
             reason
         );
+        // ARCH-2: Record the fallback reason for pgt_refresh_history.
+        crate::refresh::set_refresh_reason("recursive_cte_fallback");
         return generate_recomputation_delta(ctx, alias, columns, base, recursive, *union_all);
     }
 

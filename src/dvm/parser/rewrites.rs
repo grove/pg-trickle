@@ -994,7 +994,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr_sql = unsafe { node_to_expr(node_ptr) }
+        let expr_sql = safe_node_to_expr(node_ptr)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| {
                 // Fallback: deparse using PostgreSQL's nodeToString
@@ -1033,7 +1033,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
                 && !sort_by.node.is_null()
             {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr_sql = unsafe { node_to_expr(sort_by.node) }
+                let expr_sql = safe_node_to_expr(sort_by.node)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 let dir = match sort_by.sortby_dir {
@@ -1083,7 +1083,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr_sql = unsafe { node_to_expr(rt.val) }
+        let expr_sql = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "?".to_string());
 
@@ -1125,7 +1125,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let where_expr = unsafe { node_to_expr(select.whereClause) }
+        let where_expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {where_expr}")
@@ -1142,7 +1142,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
                 continue;
             }
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            if let Ok(expr) = unsafe { node_to_expr(node_ptr) } {
+            if let Ok(expr) = safe_node_to_expr(node_ptr) {
                 parts.push(expr.to_sql());
             }
         }
@@ -1158,7 +1158,7 @@ pub fn rewrite_distinct_on(query: &str) -> Result<String, PgTrickleError> {
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let having_expr = unsafe { node_to_expr(select.havingClause) }
+        let having_expr = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" HAVING {having_expr}")
@@ -1247,7 +1247,7 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         } else {
             // Plain GROUP BY expression
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr_sql = unsafe { node_to_expr(node_ptr) }
+            let expr_sql = safe_node_to_expr(node_ptr)
                 .map(|e| e.output_name())
                 .unwrap_or_else(|_| "?".to_string());
             plain_col_exprs.push(expr_sql);
@@ -1312,7 +1312,7 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let where_expr = unsafe { node_to_expr(select.whereClause) }
+        let where_expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {where_expr}")
@@ -1322,7 +1322,7 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let having_expr = unsafe { node_to_expr(select.havingClause) }
+        let having_expr = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" HAVING {having_expr}")
@@ -1365,7 +1365,7 @@ pub fn rewrite_grouping_sets(query: &str) -> Result<String, PgTrickleError> {
         // Parse as expression
         let expr =
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(rt.val) }.unwrap_or_else(|_| Expr::Raw("NULL".to_string()));
+            safe_node_to_expr(rt.val).unwrap_or_else(|_| Expr::Raw("NULL".to_string()));
 
         // Check if this is a simple column ref that matches a grouping column
         let col_name = match &expr {
@@ -1527,7 +1527,7 @@ fn expand_grouping_set(gs: &pg_sys::GroupingSet) -> Result<Vec<Vec<String>>, PgT
                 } else {
                     // Single column expression
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let col_sql = unsafe { node_to_expr(node_ptr) }
+                    let col_sql = safe_node_to_expr(node_ptr)
                         .map(|e| e.output_name())
                         .unwrap_or_else(|_| "?".to_string());
                     sets.push(vec![col_sql]);
@@ -1555,7 +1555,7 @@ fn extract_grouping_set_columns(gs: &pg_sys::GroupingSet) -> Result<Vec<String>,
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let col_sql = unsafe { node_to_expr(node_ptr) }
+        let col_sql = safe_node_to_expr(node_ptr)
             .map(|e| e.output_name())
             .unwrap_or_else(|_| "?".to_string());
         cols.push(col_sql);
@@ -1576,7 +1576,7 @@ fn extract_grouping_func_args(gf: &pg_sys::GroupingFunc) -> Result<Vec<String>, 
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let name = unsafe { node_to_expr(node_ptr) }
+        let name = safe_node_to_expr(node_ptr)
             .map(|e| e.output_name())
             .unwrap_or_else(|_| "?".to_string());
         names.push(name);
@@ -1758,7 +1758,7 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
     // Rewrite the WHERE expression, replacing scalar subquery occurrences
     // with column references to the CROSS/INNER JOIN aliases.
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let where_expr = unsafe { node_to_expr(select.whereClause) }
+    let where_expr = safe_node_to_expr(select.whereClause)
         .map(|e| e.to_sql())
         .unwrap_or_else(|_| "TRUE".to_string());
 
@@ -1785,7 +1785,7 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val) }
+        let expr = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "NULL".to_string());
         let alias_part = if !rt.name.is_null() {
@@ -1808,7 +1808,7 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
             let mut groups = Vec::new();
             for node_ptr in group_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(node_ptr) }
+                let expr = safe_node_to_expr(node_ptr)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 groups.push(expr);
@@ -1822,7 +1822,7 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let having_expr = unsafe { node_to_expr(select.havingClause) }
+        let having_expr = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" HAVING {having_expr}")
@@ -1848,7 +1848,7 @@ pub fn rewrite_scalar_subquery_in_where(query: &str) -> Result<String, PgTrickle
                     continue;
                 }
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(sb.node) }
+                let expr = safe_node_to_expr(sb.node)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 let dir = match sb.sortby_dir {
@@ -2079,7 +2079,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         }
 
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let inner_where_expr = unsafe { node_to_expr(inner.whereClause) }.map_err(|_| {
+        let inner_where_expr = safe_node_to_expr(inner.whereClause).map_err(|_| {
             PgTrickleError::QueryParseError("Failed to parse inner scalar subquery WHERE".into())
         })?;
 
@@ -2108,7 +2108,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
                 continue;
             }
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(rt.val) }
+            let expr = safe_node_to_expr(rt.val)
                 .map(|e| e.strip_qualifier().to_sql())
                 .unwrap_or_else(|_| "NULL".to_string());
             inner_target_exprs.push(expr);
@@ -2159,7 +2159,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
                 let mut groups = group_by_items;
                 for node_ptr in existing_groups.iter_ptr() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let expr = unsafe { node_to_expr(node_ptr) }
+                    let expr = safe_node_to_expr(node_ptr)
                         .map(|e| e.to_sql())
                         .unwrap_or_else(|_| "?".to_string());
                     groups.push(expr);
@@ -2175,7 +2175,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         // HAVING (preserve from inner if present)
         let having_sql = if has_having {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_expr = unsafe { node_to_expr(inner.havingClause) }
+            let having_expr = safe_node_to_expr(inner.havingClause)
                 .map(|e| e.to_sql())
                 .unwrap_or_else(|_| "TRUE".to_string());
             format!(" HAVING {having_expr}")
@@ -2238,7 +2238,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
                 continue;
             }
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(rt.val) }
+            let expr = safe_node_to_expr(rt.val)
                 .map(|e| e.to_sql())
                 .unwrap_or_else(|_| "NULL".to_string());
             let alias_part = if !rt.name.is_null() {
@@ -2264,7 +2264,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let w = unsafe { node_to_expr(select.whereClause) }
+        let w = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {w}")
@@ -2281,7 +2281,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
             let mut groups = Vec::new();
             for node_ptr in group_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(node_ptr) }
+                let expr = safe_node_to_expr(node_ptr)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 groups.push(expr);
@@ -2295,7 +2295,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let h = unsafe { node_to_expr(select.havingClause) }
+        let h = safe_node_to_expr(select.havingClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" HAVING {h}")
@@ -2321,7 +2321,7 @@ pub fn rewrite_correlated_scalar_in_select(query: &str) -> Result<String, PgTric
                     continue;
                 }
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(sb.node) }
+                let expr = safe_node_to_expr(sb.node)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 let dir = match sb.sortby_dir {
@@ -2740,9 +2740,9 @@ fn check_correlation_condition(
         return None;
     }
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let left_expr = unsafe { node_to_expr(aexpr.lexpr) }.ok()?;
+    let left_expr = safe_node_to_expr(aexpr.lexpr).ok()?;
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let right_expr = unsafe { node_to_expr(aexpr.rexpr) }.ok()?;
+    let right_expr = safe_node_to_expr(aexpr.rexpr).ok()?;
 
     // Check if left side is a bare outer column
     if let Expr::ColumnRef {
@@ -2821,7 +2821,7 @@ fn decorrelate_scalar_subquery(
             correlations.push(corr);
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(*cond_node) }
+            let expr = safe_node_to_expr(*cond_node)
                 .map(|e| e.to_sql())
                 .unwrap_or_else(|_| "TRUE".to_string());
             regular_conditions.push(expr);
@@ -2848,7 +2848,7 @@ fn decorrelate_scalar_subquery(
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val) }
+        let expr = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "NULL".to_string());
         original_target_exprs.push(expr);
@@ -3064,7 +3064,7 @@ unsafe fn deparse_with_demorgan(node: *mut pg_sys::Node) -> Result<String, PgTri
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
     if !is_node_type!(node, T_BoolExpr) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        return unsafe { node_to_expr(node) }.map(|e| e.to_sql());
+        return safe_node_to_expr(node).map(|e| e.to_sql());
     }
 
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
@@ -3126,7 +3126,7 @@ unsafe fn deparse_with_demorgan(node: *mut pg_sys::Node) -> Result<String, PgTri
 
             // NOT without applicable De Morgan — deparse normally.
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(node) }.map(|e| e.to_sql())
+            safe_node_to_expr(node).map(|e| e.to_sql())
         }
         pg_sys::BoolExprType::AND_EXPR => {
             // SAFETY: PgList::from_pg is safe for both null and valid list pointers from the parser.
@@ -3149,7 +3149,7 @@ unsafe fn deparse_with_demorgan(node: *mut pg_sys::Node) -> Result<String, PgTri
             Ok(parts.join(" OR "))
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        _ => unsafe { node_to_expr(node) }.map(|e| e.to_sql()),
+        _ => safe_node_to_expr(node).map(|e| e.to_sql()),
     }
 }
 
@@ -3257,7 +3257,7 @@ pub fn rewrite_sublinks_in_or(query: &str) -> Result<String, PgTrickleError> {
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(arg_ptr) }
+        let expr = safe_node_to_expr(arg_ptr)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         arm_exprs.push(expr);
@@ -3284,7 +3284,7 @@ pub fn rewrite_sublinks_in_or(query: &str) -> Result<String, PgTrickleError> {
                 continue;
             }
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(rt.val) }
+            let expr = safe_node_to_expr(rt.val)
                 .map(|e| e.to_sql())
                 .unwrap_or_else(|_| "NULL".to_string());
             let alias_part = if !rt.name.is_null() {
@@ -3386,7 +3386,7 @@ fn rewrite_and_with_or_sublinks(
                         continue;
                     }
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let expr = unsafe { node_to_expr(a) }
+                    let expr = safe_node_to_expr(a)
                         .map(|e| e.to_sql())
                         .unwrap_or_else(|_| "TRUE".to_string());
                     arms.push(expr);
@@ -3398,7 +3398,7 @@ fn rewrite_and_with_or_sublinks(
             }
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(arg_ptr) }
+        let expr = safe_node_to_expr(arg_ptr)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         other_conjuncts.push(expr);
@@ -3473,7 +3473,7 @@ fn deparse_full_select(select: &pg_sys::SelectStmt) -> Result<String, PgTrickleE
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(select.whereClause) }
+        let expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {expr}")
@@ -3501,7 +3501,7 @@ fn deparse_select_target_list(select: &pg_sys::SelectStmt) -> String {
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val) }
+        let expr = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "NULL".to_string());
         let alias_part = if !rt.name.is_null() {
@@ -3527,7 +3527,7 @@ fn deparse_group_clause(select: &pg_sys::SelectStmt) -> String {
     let mut groups = Vec::new();
     for node_ptr in group_list.iter_ptr() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(node_ptr) }
+        let expr = safe_node_to_expr(node_ptr)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "?".to_string());
         groups.push(expr);
@@ -3541,7 +3541,7 @@ fn deparse_having_clause(select: &pg_sys::SelectStmt) -> String {
         return String::new();
     }
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let expr = unsafe { node_to_expr(select.havingClause) }
+    let expr = safe_node_to_expr(select.havingClause)
         .map(|e| e.to_sql())
         .unwrap_or_else(|_| "TRUE".to_string());
     format!(" HAVING {expr}")
@@ -3568,7 +3568,7 @@ pub(crate) fn deparse_order_clause(select: &pg_sys::SelectStmt) -> String {
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(sb.node) }
+        let expr = safe_node_to_expr(sb.node)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "?".to_string());
         let dir = match sb.sortby_dir {
@@ -4115,7 +4115,7 @@ pub fn rewrite_multi_partition_windows(query: &str) -> Result<String, PgTrickleE
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val) }
+        let expr = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "NULL".to_string());
         let alias = if !rt.name.is_null() {
@@ -4132,7 +4132,7 @@ pub fn rewrite_multi_partition_windows(query: &str) -> Result<String, PgTrickleE
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(select.whereClause) }
+        let expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {expr}")
@@ -4320,7 +4320,7 @@ fn extract_window_info_from_targets(
             let mut keys: Vec<String> = Vec::new();
             for p in parts.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(p) }
+                let expr = safe_node_to_expr(p)
                     .map(|e| e.to_sql())
                     .unwrap_or_else(|_| "?".to_string());
                 keys.push(expr);
@@ -4341,7 +4341,7 @@ fn extract_window_info_from_targets(
 
         // Get the full function call as SQL
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let func_sql = unsafe { node_to_expr(rt.val) }
+        let func_sql = safe_node_to_expr(rt.val)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "NULL".to_string());
 
@@ -4490,7 +4490,7 @@ pub fn rewrite_nested_window_exprs(query: &str) -> Result<String, PgTrickleError
         unsafe { collect_all_window_func_nodes(rt.val, &mut wf_nodes) };
         for wf_node in wf_nodes {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let wf_sql = match unsafe { node_to_expr(wf_node) } {
+            let wf_sql = match safe_node_to_expr(wf_node) {
                 Ok(e) => e.to_sql(),
                 Err(_) => continue,
             };
@@ -4514,7 +4514,7 @@ pub fn rewrite_nested_window_exprs(query: &str) -> Result<String, PgTrickleError
         String::new()
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(select.whereClause) }
+        let expr = safe_node_to_expr(select.whereClause)
             .map(|e| e.to_sql())
             .unwrap_or_else(|_| "TRUE".to_string());
         format!(" WHERE {expr}")
@@ -4567,7 +4567,7 @@ pub fn rewrite_nested_window_exprs(query: &str) -> Result<String, PgTrickleError
         let has_wf_inside = !is_direct_wf && unsafe { node_contains_window_func(rt.val) };
 
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let mut expr_sql = match unsafe { node_to_expr(rt.val) } {
+        let mut expr_sql = match safe_node_to_expr(rt.val) {
             Ok(e) => e.strip_qualifier().to_sql(),
             Err(_) => continue,
         };
@@ -5914,5 +5914,178 @@ mod pg_tests {
         assert!(result.has_recursion);
         assert!(query_has_cte(query).expect("failed to detect recursive WITH"));
         assert!(query_has_recursive_cte(query).expect("failed to detect recursive WITH"));
+    }
+}
+
+// ── TEST-3: pure-Rust unit tests (no backend required) ──────────────────────
+//
+// 30+ tests covering pure-Rust helpers inside the rewrite module.
+// Functions that require a live PostgreSQL backend are tested via the
+// #[pg_test] suite above; these cover only backend-independent logic.
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    // ── expr_has_aggregate ──────────────────────────────────────────────
+
+    #[test]
+    fn test_expr_has_aggregate_sum() {
+        assert!(expr_has_aggregate("sum(amount)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_max() {
+        assert!(expr_has_aggregate("MAX(price)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_count() {
+        assert!(expr_has_aggregate("count(*)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_avg() {
+        assert!(expr_has_aggregate("avg(value)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_array_agg() {
+        assert!(expr_has_aggregate("array_agg(id ORDER BY id)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_false_for_plain_col() {
+        assert!(!expr_has_aggregate("price"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_false_for_window() {
+        // row_number() is a window func, not an aggregate
+        assert!(!expr_has_aggregate("row_number()"));
+    }
+
+    // ── strip_table_qualifier ───────────────────────────────────────────
+
+    #[test]
+    fn test_strip_qualifier_unqualified() {
+        assert_eq!(strip_table_qualifier("id"), "id");
+    }
+
+    #[test]
+    fn test_strip_qualifier_single_dot() {
+        assert_eq!(strip_table_qualifier("t.id"), "id");
+    }
+
+    #[test]
+    fn test_strip_qualifier_schema_table_col() {
+        // Only the part after the FIRST dot is kept
+        assert_eq!(strip_table_qualifier("public.orders.id"), "orders.id");
+    }
+
+    // ── contains_word_boundary ──────────────────────────────────────────
+
+    #[test]
+    fn test_word_boundary_present() {
+        assert!(contains_word_boundary("SELECT DISTINCT col FROM t", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_word_boundary_at_start() {
+        assert!(contains_word_boundary("DISTINCT col", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_word_boundary_at_end() {
+        assert!(contains_word_boundary("col DISTINCT", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_word_boundary_absent() {
+        assert!(!contains_word_boundary("SELECT DISTINCTLY col FROM t", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_word_boundary_partial_prefix() {
+        // "INTO" should not match "INTO" inside "NATURAL"
+        assert!(!contains_word_boundary("NATURAL JOIN t", "INTO"));
+    }
+
+    #[test]
+    fn test_word_boundary_underscore_adjacent_not_boundary() {
+        // "name_col" should NOT count as word-boundary match for "name"
+        assert!(!contains_word_boundary("name_col", "name"));
+    }
+
+    #[test]
+    fn test_word_boundary_exact_string() {
+        assert!(contains_word_boundary("RECURSIVE", "RECURSIVE"));
+    }
+
+    // ── query-level structural detection (pure-regex, no parser) ────────
+    // These call the same pattern-based helpers used internally.
+
+    #[test]
+    fn test_expr_has_aggregate_bool_and() {
+        assert!(expr_has_aggregate("bool_and(flag)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_bool_or() {
+        assert!(expr_has_aggregate("bool_or(flag)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_every() {
+        assert!(expr_has_aggregate("every(active)"));
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_min() {
+        assert!(expr_has_aggregate("min(timestamp)"));
+    }
+
+    #[test]
+    fn test_strip_qualifier_empty_string() {
+        assert_eq!(strip_table_qualifier(""), "");
+    }
+
+    #[test]
+    fn test_word_boundary_empty_text() {
+        assert!(!contains_word_boundary("", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_word_boundary_empty_word() {
+        // Searching for empty word: every position matches
+        assert!(contains_word_boundary("any text", ""));
+    }
+
+    #[test]
+    fn test_word_boundary_with_comma_separator() {
+        // "a, b" — word "a" at start, followed by comma (non-alnum, non-underscore)
+        assert!(contains_word_boundary("a, b", "a"));
+    }
+
+    #[test]
+    fn test_word_boundary_with_paren_separator() {
+        assert!(contains_word_boundary("SUM(col)", "SUM"));
+    }
+
+    #[test]
+    fn test_word_boundary_distinct_in_distinct_on() {
+        // "DISTINCT ON" — "DISTINCT" appears followed by space
+        assert!(contains_word_boundary("DISTINCT ON (col)", "DISTINCT"));
+    }
+
+    #[test]
+    fn test_strip_qualifier_dot_at_start() {
+        // Edge case: dot at position 0
+        assert_eq!(strip_table_qualifier(".col"), "col");
+    }
+
+    #[test]
+    fn test_expr_has_aggregate_string_agg() {
+        assert!(expr_has_aggregate("string_agg(name, ',')"));
     }
 }

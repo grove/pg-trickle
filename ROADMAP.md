@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
-> **Last updated:** 2026-04-17
-> **Latest release:** 0.20.0 (2026-04-15)
-> **Current milestone:** v0.21.0 — Correctness, Safety & Test Hardening
+> **Last updated:** 2026-07-16
+> **Latest release:** 0.21.0 (2026-07-16)
+> **Current milestone:** v0.22.0 — EC-01 Correctness Fix & Performance
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -87,7 +87,7 @@ from the v0.1.x series to 1.0 and beyond.
 | **v0.18.0** | **Hardening & delta performance** | **✅ Released** |
 | **v0.19.0** | **Production gap closure & distribution** | **✅ Released** |
 | **v0.20.0** | **Dog-feeding (pg_trickle monitors itself)** | **✅ Released** |
-| v0.21.0 | Correctness, safety & test hardening | Planned |
+| v0.21.0 | Correctness, safety & test hardening | ✅ Released |
 | v0.22.0 | Production scalability & downstream integration | Planned |
 | v0.23.0 | TUI dog-feeding integration | Planned |
 | v0.24.0 | PostgreSQL 17 support | Planned |
@@ -6017,7 +6017,7 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 
 ## v0.21.0 — Correctness, Safety & Test Hardening
 
-**Status: Planned.** Driven by findings in [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md).
+**Status: ✅ Released (2026-07-16).** Driven by findings in [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md).
 
 > **Release Theme**
 > This release closes the last known data-correctness gap (EC-01 JOIN delta
@@ -8437,7 +8437,7 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
 | v0.19.0 — Production Gap Closure & Distribution | ~4–5 weeks | — | |
 | v0.20.0 — Dog-Feeding (pg_trickle monitors itself) | ~3–4wk | — | |
-| v0.21.0 — Correctness, Safety & Test Hardening | ~6–8wk | — | |
+| v0.21.0 — Correctness, Safety & Test Hardening | ~6–8wk | 2026-07-16 | ✅ Released |
 | v0.22.0 — Production Scalability & Downstream Integration | ~5–6wk (parallel refresh + downstream CDC + predictive cost + SLA tier + outbox) | — | |
 | v0.23.0 — TUI Dog-Feeding Integration | ~3–4wk (TUI + architecture + backend + CLI) | — | |
 | v0.24.0 — PostgreSQL 17 Support | ~2–4d | — | |

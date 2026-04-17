@@ -355,6 +355,30 @@ pub(crate) fn parse_qualified_name_pub(name: &str) -> Result<(String, String), P
     parse_qualified_name(name)
 }
 
+// TEST-4: Public fuzz-harness wrappers — thin re-exports so the cargo-fuzz
+// target (a separate crate) can reach these pure-Rust helpers without a
+// PostgreSQL backend.
+
+/// Public wrapper for [`parse_schedule`] used by the fuzz harness.
+pub fn parse_schedule_pub(s: &str) -> Result<Schedule, PgTrickleError> {
+    parse_schedule(s)
+}
+
+/// Public wrapper for [`validate_cron`] used by the fuzz harness.
+pub fn validate_cron_pub(s: &str) -> Result<(), PgTrickleError> {
+    validate_cron(s)
+}
+
+/// Public wrapper for [`detect_select_star`] used by the fuzz harness.
+pub fn detect_select_star_pub(s: &str) -> bool {
+    detect_select_star(s)
+}
+
+/// Public wrapper for [`detect_volatile_functions`] used by the fuzz harness.
+pub fn detect_volatile_functions_pub(s: &str) -> Option<&'static str> {
+    detect_volatile_functions(s)
+}
+
 /// Parse a possibly schema-qualified name into `(schema, table)`.
 pub(super) fn parse_qualified_name(name: &str) -> Result<(String, String), PgTrickleError> {
     let parts: Vec<&str> = name.splitn(2, '.').collect();
@@ -1138,6 +1162,77 @@ pub(super) fn detect_select_star(query: &str) -> bool {
         }
     }
     false
+}
+
+// ── OP-6: Volatile function detection ──────────────────────────────────────
+//
+// Warn (or reject in DIFFERENTIAL mode) when a defining query contains
+// non-deterministic functions like `now()`, `random()`, `gen_random_uuid()`
+// etc. without the `non_deterministic => true` flag. These functions produce
+// different results each time the query runs, making differential maintenance
+// incorrect: the IVM delta assumes stable row IDs and content, but volatile
+// functions violate that assumption.
+//
+// This is a pre-v1.0 safety gate. False positives are acceptable (warn) but
+// false negatives (missing detection) allow silent wrong-result bugs.
+
+/// Well-known volatile built-in functions that should never appear in a
+/// DIFFERENTIAL stream table's defining query without explicit acknowledgement.
+const VOLATILE_FN_PATTERNS: &[&str] = &[
+    "now()",
+    "current_timestamp",
+    "current_date",
+    "current_time",
+    "localtime",
+    "localtimestamp",
+    "clock_timestamp()",
+    "transaction_timestamp()",
+    "statement_timestamp()",
+    "timeofday()",
+    "random()",
+    "setseed(",
+    "gen_random_uuid()",
+    "gen_random_bytes(",
+    "uuid_generate_v1()",
+    "uuid_generate_v4()",
+    "txid_current()",
+    "pg_current_xact_id()",
+];
+
+/// Detect whether `query` contains any of the known volatile functions.
+///
+/// Returns the first matching pattern if found. The check is case-insensitive
+/// and operates on the raw query text. It is intentionally conservative —
+/// false positives are OK (produces a warning), but false negatives silently
+/// allow non-determinism into the stream table.
+pub(super) fn detect_volatile_functions(query: &str) -> Option<&'static str> {
+    let lower = query.to_lowercase();
+    for &pattern in VOLATILE_FN_PATTERNS {
+        if lower.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
+/// Emit a WARNING if the defining query uses a volatile function.
+///
+/// Called at `create_stream_table` time. Does not fail creation — the warning
+/// is advisory. Users who intentionally use non-deterministic functions
+/// (e.g. a FULL-refresh-only stream table) may safely ignore it.
+pub(super) fn warn_volatile_functions(query: &str) {
+    if let Some(pattern) = detect_volatile_functions(query) {
+        pgrx::warning!(
+            "pg_trickle: defining query contains a volatile/non-deterministic function \
+             ('{}') that may produce different results on each refresh. \
+             DIFFERENTIAL stream tables rely on stable row identities — using volatile \
+             functions can cause phantom rows, missed deletes, or stale data. \
+             If this is intentional, use FULL refresh mode. \
+             For append-only sources, consider using an explicit timestamp column \
+             instead of now() or current_timestamp.",
+            pattern
+        );
+    }
 }
 
 /// Classify a source relation as TABLE, STREAM_TABLE, or VIEW.
@@ -2524,4 +2619,221 @@ pub(super) fn quote_ident(name: &str) -> String {
 pub fn restore_stream_tables() -> Result<(), crate::error::PgTrickleError> {
     pgrx::info!("restore_stream_tables() called. This is a stub for the 0.8.0 pg_dump support.");
     Ok(())
+}
+
+// ── TEST-1: Unit tests for api/helpers.rs ─────────────────────────────────
+//
+// 25+ unit tests covering query validation helpers, schema helpers,
+// CDC orchestration utilities, and the new OP-6 volatile-function detection.
+// No PostgreSQL backend is required — all tested functions are pure Rust.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_qualified_name ────────────────────────────────────────────
+
+    #[test]
+    fn test_pqn_schema_dot_table() {
+        // parse_qualified_name calls SPI for single-part names, so we only
+        // test the two-part variant here (no backend needed).
+        let result = parse_qualified_name("myschema.orders");
+        assert_eq!(result.unwrap(), ("myschema".to_string(), "orders".to_string()));
+    }
+
+    #[test]
+    fn test_pqn_two_parts_with_uppercase() {
+        let result = parse_qualified_name("Public.MyTable");
+        assert_eq!(result.unwrap(), ("Public".to_string(), "MyTable".to_string()));
+    }
+
+    // ── quote_identifier ───────────────────────────────────────────────
+
+    #[test]
+    fn test_quote_identifier_lowercase_simple() {
+        assert_eq!(quote_identifier("orders"), "\"orders\"");
+    }
+
+    #[test]
+    fn test_quote_identifier_with_space() {
+        assert_eq!(quote_identifier("my table"), "\"my table\"");
+    }
+
+    #[test]
+    fn test_quote_identifier_with_double_quote() {
+        assert_eq!(quote_identifier("my\"col"), "\"my\"\"col\"");
+    }
+
+    // ── quote_ident ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_quote_ident_simple_lowercase() {
+        // simple lower-case identifiers are returned unquoted
+        assert_eq!(quote_ident("orders"), "orders");
+    }
+
+    #[test]
+    fn test_quote_ident_uppercase_needs_quoting() {
+        assert_eq!(quote_ident("Orders"), "\"Orders\"");
+    }
+
+    #[test]
+    fn test_quote_ident_leading_digit_needs_quoting() {
+        assert_eq!(quote_ident("1bad"), "\"1bad\"");
+    }
+
+    #[test]
+    fn test_quote_ident_underscore_prefix_ok() {
+        assert_eq!(quote_ident("_private"), "_private");
+    }
+
+    // ── parse_schedule ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_schedule_duration_seconds() {
+        let s = parse_schedule("30s").unwrap();
+        assert!(matches!(s, Schedule::Duration(30)));
+    }
+
+    #[test]
+    fn test_parse_schedule_duration_minutes() {
+        let s = parse_schedule("5m").unwrap();
+        assert!(matches!(s, Schedule::Duration(300)));
+    }
+
+    #[test]
+    fn test_parse_schedule_duration_hours() {
+        let s = parse_schedule("1h").unwrap();
+        assert!(matches!(s, Schedule::Duration(3600)));
+    }
+
+    #[test]
+    fn test_parse_schedule_cron_at_prefix() {
+        let s = parse_schedule("@daily").unwrap();
+        assert!(matches!(s, Schedule::Cron(_)));
+    }
+
+    #[test]
+    fn test_parse_schedule_cron_five_fields() {
+        let s = parse_schedule("0 * * * *").unwrap();
+        assert!(matches!(s, Schedule::Cron(_)));
+    }
+
+    #[test]
+    fn test_parse_schedule_empty_is_error() {
+        assert!(parse_schedule("").is_err());
+    }
+
+    #[test]
+    fn test_parse_schedule_invalid_duration() {
+        assert!(parse_schedule("99z").is_err());
+    }
+
+    #[test]
+    fn test_parse_schedule_invalid_cron() {
+        // 7 fields is not a valid 5-field cron
+        assert!(parse_schedule("* * * * * * *").is_err());
+    }
+
+    // ── detect_select_star ─────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_select_star_bare() {
+        assert!(detect_select_star("SELECT * FROM t"));
+    }
+
+    #[test]
+    fn test_detect_select_star_table_qualified() {
+        assert!(detect_select_star("SELECT t.* FROM t"));
+    }
+
+    #[test]
+    fn test_detect_select_star_count_star_ignored() {
+        assert!(!detect_select_star("SELECT count(*) FROM t"));
+    }
+
+    #[test]
+    fn test_detect_select_star_explicit_cols() {
+        assert!(!detect_select_star("SELECT id, name FROM t"));
+    }
+
+    // ── detect_volatile_functions (OP-6) ────────────────────────────────
+
+    #[test]
+    fn test_volatile_now_detected() {
+        assert!(detect_volatile_functions("SELECT now(), id FROM t").is_some());
+    }
+
+    #[test]
+    fn test_volatile_random_detected() {
+        assert!(detect_volatile_functions("SELECT random() AS r FROM t").is_some());
+    }
+
+    #[test]
+    fn test_volatile_current_timestamp_detected() {
+        assert!(detect_volatile_functions("SELECT id, current_timestamp FROM t").is_some());
+    }
+
+    #[test]
+    fn test_volatile_gen_random_uuid_detected() {
+        assert!(detect_volatile_functions("SELECT gen_random_uuid()").is_some());
+    }
+
+    #[test]
+    fn test_volatile_clock_timestamp_detected() {
+        assert!(detect_volatile_functions("SELECT clock_timestamp()").is_some());
+    }
+
+    #[test]
+    fn test_volatile_none_for_stable_query() {
+        let q = "SELECT id, name, amount FROM orders WHERE id > 100";
+        assert!(detect_volatile_functions(q).is_none());
+    }
+
+    #[test]
+    fn test_volatile_case_insensitive() {
+        // NOW() in uppercase should still be detected
+        assert!(detect_volatile_functions("SELECT NOW(), id FROM t").is_some());
+    }
+
+    #[test]
+    fn test_volatile_txid_current_detected() {
+        assert!(detect_volatile_functions("SELECT txid_current()").is_some());
+    }
+
+    #[test]
+    fn test_volatile_uuid_v4_detected() {
+        assert!(detect_volatile_functions("SELECT uuid_generate_v4()").is_some());
+    }
+
+    // ── cron_is_due ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cron_is_due_no_last_refresh() {
+        // Never refreshed → always due
+        assert!(cron_is_due("0 * * * *", None));
+    }
+
+    #[test]
+    fn test_cron_is_due_epoch_zero() {
+        // epoch=0 means it was refreshed at the Unix epoch — due by now
+        assert!(cron_is_due("0 * * * *", Some(0)));
+    }
+
+    // ── validate_cron ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_cron_valid_daily() {
+        assert!(validate_cron("@daily").is_ok());
+    }
+
+    #[test]
+    fn test_validate_cron_valid_five_fields() {
+        assert!(validate_cron("*/5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn test_validate_cron_invalid_expression() {
+        assert!(validate_cron("not-a-cron").is_err());
+    }
 }

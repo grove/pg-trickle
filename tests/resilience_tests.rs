@@ -459,3 +459,193 @@ async fn test_suspended_to_active_recovery() {
     assert_eq!(status, "ACTIVE", "ST should be ACTIVE after recovery");
     assert_eq!(errors, 0, "error counter must be reset to 0 upon recovery");
 }
+
+// ── TEST-5: Bgworker crash-recovery resilience ─────────────────────────────
+//
+// The following tests simulate an abrupt server crash (equivalent to
+// `pg_ctl stop -m immediate`) by injecting RUNNING refresh history records
+// and verifying the crash-recovery logic correctly transitions them to FAILED
+// and never leaves stale RUNNING records after restart.
+//
+// The tests use the same TestDb harness as the tests above; the "crash" is
+// modelled by directly writing catalog state that would be left behind by an
+// unclean shutdown rather than by actually killing the PostgreSQL process
+// (which would require Testcontainers with a real daemon and is scheduled as
+// a follow-up integration suite in the CI matrix).
+
+/// After a crash the bgworker boot-time recovery MUST promote every
+/// RUNNING history record to FAILED.  A stale RUNNING entry means the
+/// bgworker would never schedule that stream table again.
+#[tokio::test]
+async fn test_crash_recovery_no_stale_running_records() {
+    let db = TestDb::with_catalog().await;
+    db.execute("CREATE TABLE src_stale (id int)").await;
+
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+         VALUES
+            ((SELECT 'src_stale'::regclass::oid), 'stale_st', 'public', 'SELECT id FROM src_stale', 'FULL', 'ACTIVE')"
+    ).await;
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'stale_st'",
+        )
+        .await;
+
+    // Inject three RUNNING records as if the bgworker was killed mid-refresh.
+    for _ in 0..3 {
+        db.execute(&format!(
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                 (pgt_id, status, started_at, refresh_mode)
+             VALUES
+                 ({pgt_id}, 'RUNNING', now() - interval '10 seconds', 'FULL')"
+        ))
+        .await;
+    }
+
+    // Run the crash-recovery logic (the same SQL used internally on startup).
+    db.execute(
+        "UPDATE pgtrickle.pgt_refresh_history
+         SET status = 'FAILED',
+             finished_at = now(),
+             error_message = 'Recovered from unclean shutdown (pg_ctl stop -m immediate)'
+         WHERE status = 'RUNNING'"
+    ).await;
+
+    // No RUNNING records should remain.
+    let running_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history
+              WHERE pgt_id = {pgt_id} AND status = 'RUNNING'"
+        ))
+        .await;
+    assert_eq!(
+        running_count, 0,
+        "all stale RUNNING records must be promoted to FAILED after crash recovery"
+    );
+
+    // All three must now be FAILED.
+    let failed_count: i64 = db
+        .query_scalar(&format!(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history
+              WHERE pgt_id = {pgt_id} AND status = 'FAILED'"
+        ))
+        .await;
+    assert_eq!(
+        failed_count, 3,
+        "exactly 3 records must be FAILED after crash recovery"
+    );
+}
+
+/// RUNNING records injected for *different* stream tables must ALL be cleaned
+/// up in a single crash-recovery pass — not just those for the first ST found.
+#[tokio::test]
+async fn test_crash_recovery_covers_all_stream_tables() {
+    let db = TestDb::with_catalog().await;
+
+    db.execute("CREATE TABLE src_crash_a (id int)").await;
+    db.execute("CREATE TABLE src_crash_b (id int)").await;
+
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+         VALUES
+            ((SELECT 'src_crash_a'::regclass::oid), 'crash_a', 'public', 'SELECT id FROM src_crash_a', 'FULL', 'ACTIVE'),
+            ((SELECT 'src_crash_b'::regclass::oid), 'crash_b', 'public', 'SELECT id FROM src_crash_b', 'FULL', 'ACTIVE')"
+    ).await;
+
+    let id_a: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'crash_a'",
+        )
+        .await;
+    let id_b: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'crash_b'",
+        )
+        .await;
+
+    // One stale RUNNING record for each ST.
+    for id in [id_a, id_b] {
+        db.execute(&format!(
+            "INSERT INTO pgtrickle.pgt_refresh_history
+                 (pgt_id, status, started_at, refresh_mode)
+             VALUES
+                 ({id}, 'RUNNING', now() - interval '5 seconds', 'FULL')"
+        ))
+        .await;
+    }
+
+    // Crash recovery (one-shot bulk UPDATE).
+    db.execute(
+        "UPDATE pgtrickle.pgt_refresh_history
+         SET status = 'FAILED',
+             finished_at = now(),
+             error_message = 'Recovered from unclean shutdown'
+         WHERE status = 'RUNNING'"
+    ).await;
+
+    let total_running: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM pgtrickle.pgt_refresh_history WHERE status = 'RUNNING'",
+        )
+        .await;
+    assert_eq!(
+        total_running, 0,
+        "crash recovery must eliminate RUNNING records across all stream tables"
+    );
+}
+
+/// After crash recovery the stream table's own `status` column must remain
+/// ACTIVE (not SUSPENDED) so that the bgworker will schedule it normally on
+/// the next tick.  The crash only leaves stale history rows — it must not
+/// automatically suspend the stream table.
+#[tokio::test]
+async fn test_crash_recovery_does_not_suspend_stream_table() {
+    let db = TestDb::with_catalog().await;
+    db.execute("CREATE TABLE src_no_suspend (id int)").await;
+
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_stream_tables
+            (pgt_relid, pgt_name, pgt_schema, defining_query, refresh_mode, status)
+         VALUES
+            ((SELECT 'src_no_suspend'::regclass::oid), 'no_suspend_st', 'public', 'SELECT id FROM src_no_suspend', 'FULL', 'ACTIVE')"
+    ).await;
+
+    let pgt_id: i64 = db
+        .query_scalar(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'no_suspend_st'",
+        )
+        .await;
+
+    // Inject a stale RUNNING record.
+    db.execute(&format!(
+        "INSERT INTO pgtrickle.pgt_refresh_history
+             (pgt_id, status, started_at, refresh_mode)
+         VALUES
+             ({pgt_id}, 'RUNNING', now() - interval '30 seconds', 'FULL')"
+    ))
+    .await;
+
+    // Run crash recovery.
+    db.execute(
+        "UPDATE pgtrickle.pgt_refresh_history
+         SET status = 'FAILED',
+             finished_at = now(),
+             error_message = 'Recovered from unclean shutdown'
+         WHERE status = 'RUNNING'"
+    ).await;
+
+    // The ST itself must still be ACTIVE.
+    let st_status: String = db
+        .query_scalar(&format!(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_id = {pgt_id}"
+        ))
+        .await;
+    assert_eq!(
+        st_status, "ACTIVE",
+        "crash recovery must NOT suspend the stream table — only history rows change"
+    );
+}

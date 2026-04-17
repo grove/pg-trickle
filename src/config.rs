@@ -333,6 +333,29 @@ pub static PGS_CONNECTION_POOLER_MODE: GucSetting<Option<std::ffi::CString>> =
 /// Set to 0 to disable automatic cleanup (history grows unbounded).
 pub static PGS_HISTORY_RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(90);
 
+// ── OP-2: Prometheus metrics HTTP port ──────────────────────────────────────
+
+/// TCP port on which the per-database scheduler serves an OpenMetrics
+/// (Prometheus) endpoint at `GET /metrics`.
+///
+/// Default `0` means the endpoint is disabled.  When set to a valid port
+/// number (1–65535), the scheduler spawns a background thread that
+/// handles exactly one connection per poll cycle.  The server is single-
+/// threaded and designed for low-frequency scraping (≤ once per second).
+///
+/// Example:
+/// ```sql
+/// ALTER SYSTEM SET pg_trickle.metrics_port = 9188;
+/// SELECT pg_reload_conf();
+/// ```
+pub static PGS_METRICS_PORT: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// OP-2: Returns the configured Prometheus metrics port.
+/// Returns `0` when the endpoint is disabled.
+pub fn pg_trickle_metrics_port() -> i32 {
+    PGS_METRICS_PORT.get()
+}
+
 /// WAKE-1: Event-driven scheduler wake via LISTEN/NOTIFY.
 ///
 /// When enabled, CDC triggers emit `pg_notify('pgtrickle_wake', '')` after
@@ -1592,6 +1615,19 @@ pub fn register_gucs() {
            df_threshold_advice when confidence is HIGH and delta > 5%%. \
            'full' — also apply scheduling hints from df_scheduling_interference.",
         &PGS_DOG_FEEDING_AUTO_APPLY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // OP-2: Prometheus metrics HTTP port.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.metrics_port",
+        c"TCP port for the Prometheus/OpenMetrics endpoint served by the scheduler (0 = off).",
+        c"When non-zero, the per-database scheduler exposes all pg_trickle monitoring \
+           metrics at GET /metrics on this port.  Default 0 disables the endpoint.",
+        &PGS_METRICS_PORT,
+        0,     // min
+        65535, // max
         GucContext::Suset,
         GucFlags::default(),
     );

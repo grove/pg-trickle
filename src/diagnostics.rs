@@ -1973,4 +1973,77 @@ mod tests {
         assert_eq!(format_bytes(52_428_800), "50.0 MB");
         assert_eq!(format_bytes(2_147_483_648), "2.0 GB");
     }
+
+    // ── TEST-2: Additional unit tests for diagnostics.rs ──────────────
+
+    #[test]
+    fn test_classify_error_user_unsupported() {
+        let (cat, _) = classify_error("unsupported operator: EXCEPT ALL");
+        assert_eq!(cat, "user");
+    }
+
+    #[test]
+    fn test_classify_error_schema_changed() {
+        let (cat, _) = classify_error("upstream table schema changed: OID 12345");
+        assert_eq!(cat, "schema");
+    }
+
+    #[test]
+    fn test_classify_error_correctness_phantom() {
+        let (cat, _) = classify_error("phantom rows detected after refresh cycle");
+        assert_eq!(cat, "correctness");
+    }
+
+    #[test]
+    fn test_classify_error_performance_lock_timeout() {
+        let (cat, _) = classify_error("lock timeout while waiting for stream table refresh");
+        assert_eq!(cat, "performance");
+    }
+
+    #[test]
+    fn test_classify_error_infrastructure_permission() {
+        let (cat, _) = classify_error("permission denied for table orders");
+        assert_eq!(cat, "infrastructure");
+    }
+
+    #[test]
+    fn test_classify_error_infrastructure_default() {
+        // An unknown error → falls through to infrastructure category
+        let (cat, _) = classify_error("something completely unknown happened");
+        assert_eq!(cat, "infrastructure");
+    }
+
+    #[test]
+    fn test_classify_error_is_case_insensitive() {
+        // classify_error lowercases internally, so upper-case input should match
+        let (cat, _) = classify_error("QUERY PARSE ERROR: unexpected token");
+        assert_eq!(cat, "user");
+    }
+
+    #[test]
+    fn test_compute_recommendation_already_on_correct_mode() {
+        // Low change ratio + fast diff → KEEP if already on DIFFERENTIAL
+        let input = DiagnosticsInput {
+            change_ratio_current: Some(0.01),
+            change_ratio_avg: Some(0.02),
+            history_rows_total: 100,
+            diff_avg_ms: Some(10.0),
+            full_avg_ms: Some(300.0),
+            history_rows_diff: 80,
+            history_rows_full: 20,
+            join_count: 0,
+            agg_depth: 0,
+            has_window: false,
+            subquery_count: 0,
+            target_size_bytes: Some(500_000_000),
+            has_covering_index: Some(true),
+            diff_p95_ms: Some(15.0),
+            diff_p50_ms: Some(10.0),
+            latency_history_rows: 80,
+        };
+        let signals = collect_signals(&input);
+        // Already on DIFFERENTIAL — should return KEEP
+        let rec = compute_recommendation(&signals, Some("DIFFERENTIAL"));
+        assert_eq!(rec.recommended_mode, "KEEP");
+    }
 }
