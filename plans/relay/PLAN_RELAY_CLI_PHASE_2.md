@@ -1133,106 +1133,77 @@ table (avoids the circular dependency).
 
 #### Catalog Schema
 
+Two tables: one for forward pipelines (outbox → sink), one for reverse
+(source → inbox).
+
 ```sql
-CREATE TABLE pgtrickle.relay_config (
-    id                  BIGSERIAL PRIMARY KEY,
-    name                TEXT NOT NULL UNIQUE,       -- pipeline name, e.g. "orders-to-kafka"
-    enabled             BOOLEAN NOT NULL DEFAULT true,
-    mode                TEXT NOT NULL,              -- 'forward' | 'reverse'
-
-    -- Source
-    source_type         TEXT NOT NULL,              -- 'outbox' | 'kafka' | 'nats' | ...
-    source_config       JSONB NOT NULL DEFAULT '{}',
-
-    -- Sink
-    sink_type           TEXT NOT NULL,              -- 'nats' | 'webhook' | 'kafka' | ...
-    sink_config         JSONB NOT NULL DEFAULT '{}',
-
-    -- Operational settings (null = use process-level defaults)
-    batch_size          INT,
-    poll_interval_ms    INT,
-    visibility_seconds  INT,
-    rate_limit_mps      INT,                        -- messages per second; null = unlimited
-    log_level           TEXT,
-    dlq_enabled         BOOLEAN,
-    metrics_labels      JSONB,                      -- extra Prometheus label k/v pairs
-
-    -- Routing (null = use process-level defaults)
-    subject_template    TEXT,
-    routing_rules       JSONB,                      -- array of {match, subject} objects
-
-    -- Audit
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_by          TEXT,
-    version             BIGINT NOT NULL DEFAULT 1,  -- incremented on each update
-
-    CONSTRAINT valid_mode        CHECK (mode IN ('forward', 'reverse')),
-    CONSTRAINT valid_source_type CHECK (source_type IN (
-        'outbox', 'kafka', 'nats', 'webhook', 'redis', 'sqs', 'rabbitmq',
-        'stdin', 'mqtt', 'kinesis', 'gcp-pubsub', 'azure-servicebus', 'pulsar'
-    )),
-    CONSTRAINT valid_sink_type CHECK (sink_type IN (
-        'nats', 'webhook', 'kafka', 'stdout', 'redis', 'sqs', 'pg-inbox',
-        'rabbitmq', 'elasticsearch', 'clickhouse', 'mqtt', 'kinesis',
-        'gcp-pubsub', 'azure-servicebus', 's3', 'gcs', 'azure-blob', 'pulsar'
-    ))
+-- Forward pipelines (outbox → sink)
+CREATE TABLE pgtrickle.relay_outbox_config (
+    id              BIGSERIAL PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,           -- pipeline name
+    enabled         BOOLEAN NOT NULL DEFAULT true,
+    
+    source_type     TEXT NOT NULL DEFAULT 'outbox', -- always 'outbox'
+    source_config   JSONB NOT NULL DEFAULT '{}',   -- outbox name, consumer group, etc.
+    
+    sink_type       TEXT NOT NULL,                  -- 'kafka', 'nats', 's3', etc.
+    sink_config     JSONB NOT NULL DEFAULT '{}',   -- destination config
+    
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Track configuration changes for audit and rollback
-CREATE TABLE pgtrickle.relay_config_history (
-    id          BIGSERIAL PRIMARY KEY,
-    config_id   BIGINT NOT NULL REFERENCES pgtrickle.relay_config(id),
-    version     BIGINT NOT NULL,
-    config_json JSONB NOT NULL,             -- snapshot of the row at this version
-    changed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    changed_by  TEXT,
-    change_note TEXT
+-- Reverse pipelines (source → inbox)
+CREATE TABLE pgtrickle.relay_inbox_config (
+    id              BIGSERIAL PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,           -- pipeline name
+    enabled         BOOLEAN NOT NULL DEFAULT true,
+    
+    source_type     TEXT NOT NULL,                  -- 'kafka', 'nats', 'webhook', etc.
+    source_config   JSONB NOT NULL DEFAULT '{}',   -- source connection config
+    
+    sink_type       TEXT NOT NULL DEFAULT 'pg-inbox', -- always 'pg-inbox'
+    sink_config     JSONB NOT NULL DEFAULT '{}',   -- inbox table name, etc.
+    
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- Trigger: auto-update updated_at + version + append to history
-CREATE OR REPLACE FUNCTION pgtrickle.relay_config_update()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-    NEW.updated_at := now();
-    NEW.version    := OLD.version + 1;
-    INSERT INTO pgtrickle.relay_config_history
-        (config_id, version, config_json, changed_by)
-    VALUES
-        (OLD.id, OLD.version, to_jsonb(OLD), NEW.updated_by);
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER relay_config_update
-    BEFORE UPDATE ON pgtrickle.relay_config
-    FOR EACH ROW EXECUTE FUNCTION pgtrickle.relay_config_update();
 ```
 
-#### SQL Functions
+#### SQL Helper Functions
+
+Optional convenience functions for CLI/application use:
 
 ```sql
--- Register or update a relay pipeline (idempotent)
-SELECT pgtrickle.relay_upsert_config(
-    name            => 'orders-to-kafka',
-    mode            => 'forward',
-    source_type     => 'outbox',
-    source_config   => '{"outbox": "order_events", "group": "orders-kafka"}'::jsonb,
-    sink_type       => 'kafka',
-    sink_config     => '{"brokers": "localhost:9092", "topic": "orders"}'::jsonb
-);
+-- Upsert forward pipeline
+INSERT INTO pgtrickle.relay_outbox_config
+    (name, source_config, sink_type, sink_config)
+VALUES
+    ('orders-to-kafka',
+     '{"outbox": "order_events", "group": "orders-kafka"}'::jsonb,
+     'kafka',
+     '{"brokers": "localhost:9092", "topic": "orders"}'::jsonb)
+ON CONFLICT (name) DO UPDATE SET
+    sink_type = EXCLUDED.sink_type,
+    sink_config = EXCLUDED.sink_config,
+    updated_at = now();
 
--- Enable / disable without deleting
-SELECT pgtrickle.relay_enable_pipeline('orders-to-kafka');
-SELECT pgtrickle.relay_disable_pipeline('orders-to-kafka');
+-- Upsert reverse pipeline
+INSERT INTO pgtrickle.relay_inbox_config
+    (name, source_type, source_config, sink_config)
+VALUES
+    ('kafka-to-orders',
+     'kafka',
+     '{"brokers": "localhost:9092", "topic": "orders"}'::jsonb,
+     '{"inbox_table": "orders_inbox"}'::jsonb)
+ON CONFLICT (name) DO UPDATE SET
+    source_type = EXCLUDED.source_type,
+    source_config = EXCLUDED.source_config,
+    updated_at = now();
 
--- Rollback to a previous version
-SELECT pgtrickle.relay_rollback_config('orders-to-kafka', version => 3);
-
--- View full history
-SELECT * FROM pgtrickle.relay_config_history
- WHERE config_id = (SELECT id FROM pgtrickle.relay_config WHERE name = 'orders-to-kafka')
- ORDER BY changed_at DESC;
+-- Enable / disable
+UPDATE pgtrickle.relay_outbox_config SET enabled = true WHERE name = 'orders-to-kafka';
+UPDATE pgtrickle.relay_outbox_config SET enabled = false WHERE name = 'orders-to-kafka';
 ```
 
 #### Bootstrap Flow
@@ -1250,19 +1221,20 @@ SELECT * FROM pgtrickle.relay_config_history
    # omit `pipeline` to run ALL enabled pipelines
    ```
 
-2. **Relay queries the DB** for the named pipeline (or all enabled pipelines):
+2. **Relay queries the DB** for enabled pipelines (forward + reverse):
 
    ```sql
-   SELECT * FROM pgtrickle.relay_config
-    WHERE enabled = true
-      AND ($1 IS NULL OR name = $1);
+   SELECT 'forward' as direction, * FROM pgtrickle.relay_outbox_config WHERE enabled = true
+   UNION ALL
+   SELECT 'reverse' as direction, * FROM pgtrickle.relay_inbox_config WHERE enabled = true;
    ```
 
-3. **If the table does not exist, or no matching row is found**, the relay
+3. **If the tables do not exist, or no enabled rows are found**, the relay
    logs a warning and falls back to the full file/env config.
 
    ```
-   WARN relay_config: pgtrickle.relay_config table not found — 
+   WARN relay_config: pgtrickle.relay_outbox_config and/or
+        pgtrickle.relay_inbox_config tables not found —
         falling back to file/env config
    ```
 
@@ -1270,29 +1242,51 @@ SELECT * FROM pgtrickle.relay_config_history
 
 #### LISTEN/NOTIFY Hot-Reload
 
-The relay subscribes to a PostgreSQL notification channel. When any
-pipeline config is updated, pg-trickle notifies the relay without polling:
+Automatic triggers fire on both config tables. The relay subscribes to a
+PostgreSQL notification channel and reacts immediately:
 
 ```sql
--- Automatically fires on INSERT/UPDATE/DELETE to relay_config
-CREATE OR REPLACE FUNCTION pgtrickle.relay_config_notify()
+-- Trigger for forward pipelines
+CREATE OR REPLACE FUNCTION pgtrickle.relay_outbox_config_notify()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     PERFORM pg_notify(
         'pgtrickle_relay_config',
         json_build_object(
-            'event',   TG_OP,
-            'name',    COALESCE(NEW.name, OLD.name),
-            'enabled', COALESCE(NEW.enabled, OLD.enabled)
+            'direction', 'forward',
+            'event',     TG_OP,
+            'name',      COALESCE(NEW.name, OLD.name),
+            'enabled',   COALESCE(NEW.enabled, OLD.enabled)
         )::text
     );
     RETURN NULL;
 END;
 $$;
 
-CREATE TRIGGER relay_config_notify
-    AFTER INSERT OR UPDATE OR DELETE ON pgtrickle.relay_config
-    FOR EACH ROW EXECUTE FUNCTION pgtrickle.relay_config_notify();
+CREATE TRIGGER relay_outbox_config_notify
+    AFTER INSERT OR UPDATE OR DELETE ON pgtrickle.relay_outbox_config
+    FOR EACH ROW EXECUTE FUNCTION pgtrickle.relay_outbox_config_notify();
+
+-- Similar trigger for reverse pipelines
+CREATE OR REPLACE FUNCTION pgtrickle.relay_inbox_config_notify()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify(
+        'pgtrickle_relay_config',
+        json_build_object(
+            'direction', 'reverse',
+            'event',     TG_OP,
+            'name',      COALESCE(NEW.name, OLD.name),
+            'enabled',   COALESCE(NEW.enabled, OLD.enabled)
+        )::text
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER relay_inbox_config_notify
+    AFTER INSERT OR UPDATE OR DELETE ON pgtrickle.relay_inbox_config
+    FOR EACH ROW EXECUTE FUNCTION pgtrickle.relay_inbox_config_notify();
 ```
 
 The relay's config watcher listens on `pgtrickle_relay_config`:
@@ -1314,8 +1308,6 @@ pgtrickle-relay config set <name> [--from-file pipeline.toml]
 pgtrickle-relay config enable <name>             # Enable a pipeline
 pgtrickle-relay config disable <name>            # Disable (does not delete)
 pgtrickle-relay config delete <name>             # Delete pipeline config
-pgtrickle-relay config history <name>            # Show change history
-pgtrickle-relay config rollback <name> --to <version>   # Roll back to version
 pgtrickle-relay config export [--format toml|yaml|json]  # Export all to file
 pgtrickle-relay config import <file>             # Import from file (idempotent)
 ```
@@ -1324,12 +1316,11 @@ pgtrickle-relay config import <file>             # Import from file (idempotent)
 
 | Condition | Behaviour |
 |-----------|----------|
-| `pgtrickle.relay_config` table does not exist | Log warning, fall back to file/env config |
-| Table exists, named pipeline row not found | Log warning, fall back to file/env config |
-| Table exists, no enabled pipelines found | Log warning, fall back to file/env config |
-| Table exists, pipelines found | Use DB config; merge with CLI flags |
+| Both config tables do not exist | Log warning, fall back to file/env config |
+| Tables exist, no enabled pipelines found | Log warning, fall back to file/env config |
+| Tables exist, pipelines found | Use DB config; subscribe to LISTEN/NOTIFY |
 | DB connection lost during reload | Keep existing pipelines running; retry connection |
-| DB config column is null | Use process-level default for that setting |
+| DB config JSONB field is null or missing | Use process-level default for that setting |
 
 **Key guarantee:** A relay process that successfully started will keep
 running even if the database goes down temporarily. It will not pick up new
@@ -1338,17 +1329,14 @@ continue with their last-known config.
 
 #### Security
 
-- The relay config table uses standard PostgreSQL RBAC. Grant `SELECT` to
+- Both config tables use standard PostgreSQL RBAC. Grant `SELECT` to
   the relay's database user; grant `INSERT/UPDATE/DELETE` only to
   administrator roles.
 - `source_config` and `sink_config` are JSONB columns. **Do not store
-  plaintext credentials** here — use the `secrets` field with a reference
-  to a secrets store (e.g. `{"password_env": "KAFKA_PASSWORD"}`) or
-  pgcrypto-encrypted values.
-- The `updated_by` column provides an audit trail; populate it via the
-  relay CLI or application code.
+  plaintext credentials** here — use references to env vars (e.g.
+  `{"password_env": "KAFKA_PASSWORD"}`) or external secret stores.
 
-**Effort:** 3d
+**Effort:** 2d
 
 ---
 
@@ -1386,12 +1374,11 @@ continue with their last-known config.
 | OTel tracing E2E | Verify spans exported to OTLP collector |
 | Encryption E2E | Encrypt → publish → decrypt → verify payload |
 | Webhook signature E2E | Signed POST accepted; unsigned POST rejected with 401 |
-| DB config — table exists | Relay reads pipeline from `relay_config` table; file config ignored for pipeline settings |
-| DB config — table missing | Relay logs warning and falls back to file/env config transparently |
-| DB config — row missing | Named pipeline not found → fall back to file/env config |
+| DB config — tables exist | Relay reads pipelines from both tables; file config ignored |
+| DB config — tables missing | Relay logs warning and falls back to file/env config |
+| DB config — no enabled rows | Log warning, fall back to file/env config |
 | DB config — LISTEN/NOTIFY reload | Update row → relay restarts affected pipeline within 1 second |
-| DB config — enable/disable | `relay_disable_pipeline()` → task stops; `relay_enable_pipeline()` → task starts |
-| DB config — history + rollback | Rollback to version N → relay uses that config snapshot |
+| DB config — enable/disable | UPDATE `enabled = false/true` → task stops/starts immediately |
 | DB config — DB down during run | Existing pipelines keep running; reconnect when DB recovers |
 
 ### C.3 Benchmarks
@@ -1430,7 +1417,7 @@ continue with their last-known config.
 | RELAY-P2-9 | Sink + Source: Apache Pulsar | *deferred — P3* |
 | RELAY-P2-10 | Sink + Source: Arrow Flight / gRPC | *deferred — P3* |
 
-### Phase 2c — Operational Excellence (12.5 days)
+### Phase 2c — Operational Excellence (18.5 days)
 
 | Item | Description | Effort |
 |------|-------------|--------|
@@ -1445,15 +1432,15 @@ continue with their last-known config.
 | RELAY-P2-19 | Dry-run & replay mode (--dry-run, --replay, --from-offset) | 1d |
 | RELAY-P2-20 | OpenTelemetry tracing (OTLP export + context propagation) | 1.5d |
 | RELAY-P2-21 | Webhook signature verification (HMAC, GitHub, Stripe, Svix) | 1d |
-| RELAY-P2-22 | DB-stored config: `pgtrickle.relay_config` table + SQL functions + LISTEN/NOTIFY hot-reload + CLI commands + fallback logic | 3d |
+| RELAY-P2-22 | DB-stored config: `pgtrickle.relay_outbox_config` + `relay_inbox_config` tables + LISTEN/NOTIFY triggers + fallback logic | 2d |
 
-### Phase 2d — Testing & Polish (6 days)
+### Phase 2d — Testing & Polish (7 days)
 
 | Item | Description | Effort |
 |------|-------------|--------|
 | RELAY-P2-23 | Backend integration tests (Pub/Sub, Kinesis, Service Bus, ES, MQTT, ClickHouse, S3) | 3d |
 | RELAY-P2-24 | Extension integration tests (DLQ, schema registry, transforms, routing, rate limit, circuit breaker, multi-pipeline, hot-reload, dry-run, replay, OTel, encryption, webhook sig) | 2d |
-| RELAY-P2-25 | DB config integration tests: table exists → use DB config; table missing → fallback; LISTEN/NOTIFY reload; history + rollback | 1d |
+| RELAY-P2-25 | DB config integration tests: both tables exist → use DB config; tables missing → fallback; LISTEN/NOTIFY reload on both | 1d |
 | RELAY-P2-26 | Benchmarks (new backends + extensions overhead) | 1d |
 
 ### Phase 2e — Documentation & Distribution (2 days)
@@ -1484,10 +1471,10 @@ continue with their last-known config.
 |-------|--------|
 | Phase 2a — Cloud Provider Parity | 9d |
 | Phase 2b — IoT, Analytics & Data Lake | 7.5d |
-| Phase 2c — Operational Excellence | 19.5d |
-| Phase 2d — Testing & Polish | 7d |
+| Phase 2c — Operational Excellence | 18.5d |
+| Phase 2d — Testing & Polish | 6d |
 | Phase 2e — Documentation & Distribution | 2d |
-| **Total** | **~44 days solo / ~28 days with two developers** |
+| **Total** | **~43 days solo / ~27 days with two developers** |
 
 Phases 2a and 2b (backends) can be parallelised with Phase 2c (extensions).
 With two developers, one focuses on backends while the other builds
