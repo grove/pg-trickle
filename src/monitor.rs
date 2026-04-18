@@ -3266,7 +3266,10 @@ mod tests {
         );
 
         let rows = render_dependency_tree(&st_info, &st_children, &st_sources);
-        let src_row = rows.iter().find(|r| r.1 == "public.raw_table").unwrap();
+        let src_row = rows
+            .iter()
+            .find(|r| r.1 == "public.raw_table")
+            .expect("expected source table row in dependency tree");
         assert_eq!(src_row.4, None); // no status for source tables
         assert_eq!(src_row.5, None); // no mode for source tables
     }
