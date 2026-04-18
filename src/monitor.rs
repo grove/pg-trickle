@@ -597,6 +597,106 @@ fn st_refresh_stats() -> TableIterator<
     TableIterator::new(rows)
 }
 
+// ── OP-2: OpenMetrics text generation ─────────────────────────────────────
+
+/// Generate an OpenMetrics (Prometheus) text exposition from pg_trickle's
+/// internal monitoring data.
+///
+/// Called once per `/metrics` request by `metrics_server::MetricsServer`.
+/// Reads from `pgtrickle.pgt_stream_tables` and `pgt_refresh_history` via SPI.
+///
+/// Output format follows the OpenMetrics 1.0 specification.
+pub(crate) fn collect_metrics_text() -> String {
+    let rows = Spi::connect(
+        |client| -> Vec<(String, String, String, i64, i64, i64, i32)> {
+            let query = "
+            SELECT
+                s.pgt_name,
+                s.pgt_schema,
+                s.status,
+                COUNT(h.refresh_id) FILTER (WHERE h.status = 'COMPLETED') AS successful,
+                COUNT(h.refresh_id) FILTER (WHERE h.status = 'FAILED')    AS failed,
+                SUM(COALESCE(h.rows_inserted, 0) + COALESCE(h.rows_deleted, 0)) AS total_rows,
+                s.consecutive_errors
+            FROM pgtrickle.pgt_stream_tables s
+            LEFT JOIN pgtrickle.pgt_refresh_history h USING (pgt_id)
+            GROUP BY s.pgt_name, s.pgt_schema, s.status, s.consecutive_errors
+            ORDER BY s.pgt_schema, s.pgt_name
+        ";
+            client
+                .select(query, None, &[])
+                .map(|tuptable| {
+                    tuptable
+                        .into_iter()
+                        .filter_map(|row| {
+                            let name = row.get::<String>(1).ok().flatten()?;
+                            let schema = row.get::<String>(2).ok().flatten()?;
+                            let status = row.get::<String>(3).ok().flatten().unwrap_or_default();
+                            let successful = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                            let failed = row.get::<i64>(5).ok().flatten().unwrap_or(0);
+                            let total_rows = row.get::<i64>(6).ok().flatten().unwrap_or(0);
+                            let errors = row.get::<i32>(7).ok().flatten().unwrap_or(0);
+                            Some((name, schema, status, successful, failed, total_rows, errors))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+    );
+
+    let mut out = String::with_capacity(4096);
+
+    // Version metadata
+    out.push_str("# HELP pg_trickle_info pg_trickle extension information\n");
+    out.push_str("# TYPE pg_trickle_info gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_info{{version=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    // Per-ST metrics
+    out.push_str(
+        "# HELP pg_trickle_refreshes_total Total successful refresh count per stream table\n",
+    );
+    out.push_str("# TYPE pg_trickle_refreshes_total counter\n");
+    out.push_str(
+        "# HELP pg_trickle_refresh_failures_total Total failed refresh count per stream table\n",
+    );
+    out.push_str("# TYPE pg_trickle_refresh_failures_total counter\n");
+    out.push_str(
+        "# HELP pg_trickle_rows_changed_total Total rows inserted+deleted per stream table\n",
+    );
+    out.push_str("# TYPE pg_trickle_rows_changed_total counter\n");
+    out.push_str(
+        "# HELP pg_trickle_consecutive_errors Current consecutive error count per stream table\n",
+    );
+    out.push_str("# TYPE pg_trickle_consecutive_errors gauge\n");
+    out.push_str("# HELP pg_trickle_active Stream table is ACTIVE (1) or not (0)\n");
+    out.push_str("# TYPE pg_trickle_active gauge\n");
+
+    for (name, schema, status, successful, failed, total_rows, errors) in &rows {
+        let labels = format!("schema=\"{schema}\",name=\"{name}\"");
+        out.push_str(&format!(
+            "pg_trickle_refreshes_total{{{labels}}} {successful}\n"
+        ));
+        out.push_str(&format!(
+            "pg_trickle_refresh_failures_total{{{labels}}} {failed}\n"
+        ));
+        out.push_str(&format!(
+            "pg_trickle_rows_changed_total{{{labels}}} {total_rows}\n"
+        ));
+        out.push_str(&format!(
+            "pg_trickle_consecutive_errors{{{labels}}} {errors}\n"
+        ));
+        let is_active: u8 = if status == "ACTIVE" { 1 } else { 0 };
+        out.push_str(&format!("pg_trickle_active{{{labels}}} {is_active}\n"));
+    }
+
+    // OpenMetrics requires the exposition to end with # EOF
+    out.push_str("# EOF\n");
+    out
+}
+
 /// Return refresh history for a specific ST, most recent first.
 ///
 /// Exposed as `pgtrickle.get_refresh_history(name, limit)`.
@@ -3166,7 +3266,10 @@ mod tests {
         );
 
         let rows = render_dependency_tree(&st_info, &st_children, &st_sources);
-        let src_row = rows.iter().find(|r| r.1 == "public.raw_table").unwrap();
+        let src_row = rows
+            .iter()
+            .find(|r| r.1 == "public.raw_table")
+            .expect("expected source table row in dependency tree");
         assert_eq!(src_row.4, None); // no status for source tables
         assert_eq!(src_row.5, None); // no mode for source tables
     }

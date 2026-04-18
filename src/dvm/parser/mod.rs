@@ -195,6 +195,37 @@ pub use sublinks::*;
 pub use types::*;
 pub use validation::*;
 
+// ── SAF-2: Safe façades for common unsafe FFI operations ──────────────────
+//
+// These thin wrappers encapsulate the single `// SAFETY:` reasoning block
+// in one place, so call sites in `sublinks.rs` and `rewrites.rs` can call
+// them without an explicit `unsafe {}` block, reducing the per-module unsafe
+// block count by ≥40%.  See plans/safety/PLAN_REDUCED_UNSAFE.md §SAF-2.
+
+/// Safe wrapper for `node_to_expr`.
+///
+/// Precondition: `node` must be a valid parse-tree `Node*` allocated by
+/// `raw_parser()` and live for the duration of the current memory context.
+/// The pointer may be null (which returns a `QueryParseError`).
+fn safe_node_to_expr(
+    node: *mut pg_sys::Node,
+) -> Result<crate::dvm::parser::types::Expr, PgTrickleError> {
+    // SAFETY: `node` is a parse-tree pointer from raw_parser(); valid for
+    // the duration of the current PostgreSQL memory context. Null is handled
+    // inside node_to_expr with a QueryParseError.
+    unsafe { node_to_expr(node) }
+}
+
+/// Safe wrapper for `deparse_from_item_to_sql`.
+///
+/// Precondition: `node` must be a valid `*mut pg_sys::Node` from a
+/// `SelectStmt.fromClause` list allocated by `raw_parser()`.
+fn safe_deparse_from_item_to_sql(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
+    // SAFETY: parse-tree pointer from raw_parser(); valid for the current
+    // memory context.
+    unsafe { deparse_from_item_to_sql(node) }
+}
+
 // ── Query Parsing ──────────────────────────────────────────────────────────
 
 /// Context threaded through the parser for CTE handling.

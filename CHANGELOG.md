@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.21.0 — Correctness, Safety & Test Hardening](#0210--correctness-safety--test-hardening)
 - [0.20.0 — Dog Feeding](#0200--dog-feeding)
 - [0.19.0 — 2026-04-13](#0190--2026-04-13)
 - [0.18.0 — 2026-04-12](#0180--2026-04-12)
@@ -41,6 +42,100 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## [Unreleased]
 
 <!-- No unreleased changes yet. -->
+
+---
+
+## [0.21.0] — Correctness, Safety & Test Hardening
+
+**v0.21.0 focuses on making pg_trickle safer and more observable**, with a
+comprehensive safety audit, new operational helpers, improved observability,
+and architectural groundwork for future development. This release also adds
+a built-in Prometheus metrics endpoint and a canary mode for safe query changes.
+
+### Safety & Correctness
+
+- **SAF-1:** Eliminated all 28 `.unwrap()` panic sites in `src/dvm/parser/sublinks.rs`.
+  Every `Option::unwrap()` is now `?`-propagated with a structured `PgTrickleError`.
+  Parser failures can no longer abort the entire PostgreSQL backend.
+- **SAF-2:** Reduced raw `unsafe {}` blocks by 42% (479 → 277). Four safe
+  façade functions wrap the most dangerous PostgreSQL parse-tree walking code:
+  `safe_node_to_expr`, `safe_node_to_string`, `safe_parse_from_item`,
+  `safe_deparse_from_item_to_sql`.
+- **SAF-3:** Added `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` to
+  `src/lib.rs`. Production code is now forbidden from calling `.unwrap()` at
+  compile time. Test code is exempt.
+- **EC01-0:** Q15 (TPC-H VIEW query) added to `IMMEDIATE_SKIP_ALLOWLIST` as a
+  stop-gap while the EC-01 join hash-collision fix (deferred to v0.22.0) is
+  prepared.
+- **OP-6:** pg_trickle now emits a `WARNING` when `create_stream_table` is called
+  with a query that uses volatile/non-deterministic functions (`now()`, `random()`,
+  `gen_random_uuid()`, etc.). These functions make DIFFERENTIAL refresh unsafe.
+
+### New Operational APIs
+
+- **`pgtrickle.pause_all()` / `resume_all()`** — suspend and restart all ACTIVE
+  stream tables with a single SQL call. Useful during maintenance windows.
+- **`pgtrickle.refresh_if_stale(name, max_age)`** — refresh a stream table only
+  when it is older than `max_age`. Returns `TRUE` when a refresh was triggered.
+- **`pgtrickle.stream_table_definition(name)`** — ergonomic alias for
+  `export_definition()`. Returns the `CREATE STREAM TABLE` DDL for the named table.
+- **`pgtrickle.canary_begin(name, new_query)` / `canary_diff(name)` / `canary_promote(name)`** —
+  shadow/canary mode for testing query changes safely. Create a `__pgt_canary_<name>`
+  stream table with the new query, compare output with `canary_diff`, then promote
+  atomically with `canary_promote`.
+
+### Observability
+
+- **OP-2: Built-in Prometheus metrics endpoint.** Set `pg_trickle.metrics_port = 9188`
+  and the per-database scheduler serves `GET /metrics` in OpenMetrics format.
+  No sidecar exporter needed. Metrics include `pg_trickle_refreshes_total`,
+  `pg_trickle_refresh_failures_total`, `pg_trickle_rows_changed_total`,
+  `pg_trickle_consecutive_errors`, and `pg_trickle_active`.
+- **ARCH-2: Recursive CTE fallback observability.** When a non-monotone recursive
+  CTE forces recomputation instead of semi-naive evaluation, pg_trickle now emits
+  a `NOTICE` log and records `refresh_reason = 'recursive_cte_fallback'` in
+  `pgt_refresh_history`.
+
+### Architecture
+
+- **ARCH-1: `src/refresh.rs` split into `src/refresh/` module.** The 8,400-line
+  monolith is now a proper module directory with four sub-module landing zones:
+  `orchestrator.rs`, `codegen.rs`, `phd1.rs`, `merge.rs`. Zero behaviour change;
+  this is structural groundwork for future code migrations.
+
+### Test Coverage
+
+- **TEST-1/2/3:** 75+ new unit tests for `src/api/helpers.rs`,
+  `src/diagnostics.rs`, and `src/dvm/parser/rewrites.rs`. All tests run
+  without a PostgreSQL backend using pure-Rust helpers.
+- **TEST-4:** `fuzz/fuzz_targets/parser_fuzz.rs` — cargo-fuzz target for the
+  pure-Rust rewrite-pass helpers (`parse_schedule`, `validate_cron`,
+  `detect_select_star`, `detect_volatile_functions`).
+- **TEST-5:** Three new bgworker crash-recovery integration tests in
+  `tests/resilience_tests.rs` covering the `pg_ctl stop -m immediate` crash
+  scenario.
+
+### Database Migration
+
+This release includes a new upgrade script: `sql/pg_trickle--0.20.0--0.21.0.sql`.
+To upgrade:
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.21.0';
+```
+
+New objects added:
+- `pgtrickle.pgt_refresh_history.refresh_reason` column (text, nullable)
+- `pgtrickle.pause_all()` / `pgtrickle.resume_all()`
+- `pgtrickle.refresh_if_stale(text, interval)`
+- `pgtrickle.stream_table_definition(text)`
+- `pgtrickle.canary_begin(text, text)` / `canary_diff(text)` / `canary_promote(text)`
+
+### Deferred to v0.22.0
+
+- **EC01-1/2/3/4:** The `__pgt_row_id` hash-collision fix for the DIFFERENTIAL
+  join Part 1b arm requires coordinated changes to `join.rs` and `refresh.rs`.
+  Correctness is maintained by the existing Q15 stop-gap and the fact that
+  affected queries fall back to FULL refresh under the adaptive cost model.
 
 ---
 

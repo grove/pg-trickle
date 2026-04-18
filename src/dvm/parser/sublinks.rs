@@ -52,7 +52,11 @@ fn extract_where_sublinks(
             let args = pg_list::<pg_sys::Node>(boolexpr.args);
             if args.len() == 1 {
                 // INVARIANT: args.len() == 1 guarantees head() returns Some.
-                let arg = args.head().unwrap();
+                let arg = args.head().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "BoolExpr NOT_EXPR args list unexpectedly empty".into(),
+                    )
+                })?;
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(arg, T_SubLink) {
                     let wrapper = parse_sublink_to_wrapper(arg, true, cte_ctx)?;
@@ -83,7 +87,11 @@ fn extract_where_sublinks(
                         let inner_args = pg_list::<pg_sys::Node>(inner_bool.args);
                         if inner_args.len() == 1 {
                             // INVARIANT: inner_args.len() == 1 guarantees head() returns Some.
-                            let inner_arg = inner_args.head().unwrap();
+                            let inner_arg = inner_args.head().ok_or_else(|| {
+                                PgTrickleError::InternalError(
+                                    "BoolExpr NOT_EXPR inner args list unexpectedly empty".into(),
+                                )
+                            })?;
                             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                             if is_node_type!(inner_arg, T_SubLink) {
                                 let wrapper = parse_sublink_to_wrapper(inner_arg, true, cte_ctx)?;
@@ -107,11 +115,11 @@ fn extract_where_sublinks(
                     }
                     // Regular boolean expression — keep as remaining
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    remaining_exprs.push(unsafe { node_to_expr(arg_ptr)? });
+                    remaining_exprs.push(safe_node_to_expr(arg_ptr)?);
                 } else {
                     // Regular predicate — keep as remaining
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    remaining_exprs.push(unsafe { node_to_expr(arg_ptr)? });
+                    remaining_exprs.push(safe_node_to_expr(arg_ptr)?);
                 }
             }
 
@@ -126,7 +134,11 @@ fn extract_where_sublinks(
                             left: Box::new(acc),
                             right: Box::new(expr),
                         })
-                        .unwrap(),
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "AND expression list was non-empty but reduce produced None".into(),
+                            )
+                        })?,
                 )
             };
 
@@ -148,7 +160,7 @@ fn extract_where_sublinks(
 
     // No SubLinks found — return the whole expression as remaining predicate
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let expr = unsafe { node_to_expr(node)? };
+    let expr = safe_node_to_expr(node)?;
     Ok((vec![], Some(expr)))
 }
 
@@ -277,7 +289,7 @@ pub(crate) fn deparse_select_to_sql(
             && !rt.val.is_null()
         {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(rt.val)? };
+            let expr = safe_node_to_expr(rt.val)?;
             let expr_sql = expr.to_sql();
             if !rt.name.is_null() {
                 let name = pg_cstr_to_str(rt.name).unwrap_or("?");
@@ -305,7 +317,7 @@ pub(crate) fn deparse_select_to_sql(
     // Deparse WHERE clause
     if !select.whereClause.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let where_expr = unsafe { node_to_expr(select.whereClause)? };
+        let where_expr = safe_node_to_expr(select.whereClause)?;
         sql.push_str(&format!(" WHERE {}", where_expr.to_sql()));
     }
 
@@ -316,7 +328,7 @@ pub(crate) fn deparse_select_to_sql(
             let mut groups = Vec::new();
             for node_ptr in group_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(node_ptr)? };
+                let expr = safe_node_to_expr(node_ptr)?;
                 groups.push(expr.to_sql());
             }
             sql.push_str(&format!(" GROUP BY {}", groups.join(", ")));
@@ -326,7 +338,7 @@ pub(crate) fn deparse_select_to_sql(
     // Deparse HAVING
     if !select.havingClause.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let having_expr = unsafe { node_to_expr(select.havingClause)? };
+        let having_expr = safe_node_to_expr(select.havingClause)?;
         sql.push_str(&format!(" HAVING {}", having_expr.to_sql()));
     }
 
@@ -339,14 +351,14 @@ pub(crate) fn deparse_select_to_sql(
     // Deparse LIMIT
     if !select.limitCount.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let limit_expr = unsafe { node_to_expr(select.limitCount)? };
+        let limit_expr = safe_node_to_expr(select.limitCount)?;
         sql.push_str(&format!(" LIMIT {}", limit_expr.to_sql()));
     }
 
     // Deparse OFFSET
     if !select.limitOffset.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let offset_expr = unsafe { node_to_expr(select.limitOffset)? };
+        let offset_expr = safe_node_to_expr(select.limitOffset)?;
         sql.push_str(&format!(" OFFSET {}", offset_expr.to_sql()));
     }
 
@@ -396,7 +408,7 @@ fn deparse_from_item(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> 
         let mut sql = format!("{left} {join_type} {right}");
         if !join.quals.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let quals = unsafe { node_to_expr(join.quals)? };
+            let quals = safe_node_to_expr(join.quals)?;
             sql.push_str(&format!(" ON {}", quals.to_sql()));
         }
         Ok(sql)
@@ -517,7 +529,16 @@ fn parse_exists_sublink(
 
     // INVARIANT: from_list is non-empty (error returned above), so head() cannot fail.
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-    let mut inner_tree = unsafe { parse_from_item(from_list.head().unwrap(), cte_ctx)? };
+    let mut inner_tree = unsafe {
+        parse_from_item(
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "EXISTS sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
+            cte_ctx,
+        )?
+    };
 
     // Handle multiple FROM items (implicit cross joins in subquery)
     for i in 1..from_list.len() {
@@ -572,7 +593,7 @@ fn parse_exists_sublink(
         //   inner_filter — everything else (applied before aggregation)
         let (corr_pairs, inner_filter) = if !inner_select.whereClause.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let where_expr = unsafe { node_to_expr(inner_select.whereClause)? };
+            let where_expr = safe_node_to_expr(inner_select.whereClause)?;
             split_exists_correlation(&where_expr, &inner_aliases)
         } else {
             (Vec::new(), None)
@@ -590,7 +611,7 @@ fn parse_exists_sublink(
         let mut group_by = Vec::new();
         for node_ptr in group_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(node_ptr)? };
+            let expr = safe_node_to_expr(node_ptr)?;
             group_by.push(expr);
         }
 
@@ -598,7 +619,7 @@ fn parse_exists_sublink(
         let mut aggregates: Vec<AggExpr> = Vec::new();
         if has_having {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let having_expr = safe_node_to_expr(inner_select.havingClause)?;
             let having_aggs = extract_aggregates_from_expr(&having_expr, 0);
             aggregates.extend(having_aggs);
         }
@@ -613,7 +634,7 @@ fn parse_exists_sublink(
         // Apply HAVING as Filter on top of Aggregate.
         if has_having {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let having_expr = safe_node_to_expr(inner_select.havingClause)?;
             let rewritten = rewrite_having_expr(&having_expr, &aggregates);
             inner_tree = OpTree::Filter {
                 predicate: rewritten,
@@ -650,7 +671,11 @@ fn parse_exists_sublink(
                     left: Box::new(acc),
                     right: Box::new(eq),
                 })
-                .unwrap()
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "corr_pairs was non-empty but reduce produced None".into(),
+                    )
+                })?
         } else {
             // No correlation found — let the pre-aggregate filter handle
             // all filtering; the SemiJoin condition is a tautology.
@@ -671,7 +696,7 @@ fn parse_exists_sublink(
         Expr::Literal("TRUE".into())
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        unsafe { node_to_expr(inner_select.whereClause)? }
+        safe_node_to_expr(inner_select.whereClause)?
     };
 
     Ok(SublinkWrapper {
@@ -868,7 +893,16 @@ fn parse_any_sublink(
     }
 
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-    let mut inner_tree = unsafe { parse_from_item(from_list.head().unwrap(), cte_ctx)? };
+    let mut inner_tree = unsafe {
+        parse_from_item(
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "IN sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
+            cte_ctx,
+        )?
+    };
     for i in 1..from_list.len() {
         if let Some(item) = from_list.get_ptr(i) {
             // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
@@ -888,7 +922,7 @@ fn parse_any_sublink(
         ));
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        unsafe { node_to_expr(sublink.testexpr)? }
+        safe_node_to_expr(sublink.testexpr)?
     };
 
     // ── G12-SQL-IN: Multi-column IN (subquery) guard ────────────────
@@ -929,7 +963,11 @@ fn parse_any_sublink(
         ));
     }
 
-    let first_target = target_list.head().unwrap();
+    let first_target = target_list.head().ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "IN sublink target_list unexpectedly empty after non-empty check".into(),
+        )
+    })?;
     let inner_col_expr = if let Some(rt) = cast_node!(first_target, T_ResTarget, pg_sys::ResTarget)
     {
         if rt.val.is_null() {
@@ -938,7 +976,7 @@ fn parse_any_sublink(
             ));
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        unsafe { node_to_expr(rt.val)? }
+        safe_node_to_expr(rt.val)?
     } else {
         return Err(PgTrickleError::QueryParseError(
             "IN subquery target is not a ResTarget".into(),
@@ -959,7 +997,7 @@ fn parse_any_sublink(
         // Apply inner WHERE as a Filter on the FROM tree
         if !inner_select.whereClause.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let inner_where = unsafe { node_to_expr(inner_select.whereClause)? };
+            let inner_where = safe_node_to_expr(inner_select.whereClause)?;
             inner_tree = OpTree::Filter {
                 predicate: inner_where,
                 child: Box::new(inner_tree),
@@ -970,7 +1008,7 @@ fn parse_any_sublink(
         let mut group_by = Vec::new();
         for node_ptr in group_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(node_ptr)? };
+            let expr = safe_node_to_expr(node_ptr)?;
             group_by.push(expr);
         }
 
@@ -983,7 +1021,7 @@ fn parse_any_sublink(
         // SELECT list (e.g., `SELECT col FROM T GROUP BY col HAVING SUM(x) > 0`).
         if has_having {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let having_expr = safe_node_to_expr(inner_select.havingClause)?;
             let having_aggs = extract_aggregates_from_expr(&having_expr, aggregates.len());
             for ha in &having_aggs {
                 // Avoid duplicates: only add if no existing aggregate matches
@@ -1008,7 +1046,7 @@ fn parse_any_sublink(
         // Apply HAVING as Filter on top of Aggregate
         if has_having {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_expr = unsafe { node_to_expr(inner_select.havingClause)? };
+            let having_expr = safe_node_to_expr(inner_select.havingClause)?;
             let rewritten = rewrite_having_expr(&having_expr, &aggregates);
             inner_tree = OpTree::Filter {
                 predicate: rewritten,
@@ -1063,7 +1101,7 @@ fn parse_any_sublink(
         equality
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let inner_where = unsafe { node_to_expr(inner_select.whereClause)? };
+        let inner_where = safe_node_to_expr(inner_select.whereClause)?;
         Expr::BinaryOp {
             op: "AND".to_string(),
             left: Box::new(equality),
@@ -1177,7 +1215,16 @@ fn parse_all_sublink(
     }
 
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-    let mut inner_tree = unsafe { parse_from_item(from_list.head().unwrap(), cte_ctx)? };
+    let mut inner_tree = unsafe {
+        parse_from_item(
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "ALL sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
+            cte_ctx,
+        )?
+    };
     for i in 1..from_list.len() {
         if let Some(item) = from_list.get_ptr(i) {
             // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
@@ -1197,7 +1244,7 @@ fn parse_all_sublink(
         ));
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        unsafe { node_to_expr(sublink.testexpr)? }
+        safe_node_to_expr(sublink.testexpr)?
     };
 
     // Extract the inner SELECT target column
@@ -1208,7 +1255,11 @@ fn parse_all_sublink(
         ));
     }
 
-    let first_target = target_list.head().unwrap();
+    let first_target = target_list.head().ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "ALL sublink target_list unexpectedly empty after non-empty check".into(),
+        )
+    })?;
     let inner_col_expr = if let Some(rt) = cast_node!(first_target, T_ResTarget, pg_sys::ResTarget)
     {
         if rt.val.is_null() {
@@ -1217,7 +1268,7 @@ fn parse_all_sublink(
             ));
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        unsafe { node_to_expr(rt.val)? }
+        safe_node_to_expr(rt.val)?
     } else {
         return Err(PgTrickleError::QueryParseError(
             "ALL subquery target is not a ResTarget".into(),
@@ -1254,7 +1305,7 @@ fn parse_all_sublink(
         negated_cond
     } else {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let inner_where = unsafe { node_to_expr(inner_select.whereClause)? };
+        let inner_where = safe_node_to_expr(inner_select.whereClause)?;
         Expr::BinaryOp {
             op: "AND".to_string(),
             left: Box::new(negated_cond),
@@ -1646,7 +1697,16 @@ unsafe fn parse_select_stmt_inner(
     }
 
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-    let mut tree = unsafe { parse_from_item(from_list.head().unwrap(), cte_ctx)? };
+    let mut tree = unsafe {
+        parse_from_item(
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "parse_select_stmt_inner from_list unexpectedly empty".into(),
+                )
+            })?,
+            cte_ctx,
+        )?
+    };
 
     // Handle implicit cross-joins / LATERAL SRFs (multiple items in FROM)
     for i in 1..from_list.len() {
@@ -1800,7 +1860,7 @@ unsafe fn parse_select_stmt_inner(
             let mut group_by = Vec::new();
             for node_ptr in group_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(node_ptr)? };
+                let expr = safe_node_to_expr(node_ptr)?;
                 group_by.push(expr);
             }
             // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
@@ -1822,7 +1882,7 @@ unsafe fn parse_select_stmt_inner(
         let mut group_by = Vec::new();
         for node_ptr in group_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(node_ptr)? };
+            let expr = safe_node_to_expr(node_ptr)?;
             group_by.push(expr);
         }
 
@@ -1896,7 +1956,7 @@ unsafe fn parse_select_stmt_inner(
         // ── Step 3b: Parse HAVING clause as Filter on top of Aggregate ──
         if !select.havingClause.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let having_pred = unsafe { node_to_expr(select.havingClause)? };
+            let having_pred = safe_node_to_expr(select.havingClause)?;
             let rewritten = rewrite_having_expr(&having_pred, &aggregates);
             tree = OpTree::Filter {
                 predicate: rewritten,
@@ -2050,7 +2110,7 @@ unsafe fn parse_appended_scalar_target_subqueries(
         }
 
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val)? };
+        let expr = safe_node_to_expr(rt.val)?;
         if matches!(expr, Expr::Star { .. }) {
             return Ok(None);
         }
@@ -2133,7 +2193,7 @@ unsafe fn parse_scalar_target_subquery(
     }
 
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let expr = unsafe { node_to_expr(node)? };
+    let expr = safe_node_to_expr(node)?;
     let Expr::Raw(raw_sql) = expr else {
         return Ok(None);
     };
@@ -2510,7 +2570,7 @@ unsafe fn parse_from_item_inner(
             Expr::Literal("TRUE".into())
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(join.quals)? }
+            safe_node_to_expr(join.quals)?
         };
 
         match join.jointype {
@@ -2659,7 +2719,11 @@ unsafe fn parse_from_item_inner(
 
         // The first element is a List node; its first element is the FuncCall.
         // SAFETY: func_list is non-empty, head is a List node containing the FuncCall.
-        let inner_list_node = func_list.head().unwrap();
+        let inner_list_node = func_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction func_list head is None despite non-empty check".into(),
+            )
+        })?;
         let inner_list = pg_list::<pg_sys::Node>(inner_list_node as *mut pg_sys::List);
         if inner_list.is_empty() {
             return Err(PgTrickleError::QueryParseError(
@@ -2667,7 +2731,11 @@ unsafe fn parse_from_item_inner(
             ));
         }
 
-        let func_node = inner_list.head().unwrap();
+        let func_node = inner_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction inner_list head is None despite non-empty check".into(),
+            )
+        })?;
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
         if !is_node_type!(func_node, T_FuncCall) {
             return Err(PgTrickleError::QueryParseError(
@@ -2891,7 +2959,7 @@ pub(crate) fn extract_cte_def_colnames(
     let mut names = Vec::new();
     for node_ptr in colnames.iter_ptr() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        let name = unsafe { node_to_string(node_ptr)? };
+        let name = safe_node_to_string(node_ptr)?;
         names.push(name);
     }
     Ok(names)
@@ -2909,7 +2977,7 @@ pub(crate) fn extract_alias_colnames(alias: &pg_sys::Alias) -> Result<Vec<String
     let mut names = Vec::new();
     for node_ptr in colnames.iter_ptr() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        let name = unsafe { node_to_string(node_ptr)? };
+        let name = safe_node_to_string(node_ptr)?;
         names.push(name);
     }
     Ok(names)
@@ -3043,14 +3111,18 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
 
         match fields.len() {
             1 => {
-                let field = fields.head().unwrap();
+                let field = fields.head().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "ColumnRef fields list has len=1 but head() returned None".into(),
+                    )
+                })?;
                 // Bare `SELECT *` arrives as ColumnRef with a single A_Star field.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(field, T_A_Star) {
                     return Ok(Expr::Star { table_alias: None });
                 }
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let col_name = unsafe { node_to_string(field)? };
+                let col_name = safe_node_to_string(field)?;
                 Ok(Expr::ColumnRef {
                     table_alias: None,
                     column_name: col_name,
@@ -3058,8 +3130,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             }
             2 => {
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let table_alias = unsafe { node_to_string(fields.get_ptr(0).unwrap())? };
-                let last = fields.get_ptr(1).unwrap();
+                let table_alias = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[0] is None".into())
+                })?)?;
+                let last = fields.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[1] is None".into())
+                })?;
                 // `table.*` arrives as ColumnRef with fields [T_String, T_A_Star].
                 // T_A_Star is not a T_String, so node_to_string falls back to
                 // "node_T_A_Star" — check explicitly before calling it.
@@ -3070,7 +3146,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                     });
                 }
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let col_name = unsafe { node_to_string(last)? };
+                let col_name = safe_node_to_string(last)?;
                 Ok(Expr::ColumnRef {
                     table_alias: Some(table_alias),
                     column_name: col_name,
@@ -3079,10 +3155,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             3 => {
                 // schema.table.column — drop the schema, use table.column
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let _schema = unsafe { node_to_string(fields.get_ptr(0).unwrap())? };
+                let _schema = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[0] is None".into())
+                })?)?;
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let table_alias = unsafe { node_to_string(fields.get_ptr(1).unwrap())? };
-                let last = fields.get_ptr(2).unwrap();
+                let table_alias = safe_node_to_string(fields.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[1] is None".into())
+                })?)?;
+                let last = fields.get_ptr(2).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[2] is None".into())
+                })?;
                 // `schema.table.*` — same T_A_Star guard as the 2-field case.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(last, T_A_Star) {
@@ -3091,7 +3173,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                     });
                 }
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let col_name = unsafe { node_to_string(last)? };
+                let col_name = safe_node_to_string(last)?;
                 Ok(Expr::ColumnRef {
                     table_alias: Some(table_alias),
                     column_name: col_name,
@@ -3113,13 +3195,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 // Handle unary prefix operators (e.g., -x) where lexpr is NULL
                 if aexpr.lexpr.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                    let right = safe_node_to_expr(aexpr.rexpr)?;
                     return Ok(Expr::Raw(format!("{op_name}{}", right.to_sql())));
                 }
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 Ok(Expr::BinaryOp {
                     op: op_name,
                     left: Box::new(left),
@@ -3129,9 +3211,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_DISTINCT => {
                 // IS DISTINCT FROM
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 Ok(Expr::Raw(format!(
                     "{} IS DISTINCT FROM {}",
                     left.to_sql(),
@@ -3141,9 +3223,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_NOT_DISTINCT => {
                 // IS NOT DISTINCT FROM
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 Ok(Expr::Raw(format!(
                     "{} IS NOT DISTINCT FROM {}",
                     left.to_sql(),
@@ -3153,12 +3235,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_IN => {
                 // x IN (v1, v2, v3)
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 let right_list = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 let mut vals = Vec::new();
                 for n in right_list.iter_ptr() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    vals.push(unsafe { node_to_expr(n)? }.to_sql());
+                    vals.push(safe_node_to_expr(n)?.to_sql());
                 }
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
                 let op_name = unsafe { extract_operator_name(aexpr.name) }
@@ -3180,12 +3262,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_BETWEEN => {
                 // x BETWEEN a AND b
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let tested = unsafe { node_to_expr(aexpr.lexpr)? };
+                let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = unsafe { node_to_expr(bounds.get_ptr(0).unwrap())? };
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = unsafe { node_to_expr(bounds.get_ptr(1).unwrap())? };
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} BETWEEN {} AND {}",
                     tested.to_sql(),
@@ -3195,12 +3281,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             }
             pg_sys::A_Expr_Kind::AEXPR_NOT_BETWEEN => {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let tested = unsafe { node_to_expr(aexpr.lexpr)? };
+                let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = unsafe { node_to_expr(bounds.get_ptr(0).unwrap())? };
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = unsafe { node_to_expr(bounds.get_ptr(1).unwrap())? };
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} NOT BETWEEN {} AND {}",
                     tested.to_sql(),
@@ -3210,12 +3300,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             }
             pg_sys::A_Expr_Kind::AEXPR_BETWEEN_SYM => {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let tested = unsafe { node_to_expr(aexpr.lexpr)? };
+                let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = unsafe { node_to_expr(bounds.get_ptr(0).unwrap())? };
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = unsafe { node_to_expr(bounds.get_ptr(1).unwrap())? };
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} BETWEEN SYMMETRIC {} AND {}",
                     tested.to_sql(),
@@ -3225,12 +3319,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             }
             pg_sys::A_Expr_Kind::AEXPR_NOT_BETWEEN_SYM => {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let tested = unsafe { node_to_expr(aexpr.lexpr)? };
+                let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = unsafe { node_to_expr(bounds.get_ptr(0).unwrap())? };
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = unsafe { node_to_expr(bounds.get_ptr(1).unwrap())? };
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} NOT BETWEEN SYMMETRIC {} AND {}",
                     tested.to_sql(),
@@ -3241,10 +3339,10 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_SIMILAR => {
                 // SIMILAR TO
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // rexpr for SIMILAR TO is a FuncCall wrapping the pattern
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 Ok(Expr::Raw(format!(
                     "{} SIMILAR TO {}",
                     left.to_sql(),
@@ -3254,9 +3352,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_LIKE => {
                 // [NOT] LIKE — name is "~~" (LIKE) or "!~~" (NOT LIKE).
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
                 let op_name = unsafe { extract_operator_name(aexpr.name) }
                     .unwrap_or_else(|_| "~~".to_string());
@@ -3270,9 +3368,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_ILIKE => {
                 // [NOT] ILIKE — name is "~~*" (ILIKE) or "!~~*" (NOT ILIKE).
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
                 let op_name = unsafe { extract_operator_name(aexpr.name) }
                     .unwrap_or_else(|_| "~~*".to_string());
@@ -3290,9 +3388,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_OP_ANY => {
                 // expr op ANY(array)
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
                 let op_name = unsafe { extract_operator_name(aexpr.name)? };
                 Ok(Expr::Raw(format!(
@@ -3304,9 +3402,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             pg_sys::A_Expr_Kind::AEXPR_OP_ALL => {
                 // expr op ALL(array)
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 // SAFETY: Parse-tree node pointer from raw_parser; valid within current memory context.
                 let op_name = unsafe { extract_operator_name(aexpr.name)? };
                 Ok(Expr::Raw(format!(
@@ -3321,9 +3419,9 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 // here so expressions like `NULLIF(col, '')::bigint` in the
                 // SELECT list don't cause an unsupported-operator error.
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let left = unsafe { node_to_expr(aexpr.lexpr)? };
+                let left = safe_node_to_expr(aexpr.lexpr)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let right = unsafe { node_to_expr(aexpr.rexpr)? };
+                let right = safe_node_to_expr(aexpr.rexpr)?;
                 Ok(Expr::Raw(format!(
                     "NULLIF({}, {})",
                     left.to_sql(),
@@ -3340,7 +3438,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut args = Vec::new();
         for n in args_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            if let Ok(e) = unsafe { node_to_expr(n) } {
+            if let Ok(e) = safe_node_to_expr(n) {
                 args.push(e);
             }
         }
@@ -3403,7 +3501,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             let mut args = Vec::new();
             for n in args_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                if let Ok(e) = unsafe { node_to_expr(n) } {
+                if let Ok(e) = safe_node_to_expr(n) {
                     args.push(e.to_sql());
                 }
             }
@@ -3422,7 +3520,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let mut pk = Vec::new();
                 for p in parts_list.iter_ptr() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    pk.push(unsafe { node_to_expr(p) }?.to_sql());
+                    pk.push(safe_node_to_expr(p)?.to_sql());
                 }
                 over_parts.push(format!("PARTITION BY {}", pk.join(", ")));
             }
@@ -3457,7 +3555,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             let mut args = Vec::new();
             for n in args_list.iter_ptr() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                if let Ok(e) = unsafe { node_to_expr(n) } {
+                if let Ok(e) = safe_node_to_expr(n) {
                     args.push(e);
                 }
             }
@@ -3465,7 +3563,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         }
     } else if let Some(tc) = cast_node!(node, T_TypeCast, pg_sys::TypeCast) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let inner = unsafe { node_to_expr(tc.arg)? };
+        let inner = safe_node_to_expr(tc.arg)?;
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let type_name = unsafe { deparse_typename(tc.typeName) };
         Ok(Expr::Raw(format!(
@@ -3475,7 +3573,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         )))
     } else if let Some(nt) = cast_node!(node, T_NullTest, pg_sys::NullTest) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let arg = unsafe { node_to_expr(nt.arg as *mut pg_sys::Node)? };
+        let arg = safe_node_to_expr(nt.arg as *mut pg_sys::Node)?;
         let op = if nt.nulltesttype == pg_sys::NullTestType::IS_NULL {
             "IS NULL"
         } else {
@@ -3488,7 +3586,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         // Simple CASE: CASE <arg> WHEN ...
         if !case_expr.arg.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let arg = unsafe { node_to_expr(case_expr.arg as *mut pg_sys::Node)? };
+            let arg = safe_node_to_expr(case_expr.arg as *mut pg_sys::Node)?;
             sql.push_str(&format!(" {}", arg.to_sql()));
         }
 
@@ -3497,15 +3595,15 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             let case_when = pg_deref!(w as *const pg_sys::CaseWhen);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let cond = unsafe { node_to_expr(case_when.expr as *mut pg_sys::Node)? };
+            let cond = safe_node_to_expr(case_when.expr as *mut pg_sys::Node)?;
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let result = unsafe { node_to_expr(case_when.result as *mut pg_sys::Node)? };
+            let result = safe_node_to_expr(case_when.result as *mut pg_sys::Node)?;
             sql.push_str(&format!(" WHEN {} THEN {}", cond.to_sql(), result.to_sql()));
         }
 
         if !case_expr.defresult.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let def = unsafe { node_to_expr(case_expr.defresult as *mut pg_sys::Node)? };
+            let def = safe_node_to_expr(case_expr.defresult as *mut pg_sys::Node)?;
             sql.push_str(&format!(" ELSE {}", def.to_sql()));
         }
 
@@ -3516,7 +3614,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut args = Vec::new();
         for n in args_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            args.push(unsafe { node_to_expr(n)? });
+            args.push(safe_node_to_expr(n)?);
         }
         Ok(Expr::FuncCall {
             func_name: "COALESCE".to_string(),
@@ -3527,7 +3625,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut args = Vec::new();
         for n in args_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            args.push(unsafe { node_to_expr(n)? });
+            args.push(safe_node_to_expr(n)?);
         }
         Ok(Expr::FuncCall {
             func_name: "NULLIF".to_string(),
@@ -3543,7 +3641,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut args = Vec::new();
         for n in args_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            args.push(unsafe { node_to_expr(n)? });
+            args.push(safe_node_to_expr(n)?);
         }
         Ok(Expr::FuncCall {
             func_name: func_name.to_string(),
@@ -3554,7 +3652,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         Ok(Expr::Raw(kw.to_string()))
     } else if let Some(bt) = cast_node!(node, T_BooleanTest, pg_sys::BooleanTest) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let arg = unsafe { node_to_expr(bt.arg as *mut pg_sys::Node)? };
+        let arg = safe_node_to_expr(bt.arg as *mut pg_sys::Node)?;
         let test = match bt.booltesttype {
             pg_sys::BoolTestType::IS_TRUE => "IS TRUE",
             pg_sys::BoolTestType::IS_NOT_TRUE => "IS NOT TRUE",
@@ -3597,7 +3695,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                     ));
                 }
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let test = unsafe { node_to_expr(sublink.testexpr)? };
+                let test = safe_node_to_expr(sublink.testexpr)?;
                 let inner_sql = deparse_select_to_sql(sublink.subselect)?;
                 Ok(Expr::Raw(format!("{} IN ({inner_sql})", test.to_sql())))
             }
@@ -3617,7 +3715,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut elem_sql = Vec::new();
         for n in elems.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            elem_sql.push(unsafe { node_to_expr(n)? }.to_sql());
+            elem_sql.push(safe_node_to_expr(n)?.to_sql());
         }
         Ok(Expr::Raw(format!("ARRAY[{}]", elem_sql.join(", "))))
     } else if let Some(rowexpr) = cast_node!(node, T_RowExpr, pg_sys::RowExpr) {
@@ -3625,19 +3723,19 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         let mut field_sql = Vec::new();
         for n in fields.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            field_sql.push(unsafe { node_to_expr(n)? }.to_sql());
+            field_sql.push(safe_node_to_expr(n)?.to_sql());
         }
         Ok(Expr::Raw(format!("ROW({})", field_sql.join(", "))))
     } else if let Some(indir) = cast_node!(node, T_A_Indirection, pg_sys::A_Indirection) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let base = unsafe { node_to_expr(indir.arg)? };
+        let base = safe_node_to_expr(indir.arg)?;
         let mut sql = base.to_sql();
         let indirection_list = pg_list::<pg_sys::Node>(indir.indirection);
         for ind_node in indirection_list.iter_ptr() {
             if let Some(indices) = cast_node!(ind_node, T_A_Indices, pg_sys::A_Indices) {
                 if !indices.uidx.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let idx = unsafe { node_to_expr(indices.uidx)? };
+                    let idx = safe_node_to_expr(indices.uidx)?;
                     // Parenthesize `sql` so that complex base expressions such as
                     // `array_agg(...) FILTER (WHERE ...)` deparse as
                     // `(array_agg(...) FILTER (WHERE ...))[1]` — the subscript
@@ -3656,13 +3754,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         Ok(Expr::Raw(sql))
     } else if let Some(cc) = cast_node!(node, T_CollateClause, pg_sys::CollateClause) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let arg = unsafe { node_to_expr(cc.arg)? };
+        let arg = safe_node_to_expr(cc.arg)?;
         // Extract collation name from the name list
         let coll_list = pg_list::<pg_sys::Node>(cc.collname);
         let mut coll_parts = Vec::new();
         for n in coll_list.iter_ptr() {
             // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-            if let Ok(s) = unsafe { node_to_string(n) } {
+            if let Ok(s) = safe_node_to_string(n) {
                 coll_parts.push(s);
             }
         }
@@ -3680,7 +3778,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         ))
     } else if let Some(jip) = cast_node!(node, T_JsonIsPredicate, pg_sys::JsonIsPredicate) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let arg = unsafe { node_to_expr(jip.expr)? };
+        let arg = safe_node_to_expr(jip.expr)?;
         let type_str = match jip.item_type {
             pg_sys::JsonValueType::JS_TYPE_OBJECT => "JSON OBJECT",
             pg_sys::JsonValueType::JS_TYPE_ARRAY => "JSON ARRAY",
@@ -3701,12 +3799,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         for n in exprs.iter_ptr() {
             if let Some(kv) = cast_node!(n, T_JsonKeyValue, pg_sys::JsonKeyValue) {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let key = unsafe { node_to_expr(kv.key as *mut pg_sys::Node)? };
+                let key = safe_node_to_expr(kv.key as *mut pg_sys::Node)?;
                 let val = if !kv.value.is_null() {
                     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
                     let jve = pg_deref!(kv.value);
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
+                    safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?
                 } else {
                     Expr::Raw("NULL".to_string())
                 };
@@ -3728,10 +3826,10 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // Elements may be JsonValueExpr or plain exprs
             if let Some(jve) = cast_node!(n, T_JsonValueExpr, pg_sys::JsonValueExpr) {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                elems.push(unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }.to_sql());
+                elems.push(safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?.to_sql());
             } else {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                elems.push(unsafe { node_to_expr(n)? }.to_sql());
+                elems.push(safe_node_to_expr(n)?.to_sql());
             }
         }
         let mut sql = format!("JSON_ARRAY({})", elems.join(", "));
@@ -3760,7 +3858,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             let jve = pg_deref!(jpe.expr);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
+            safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?
         } else {
             Expr::Raw("NULL".to_string())
         };
@@ -3770,7 +3868,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
         Ok(Expr::Raw(sql))
     } else if let Some(jse) = cast_node!(node, T_JsonScalarExpr, pg_sys::JsonScalarExpr) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let arg = unsafe { node_to_expr(jse.expr as *mut pg_sys::Node)? };
+        let arg = safe_node_to_expr(jse.expr as *mut pg_sys::Node)?;
         let mut sql = format!("JSON_SCALAR({})", arg.to_sql());
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
         unsafe { append_json_output(&mut sql, jse.output) };
@@ -3780,7 +3878,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             let jve = pg_deref!(jse.expr);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
+            safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?
         } else {
             Expr::Raw("NULL".to_string())
         };
@@ -3794,12 +3892,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             let kv = pg_deref!(joa.arg);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let key = unsafe { node_to_expr(kv.key as *mut pg_sys::Node)? };
+            let key = safe_node_to_expr(kv.key as *mut pg_sys::Node)?;
             let val = if !kv.value.is_null() {
                 // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
                 let jve = pg_deref!(kv.value);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
+                safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?
             } else {
                 Expr::Raw("NULL".to_string())
             };
@@ -3821,7 +3919,7 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
             let jve = pg_deref!(jaa.arg);
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? }
+            safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?
         } else {
             Expr::Raw("NULL".to_string())
         };
@@ -3882,7 +3980,7 @@ unsafe fn append_json_agg_clauses(
         for n in order_list.iter_ptr() {
             if let Some(sb) = cast_node!(n, T_SortBy, pg_sys::SortBy)
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                && let Ok(expr) = unsafe { node_to_expr(sb.node) }
+                && let Ok(expr) = safe_node_to_expr(sb.node)
             {
                 let dir = match sb.sortby_dir {
                     pg_sys::SortByDir::SORTBY_DESC => " DESC",
@@ -3924,7 +4022,7 @@ unsafe fn deparse_json_table(jt: *const pg_sys::JsonTable) -> Result<String, PgT
         let jve = pg_deref!(jt_ref.context_item);
         if !jve.raw_expr.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(jve.raw_expr as *mut pg_sys::Node)? };
+            let expr = safe_node_to_expr(jve.raw_expr as *mut pg_sys::Node)?;
             expr.to_sql()
         } else {
             "NULL".to_string()
@@ -3939,7 +4037,7 @@ unsafe fn deparse_json_table(jt: *const pg_sys::JsonTable) -> Result<String, PgT
         let ps = pg_deref!(jt_ref.pathspec);
         if !ps.string.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(ps.string)? };
+            let expr = safe_node_to_expr(ps.string)?;
             expr.to_sql()
         } else {
             "'$'".to_string()
@@ -3991,7 +4089,7 @@ unsafe fn deparse_json_table_passing(passing: *mut pg_sys::List) -> Result<Strin
     let mut parts = Vec::new();
     for node_ptr in list.iter_ptr() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(node_ptr)? };
+        let expr = safe_node_to_expr(node_ptr)?;
         parts.push(expr.to_sql());
     }
     Ok(parts.join(", "))
@@ -4057,7 +4155,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
                 let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let path_expr = unsafe { node_to_expr(ps.string)? };
+                    let path_expr = safe_node_to_expr(ps.string)?;
                     s.push_str(&format!(" PATH {}", path_expr.to_sql()));
                 }
             }
@@ -4102,7 +4200,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
                 let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let path_expr = unsafe { node_to_expr(ps.string)? };
+                    let path_expr = safe_node_to_expr(ps.string)?;
                     s.push_str(&format!(" PATH {}", path_expr.to_sql()));
                 }
             }
@@ -4126,7 +4224,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
                 let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let path_expr = unsafe { node_to_expr(ps.string)? };
+                    let path_expr = safe_node_to_expr(ps.string)?;
                     s.push_str(&format!(" PATH {}", path_expr.to_sql()));
                 }
             }
@@ -4152,7 +4250,7 @@ unsafe fn deparse_json_table_column(node: *mut pg_sys::Node) -> Result<String, P
                 let ps = pg_deref!(col.pathspec);
                 if !ps.string.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    let path_expr = unsafe { node_to_expr(ps.string)? };
+                    let path_expr = safe_node_to_expr(ps.string)?;
                     s.push_str(&format!(" PATH {}", path_expr.to_sql()));
                 }
             }
@@ -4193,7 +4291,7 @@ unsafe fn deparse_json_behavior(behavior: *const pg_sys::JsonBehavior, suffix: &
         pg_sys::JsonBehaviorType::JSON_BEHAVIOR_DEFAULT => {
             if !beh.expr.is_null() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                if let Ok(expr) = unsafe { node_to_expr(beh.expr) } {
+                if let Ok(expr) = safe_node_to_expr(beh.expr) {
                     format!("DEFAULT {} {suffix}", expr.to_sql())
                 } else {
                     String::new()
@@ -4216,7 +4314,7 @@ pub(crate) unsafe fn extract_operator_name(
     let list = pg_list::<pg_sys::Node>(name_list);
     if let Some(node) = list.head() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        unsafe { node_to_string(node) }
+        safe_node_to_string(node)
     } else {
         Ok("=".to_string())
     }
@@ -4230,7 +4328,7 @@ pub(crate) unsafe fn extract_func_name(
     let mut parts = Vec::new();
     for n in list.iter_ptr() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        if let Ok(s) = unsafe { node_to_string(n) } {
+        if let Ok(s) = safe_node_to_string(n) {
             parts.push(s);
         }
     }
@@ -4257,7 +4355,7 @@ pub(crate) unsafe fn deparse_func_call(
     let mut arg_sqls = Vec::new();
     for n in args_list.iter_ptr() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(n)? };
+        let expr = safe_node_to_expr(n)?;
         arg_sqls.push(expr.to_sql());
     }
 
@@ -4306,7 +4404,7 @@ pub(crate) unsafe fn deparse_select_stmt_to_sql(
     // WHERE clause
     if !s.whereClause.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(s.whereClause)? };
+        let expr = safe_node_to_expr(s.whereClause)?;
         parts.push(format!("WHERE {}", expr.to_sql()));
     }
 
@@ -4316,7 +4414,7 @@ pub(crate) unsafe fn deparse_select_stmt_to_sql(
         let mut groups = Vec::new();
         for node_ptr in group_list.iter_ptr() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(node_ptr)? };
+            let expr = safe_node_to_expr(node_ptr)?;
             groups.push(expr.to_sql());
         }
         parts.push(format!("GROUP BY {}", groups.join(", ")));
@@ -4325,7 +4423,7 @@ pub(crate) unsafe fn deparse_select_stmt_to_sql(
     // HAVING clause
     if !s.havingClause.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(s.havingClause)? };
+        let expr = safe_node_to_expr(s.havingClause)?;
         parts.push(format!("HAVING {}", expr.to_sql()));
     }
 
@@ -4340,14 +4438,14 @@ pub(crate) unsafe fn deparse_select_stmt_to_sql(
     // LIMIT
     if !s.limitCount.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(s.limitCount)? };
+        let expr = safe_node_to_expr(s.limitCount)?;
         parts.push(format!("LIMIT {}", expr.to_sql()));
     }
 
     // OFFSET
     if !s.limitOffset.is_null() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(s.limitOffset)? };
+        let expr = safe_node_to_expr(s.limitOffset)?;
         parts.push(format!("OFFSET {}", expr.to_sql()));
     }
 
@@ -4376,7 +4474,7 @@ pub(crate) unsafe fn deparse_target_list(
             continue;
         }
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val)? };
+        let expr = safe_node_to_expr(rt.val)?;
         let expr_sql = expr.to_sql();
         if !rt.name.is_null() {
             let alias = pg_cstr_to_str(rt.name).unwrap_or("");
@@ -4487,7 +4585,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
             "TRUE".to_string()
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(join.quals)? };
+            let expr = safe_node_to_expr(join.quals)?;
             expr.to_sql()
         };
         Ok(format!("{left} {join_type} {right} ON {condition}"))
@@ -4519,14 +4617,22 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
                 "RangeFunction with no functions in deparse".into(),
             ));
         }
-        let inner_list_node = func_list.head().unwrap();
+        let inner_list_node = func_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction func_list head is None in deparse".into(),
+            )
+        })?;
         let inner_list = pg_list::<pg_sys::Node>(inner_list_node as *mut pg_sys::List);
         if inner_list.is_empty() {
             return Err(PgTrickleError::QueryParseError(
                 "RangeFunction inner list empty in deparse".into(),
             ));
         }
-        let func_node = inner_list.head().unwrap();
+        let func_node = inner_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction inner_list head is None in deparse".into(),
+            )
+        })?;
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let func_sql = unsafe { deparse_func_call(func_node as *const pg_sys::FuncCall)? };
         let mut result = func_sql;
@@ -4550,7 +4656,7 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
     } else {
         // Fallback: deparse as generic expression
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(node)? };
+        let expr = safe_node_to_expr(node)?;
         Ok(expr.to_sql())
     }
 }
@@ -4579,7 +4685,7 @@ unsafe fn deparse_sort_by(node: *const pg_sys::SortBy) -> Result<String, PgTrick
     // SAFETY: caller guarantees node is valid.
     let sb = pg_deref!(node);
     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-    let expr = unsafe { node_to_expr(sb.node)? };
+    let expr = safe_node_to_expr(sb.node)?;
     let dir = match sb.sortby_dir {
         pg_sys::SortByDir::SORTBY_ASC => " ASC",
         pg_sys::SortByDir::SORTBY_DESC => " DESC",
@@ -4620,7 +4726,7 @@ unsafe fn extract_select_output_cols(
             cols.push(name.to_string());
         } else if !rt.val.is_null() {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            if let Ok(expr) = unsafe { node_to_expr(rt.val) } {
+            if let Ok(expr) = safe_node_to_expr(rt.val) {
                 cols.push(expr.output_name());
             } else {
                 cols.push(format!("column{}", i + 1));
@@ -4828,7 +4934,7 @@ unsafe fn extract_correlation_predicates(
 
     // Convert to Expr tree — best-effort, ignore errors.
     // SAFETY: caller guarantees `where_clause` is a valid expression node.
-    let expr = match unsafe { node_to_expr(where_clause) } {
+    let expr = match safe_node_to_expr(where_clause) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
@@ -4924,6 +5030,16 @@ unsafe fn node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleErr
     }
 }
 
+/// Safe wrapper for `node_to_string`.
+///
+/// Precondition: `node` must be a valid parse-tree pointer from `raw_parser()`,
+/// live within the current PostgreSQL memory context.
+fn safe_node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
+    // SAFETY: parse-tree pointer from raw_parser(); valid for the current
+    // memory context. Null is handled inside node_to_string.
+    unsafe { node_to_string(node) }
+}
+
 /// Deparse a node back to SQL text (simplified fallback).
 unsafe fn deparse_node(node: *mut pg_sys::Node) -> String {
     if node.is_null() {
@@ -4966,7 +5082,7 @@ unsafe fn deparse_node(node: *mut pg_sys::Node) -> String {
     // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
     } else if is_node_type!(node, T_ColumnRef) {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        if let Ok(e) = unsafe { node_to_expr(node) } {
+        if let Ok(e) = safe_node_to_expr(node) {
             e.to_sql()
         } else {
             "?".to_string()
@@ -4986,7 +5102,7 @@ unsafe fn deparse_typename(tn: *mut pg_sys::TypeName) -> String {
     let mut parts = Vec::new();
     for n in names.iter_ptr() {
         // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-        if let Ok(s) = unsafe { node_to_string(n) } {
+        if let Ok(s) = safe_node_to_string(n) {
             parts.push(s);
         }
     }
@@ -5424,7 +5540,7 @@ unsafe fn extract_window_exprs(
         let alias = if !rt.name.is_null() {
             pg_cstr_to_str(rt.name).unwrap_or("?column?").to_string()
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        } else if let Ok(e) = unsafe { node_to_expr(rt.val) } {
+        } else if let Ok(e) = safe_node_to_expr(rt.val) {
             match &e {
                 Expr::ColumnRef { column_name, .. } => column_name.clone(),
                 Expr::Star { .. } => "*".to_string(),
@@ -5434,7 +5550,7 @@ unsafe fn extract_window_exprs(
             format!("col_{}", pass_through.len())
         };
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        let expr = unsafe { node_to_expr(rt.val)? };
+        let expr = safe_node_to_expr(rt.val)?;
         pass_through.push((expr, alias));
     }
 
@@ -5459,7 +5575,7 @@ unsafe fn parse_window_func_call(
     let mut args = Vec::new();
     for n in args_list.iter_ptr() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        if let Ok(e) = unsafe { node_to_expr(n) } {
+        if let Ok(e) = safe_node_to_expr(n) {
             args.push(e);
         }
     }
@@ -5520,7 +5636,7 @@ unsafe fn parse_window_func_call(
     let mut partition_by = Vec::new();
     for n in part_list.iter_ptr() {
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        if let Ok(e) = unsafe { node_to_expr(n) } {
+        if let Ok(e) = safe_node_to_expr(n) {
             partition_by.push(e);
         }
     }
@@ -5531,7 +5647,7 @@ unsafe fn parse_window_func_call(
     for n in ord_list.iter_ptr() {
         if let Some(sb) = cast_node!(n, T_SortBy, pg_sys::SortBy) {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(sb.node)? };
+            let expr = safe_node_to_expr(sb.node)?;
             let ascending = sb.sortby_dir != pg_sys::SortByDir::SORTBY_DESC;
             let nulls_first = match sb.sortby_nulls {
                 pg_sys::SortByNulls::SORTBY_NULLS_FIRST => true,
@@ -5625,13 +5741,13 @@ unsafe fn deparse_frame_bound(opts: u32, is_start: bool, offset: *mut pg_sys::No
         }
         if opts & pg_sys::FRAMEOPTION_START_OFFSET_PRECEDING != 0
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            && let Ok(e) = unsafe { node_to_expr(offset) }
+            && let Ok(e) = safe_node_to_expr(offset)
         {
             return format!("{} PRECEDING", e.to_sql());
         }
         if opts & pg_sys::FRAMEOPTION_START_OFFSET_FOLLOWING != 0
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            && let Ok(e) = unsafe { node_to_expr(offset) }
+            && let Ok(e) = safe_node_to_expr(offset)
         {
             return format!("{} FOLLOWING", e.to_sql());
         }
@@ -5647,13 +5763,13 @@ unsafe fn deparse_frame_bound(opts: u32, is_start: bool, offset: *mut pg_sys::No
         }
         if opts & pg_sys::FRAMEOPTION_END_OFFSET_FOLLOWING != 0
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            && let Ok(e) = unsafe { node_to_expr(offset) }
+            && let Ok(e) = safe_node_to_expr(offset)
         {
             return format!("{} FOLLOWING", e.to_sql());
         }
         if opts & pg_sys::FRAMEOPTION_END_OFFSET_PRECEDING != 0
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            && let Ok(e) = unsafe { node_to_expr(offset) }
+            && let Ok(e) = safe_node_to_expr(offset)
         {
             return format!("{} PRECEDING", e.to_sql());
         }
@@ -5889,7 +6005,7 @@ unsafe fn extract_aggregates(
             // window operator path in parse_select_stmt.
             if !fcall.over.is_null() {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(rt.val)? };
+                let expr = safe_node_to_expr(rt.val)?;
                 non_aggs.push(expr);
                 continue;
             }
@@ -5953,14 +6069,14 @@ unsafe fn extract_aggregates(
                 let argument = args_list
                     .head()
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    .and_then(|n| unsafe { node_to_expr(n).ok() });
+                    .and_then(|n| safe_node_to_expr(n).ok());
 
                 // Extract optional second argument (e.g., STRING_AGG separator)
                 let second_arg = if args_list.len() >= 2 {
                     args_list
                         .get_ptr(1)
                         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                        .and_then(|n| unsafe { node_to_expr(n).ok() })
+                        .and_then(|n| safe_node_to_expr(n).ok())
                 } else {
                     None
                 };
@@ -5968,7 +6084,7 @@ unsafe fn extract_aggregates(
                 // Parse optional FILTER (WHERE ...) clause
                 let filter = if !fcall.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    Some(unsafe { node_to_expr(fcall.agg_filter)? })
+                    Some(safe_node_to_expr(fcall.agg_filter)?)
                 } else {
                     None
                 };
@@ -5983,7 +6099,7 @@ unsafe fn extract_aggregates(
                     for n in ord_list.iter_ptr() {
                         if let Some(sb) = cast_node!(n, T_SortBy, pg_sys::SortBy) {
                             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                            let expr = unsafe { node_to_expr(sb.node)? };
+                            let expr = safe_node_to_expr(sb.node)?;
                             let ascending = sb.sortby_dir != pg_sys::SortByDir::SORTBY_DESC;
                             let nulls_first = match sb.sortby_nulls {
                                 pg_sys::SortByNulls::SORTBY_NULLS_FIRST => true,
@@ -6036,7 +6152,7 @@ unsafe fn extract_aggregates(
                 let argument = args_list
                     .head()
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    .and_then(|n| unsafe { node_to_expr(n).ok() });
+                    .and_then(|n| safe_node_to_expr(n).ok());
 
                 // Build the argument SQL, respecting DISTINCT.
                 let distinct_str = if fcall.agg_distinct { "DISTINCT " } else { "" };
@@ -6044,7 +6160,7 @@ unsafe fn extract_aggregates(
                     let mut v = Vec::new();
                     for n in args_list.iter_ptr() {
                         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                        if let Ok(e) = unsafe { node_to_expr(n) } {
+                        if let Ok(e) = safe_node_to_expr(n) {
                             v.push(e.to_sql());
                         }
                     }
@@ -6063,7 +6179,7 @@ unsafe fn extract_aggregates(
                     for n in ord_list.iter_ptr() {
                         if let Some(sb) = cast_node!(n, T_SortBy, pg_sys::SortBy) {
                             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                            let expr = unsafe { node_to_expr(sb.node)? };
+                            let expr = safe_node_to_expr(sb.node)?;
                             let dir = if sb.sortby_dir == pg_sys::SortByDir::SORTBY_DESC {
                                 " DESC"
                             } else {
@@ -6090,7 +6206,7 @@ unsafe fn extract_aggregates(
                 // tracking) and appended to `raw_sql` (for rescan correctness).
                 let filter = if !fcall.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    Some(unsafe { node_to_expr(fcall.agg_filter)? })
+                    Some(safe_node_to_expr(fcall.agg_filter)?)
                 } else {
                     None
                 };
@@ -6115,7 +6231,7 @@ unsafe fn extract_aggregates(
                 // e.g. ROUND(STDDEV_POP(amount), 2). Treat as ComplexExpression
                 // so the group-rescan path re-evaluates it correctly.
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let raw_expr = unsafe { node_to_expr(rt.val)? };
+                let raw_expr = safe_node_to_expr(rt.val)?;
                 let raw_sql = raw_expr.to_sql();
 
                 let alias = if !rt.name.is_null() {
@@ -6135,7 +6251,7 @@ unsafe fn extract_aggregates(
                 });
             } else {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(rt.val)? };
+                let expr = safe_node_to_expr(rt.val)?;
                 non_aggs.push(expr);
             }
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
@@ -6144,7 +6260,7 @@ unsafe fn extract_aggregates(
             // This node type is separate from T_FuncCall, so we handle it
             // explicitly. Deparse to SQL and store as AggFunc::JsonObjectAggStd.
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let raw_expr = unsafe { node_to_expr(rt.val)? };
+            let raw_expr = safe_node_to_expr(rt.val)?;
             let raw_sql = raw_expr.to_sql();
 
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
@@ -6164,7 +6280,7 @@ unsafe fn extract_aggregates(
                 let ctor = pg_deref!(joa.constructor);
                 if !ctor.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    Some(unsafe { node_to_expr(ctor.agg_filter)? })
+                    Some(safe_node_to_expr(ctor.agg_filter)?)
                 } else {
                     None
                 }
@@ -6185,7 +6301,7 @@ unsafe fn extract_aggregates(
         } else if is_node_type!(rt.val, T_JsonArrayAgg) {
             // ── F11: SQL/JSON standard JSON_ARRAYAGG(expr ...) ──
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let raw_expr = unsafe { node_to_expr(rt.val)? };
+            let raw_expr = safe_node_to_expr(rt.val)?;
             let raw_sql = raw_expr.to_sql();
 
             // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
@@ -6203,7 +6319,7 @@ unsafe fn extract_aggregates(
                 let ctor = pg_deref!(jaa.constructor);
                 if !ctor.agg_filter.is_null() {
                     // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                    Some(unsafe { node_to_expr(ctor.agg_filter)? })
+                    Some(safe_node_to_expr(ctor.agg_filter)?)
                 } else {
                     None
                 }
@@ -6228,7 +6344,7 @@ unsafe fn extract_aggregates(
             if unsafe { expr_contains_agg(rt.val) } {
                 // Deparse the entire expression to SQL for the rescan CTE.
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let raw_expr = unsafe { node_to_expr(rt.val)? };
+                let raw_expr = safe_node_to_expr(rt.val)?;
                 let raw_sql = raw_expr.to_sql();
 
                 let alias = if !rt.name.is_null() {
@@ -6248,7 +6364,7 @@ unsafe fn extract_aggregates(
                 });
             } else {
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let expr = unsafe { node_to_expr(rt.val)? };
+                let expr = safe_node_to_expr(rt.val)?;
                 non_aggs.push(expr);
             }
         }
@@ -6280,7 +6396,7 @@ unsafe fn parse_target_list(
             aliases.push("*".to_string());
         } else {
             // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-            let expr = unsafe { node_to_expr(rt.val)? };
+            let expr = safe_node_to_expr(rt.val)?;
             expressions.push(expr);
             aliases.push(alias);
         }
@@ -6300,7 +6416,7 @@ unsafe fn target_alias_for_res_target(rt: &pg_sys::ResTarget, ordinal: usize) ->
 
     if !rt.val.is_null()
         // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-        && let Ok(expr) = unsafe { node_to_expr(rt.val) }
+        && let Ok(expr) = safe_node_to_expr(rt.val)
     {
         return match &expr {
             Expr::ColumnRef { column_name, .. } => column_name.clone(),

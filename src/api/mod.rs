@@ -2927,6 +2927,8 @@ fn create_stream_table_impl(
     // Warnings
     warn_source_table_properties(&vq.source_relids);
     warn_select_star(query);
+    // OP-6: Warn if the defining query uses volatile/non-deterministic functions.
+    warn_volatile_functions(query);
 
     // Summary warning when AUTO mode resulted in FULL refresh
     if is_auto && refresh_mode == RefreshMode::Full {

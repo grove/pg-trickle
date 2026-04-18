@@ -2227,6 +2227,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // Refreshed once per auto-apply cycle (10 min).
     let mut interference_overlap_count: i64 = 0;
 
+    // OP-2: Start the Prometheus metrics HTTP server if metrics_port is non-zero.
+    let metrics_server = {
+        let port = config::pg_trickle_metrics_port();
+        if port > 0 {
+            crate::metrics_server::MetricsServer::start(port as u16)
+        } else {
+            None
+        }
+    };
+
     loop {
         // DAG-2: Adaptive poll interval — exponential backoff (20ms → 200ms)
         // that resets to 20ms on worker completion, making parallel mode
@@ -2254,6 +2264,15 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         let wake_start = std::time::Instant::now();
         let should_continue =
             BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
+
+        // OP-2: Service one pending Prometheus scrape request per tick (non-blocking).
+        if let Some(ref ms) = metrics_server {
+            // Collect metrics inside a transaction so SPI queries work.
+            let metrics_text = BackgroundWorker::transaction(std::panic::AssertUnwindSafe(|| {
+                crate::monitor::collect_metrics_text()
+            }));
+            ms.serve_one_request(&metrics_text);
+        }
 
         // WAKE-1: Determine whether this wake was event-driven (notification)
         // or poll-based (timeout expired). If the latch returned faster than

@@ -1,0 +1,26 @@
+[package]
+name = "pg_trickle_fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "parser_fuzz"
+path = "fuzz_targets/parser_fuzz.rs"
+test = false
+doc = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pg_trickle = { path = "..", features = [] }
+
+[profile.release]
+opt-level = 3
+debug = true
+overflow-checks = true
