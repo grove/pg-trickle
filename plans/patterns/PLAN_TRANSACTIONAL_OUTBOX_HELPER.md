@@ -26,7 +26,7 @@
   - [A.9 Failure Handling](#a9-failure-handling)
   - [A.10 Performance Considerations](#a10-performance-considerations)
   - [A.11 Migration & Upgrade](#a11-migration--upgrade)
-- [Part B — Consumer Offset Extension (Post-1.0)](#part-b--consumer-offset-extension-post-10)
+- [Part B — Consumer Offset Extension (v0.23.0)](#part-b--consumer-offset-extension-v0230)
   - [B.1 Goals](#b1-goals)
   - [B.2 SQL API](#b2-sql-api)
   - [B.3 Catalog Schema](#b3-catalog-schema)
@@ -56,7 +56,7 @@ This plan specifies two complementary features for pg_trickle:
    downstream event buses **without an additional CDC connector or
    replication slot**.
 
-2. **Consumer Offset Extension (Post-1.0):** An optional layer on top of the
+2. **Consumer Offset Extension (v0.23.0):** An optional layer on top of the
    Outbox Helper that adds Kafka-style consumer groups, per-consumer offset
    tracking, lag visibility, heartbeats, and replay primitives so that
    multiple relay processes can safely share a single outbox table with
@@ -399,7 +399,7 @@ Not supported in initial release. Users must:
 
 ---
 
-## Part B — Consumer Offset Extension (Post-1.0)
+## Part B — Consumer Offset Extension (v0.23.0)
 
 ### B.1 Goals
 
@@ -786,7 +786,7 @@ Acceptance criteria: < 10 % overhead vs. baseline at small payloads,
 
 **Total: ~2.5–3 days** (matches existing roadmap estimate).
 
-### Part B — Post-1.0 (separate milestone)
+### Part B — v0.23.0 (same milestone)
 
 | Item | Description | Effort |
 |------|-------------|--------|

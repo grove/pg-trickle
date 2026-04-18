@@ -29,7 +29,7 @@
   - [A.11 Failure Handling](#a11-failure-handling)
   - [A.12 Performance Considerations](#a12-performance-considerations)
   - [A.13 Migration & Upgrade](#a13-migration--upgrade)
-- [Part B — Ordered Processing Extension (Post-1.0)](#part-b--ordered-processing-extension-post-10)
+- [Part B — Ordered Processing Extension (v0.23.0)](#part-b--ordered-processing-extension-v0230)
   - [B.1 Goals](#b1-goals)
   - [B.2 SQL API](#b2-sql-api)
   - [B.3 Aggregate-Ordered Stream Table](#b3-aggregate-ordered-stream-table)
@@ -58,7 +58,7 @@ This plan specifies two complementary features for pg_trickle:
    It also supports *adopting* an existing hand-rolled inbox table into
    pg_trickle's monitoring infrastructure without schema changes.
 
-2. **Ordered Processing Extension (Post-1.0):** An optional layer that adds
+2. **Ordered Processing Extension (v0.23.0):** An optional layer that adds
    per-aggregate ordered processing, sequence-gap detection, priority queues,
    and partition-affinity for competing workers.
 
@@ -113,7 +113,7 @@ This is an important conceptual asymmetry:
 - pg_trickle does **not** own broker connections. Consuming from Kafka, NATS,
   RabbitMQ, etc. remains external.
 - pg_trickle does **not** enforce message ordering in v0.22.0 — that is
-  Part B (Post-1.0).
+  Part B (v0.23.0).
 - The inbox helper does **not** replace pgmq, pgflow, or other purpose-built
   queue extensions. It is a thin orchestration layer for the common
   "table + stream table" pattern.
@@ -705,7 +705,7 @@ Not supported in initial release. Users must:
 
 ---
 
-## Part B — Ordered Processing Extension (Post-1.0)
+## Part B — Ordered Processing Extension (v0.23.0)
 
 ### B.1 Goals
 
@@ -1186,7 +1186,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 **Total: ~4.5 days.** Slightly larger than the outbox helper due to
 column-mapping complexity and the `enable_inbox_tracking()` path.
 
-### Part B — Post-1.0 (separate milestone)
+### Part B — v0.23.0 (same milestone)
 
 | Item | Description | Effort |
 |------|-------------|--------|
