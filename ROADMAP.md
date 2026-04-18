@@ -40,12 +40,13 @@ coverage, all in plain language.
 - [v0.21.0 — Correctness, Safety & Test Hardening](#v0210--correctness-safety--test-hardening)
 - [v0.22.0 — Production Scalability & Downstream Integration](#v0220--production-scalability--downstream-integration)
 - [v0.23.0 — Transactional Inbox & Outbox Patterns](#v0230--transactional-inbox--outbox-patterns)
-- [v0.24.0 — TUI Dog-Feeding Integration](#v0240--tui-dog-feeding-integration)
-- [v0.25.0 — PostgreSQL 17 Support](#v0250--postgresql-17-support)
-- [v0.26.0 — PGlite Proof of Concept](#v0260--pglite-proof-of-concept)
-- [v0.27.0 — Core Extraction (`pg_trickle_core`)](#v0270--core-extraction-pg_trickle_core)
-- [v0.28.0 — PGlite WASM Extension](#v0280--pglite-wasm-extension)
-- [v0.29.0 — PGlite Reactive Integration](#v0290--pglite-reactive-integration)
+- [v0.24.0 — Relay CLI (`pgtrickle-relay`)](#v0240--relay-cli-pgtrickle-relay)
+- [v0.25.0 — TUI Dog-Feeding Integration](#v0250--tui-dog-feeding-integration)
+- [v0.26.0 — PostgreSQL 17 Support](#v0260--postgresql-17-support)
+- [v0.27.0 — PGlite Proof of Concept](#v0270--pglite-proof-of-concept)
+- [v0.28.0 — Core Extraction (`pg_trickle_core`)](#v0280--core-extraction-pg_trickle_core)
+- [v0.29.0 — PGlite WASM Extension](#v0290--pglite-wasm-extension)
+- [v0.30.0 — PGlite Reactive Integration](#v0300--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 - [Effort Summary](#effort-summary)
@@ -91,12 +92,13 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.21.0 | Correctness, safety & test hardening | ✅ Released |
 | v0.22.0 | Production scalability & downstream integration | ✅ Released |
 | v0.23.0 | Transactional inbox & outbox patterns | Planned |
-| v0.24.0 | TUI dog-feeding integration | Planned |
-| v0.25.0 | PostgreSQL 17 support | Planned |
-| v0.26.0 | PGlite proof of concept | Planned |
-| v0.27.0 | Core extraction (`pg_trickle_core`) | Planned |
-| v0.28.0 | PGlite WASM extension | Planned |
-| v0.29.0 | PGlite reactive integration | Planned |
+| v0.24.0 | Relay CLI (`pgtrickle-relay`) — bidirectional outbox→sinks + sources→inbox | Planned |
+| v0.25.0 | TUI dog-feeding integration | Planned |
+| v0.26.0 | PostgreSQL 17 support | Planned |
+| v0.27.0 | PGlite proof of concept | Planned |
+| v0.28.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v0.29.0 | PGlite WASM extension | Planned |
+| v0.30.0 | PGlite reactive integration | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
@@ -6465,7 +6467,145 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 
 ---
 
-## v0.24.0 — TUI Dog-Feeding Integration
+## v0.24.0 — Relay CLI (`pgtrickle-relay`)
+
+**Status: Planned.** See [plans/relay/PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) for the full design.
+
+> **Release Theme**
+> This release ships `pgtrickle-relay` — a standalone bidirectional Rust CLI
+> binary that bridges pg-trickle outboxes and inboxes with popular messaging
+> systems. In **forward mode** it polls outbox tables and publishes deltas to
+> external sinks; in **reverse mode** it consumes messages from external
+> sources and writes them into pg-trickle inbox tables. Both directions share
+> symmetric Source/Sink trait abstractions, config system, observability, and
+> error handling. Implemented as a workspace member alongside `pgtrickle-tui`,
+> with 8 backends behind Cargo feature flags. The relay makes the v0.23.0
+> outbox and inbox immediately usable — zero custom relay code required.
+>
+> See [plans/relay/PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md)
+> for the full architecture, backend specifications, and phased implementation plan.
+
+### Phase 1 — Core Framework + Forward Tier 1 Sinks
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| RELAY-1 | **Crate scaffold.** Workspace member `pgtrickle-relay/` with `Cargo.toml`, feature flags per backend, CLI parsing via `clap` (`forward`/`reverse` subcommands), config merging (CLI > env > file > defaults) supporting TOML (primary), YAML, and JSON, `RelayError` enum, `RelayMessage` envelope type. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.1–A.3, §A.7 |
+| RELAY-2 | **Source + Sink traits + relay loop.** `async trait Source` with `poll`/`acknowledge`, `async trait Sink` with `publish`/`is_healthy`. Generic relay loop composing any source with any sink via `CancellationToken`. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.4–A.6 |
+| RELAY-3 | **Outbox poller source.** Simple mode (offset tracked in memory) and consumer group mode (`poll_outbox()` + `commit_offset()`). Heartbeat background task. Lease renewal via `extend_lease()`. | 2d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.8 |
+| RELAY-4 | **Payload decoder.** All four modes: inline differential, inline full-refresh, claim-check differential, claim-check full-refresh. Server-side cursor for claim-check rows. `outbox_rows_consumed()` called after cursor consumption. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.9 |
+| RELAY-5 | **Sink: stdout/file.** `jsonl`, `json_pretty`, `csv` formats. File rotation. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.4 |
+| RELAY-6 | **Sink: NATS JetStream.** `async-nats`. Subject template. `Nats-Msg-Id` dedup header. `Pgtrickle-Full-Refresh` header. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.1 |
+| RELAY-7 | **Sink: HTTP webhook.** `reqwest`. Batch and per-event mode. `Idempotency-Key` header. Configurable timeout, custom headers, retry-on-status. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.2 |
+| RELAY-8 | **Sink: Apache Kafka.** `rdkafka`. Idempotent producer. Dedup key as record key. Topic template. Compression, acks, SASL/SSL. | 1.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.3 |
+| RELAY-9 | **Observability + shutdown.** `axum` at `:9090/metrics` + `GET /health`. Prometheus counters for both modes. SIGTERM/SIGINT graceful shutdown. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.11–A.12 |
+
+> **Phase 1 subtotal: ~10 days**
+
+### Phase 2 — Forward Tier 2 Sinks
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| RELAY-10 | **Sink: Redis Streams.** `redis` crate. `XADD` with `MAXLEN ~`. Stream key template. Dedup key field. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.5 |
+| RELAY-11 | **Sink: Amazon SQS.** `aws-sdk-sqs`. `SendMessageBatch`. `MessageDeduplicationId` for FIFO queues. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.6 |
+| RELAY-12 | **Sink: PostgreSQL inbox (remote).** `tokio-postgres`. Inserts into compatible inbox table on different PG. `ON CONFLICT (event_id) DO NOTHING`. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.7 |
+| RELAY-13 | **Sink: RabbitMQ AMQP.** `lapin`. Exchange + routing key template. `message-id` AMQP property. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §B.8 |
+| RELAY-14 | **Subject/topic routing templates.** Variables: `{stream_table}`, `{op}`, `{outbox_id}`, `{refresh_id}`. Per-event-type override map. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §A.3 |
+
+> **Phase 2 subtotal: ~5 days**
+
+### Phase 3 — Reverse Mode (Sources + Inbox Sink)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| RELAY-22 | **Inbox sink.** pg-trickle inbox writer with batch insert, `ON CONFLICT (event_id) DO NOTHING`, dedup tracking metric, configurable column mapping. | 1.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §D |
+| RELAY-23 | **Source: NATS JetStream consumer.** Durable pull consumer, ack after inbox write. Dedup key from `Nats-Msg-Id` header or stream sequence. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.1 |
+| RELAY-24 | **Source: Apache Kafka consumer.** `rdkafka` `StreamConsumer`, manual offset commit after inbox write. Dedup key from record key or partition:offset. | 1.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.3 |
+| RELAY-25 | **Source: HTTP webhook receiver.** `axum` server, synchronous ack (200 after inbox write). Dedup key from `Idempotency-Key` header. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.2 |
+| RELAY-26 | **Source: Redis Streams consumer.** `XREADGROUP` + `XACK`. Dedup key from `pgt_dedup_key` field or entry ID. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.5 |
+| RELAY-27 | **Source: Amazon SQS consumer.** `ReceiveMessage` + `DeleteMessage`. Dedup key from `MessageDeduplicationId` (FIFO) or `MessageId`. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.6 |
+| RELAY-28 | **Source: RabbitMQ consumer.** `basic_consume` + manual ack/nack. Dedup key from `message-id` AMQP property. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.7 |
+| RELAY-29 | **Source: stdin/file reader.** JSONL format. Dedup key from `dedup_key` field or generated UUID. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §C.4 |
+| RELAY-30 | **Reverse-mode config.** Dedup key mapping, event type extraction, inbox column mapping. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §D |
+
+> **Phase 3 subtotal: ~10 days**
+
+### Phase 4 — Testing & Polish
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| RELAY-15 | **Unit tests.** Payload decoder (all 4 modes), config merging, subject templates, dedup key generation, retry backoff, envelope round-trip, mock source→sink. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.1 |
+| RELAY-16 | **Forward integration tests (Testcontainers).** NATS, Kafka (Redpanda), webhook (WireMock), Redis, PG inbox — end-to-end per sink with dedup verification. | 2d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.2 |
+| RELAY-17 | **Forward consumer group E2E.** 2 relay instances share one consumer group; zero duplicates; crash recovery; claim-check large delta. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.2 |
+| RELAY-31 | **Reverse integration tests (Testcontainers).** NATS→inbox, Kafka→inbox, webhook→inbox, Redis→inbox, SQS→inbox, RabbitMQ→inbox, stdin→inbox — dedup verification per source. | 2d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.3 |
+| RELAY-32 | **Reverse dedup + crash recovery E2E.** Duplicate messages produce 1 inbox row; kill relay mid-batch → restart → zero lost messages. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.3 |
+| RELAY-18 | **Benchmarks.** Forward + reverse throughput (100K events), latency p50/p95/p99, memory bounded during claim-check. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §E.4 |
+
+> **Phase 4 subtotal: ~7 days**
+
+### Phase 5 — Documentation & Distribution
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| RELAY-19 | **Documentation.** `pgtrickle-relay/README.md` quick start (forward + reverse). `docs/RELAY.md` comprehensive guide. `docs/PATTERNS.md` relay section with worked examples per backend. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §F.1 |
+| RELAY-20 | **Dockerfile + GitHub Actions.** Distroless container image `grove/pgtrickle-relay`. CI matrix: Linux amd64/arm64, macOS amd64/arm64. Pre-built binaries on GitHub Releases. | 1d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §F.2 |
+| RELAY-21 | **Release automation.** Docker Hub publish, Homebrew formula (`brew install grove/tap/pgtrickle-relay`), `cargo publish pgtrickle-relay`. | 0.5d | [PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) §F.2 |
+
+> **Phase 5 subtotal: ~2.5 days**
+
+### Implementation Phases
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Phase 1 | Core framework: Source/Sink traits, outbox poller, payload decoder, NATS/webhook/Kafka sinks, metrics, shutdown | Days 1–10 |
+| Phase 2 | Tier 2 sinks: Redis, SQS, PG inbox, RabbitMQ + routing templates | Days 10–15 |
+| Phase 3 | Reverse mode: inbox sink, NATS/Kafka/webhook/Redis/SQS/RabbitMQ/stdin sources + reverse config | Days 15–25 |
+| Phase 4 | Tests: unit, Testcontainers integration (forward + reverse), consumer group E2E, benchmarks | Days 25–32 |
+| Phase 5 | Distribution: Docker, CI binaries, Homebrew, docs, cargo publish | Days 32–34.5 |
+
+> **v0.24.0 total: ~34.5 days solo / ~22 days with two developers**
+> (Phases 1–2 forward sinks and Phase 3 reverse sources can be parallelised.
+> Requires v0.23.0 outbox + consumer groups for full forward E2E; reverse
+> mode only needs inbox table schema.)
+
+**Exit criteria:**
+- [ ] RELAY-1: `pgtrickle-relay` crate builds with `--features default` and `--features nats,webhook,kafka`
+- [ ] RELAY-2: Source + Sink traits compose correctly; relay loop runs with mock source/sink
+- [ ] RELAY-3: Simple mode polls and forwards events; consumer group mode uses `poll_outbox()` + `commit_offset()` correctly
+- [ ] RELAY-4: Inline payload decoded and published; claim-check cursor fetch returns all rows; `outbox_rows_consumed()` called; full-refresh flag triggers upsert semantics
+- [ ] RELAY-5: stdout/file backend writes valid JSONL; all 3 formats tested
+- [ ] RELAY-6: NATS E2E: relay publishes; consumer verifies dedup via `Nats-Msg-Id`
+- [ ] RELAY-7: Webhook E2E: relay POSTs batch; WireMock verifies `Idempotency-Key` header
+- [ ] RELAY-8: Kafka E2E: relay produces records; consumer group verifies zero duplicates
+- [ ] RELAY-9: `/metrics` returns valid Prometheus exposition; `/health` returns 200 healthy, 503 degraded
+- [ ] RELAY-10: Redis E2E: `XRANGE` returns all relayed events in order
+- [ ] RELAY-11: SQS E2E: `SendMessageBatch` used; FIFO dedup verified
+- [ ] RELAY-12: PG inbox E2E: events appear in target inbox; duplicate publish does not duplicate row
+- [ ] RELAY-13: RabbitMQ E2E: events delivered to bound queue; `message-id` property set
+- [ ] RELAY-14: Subject template `pgtrickle.{stream_table}.{op}` resolves correctly
+- [ ] RELAY-15: All unit tests pass
+- [ ] RELAY-16: All forward Testcontainers integration tests pass per sink
+- [ ] RELAY-17: Forward consumer group E2E: 2 relays, 0 duplicates; crash recovery verified
+- [ ] RELAY-18: Forward throughput > 10K events/sec inline → NATS; reverse throughput > 10K events/sec Kafka → inbox; memory bounded during claim-check
+- [ ] RELAY-19: `docs/RELAY.md` published; quick start covers forward + reverse with NATS, webhook, Kafka
+- [ ] RELAY-20: Docker image `grove/pgtrickle-relay:0.24.0` published; distroless < 50 MB
+- [ ] RELAY-21: `cargo install pgtrickle-relay` works; Homebrew formula passes `brew audit`
+- [ ] RELAY-22: Inbox sink writes events with `ON CONFLICT` dedup; batch insert verified
+- [ ] RELAY-23: NATS→inbox E2E: durable consumer delivers to inbox; ack only after write
+- [ ] RELAY-24: Kafka→inbox E2E: offset committed only after inbox write; crash recovery verified
+- [ ] RELAY-25: Webhook→inbox E2E: POST returns 200 only after inbox write
+- [ ] RELAY-26: Redis→inbox E2E: XACK sent only after inbox write
+- [ ] RELAY-27: SQS→inbox E2E: DeleteMessage after inbox write; visibility timeout re-poll verified
+- [ ] RELAY-28: RabbitMQ→inbox E2E: manual ack after inbox write; nack+requeue on failure
+- [ ] RELAY-29: stdin→inbox: piped JSONL arrives in inbox; dedup key extracted
+- [ ] RELAY-30: Reverse config: event type extraction + column mapping works
+- [ ] RELAY-31: All reverse Testcontainers integration tests pass per source
+- [ ] RELAY-32: Reverse dedup: duplicate source message produces 1 inbox row; crash recovery zero loss
+- [ ] Extension upgrade path tested (`0.23.0 → 0.24.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.25.0 — TUI Dog-Feeding Integration
 
 **Status: Planned.** See [plans/ui/PLAN_TUI_PART_3.md](plans/ui/PLAN_TUI_PART_3.md) for the full design.
 
@@ -6559,7 +6699,7 @@ TUI/CLI visualization enhancement for the dog-feeding views. Recommended from [P
 | T20 | Documentation, Polish & Final Testing — docs, cross-cutting tests, coverage audit | Days 13–15 |
 | T21 (OP) | TUI/CLI Polish — DAG runtime overlay in `explain_dag()` | Days 15–16 (parallel or interleaved) |
 
-> **v0.22.0 total: ~3–4 weeks** (TUI dog-feeding integration + DAG visualization polish: architecture + 16 views + 4 backend items + 2 CLI commands + tests + docs)
+> **v0.25.0 total: ~3–4 weeks** (TUI dog-feeding integration + DAG visualization polish: architecture + 16 views + 4 backend items + 2 CLI commands + tests + docs)
 
 **Exit criteria:**
 - [ ] T15: `AppState` uses 8 domain structs; all existing tests pass; `just lint` clean
@@ -6582,17 +6722,17 @@ TUI/CLI visualization enhancement for the dog-feeding views. Recommended from [P
 - [ ] CLI-1: `pgtrickle dog-feeding enable/disable/status` functional
 - [ ] CLI-2: `pgtrickle graph --format mermaid` outputs valid Mermaid
 - [ ] TUI-D1/DOC-21/DOC-22: Documentation updated
-- [ ] Extension upgrade path tested (`0.23.0 → 0.24.0`)
+- [ ] Extension upgrade path tested (`0.24.0 → 0.25.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.25.0 — PostgreSQL 17 Support
+## v0.26.0 — PostgreSQL 17 Support
 
 > **Release Theme**
 > This release adds PostgreSQL 17 as a supported target alongside
 > PostgreSQL 18. PGlite is built on PostgreSQL 17, so this is a hard
-> prerequisite for the PGlite proof of concept (v0.26.0). The pgrx 0.17.x
+> prerequisite for the PGlite proof of concept (v0.27.0). The pgrx 0.17.x
 > framework already supports PG 17 — the work is enabling the feature flag,
 > adapting version-sensitive code paths, expanding the CI matrix, and
 > validating the full test suite against a PG 17 instance.
@@ -6621,7 +6761,7 @@ TUI/CLI visualization enhancement for the dog-feeding views. Recommended from [P
 |------|-------------|--------|-----|
 | PG17-9 | **Full E2E suite against PG 17.** Run the complete E2E test suite against a PG 17 instance. Fix any parser or catalog incompatibilities that surface. | 1–2d | — |
 | PG17-10 | **TPC-H validation on PG 17.** Run TPC-H benchmark queries on PG 17 to verify differential refresh correctness for complex queries. | 4–8h | — |
-| PG17-11 | **Upgrade path test.** Verify `ALTER EXTENSION pg_trickle UPDATE` from 0.24.0 to 0.25.0 works on both PG 17 and PG 18. | 2–4h | — |
+| PG17-11 | **Upgrade path test.** Verify `ALTER EXTENSION pg_trickle UPDATE` from 0.25.0 to 0.26.0 works on both PG 17 and PG 18. | 2–4h | — |
 
 ### Documentation
 
@@ -6660,7 +6800,7 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 
 > **PostgreSQL feature integration subtotal: ~4–5 hours** (PGFEAT-1 through PGFEAT-5) **+ ~10–18 hours** (PGFEAT-6 through PGFEAT-9, optional but recommended)
 
-> **v0.25.0 total: ~2–4 days** (PG 17 support) **+ ~14–23 hours** (PostgreSQL feature integration, all items)
+> **v0.26.0 total: ~2–4 days** (PG 17 support) **+ ~14–23 hours** (PostgreSQL feature integration, all items)
 
 **Exit criteria:**
 - [ ] PG17-1: `cargo build --features pg17 --no-default-features` compiles cleanly
@@ -6680,12 +6820,12 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 - [ ] PGFEAT-7: Skip scan index optimization evaluated; benchmarks quantify benefit; indexes created if beneficial
 - [ ] PGFEAT-8: `MERGE ... RETURNING OLD.*, NEW.*` integrated in `build_merge_sql()`; ST-to-ST change buffer performance improved
 - [ ] PGFEAT-9: Virtual generated columns correctly excluded from CDC change buffer schemas; E2E tests pass with virtual column sources
-- [ ] Extension upgrade path tested (`0.24.0 → 0.25.0`)
+- [ ] Extension upgrade path tested (`0.25.0 → 0.26.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.26.0 — PGlite Proof of Concept
+## v0.27.0 — PGlite Proof of Concept
 
 > **Release Theme**
 > This release validates whether PGlite users want real incremental view
@@ -6695,7 +6835,7 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 > simple patterns — single-table aggregates, two-table inner joins, and
 > filtered scans. It deliberately limits scope to 3–5 SQL patterns to
 > keep effort low while generating a concrete demand signal. If adoption
-> materialises, the full core extraction (v0.27.0) and WASM build (v0.28.0)
+> materialises, the full core extraction (v0.28.0) and WASM build (v0.29.0)
 > proceed. The main pg_trickle PostgreSQL extension ships no functional
 > changes in this release — only version bumps and upgrade migration
 > plumbing.
@@ -7011,19 +7151,19 @@ Dependencies: PGL-0-4. Schema change: No.
 **TEST-5 — Extension upgrade path (0.18 to 0.19)**
 
 > **In plain terms:** The main pg_trickle PostgreSQL extension ships no
-> functional changes in v0.26.0, but the upgrade migration path must still
-> be tested. `ALTER EXTENSION pg_trickle UPDATE` from 0.25.0 to 0.26.0
+> functional changes in v0.27.0, but the upgrade migration path must still
+> be tested. `ALTER EXTENSION pg_trickle UPDATE` from 0.26.0 to 0.27.0
 > must leave existing stream tables intact.
 
 Verify: upgrade E2E test confirms all existing stream tables survive and
-refresh correctly after `0.25.0 -> 0.26.0` upgrade.
+refresh correctly after `0.26.0 -> 0.27.0` upgrade.
 Dependencies: None. Schema change: No (PG extension unchanged).
 
 ### Conflicts & Risks
 
 1. **Demand uncertainty is the primary risk.** This entire milestone is a bet
    that PGlite users want IVM beyond what pg_ivm provides. If Phase 0
-   generates no adoption signal, v0.27.0–v0.29.0 should be deprioritised and
+   generates no adoption signal, v0.28.0–v0.30.0 should be deprioritised and
    v1.0.0 proceeds without PGlite. Define a concrete adoption threshold
    (e.g., > 100 npm weekly downloads within 60 days of publication) as a
    go/no-go gate for v0.27.0.
@@ -7055,7 +7195,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
    compensate — consider porting the proptest approach to a JS property-
    testing library (e.g., fast-check).
 
-> **v0.26.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
+> **v0.27.0 total: ~2–3 weeks (PGlite plugin) + ~1–2 days (PG extension version bump)**
 
 **Exit criteria:**
 - [ ] PGL-0-1: Statement-level triggers with transition tables confirmed working in PGlite
@@ -7077,12 +7217,12 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 - [ ] UX-4: TypeScript type definitions ship with strict-mode compatibility
 - [ ] TEST-1: > 50 correctness test cases pass on PGlite latest
 - [ ] TEST-2: CI tests pass against PGlite N, N-1, N-2
-- [ ] TEST-5: Extension upgrade path tested (`0.25.0 -> 0.26.0`)
+- [ ] TEST-5: Extension upgrade path tested (`0.26.0 -> 0.27.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v0.27.0 — Core Extraction (`pg_trickle_core`)
+## v0.28.0 — Core Extraction (`pg_trickle_core`)
 
 > **Release Theme**
 > This release surgically separates pg_trickle's "brain" — the DVM engine,
@@ -7234,11 +7374,11 @@ Dependencies: PGL-1-1. Schema change: No.
 
 > **In plain terms:** v0.27.0 makes no SQL-visible changes (same functions,
 > same catalog schema), but the upgrade migration must still be tested.
-> `ALTER EXTENSION pg_trickle UPDATE` from 0.26.0 to 0.27.0 must leave
+> `ALTER EXTENSION pg_trickle UPDATE` from 0.27.0 to 0.28.0 must leave
 > existing stream tables intact and refreshable.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
- correctly after `0.26.0 -> 0.27.0`.
+ correctly after `0.27.0 -> 0.28.0`.
 
 **STAB-5 — Feature-flag isolation for WASM target**
 
@@ -7476,7 +7616,7 @@ Dependencies: PGL-1-1. Schema change: No.
    extraction order: types -> operators -> DAG -> diff -> rewrites ->
    sublinks.
 
-> **v0.27.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
+> **v0.28.0 total: ~3–4 weeks (extraction) + ~1–2 weeks (abstraction layer + testing)**
 
 **Exit criteria:**
 - [ ] PGL-1-1: `pg_trickle_core` crate exists as a workspace member with zero pgrx dependencies
@@ -7493,7 +7633,7 @@ Dependencies: PGL-1-1. Schema change: No.
 - [ ] STAB-1: Zero `pg_sys::` references in `pg_trickle_core/src/`
 - [ ] STAB-2: `cargo build -p pg_trickle_core --no-default-features` passes in CI
 - [ ] STAB-3: `cargo pgrx package` and `cargo pgrx test` succeed with workspace layout
-- [ ] STAB-4: Extension upgrade path tested (`0.26.0 -> 0.27.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.27.0 -> 0.28.0`)
 - [ ] STAB-5: WASM target builds in CI
 - [ ] PERF-1: Criterion shows < 1% regression on `diff_operators` benchmark
 - [ ] PERF-2: Full benchmark suite passes with < 5% regression threshold
@@ -7508,7 +7648,7 @@ Dependencies: PGL-1-1. Schema change: No.
 
 ---
 
-## v0.28.0 — PGlite WASM Extension
+## v0.29.0 — PGlite WASM Extension
 
 > **Release Theme**
 > This release delivers the first working PGlite extension — the moment
@@ -7944,7 +8084,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
    Add it to the existing CI matrix as a separate job that only runs when
    `pg_trickle_pglite/` or `pg_trickle_core/` files are modified.
 
-> **v0.28.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
+> **v0.29.0 total: ~5–7 weeks (WASM build) + ~2–3 weeks (testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-2-1: C shim compiles and links against PGlite's WASM PostgreSQL headers
@@ -7976,7 +8116,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 
 ---
 
-## v0.29.0 — PGlite Reactive Integration
+## v0.30.0 — PGlite Reactive Integration
 
 > **Release Theme**
 > This release completes the PGlite story by bridging the gap between
@@ -8127,16 +8267,16 @@ Verify: test dropping a stream table while `useStreamTable()` is active;
 assert error boundary catches the error with an actionable message.
 Dependencies: PGL-3-2, PGL-3-3. Schema change: No.
 
-**STAB-4 — Native extension upgrade path (0.28 → 0.29)**
+**STAB-4 — Native extension upgrade path (0.29 → 0.30)**
 
-> **In plain terms:** v0.29.0 adds reactive bindings at the TypeScript/npm
+> **In plain terms:** v0.30.0 adds reactive bindings at the TypeScript/npm
 > layer only. The native PostgreSQL extension and PGlite WASM extension
-> must continue to work unchanged. The upgrade migration from 0.28.0 to
-> 0.29.0 must leave existing stream tables and the `@pgtrickle/pglite`
+> must continue to work unchanged. The upgrade migration from 0.29.0 to
+> 0.30.0 must leave existing stream tables and the `@pgtrickle/pglite`
 > WASM extension intact.
 
 Verify: upgrade E2E test confirms stream tables survive and refresh
-correctly after `0.28.0 -> 0.29.0`. TypeScript API backward compatibility
+correctly after `0.29.0 -> 0.30.0`. TypeScript API backward compatibility
 verified.
 Dependencies: None. Schema change: No.
 
@@ -8411,7 +8551,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
    (e.g., `LISTEN/NOTIFY` bridge, WebSocket push) should be deferred to
    post-1.0. Keep the scope tight: reactive bindings + examples + docs.
 
-> **v0.29.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
+> **v0.30.0 total: ~2–3 weeks (bridge + hooks) + ~1–2 weeks (examples + testing + polish)**
 
 **Exit criteria:**
 - [ ] PGL-3-1: Stream table changes appear in `live.changes()` event stream
@@ -8426,7 +8566,7 @@ Dependencies: STAB-1, PGL-3-2. Schema change: No.
 - [ ] STAB-1: 4-hour soak test: heap growth < 10%
 - [ ] STAB-2: 100 mount/unmount cycles: zero leaked subscriptions
 - [ ] STAB-3: Stream table dropped while hook active: error boundary catches
-- [ ] STAB-4: Extension upgrade path tested (`0.28.0 -> 0.29.0`)
+- [ ] STAB-4: Extension upgrade path tested (`0.29.0 -> 0.30.0`)
 - [ ] STAB-5: CI matrix passes for React 18, React 19, Vue 3.4+
 - [ ] PERF-1: INSERT-to-render latency < 50% of `live.incrementalQuery()` at 10K rows
 - [ ] PERF-2: Render count = 1 for bulk DML (1, 10, 100, 1000 rows)
@@ -8653,12 +8793,13 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 | v0.21.0 — Correctness, Safety & Test Hardening | ~6–8wk | 2026-07-16 | ✅ Released |
 | v0.22.0 — Production Scalability & Downstream Integration | ~5–6wk (parallel refresh + downstream CDC + predictive cost + SLA tier) | — | |
 | v0.23.0 — Transactional Inbox & Outbox Patterns | ~4–5wk (outbox + inbox + consumer groups + ordered processing) | — | |
-| v0.24.0 — TUI Dog-Feeding Integration | ~3–4wk (TUI + architecture + backend + CLI) | — | |
-| v0.25.0 — PostgreSQL 17 Support | ~2–4d | — | |
-| v0.26.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
-| v0.27.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
-| v0.28.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
-| v0.29.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
+| v0.24.0 — Relay CLI (`pgtrickle-relay`) | ~34.5d (forward + reverse + 8 backends × Source+Sink + tests + distribution) | — | |
+| v0.25.0 — TUI Dog-Feeding Integration | ~3–4wk (TUI + architecture + backend + CLI) | — | |
+| v0.26.0 — PostgreSQL 17 Support | ~2–4d | — | |
+| v0.27.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
+| v0.28.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
+| v0.29.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
+| v0.30.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
 | v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
 | Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
 | Post-1.0 (ecosystem) | 88–134h | — | |
