@@ -6105,6 +6105,8 @@ mod tests {
             max_delta_fraction: None,
             last_error_message: None,
             last_error_at: None,
+            downstream_publication_name: None,
+            freshness_deadline_ms: None,
         }
     }
 

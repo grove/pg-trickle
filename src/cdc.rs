@@ -2988,6 +2988,34 @@ pub fn count_pending_changes(
     .unwrap_or(0)
 }
 
+/// PRED-2: Estimate total pending change buffer rows across all sources for a stream table.
+///
+/// This uses `pg_class.reltuples` for a fast estimate (no sequential scan).
+/// Returns `Ok(None)` if no change buffers exist for this ST.
+pub fn estimate_pending_changes(pgt_id: i64) -> Option<i64> {
+    let change_schema = crate::config::pg_trickle_change_buffer_schema();
+    Spi::connect(|client| {
+        client
+            .select(
+                "SELECT COALESCE(SUM(c.reltuples::bigint), 0)::bigint \
+                 FROM pgtrickle.pgt_dependencies d \
+                 JOIN pg_catalog.pg_class c ON c.relname = 'changes_' || d.source_relid::text \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1 \
+                 WHERE d.pgt_id = $2 AND d.source_type = 'TABLE'",
+                None,
+                &[change_schema.into(), pgt_id.into()],
+            )
+            .ok()
+            .and_then(|r| {
+                if r.is_empty() {
+                    None
+                } else {
+                    r.get::<i64>(1).ok()?
+                }
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

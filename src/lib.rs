@@ -282,6 +282,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     blow_reason     TEXT,
     last_error_message TEXT,
     last_error_at   TIMESTAMPTZ,
+    downstream_publication_name TEXT,
+    freshness_deadline_ms BIGINT,
     st_partition_key TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()

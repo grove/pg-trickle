@@ -133,7 +133,8 @@ extract_table_columns_for() {
             split($0, parts, /[[:space:]]/)
             col = tolower(parts[1])
             if (col != "constraint" && col != "check" && col != "primary" &&
-                col != "foreign" && col != "unique" && col != "exclude") {
+                col != "foreign" && col != "unique" && col != "exclude" &&
+                col != "references") {
                 print col
             }
         }

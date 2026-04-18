@@ -966,6 +966,93 @@ SELECT pgtrickle.drop_stream_table('order_totals');
 - Drops the underlying storage table with `CASCADE`.
 - Removes all catalog entries (metadata, dependencies, refresh history).
 - Cleans up CDC triggers and change buffer tables for source tables that are no longer tracked by any ST.
+- Automatically drops any downstream publication created by `stream_table_to_publication()`.
+
+---
+
+### pgtrickle.stream\_table\_to\_publication
+
+Create a PostgreSQL logical replication publication for a stream table,
+enabling downstream consumers (Debezium, Kafka Connect, standby replicas)
+to subscribe to changes.
+
+```sql
+pgtrickle.stream_table_to_publication(name text) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table (schema-qualified or unqualified). |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.stream_table_to_publication('order_totals');
+-- Creates publication 'pgt_pub_order_totals'
+```
+
+**Notes:**
+- The publication is named `pgt_pub_<table_name>`.
+- Only one publication per stream table is allowed.
+- The publication is automatically dropped when the stream table is dropped.
+
+---
+
+### pgtrickle.drop\_stream\_table\_publication
+
+Drop the logical replication publication for a stream table.
+
+```sql
+pgtrickle.drop_stream_table_publication(name text) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table (schema-qualified or unqualified). |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.drop_stream_table_publication('order_totals');
+```
+
+---
+
+### pgtrickle.set\_stream\_table\_sla
+
+Assign a freshness deadline SLA to a stream table. The extension automatically
+assigns the appropriate refresh tier based on the SLA.
+
+```sql
+pgtrickle.set_stream_table_sla(name text, sla interval) → void
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `text` | Name of the stream table (schema-qualified or unqualified). |
+| `sla` | `interval` | Maximum acceptable data staleness. |
+
+**Tier assignment:**
+- SLA ≤ 5 seconds → **Hot** tier
+- SLA ≤ 30 seconds → **Warm** tier
+- SLA > 30 seconds → **Cold** tier
+
+**Example:**
+
+```sql
+SELECT pgtrickle.set_stream_table_sla('order_totals', interval '10 seconds');
+-- Assigns Warm tier
+```
+
+**Notes:**
+- The scheduler periodically checks actual refresh performance and dynamically
+  re-assigns tiers if the SLA is consistently breached or over-served.
 
 ---
 
