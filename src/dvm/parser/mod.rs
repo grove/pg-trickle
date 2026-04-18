@@ -216,29 +216,6 @@ fn safe_node_to_expr(
     unsafe { node_to_expr(node) }
 }
 
-/// Safe wrapper for `node_to_string`.
-///
-/// Precondition: same as `safe_node_to_expr` — parse-tree pointer from
-/// `raw_parser()`, live for the current memory context.
-fn safe_node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
-    // SAFETY: parse-tree pointer from raw_parser(); valid for the current
-    // memory context. Null is handled inside node_to_string.
-    unsafe { node_to_string(node) }
-}
-
-/// Safe wrapper for `parse_from_item`.
-///
-/// Precondition: `node` must be a valid `*mut pg_sys::Node` from a
-/// `SelectStmt.fromClause` list allocated by `raw_parser()`.
-fn safe_parse_from_item(
-    node: *mut pg_sys::Node,
-    cte_ctx: &mut CteParseContext,
-) -> Result<crate::dvm::parser::types::OpTree, PgTrickleError> {
-    // SAFETY: parse-tree pointer from raw_parser(); valid for the current
-    // memory context.
-    unsafe { parse_from_item(node, cte_ctx) }
-}
-
 /// Safe wrapper for `deparse_from_item_to_sql`.
 ///
 /// Precondition: `node` must be a valid `*mut pg_sys::Node` from a

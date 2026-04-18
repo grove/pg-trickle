@@ -52,9 +52,11 @@ fn extract_where_sublinks(
             let args = pg_list::<pg_sys::Node>(boolexpr.args);
             if args.len() == 1 {
                 // INVARIANT: args.len() == 1 guarantees head() returns Some.
-                let arg = args.head().ok_or_else(|| PgTrickleError::InternalError(
-                    "BoolExpr NOT_EXPR args list unexpectedly empty".into(),
-                ))?;
+                let arg = args.head().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "BoolExpr NOT_EXPR args list unexpectedly empty".into(),
+                    )
+                })?;
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(arg, T_SubLink) {
                     let wrapper = parse_sublink_to_wrapper(arg, true, cte_ctx)?;
@@ -132,9 +134,11 @@ fn extract_where_sublinks(
                             left: Box::new(acc),
                             right: Box::new(expr),
                         })
-                        .ok_or_else(|| PgTrickleError::InternalError(
-                            "AND expression list was non-empty but reduce produced None".into(),
-                        ))?,
+                        .ok_or_else(|| {
+                            PgTrickleError::InternalError(
+                                "AND expression list was non-empty but reduce produced None".into(),
+                            )
+                        })?,
                 )
             };
 
@@ -527,9 +531,11 @@ fn parse_exists_sublink(
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
     let mut inner_tree = unsafe {
         parse_from_item(
-            from_list.head().ok_or_else(|| PgTrickleError::InternalError(
-                "EXISTS sublink from_list unexpectedly empty after non-empty check".into(),
-            ))?,
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "EXISTS sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
             cte_ctx,
         )?
     };
@@ -665,9 +671,11 @@ fn parse_exists_sublink(
                     left: Box::new(acc),
                     right: Box::new(eq),
                 })
-                .ok_or_else(|| PgTrickleError::InternalError(
-                    "corr_pairs was non-empty but reduce produced None".into(),
-                ))?
+                .ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "corr_pairs was non-empty but reduce produced None".into(),
+                    )
+                })?
         } else {
             // No correlation found — let the pre-aggregate filter handle
             // all filtering; the SemiJoin condition is a tautology.
@@ -887,9 +895,11 @@ fn parse_any_sublink(
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
     let mut inner_tree = unsafe {
         parse_from_item(
-            from_list.head().ok_or_else(|| PgTrickleError::InternalError(
-                "IN sublink from_list unexpectedly empty after non-empty check".into(),
-            ))?,
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "IN sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
             cte_ctx,
         )?
     };
@@ -953,9 +963,11 @@ fn parse_any_sublink(
         ));
     }
 
-    let first_target = target_list.head().ok_or_else(|| PgTrickleError::InternalError(
-        "IN sublink target_list unexpectedly empty after non-empty check".into(),
-    ))?;
+    let first_target = target_list.head().ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "IN sublink target_list unexpectedly empty after non-empty check".into(),
+        )
+    })?;
     let inner_col_expr = if let Some(rt) = cast_node!(first_target, T_ResTarget, pg_sys::ResTarget)
     {
         if rt.val.is_null() {
@@ -1205,9 +1217,11 @@ fn parse_all_sublink(
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
     let mut inner_tree = unsafe {
         parse_from_item(
-            from_list.head().ok_or_else(|| PgTrickleError::InternalError(
-                "ALL sublink from_list unexpectedly empty after non-empty check".into(),
-            ))?,
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "ALL sublink from_list unexpectedly empty after non-empty check".into(),
+                )
+            })?,
             cte_ctx,
         )?
     };
@@ -1241,9 +1255,11 @@ fn parse_all_sublink(
         ));
     }
 
-    let first_target = target_list.head().ok_or_else(|| PgTrickleError::InternalError(
-        "ALL sublink target_list unexpectedly empty after non-empty check".into(),
-    ))?;
+    let first_target = target_list.head().ok_or_else(|| {
+        PgTrickleError::InternalError(
+            "ALL sublink target_list unexpectedly empty after non-empty check".into(),
+        )
+    })?;
     let inner_col_expr = if let Some(rt) = cast_node!(first_target, T_ResTarget, pg_sys::ResTarget)
     {
         if rt.val.is_null() {
@@ -1683,9 +1699,11 @@ unsafe fn parse_select_stmt_inner(
     // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
     let mut tree = unsafe {
         parse_from_item(
-            from_list.head().ok_or_else(|| PgTrickleError::InternalError(
-                "parse_select_stmt_inner from_list unexpectedly empty".into(),
-            ))?,
+            from_list.head().ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "parse_select_stmt_inner from_list unexpectedly empty".into(),
+                )
+            })?,
             cte_ctx,
         )?
     };
@@ -2701,9 +2719,11 @@ unsafe fn parse_from_item_inner(
 
         // The first element is a List node; its first element is the FuncCall.
         // SAFETY: func_list is non-empty, head is a List node containing the FuncCall.
-        let inner_list_node = func_list.head().ok_or_else(|| PgTrickleError::QueryParseError(
-            "RangeFunction func_list head is None despite non-empty check".into(),
-        ))?;
+        let inner_list_node = func_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction func_list head is None despite non-empty check".into(),
+            )
+        })?;
         let inner_list = pg_list::<pg_sys::Node>(inner_list_node as *mut pg_sys::List);
         if inner_list.is_empty() {
             return Err(PgTrickleError::QueryParseError(
@@ -2711,9 +2731,11 @@ unsafe fn parse_from_item_inner(
             ));
         }
 
-        let func_node = inner_list.head().ok_or_else(|| PgTrickleError::QueryParseError(
-            "RangeFunction inner_list head is None despite non-empty check".into(),
-        ))?;
+        let func_node = inner_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction inner_list head is None despite non-empty check".into(),
+            )
+        })?;
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
         if !is_node_type!(func_node, T_FuncCall) {
             return Err(PgTrickleError::QueryParseError(
@@ -3089,9 +3111,11 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
 
         match fields.len() {
             1 => {
-                let field = fields.head().ok_or_else(|| PgTrickleError::InternalError(
-                    "ColumnRef fields list has len=1 but head() returned None".into(),
-                ))?;
+                let field = fields.head().ok_or_else(|| {
+                    PgTrickleError::InternalError(
+                        "ColumnRef fields list has len=1 but head() returned None".into(),
+                    )
+                })?;
                 // Bare `SELECT *` arrives as ColumnRef with a single A_Star field.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(field, T_A_Star) {
@@ -3106,8 +3130,12 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             }
             2 => {
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let table_alias = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("ColumnRef fields[0] is None".into()))?)?;
-                let last = fields.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("ColumnRef fields[1] is None".into()))?;
+                let table_alias = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[0] is None".into())
+                })?)?;
+                let last = fields.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[1] is None".into())
+                })?;
                 // `table.*` arrives as ColumnRef with fields [T_String, T_A_Star].
                 // T_A_Star is not a T_String, so node_to_string falls back to
                 // "node_T_A_Star" — check explicitly before calling it.
@@ -3127,10 +3155,16 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
             3 => {
                 // schema.table.column — drop the schema, use table.column
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let _schema = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("ColumnRef fields[0] is None".into()))?)?;
+                let _schema = safe_node_to_string(fields.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[0] is None".into())
+                })?)?;
                 // SAFETY: Parse-tree pointer from PostgreSQL's raw_parser; valid within current memory context.
-                let table_alias = safe_node_to_string(fields.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("ColumnRef fields[1] is None".into()))?)?;
-                let last = fields.get_ptr(2).ok_or_else(|| PgTrickleError::InternalError("ColumnRef fields[2] is None".into()))?;
+                let table_alias = safe_node_to_string(fields.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[1] is None".into())
+                })?)?;
+                let last = fields.get_ptr(2).ok_or_else(|| {
+                    PgTrickleError::InternalError("ColumnRef fields[2] is None".into())
+                })?;
                 // `schema.table.*` — same T_A_Star guard as the 2-field case.
                 // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
                 if is_node_type!(last, T_A_Star) {
@@ -3231,9 +3265,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("BETWEEN bounds[0] is None".into()))?)?;
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("BETWEEN bounds[1] is None".into()))?)?;
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} BETWEEN {} AND {}",
                     tested.to_sql(),
@@ -3246,9 +3284,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("NOT BETWEEN bounds[0] is None".into()))?)?;
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("NOT BETWEEN bounds[1] is None".into()))?)?;
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} NOT BETWEEN {} AND {}",
                     tested.to_sql(),
@@ -3261,9 +3303,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[0] is None".into()))?)?;
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[1] is None".into()))?)?;
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("BETWEEN SYMMETRIC bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} BETWEEN SYMMETRIC {} AND {}",
                     tested.to_sql(),
@@ -3276,9 +3322,13 @@ pub(crate) unsafe fn node_to_expr(node: *mut pg_sys::Node) -> Result<Expr, PgTri
                 let tested = safe_node_to_expr(aexpr.lexpr)?;
                 let bounds = pg_list::<pg_sys::Node>(aexpr.rexpr as *mut _);
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[0] is None".into()))?)?;
+                let low = safe_node_to_expr(bounds.get_ptr(0).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[0] is None".into())
+                })?)?;
                 // SAFETY: Node pointer from a valid parse-tree list; allocated by raw_parser.
-                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[1] is None".into()))?)?;
+                let high = safe_node_to_expr(bounds.get_ptr(1).ok_or_else(|| {
+                    PgTrickleError::InternalError("NOT BETWEEN SYMMETRIC bounds[1] is None".into())
+                })?)?;
                 Ok(Expr::Raw(format!(
                     "{} NOT BETWEEN SYMMETRIC {} AND {}",
                     tested.to_sql(),
@@ -4567,18 +4617,22 @@ pub(crate) unsafe fn deparse_from_item_to_sql(
                 "RangeFunction with no functions in deparse".into(),
             ));
         }
-        let inner_list_node = func_list.head().ok_or_else(|| PgTrickleError::QueryParseError(
-            "RangeFunction func_list head is None in deparse".into(),
-        ))?;
+        let inner_list_node = func_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction func_list head is None in deparse".into(),
+            )
+        })?;
         let inner_list = pg_list::<pg_sys::Node>(inner_list_node as *mut pg_sys::List);
         if inner_list.is_empty() {
             return Err(PgTrickleError::QueryParseError(
                 "RangeFunction inner list empty in deparse".into(),
             ));
         }
-        let func_node = inner_list.head().ok_or_else(|| PgTrickleError::QueryParseError(
-            "RangeFunction inner_list head is None in deparse".into(),
-        ))?;
+        let func_node = inner_list.head().ok_or_else(|| {
+            PgTrickleError::QueryParseError(
+                "RangeFunction inner_list head is None in deparse".into(),
+            )
+        })?;
         // SAFETY: Parse-tree node pointers from raw_parser; valid within current memory context.
         let func_sql = unsafe { deparse_func_call(func_node as *const pg_sys::FuncCall)? };
         let mut result = func_sql;
@@ -4974,6 +5028,16 @@ unsafe fn node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleErr
     } else {
         Ok(format!("node_{:?}", pg_deref!(node).type_))
     }
+}
+
+/// Safe wrapper for `node_to_string`.
+///
+/// Precondition: `node` must be a valid parse-tree pointer from `raw_parser()`,
+/// live within the current PostgreSQL memory context.
+fn safe_node_to_string(node: *mut pg_sys::Node) -> Result<String, PgTrickleError> {
+    // SAFETY: parse-tree pointer from raw_parser(); valid for the current
+    // memory context. Null is handled inside node_to_string.
+    unsafe { node_to_string(node) }
 }
 
 /// Deparse a node back to SQL text (simplified fallback).

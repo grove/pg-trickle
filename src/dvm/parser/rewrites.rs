@@ -3795,7 +3795,10 @@ fn rewrite_from_item_rows_from(node: *mut pg_sys::Node) -> Result<String, PgTric
                 continue;
             }
             // INVARIANT: inner_list is non-empty (checked above), so head() cannot fail.
-            let func_node = inner_list.head().unwrap();
+            let func_node = match inner_list.head() {
+                Some(n) => n,
+                None => continue,
+            };
             // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
             if !is_node_type!(func_node, T_FuncCall) {
                 continue;
@@ -5987,7 +5990,10 @@ mod unit_tests {
 
     #[test]
     fn test_word_boundary_present() {
-        assert!(contains_word_boundary("SELECT DISTINCT col FROM t", "DISTINCT"));
+        assert!(contains_word_boundary(
+            "SELECT DISTINCT col FROM t",
+            "DISTINCT"
+        ));
     }
 
     #[test]
@@ -6002,7 +6008,10 @@ mod unit_tests {
 
     #[test]
     fn test_word_boundary_absent() {
-        assert!(!contains_word_boundary("SELECT DISTINCTLY col FROM t", "DISTINCT"));
+        assert!(!contains_word_boundary(
+            "SELECT DISTINCTLY col FROM t",
+            "DISTINCT"
+        ));
     }
 
     #[test]

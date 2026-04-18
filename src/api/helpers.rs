@@ -1207,12 +1207,10 @@ const VOLATILE_FN_PATTERNS: &[&str] = &[
 /// allow non-determinism into the stream table.
 pub(super) fn detect_volatile_functions(query: &str) -> Option<&'static str> {
     let lower = query.to_lowercase();
-    for &pattern in VOLATILE_FN_PATTERNS {
-        if lower.contains(pattern) {
-            return Some(pattern);
-        }
-    }
-    None
+    VOLATILE_FN_PATTERNS
+        .iter()
+        .find(|&&pattern| lower.contains(pattern))
+        .copied()
 }
 
 /// Emit a WARNING if the defining query uses a volatile function.
@@ -2638,13 +2636,19 @@ mod tests {
         // parse_qualified_name calls SPI for single-part names, so we only
         // test the two-part variant here (no backend needed).
         let result = parse_qualified_name("myschema.orders");
-        assert_eq!(result.unwrap(), ("myschema".to_string(), "orders".to_string()));
+        assert_eq!(
+            result.unwrap(),
+            ("myschema".to_string(), "orders".to_string())
+        );
     }
 
     #[test]
     fn test_pqn_two_parts_with_uppercase() {
         let result = parse_qualified_name("Public.MyTable");
-        assert_eq!(result.unwrap(), ("Public".to_string(), "MyTable".to_string()));
+        assert_eq!(
+            result.unwrap(),
+            ("Public".to_string(), "MyTable".to_string())
+        );
     }
 
     // ── quote_identifier ───────────────────────────────────────────────

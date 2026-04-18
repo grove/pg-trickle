@@ -607,8 +607,9 @@ fn st_refresh_stats() -> TableIterator<
 ///
 /// Output format follows the OpenMetrics 1.0 specification.
 pub(crate) fn collect_metrics_text() -> String {
-    let rows = Spi::connect(|client| -> Vec<(String, String, String, i64, i64, i64, i32)> {
-        let query = "
+    let rows = Spi::connect(
+        |client| -> Vec<(String, String, String, i64, i64, i64, i32)> {
+            let query = "
             SELECT
                 s.pgt_name,
                 s.pgt_schema,
@@ -622,25 +623,26 @@ pub(crate) fn collect_metrics_text() -> String {
             GROUP BY s.pgt_name, s.pgt_schema, s.status, s.consecutive_errors
             ORDER BY s.pgt_schema, s.pgt_name
         ";
-        client
-            .select(query, None, &[])
-            .map(|tuptable| {
-                tuptable
-                    .into_iter()
-                    .filter_map(|row| {
-                        let name = row.get::<String>(1).ok().flatten()?;
-                        let schema = row.get::<String>(2).ok().flatten()?;
-                        let status = row.get::<String>(3).ok().flatten().unwrap_or_default();
-                        let successful = row.get::<i64>(4).ok().flatten().unwrap_or(0);
-                        let failed = row.get::<i64>(5).ok().flatten().unwrap_or(0);
-                        let total_rows = row.get::<i64>(6).ok().flatten().unwrap_or(0);
-                        let errors = row.get::<i32>(7).ok().flatten().unwrap_or(0);
-                        Some((name, schema, status, successful, failed, total_rows, errors))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
+            client
+                .select(query, None, &[])
+                .map(|tuptable| {
+                    tuptable
+                        .into_iter()
+                        .filter_map(|row| {
+                            let name = row.get::<String>(1).ok().flatten()?;
+                            let schema = row.get::<String>(2).ok().flatten()?;
+                            let status = row.get::<String>(3).ok().flatten().unwrap_or_default();
+                            let successful = row.get::<i64>(4).ok().flatten().unwrap_or(0);
+                            let failed = row.get::<i64>(5).ok().flatten().unwrap_or(0);
+                            let total_rows = row.get::<i64>(6).ok().flatten().unwrap_or(0);
+                            let errors = row.get::<i32>(7).ok().flatten().unwrap_or(0);
+                            Some((name, schema, status, successful, failed, total_rows, errors))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+    );
 
     let mut out = String::with_capacity(4096);
 
@@ -649,17 +651,25 @@ pub(crate) fn collect_metrics_text() -> String {
     out.push_str("# TYPE pg_trickle_info gauge\n");
     out.push_str(&format!(
         "pg_trickle_info{{version=\"{}\"}} 1\n",
-        crate::version::EXTENSION_VERSION
+        env!("CARGO_PKG_VERSION")
     ));
 
     // Per-ST metrics
-    out.push_str("# HELP pg_trickle_refreshes_total Total successful refresh count per stream table\n");
+    out.push_str(
+        "# HELP pg_trickle_refreshes_total Total successful refresh count per stream table\n",
+    );
     out.push_str("# TYPE pg_trickle_refreshes_total counter\n");
-    out.push_str("# HELP pg_trickle_refresh_failures_total Total failed refresh count per stream table\n");
+    out.push_str(
+        "# HELP pg_trickle_refresh_failures_total Total failed refresh count per stream table\n",
+    );
     out.push_str("# TYPE pg_trickle_refresh_failures_total counter\n");
-    out.push_str("# HELP pg_trickle_rows_changed_total Total rows inserted+deleted per stream table\n");
+    out.push_str(
+        "# HELP pg_trickle_rows_changed_total Total rows inserted+deleted per stream table\n",
+    );
     out.push_str("# TYPE pg_trickle_rows_changed_total counter\n");
-    out.push_str("# HELP pg_trickle_consecutive_errors Current consecutive error count per stream table\n");
+    out.push_str(
+        "# HELP pg_trickle_consecutive_errors Current consecutive error count per stream table\n",
+    );
     out.push_str("# TYPE pg_trickle_consecutive_errors gauge\n");
     out.push_str("# HELP pg_trickle_active Stream table is ACTIVE (1) or not (0)\n");
     out.push_str("# TYPE pg_trickle_active gauge\n");

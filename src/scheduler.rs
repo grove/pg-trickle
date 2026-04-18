@@ -2268,7 +2268,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         // OP-2: Service one pending Prometheus scrape request per tick (non-blocking).
         if let Some(ref ms) = metrics_server {
             // Collect metrics inside a transaction so SPI queries work.
-            let metrics_text = BackgroundWorker::transaction(pgrx::prelude::AssertUnwindSafe(|| {
+            let metrics_text = BackgroundWorker::transaction(std::panic::AssertUnwindSafe(|| {
                 crate::monitor::collect_metrics_text()
             }));
             ms.serve_one_request(&metrics_text);
