@@ -2664,6 +2664,10 @@ fn strip_table_qualifier(expr: &str) -> String {
 /// that is not alphanumeric and not underscore (since SQL identifiers
 /// can contain underscores).
 pub(crate) fn contains_word_boundary(text: &str, word: &str) -> bool {
+    // An empty search word is present at every position — return true for any text.
+    if word.is_empty() {
+        return true;
+    }
     let text_bytes = text.as_bytes();
     let word_len = word.len();
     let mut start = 0;

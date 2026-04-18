@@ -496,9 +496,9 @@ async fn test_crash_recovery_no_stale_running_records() {
     for _ in 0..3 {
         db.execute(&format!(
             "INSERT INTO pgtrickle.pgt_refresh_history
-                 (pgt_id, status, started_at, refresh_mode)
+                 (pgt_id, status, data_timestamp, start_time, action)
              VALUES
-                 ({pgt_id}, 'RUNNING', now() - interval '10 seconds', 'FULL')"
+                 ({pgt_id}, 'RUNNING', now(), now() - interval '10 seconds', 'FULL')"
         ))
         .await;
     }
@@ -566,9 +566,9 @@ async fn test_crash_recovery_covers_all_stream_tables() {
     for id in [id_a, id_b] {
         db.execute(&format!(
             "INSERT INTO pgtrickle.pgt_refresh_history
-                 (pgt_id, status, started_at, refresh_mode)
+                 (pgt_id, status, data_timestamp, start_time, action)
              VALUES
-                 ({id}, 'RUNNING', now() - interval '5 seconds', 'FULL')"
+                 ({id}, 'RUNNING', now(), now() - interval '5 seconds', 'FULL')"
         ))
         .await;
     }
@@ -617,9 +617,9 @@ async fn test_crash_recovery_does_not_suspend_stream_table() {
     // Inject a stale RUNNING record.
     db.execute(&format!(
         "INSERT INTO pgtrickle.pgt_refresh_history
-             (pgt_id, status, started_at, refresh_mode)
+             (pgt_id, status, data_timestamp, start_time, action)
          VALUES
-             ({pgt_id}, 'RUNNING', now() - interval '30 seconds', 'FULL')"
+             ({pgt_id}, 'RUNNING', now(), now() - interval '30 seconds', 'FULL')"
     ))
     .await;
 

@@ -706,6 +706,9 @@ fn normalize_merge_strategy(value: Option<String>) -> MergeStrategy {
         Some("delete_insert") => {
             // CORR-1: The delete_insert strategy was removed in v0.19.0.
             // It was semantically unsafe for aggregate/DISTINCT queries.
+            // Suppress the pgrx warning in unit tests — pgrx FFI is not
+            // available outside a PostgreSQL backend process.
+            #[cfg(not(test))]
             pgrx::warning!(
                 "pg_trickle.merge_strategy = 'delete_insert' was removed in v0.19.0 \
                  (unsafe for aggregate/DISTINCT queries). Falling back to 'auto'. \

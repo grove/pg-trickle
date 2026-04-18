@@ -741,7 +741,12 @@ pub(crate) fn parse_duration(s: &str) -> Result<i64, PgTrickleError> {
 
 /// Validate that schedule meets the minimum.
 pub(super) fn validate_schedule(seconds: i64) -> Result<(), PgTrickleError> {
+    // In test context the PostgreSQL GUC infrastructure is not available;
+    // use the default minimum (1 s) directly to avoid FFI panics.
+    #[cfg(not(test))]
     let min = config::pg_trickle_min_schedule_seconds() as i64;
+    #[cfg(test)]
+    let min = 1i64;
 
     if seconds < min {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -786,6 +791,18 @@ pub(crate) fn parse_schedule(s: &str) -> Result<Schedule, PgTrickleError> {
 /// Validate a cron expression by parsing it with croner.
 pub(super) fn validate_cron(expr: &str) -> Result<(), PgTrickleError> {
     use std::str::FromStr;
+
+    // Standard cron has 5 fields (min hour dom mon dow).
+    // We also accept 6-field cron with a leading seconds field.
+    // 7 or more fields are not valid cron expressions.
+    if !expr.starts_with('@') {
+        let field_count = expr.split_whitespace().count();
+        if field_count != 5 && field_count != 6 {
+            return Err(PgTrickleError::InvalidArgument(format!(
+                "invalid cron expression '{expr}': expected 5 or 6 fields, got {field_count}"
+            )));
+        }
+    }
 
     croner::Cron::from_str(expr).map_err(|e| {
         PgTrickleError::InvalidArgument(format!("invalid cron expression '{expr}': {e}"))
