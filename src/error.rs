@@ -112,6 +112,20 @@ pub enum PgTrickleError {
     #[error("refresh skipped: {0}")]
     RefreshSkipped(String),
 
+    // ── Publication errors ───────────────────────────────────────────────
+    /// The stream table already has a downstream publication.
+    #[error("publication already exists for stream table: {0}")]
+    PublicationAlreadyExists(String),
+
+    /// The stream table does not have a downstream publication.
+    #[error("no publication found for stream table: {0}")]
+    PublicationNotFound(String),
+
+    // ── SLA errors ───────────────────────────────────────────────────────
+    /// The SLA interval is too small for any available tier.
+    #[error("SLA interval too small for available tiers: {0}")]
+    SlaTooSmall(String),
+
     // ── Internal errors — should not happen ──────────────────────────────
     /// An unexpected internal error. Indicates a bug.
     #[error("internal error: {0}")]
@@ -272,7 +286,10 @@ impl PgTrickleError {
             | PgTrickleError::PermissionDenied(_)
             | PgTrickleError::WatermarkBackwardMovement(_)
             | PgTrickleError::WatermarkGroupNotFound(_)
-            | PgTrickleError::WatermarkGroupAlreadyExists(_) => PgTrickleErrorKind::User,
+            | PgTrickleError::WatermarkGroupAlreadyExists(_)
+            | PgTrickleError::PublicationAlreadyExists(_)
+            | PgTrickleError::PublicationNotFound(_)
+            | PgTrickleError::SlaTooSmall(_) => PgTrickleErrorKind::User,
 
             PgTrickleError::UpstreamTableDropped(_) | PgTrickleError::UpstreamSchemaChanged(_) => {
                 PgTrickleErrorKind::Schema

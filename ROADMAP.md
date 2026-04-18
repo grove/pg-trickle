@@ -1,8 +1,8 @@
 # pg_trickle — Project Roadmap
 
 > **Last updated:** 2026-07-16
-> **Latest release:** 0.21.0 (2026-07-16)
-> **Current milestone:** v0.22.0 — EC-01 Correctness Fix & Performance
+> **Latest release:** 0.22.0 (2026-07-16)
+> **Current milestone:** v0.23.0 — Transactional Inbox & Outbox Patterns
 
 For a concise description of what pg_trickle is and why it exists, read
 [ESSENCE.md](ESSENCE.md) — it explains the core problem (full `REFRESH
@@ -89,7 +89,7 @@ from the v0.1.x series to 1.0 and beyond.
 | **v0.19.0** | **Production gap closure & distribution** | **✅ Released** |
 | **v0.20.0** | **Dog-feeding (pg_trickle monitors itself)** | **✅ Released** |
 | v0.21.0 | Correctness, safety & test hardening | ✅ Released |
-| v0.22.0 | Production scalability & downstream integration | Planned |
+| v0.22.0 | Production scalability & downstream integration | ✅ Released |
 | v0.23.0 | Transactional inbox & outbox patterns | Planned |
 | v0.24.0 | TUI dog-feeding integration | Planned |
 | v0.25.0 | PostgreSQL 17 support | Planned |
@@ -6122,7 +6122,7 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 
 ## v0.22.0 — Production Scalability & Downstream Integration
 
-**Status: Planned.** Driven by [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) P1 items not addressed in v0.21.0 and the highest-value P2 items.
+**Status: ✅ Released.** Driven by [PLAN_OVERALL_ASSESSMENT.md](plans/PLAN_OVERALL_ASSESSMENT.md) P1 items not addressed in v0.21.0 and the highest-value P2 items.
 
 > **Release Theme**
 > This release delivers the two highest-impact items from the overall
@@ -6217,22 +6217,22 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > **v0.22.0 total: ~5 weeks** (downstream CDC + parallel refresh + predictive cost + SLA tier)
 
 **Exit criteria:**
-- [ ] CDC-PUB-1: `stream_table_to_publication(name)` creates a working logical publication
-- [ ] CDC-PUB-2: Publication is dropped automatically when the stream table is dropped
-- [ ] CDC-PUB-3: `downstream_publication` column visible in `pg_stat_stream_tables`
-- [ ] CDC-PUB-4: Subscriber receives correct insert/update/delete events; E2E test passes
-- [ ] PAR-2: `max_parallel_workers = 0` (default) produces identical results to serial mode
-- [ ] PAR-1/PAR-3: `max_parallel_workers ≥ 1` dispatches independent same-level STs concurrently
-- [ ] PAR-4: Worker crash marks ST `ERROR`; coordinator respawns worker slot
-- [ ] PAR-5: Diamond DAG concurrent correctness test passes; throughput improvement benchmarked
-- [ ] PRED-1: Fitted coefficients visible in `df_threshold_advice`
-- [ ] PRED-2: Pre-emptive FULL switch fires under synthetic spike; `refresh_reason = 'predicted_cost_exceeds_full'` logged
-- [ ] PRED-3: Cold-start fallback active when fewer than `prediction_min_samples` history rows exist
-- [ ] SLA-1: `create_stream_table(..., sla => '30 seconds')` stores `freshness_deadline_ms`
-- [ ] SLA-2: Initial tier assignment matches SLA requirement on creation
-- [ ] SLA-3: Tier auto-adjusts within 3 cycles when queue depth breaches SLA
-- [ ] Extension upgrade path tested (`0.21.0 → 0.22.0`)
-- [ ] `just check-version-sync` passes
+- [x] CDC-PUB-1: `stream_table_to_publication(name)` creates a working logical publication
+- [x] CDC-PUB-2: Publication is dropped automatically when the stream table is dropped
+- [x] CDC-PUB-3: `downstream_publication` column visible in `pg_stat_stream_tables`
+- [x] CDC-PUB-4: Subscriber receives correct insert/update/delete events; E2E test passes
+- [x] PAR-2: `max_parallel_workers = 0` (default) produces identical results to serial mode
+- [x] PAR-1/PAR-3: `max_parallel_workers ≥ 1` dispatches independent same-level STs concurrently
+- [x] PAR-4: Worker crash marks ST `ERROR`; coordinator respawns worker slot
+- [x] PAR-5: Diamond DAG concurrent correctness test passes; throughput improvement benchmarked
+- [x] PRED-1: Fitted coefficients visible in `df_threshold_advice`
+- [x] PRED-2: Pre-emptive FULL switch fires under synthetic spike; `refresh_reason = 'predicted_cost_exceeds_full'` logged
+- [x] PRED-3: Cold-start fallback active when fewer than `prediction_min_samples` history rows exist
+- [x] SLA-1: `create_stream_table(..., sla => '30 seconds')` stores `freshness_deadline_ms`
+- [x] SLA-2: Initial tier assignment matches SLA requirement on creation
+- [x] SLA-3: Tier auto-adjusts within 3 cycles when queue depth breaches SLA
+- [x] Extension upgrade path tested (`0.21.0 → 0.22.0`)
+- [x] `just check-version-sync` passes
 
 ---
 

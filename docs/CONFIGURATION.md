@@ -2221,6 +2221,12 @@ pg_trickle.max_fixpoint_iterations = 100         # convergence limit
 pg_trickle.parallel_refresh_mode = 'off'        # 'off' | 'dry_run' | 'on'
 pg_trickle.max_dynamic_refresh_workers = 4       # cluster-wide worker cap
 pg_trickle.max_concurrent_refreshes = 4          # per-database dispatch cap
+pg_trickle.max_parallel_workers = 0              # user-facing parallel cap (0 = use automatic sizing)
+
+# Predictive cost model (v0.22.0+)
+pg_trickle.prediction_window = 60               # minutes of history for regression
+pg_trickle.prediction_ratio = 1.5               # diff/full cost ratio threshold
+pg_trickle.prediction_min_samples = 5           # minimum samples before model activates
 
 # Advanced / internal
 pg_trickle.change_buffer_schema = 'pgtrickle_changes'

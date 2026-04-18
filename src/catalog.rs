@@ -114,6 +114,12 @@ pub struct StreamTableMeta {
     /// ERR-1: Timestamp of the last permanent refresh failure.
     /// `None` means no error has occurred (or it was cleared).
     pub last_error_at: Option<TimestampWithTimeZone>,
+    /// CDC-PUB-1: Name of the downstream logical replication publication.
+    /// `None` means no publication has been created for this stream table.
+    pub downstream_publication_name: Option<String>,
+    /// SLA-1: Freshness deadline in milliseconds, derived from the user-supplied SLA interval.
+    /// `None` means no SLA has been set for this stream table.
+    pub freshness_deadline_ms: Option<i64>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -291,7 +297,7 @@ impl StreamTableMeta {
                      COALESCE(fuse_state, 'armed') AS fuse_state, \
                      fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
                      st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -324,7 +330,7 @@ impl StreamTableMeta {
                      COALESCE(fuse_state, 'armed') AS fuse_state, \
                      fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
                      st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -362,7 +368,7 @@ impl StreamTableMeta {
                      COALESCE(fuse_state, 'armed') AS fuse_state, \
                      fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
                      st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -395,7 +401,7 @@ impl StreamTableMeta {
                      COALESCE(fuse_state, 'armed') AS fuse_state, \
                      fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
                      st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -432,7 +438,7 @@ impl StreamTableMeta {
                      COALESCE(fuse_state, 'armed') AS fuse_state, \
                      fuse_ceiling, fuse_sensitivity, blown_at, blow_reason, \
                      st_partition_key, max_differential_joins, max_delta_fraction, \
-                     last_error_message, last_error_at \
+                     last_error_message, last_error_at, downstream_publication_name, freshness_deadline_ms \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1055,6 +1061,8 @@ impl StreamTableMeta {
         let max_delta_fraction = table.get::<f64>(39).map_err(map_spi)?;
         let last_error_message = table.get::<String>(40).map_err(map_spi)?;
         let last_error_at = table.get::<TimestampWithTimeZone>(41).map_err(map_spi)?;
+        let downstream_publication_name = table.get::<String>(42).map_err(map_spi)?;
+        let freshness_deadline_ms = table.get::<i64>(43).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1098,6 +1106,8 @@ impl StreamTableMeta {
             max_delta_fraction,
             last_error_message,
             last_error_at,
+            downstream_publication_name,
+            freshness_deadline_ms,
         })
     }
 
@@ -1205,6 +1215,8 @@ impl StreamTableMeta {
         let max_delta_fraction = row.get::<f64>(39).map_err(map_spi)?;
         let last_error_message = row.get::<String>(40).map_err(map_spi)?;
         let last_error_at = row.get::<TimestampWithTimeZone>(41).map_err(map_spi)?;
+        let downstream_publication_name = row.get::<String>(42).map_err(map_spi)?;
+        let freshness_deadline_ms = row.get::<i64>(43).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1248,6 +1260,8 @@ impl StreamTableMeta {
             max_delta_fraction,
             last_error_message,
             last_error_at,
+            downstream_publication_name,
+            freshness_deadline_ms,
         })
     }
 }

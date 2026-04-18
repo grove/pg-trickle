@@ -812,6 +812,37 @@ fn normalize_dog_feeding_auto_apply(value: Option<String>) -> DogFeedingAutoAppl
     }
 }
 
+// ── PAR-2: Maximum parallel refresh workers GUC ────────────────────────────
+
+/// PAR-2: Maximum parallel refresh workers for the coordinator/worker pool.
+///
+/// When > 0, the per-database scheduler dispatches independent same-level
+/// stream tables to a pool of dynamic background workers for concurrent
+/// refresh. At most `max_parallel_workers` refreshes execute simultaneously.
+///
+/// Default 0 = serial mode (existing behavior preserved).
+pub static PGS_MAX_PARALLEL_WORKERS: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+// ── PRED: Predictive cost model GUCs ───────────────────────────────────────
+
+/// PRED-1: Prediction window in minutes for the linear regression forecaster.
+///
+/// The forecaster fits `duration_ms ~ delta_rows` over this many minutes of
+/// `pgt_refresh_history` data per stream table.
+pub static PGS_PREDICTION_WINDOW: GucSetting<i32> = GucSetting::<i32>::new(60);
+
+/// PRED-2: Prediction ratio threshold for pre-emptive FULL switch.
+///
+/// When `predicted_diff_ms > last_full_ms × prediction_ratio`, the
+/// scheduler overrides the strategy to FULL refresh.
+pub static PGS_PREDICTION_RATIO: GucSetting<f64> = GucSetting::<f64>::new(1.5);
+
+/// PRED-3: Minimum number of history samples before the predictor is active.
+///
+/// When fewer than this many data points exist, the predictor falls back to
+/// the existing fixed-threshold logic.
+pub static PGS_PREDICTION_MIN_SAMPLES: GucSetting<i32> = GucSetting::<i32>::new(5);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -1634,6 +1665,59 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // PAR-2: Maximum parallel refresh workers.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.max_parallel_workers",
+        c"Maximum parallel refresh workers for the coordinator/worker pool (0 = serial).",
+        c"When > 0, the per-database scheduler dispatches independent same-level \
+           stream tables to a pool of dynamic background workers for concurrent \
+           refresh. Default 0 = serial mode (existing behavior preserved).",
+        &PGS_MAX_PARALLEL_WORKERS,
+        0,  // min (0 = serial)
+        32, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // PRED-1: Prediction window in minutes.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.prediction_window",
+        c"Prediction window in minutes for the linear regression forecaster.",
+        c"The forecaster fits duration_ms ~ delta_rows over this many minutes of \
+           pgt_refresh_history data per stream table.",
+        &PGS_PREDICTION_WINDOW,
+        5,    // min (5 minutes)
+        1440, // max (24 hours)
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // PRED-2: Prediction ratio threshold.
+    GucRegistry::define_float_guc(
+        c"pg_trickle.prediction_ratio",
+        c"Prediction ratio threshold for pre-emptive FULL switch.",
+        c"When predicted_diff_ms > last_full_ms × prediction_ratio, the scheduler \
+           overrides the strategy to FULL refresh. Default 1.5.",
+        &PGS_PREDICTION_RATIO,
+        1.0,  // min
+        10.0, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // PRED-3: Minimum number of history samples.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.prediction_min_samples",
+        c"Minimum samples before the predictive cost model activates (0 = disabled).",
+        c"When fewer than this many data points exist for a stream table, the \
+           predictor falls back to the existing fixed-threshold logic.",
+        &PGS_PREDICTION_MIN_SAMPLES,
+        0,    // min (0 = disabled)
+        1000, // max
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -2050,6 +2134,26 @@ pub fn pg_trickle_dog_feeding_auto_apply() -> DogFeedingAutoApply {
             .get()
             .and_then(|cs| cs.to_str().ok().map(str::to_owned)),
     )
+}
+
+/// PAR-2: Returns the maximum parallel refresh workers (0 = serial).
+pub fn pg_trickle_max_parallel_workers() -> i32 {
+    PGS_MAX_PARALLEL_WORKERS.get()
+}
+
+/// PRED-1: Returns the prediction window in minutes.
+pub fn pg_trickle_prediction_window() -> i32 {
+    PGS_PREDICTION_WINDOW.get()
+}
+
+/// PRED-2: Returns the prediction ratio threshold for pre-emptive FULL switch.
+pub fn pg_trickle_prediction_ratio() -> f64 {
+    PGS_PREDICTION_RATIO.get()
+}
+
+/// PRED-3: Returns the minimum number of history samples before prediction activates.
+pub fn pg_trickle_prediction_min_samples() -> i32 {
+    PGS_PREDICTION_MIN_SAMPLES.get()
 }
 
 #[cfg(test)]

@@ -20,6 +20,8 @@ use crate::template_cache;
 use crate::version;
 use crate::wal_decoder;
 
+pub(crate) mod publication;
+
 // ── G13-EH: Enriched error reporting ────────────────────────────────────────
 
 /// UX-7: Resolve a relation OID to a human-readable `schema.table` name.
@@ -379,6 +381,33 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
                  https://github.com/grove/pg-trickle/issues with the full error \
                  message and PostgreSQL log output."
                     .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::PublicationAlreadyExists(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("publication already exists for stream table '{}'", name),
+                "",
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::PublicationNotFound(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("no publication found for stream table '{}'", name),
+                "",
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::SlaTooSmall(msg) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("SLA interval too small: {}", msg),
+                "",
             )
             .report(PgLogLevel::ERROR);
             unreachable!()
@@ -3818,6 +3847,14 @@ fn drop_stream_table_impl_inner(
         .collect();
     crate::refresh::flush_pending_cleanups_for_oids(&dep_oids);
 
+    // CDC-PUB-2: Drop downstream publication if one exists.
+    if let Some(pub_name) = &st.downstream_publication_name {
+        let _ = Spi::run(&format!(
+            "DROP PUBLICATION IF EXISTS {}",
+            quote_identifier(pub_name),
+        ));
+    }
+
     // Drop the storage table
     let drop_sql = format!(
         "DROP TABLE IF EXISTS {}.{} CASCADE",
@@ -5361,6 +5398,8 @@ mod tests {
             max_delta_fraction: None,
             last_error_message: None,
             last_error_at: None,
+            downstream_publication_name: None,
+            freshness_deadline_ms: None,
         }
     }
 

@@ -1586,11 +1586,18 @@ fn parallel_dispatch_tick(
     };
 
     let max_cluster = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
+    // PAR-2: If max_parallel_workers is set (> 0), use it as an additional cap.
+    let par_workers = config::pg_trickle_max_parallel_workers();
+    let effective_max_cluster = if par_workers > 0 {
+        max_cluster.min(par_workers as u32)
+    } else {
+        max_cluster
+    };
     // C3-1: Per-database quota with burst capacity.
     let max_per_db = compute_per_db_quota(
         config::pg_trickle_per_database_worker_quota(),
         config::pg_trickle_max_concurrent_refreshes(),
-        max_cluster,
+        effective_max_cluster,
         shmem::active_worker_count(),
     );
     let dag_version_i64 = state.dag_version as i64;
@@ -2528,6 +2535,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 }
                 last_auto_apply_ms = now_for_auto_apply;
 
+                // SLA-3: Dynamic tier re-assignment — check and adjust tiers
+                // for stream tables with SLA configured.
+                BackgroundWorker::transaction(AssertUnwindSafe(|| {
+                    sla_tier_adjustment_tick();
+                }));
+
                 // OPS-6: Refresh interference overlap count for workload-aware poll.
                 // Only reads if the DF ST exists (safe even without dog-feeding).
                 BackgroundWorker::transaction(AssertUnwindSafe(|| {
@@ -3215,6 +3228,42 @@ fn check_extension_version_match() {
             compiled_version,
             installed
         );
+    }
+}
+
+// ── SLA-3: Dynamic tier re-assignment ──────────────────────────────────────
+
+/// SLA-3: Check and adjust tiers for stream tables with SLA configured.
+///
+/// Iterates over stream tables that have a `freshness_deadline_ms` set and
+/// calls `maybe_adjust_tier_for_sla` for each.
+fn sla_tier_adjustment_tick() {
+    let st_ids: Vec<i64> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+                 WHERE freshness_deadline_ms IS NOT NULL AND status = 'ACTIVE'",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                log!("pg_trickle: SLA-3 query failed: {e}");
+                return Vec::new();
+            }
+        };
+        let mut ids = Vec::new();
+        for row in result {
+            if let Some(id) = row.get::<i64>(1).unwrap_or(None) {
+                ids.push(id);
+            }
+        }
+        ids
+    });
+
+    for pgt_id in st_ids {
+        if let Ok(Some(meta)) = StreamTableMeta::get_by_id(pgt_id) {
+            crate::api::publication::maybe_adjust_tier_for_sla(&meta);
+        }
     }
 }
 
@@ -4711,6 +4760,29 @@ fn refresh_single_st(
 
     let action = {
         let mut base_action = refresh::determine_refresh_action(&st, has_changes);
+
+        // PRED-2: Predictive cost model — pre-emptive FULL switch.
+        // If the predicted DIFFERENTIAL cost exceeds the FULL cost by the
+        // configured ratio, switch to FULL preemptively.
+        if base_action == RefreshAction::Differential
+            && let Some(last_full) = st.last_full_ms
+        {
+            // Estimate delta_rows from change buffers.
+            let delta_rows = crate::cdc::estimate_pending_changes(st.pgt_id).unwrap_or(0);
+            if delta_rows > 0
+                && crate::api::publication::should_preempt_to_full(st.pgt_id, delta_rows, last_full)
+            {
+                log!(
+                    "pg_trickle: PRED-2 pre-emptive FULL switch for {}.{} \
+                     (predicted diff cost exceeds {}× full cost)",
+                    st.pgt_schema,
+                    st.pgt_name,
+                    config::pg_trickle_prediction_ratio(),
+                );
+                refresh::set_refresh_reason("predicted_cost_exceeds_full");
+                base_action = RefreshAction::Full;
+            }
+        }
 
         // Check periodic drift reset
         if base_action == RefreshAction::Differential {

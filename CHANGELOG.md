@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.22.0 — Downstream CDC, Parallel Refresh & Predictive Cost Model](#0220--downstream-cdc-parallel-refresh--predictive-cost-model)
 - [0.21.0 — Correctness, Safety & Test Hardening](#0210--correctness-safety--test-hardening)
 - [0.20.0 — Dog Feeding](#0200--dog-feeding)
 - [0.19.0 — 2026-04-13](#0190--2026-04-13)
@@ -42,6 +43,60 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## [Unreleased]
 
 <!-- No unreleased changes yet. -->
+
+---
+
+## [0.22.0] — Downstream CDC, Parallel Refresh & Predictive Cost Model
+
+**v0.22.0 adds downstream CDC publication support, a parallel refresh worker
+pool, a predictive cost model for intelligent refresh-mode switching, and
+SLA-driven tier auto-assignment.**
+
+### Downstream CDC Publication
+
+- **`stream_table_to_publication(name)`** — Creates a PostgreSQL logical
+  replication publication for a stream table, enabling downstream consumers
+  (Debezium, pg_logical, standby replicas) to subscribe to changes.
+- **`drop_stream_table_publication(name)`** — Drops an existing publication.
+- Publications are automatically dropped when the parent stream table is
+  dropped.
+- New `downstream_publication` column in `st_refresh_stats` monitoring view.
+
+### Parallel Refresh Worker Pool
+
+- **`pg_trickle.max_parallel_workers`** GUC — Caps the number of parallel
+  background workers used for concurrent refresh. Set to `0` (default) to use
+  the existing automatic sizing.
+- Existing DAG-level parallelism and worker crash recovery are now exposed
+  through this configurable limit.
+
+### Predictive Cost Model
+
+- **Linear regression** over recent refresh history predicts differential
+  refresh cost before execution.
+- **Pre-emptive FULL switch** — When the predicted differential cost exceeds
+  `pg_trickle.prediction_ratio` × last FULL cost, the scheduler automatically
+  switches to FULL refresh for that cycle.
+- **`pg_trickle.prediction_window`** — Number of recent samples for
+  regression (default: 60).
+- **`pg_trickle.prediction_ratio`** — Cost ratio threshold for pre-emptive
+  switch (default: 1.5).
+- **`pg_trickle.prediction_min_samples`** — Minimum samples before the model
+  activates (default: 5).
+
+### SLA-Driven Tier Auto-Assignment
+
+- **`set_stream_table_sla(name, interval)`** — Assigns a freshness deadline
+  SLA to a stream table. The extension automatically assigns the appropriate
+  refresh tier (Hot ≤ 5s, Warm ≤ 30s, Cold > 30s).
+- **Dynamic re-assignment** — The scheduler periodically checks actual refresh
+  performance against the SLA and adjusts tiers as needed.
+- New `freshness_deadline_ms` column in the catalog for SLA tracking.
+
+### Schema Changes
+
+- Added `downstream_publication_name TEXT` and `freshness_deadline_ms BIGINT`
+  columns to `pgtrickle.pgt_stream_tables`.
 
 ---
 

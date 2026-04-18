@@ -473,6 +473,7 @@ fn st_refresh_stats() -> TableIterator<
         name!(schedule, Option<String>),
         name!(refresh_tier, String),
         name!(last_error_message, Option<String>),
+        name!(downstream_publication, Option<String>),
     ),
 > {
     let rows: Vec<_> = Spi::connect(|client| {
@@ -512,7 +513,8 @@ fn st_refresh_stats() -> TableIterator<
                     st.consecutive_errors::integer,
                     st.schedule::text,
                     COALESCE(st.refresh_tier, 'hot')::text,
-                    st.last_error_message::text
+                    st.last_error_message::text,
+                    st.downstream_publication_name::text
                 FROM pgtrickle.pgt_stream_tables st
                 LEFT JOIN LATERAL (
                     SELECT
@@ -567,6 +569,7 @@ fn st_refresh_stats() -> TableIterator<
                 .unwrap_or(None)
                 .unwrap_or_else(|| "hot".to_string());
             let last_error_message = row.get::<String>(20).unwrap_or(None);
+            let downstream_publication = row.get::<String>(21).unwrap_or(None);
 
             out.push((
                 pgt_name,
@@ -589,6 +592,7 @@ fn st_refresh_stats() -> TableIterator<
                 schedule,
                 refresh_tier,
                 last_error_message,
+                downstream_publication,
             ));
         }
         out
