@@ -432,9 +432,23 @@ once per cleanup cycle:
 
 ```sql
 -- PostgreSQL does not support LIMIT on DELETE directly; use a CTE.
+-- For claim-check safety: only delete a row if all consumer groups
+-- that have polled past this outbox_id have called outbox_rows_consumed().
+-- Check pgt_consumer_claim_check_acks completeness before deletion.
 WITH rows_to_delete AS (
-    SELECT id FROM pgtrickle.outbox_<st>
+    SELECT id FROM pgtrickle.outbox_<st> o
     WHERE created_at < now() - INTERVAL '<retention_hours> hours'
+      AND (NOT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_consumer_groups cg
+          ) OR NOT EXISTS (
+            SELECT 1 FROM pgtrickle.pgt_consumer_claim_check_acks aca
+            WHERE aca.outbox_id = o.id
+              AND NOT EXISTS (
+                SELECT 1 FROM pgtrickle.pgt_consumer_offsets co
+                WHERE co.group_id = aca.group_id
+                  AND co.last_offset >= o.id
+              )
+          ))
     ORDER BY id
     LIMIT pg_trickle.outbox_drain_batch_size  -- default 10000
 )
@@ -446,6 +460,10 @@ WHERE id IN (SELECT id FROM rows_to_delete);
 - Loops until the CTE returns < `outbox_drain_batch_size` rows.
 - Updates `pgt_outbox_config.last_drained_at` and
   `last_drained_count`.
+- **Claim-check safety:** Before deleting a row, verifies that all consumer
+  groups that have polled past this `outbox_id` have called
+  `outbox_rows_consumed()` (tracked in `pgt_consumer_claim_check_acks`).
+  This prevents data loss when relays are cursor-fetching claim-check rows.
 
 #### Edge Cases
 

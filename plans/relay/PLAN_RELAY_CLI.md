@@ -615,8 +615,7 @@ async fn update_consumer_offset(
 }
 ```
 
-`worker_id` is set to `"<pod_name>:<thread_index>"` at startup (e.g.
-`"relay-6b7f9-0:3"`), useful for debugging stalls in multi-pod deployments.
+`worker_id` is set to `"<pod_name>:<thread_index>"` at startup, where `<pod_name>` is read from the `HOSTNAME` environment variable (or `os::hostname()` if unset); `<thread_index>` is the worker thread index (e.g. `"relay-6b7f9-0:3"`). Useful for debugging stalls in multi-pod deployments.
 
 #### Consumer Group Mode
 
@@ -625,14 +624,15 @@ async fn update_consumer_offset(
 > `pgtrickle.relay_consumer_offsets` table — a lightweight `(relay_group_id,
 > pipeline_id, last_change_id)` row updated atomically after each batch. This
 > is sufficient for single-relay deployments and requires no v0.24.0 consumer
-> group infrastructure. **Consumer group mode** delegates offset tracking to
-> the v0.24.0 `poll_outbox()` / `commit_offset()` API, which adds visibility
-> timeouts, lease management, multi-relay coordination, and lag monitoring via
-> `consumer_lag()`. Use consumer group mode when multiple relay instances share
-> a single outbox, or when you need the operational tooling (heartbeats, dead
-> consumer reaping, `seek_offset()` replay). The pipeline's `config` JSONB
-> controls which mode is used: include a `"group"` key in the source config
-> to activate consumer group mode.
+> group infrastructure; the extension's retention drain checks `relay_consumer_offsets`
+> to avoid data loss. **Consumer group mode** delegates offset tracking to
+> the v0.24.0 `poll_outbox()` / `commit_offset()` API, which uses the extension's
+> `pgt_consumer_offsets` table and adds visibility timeouts, lease management,
+> multi-relay coordination, and lag monitoring via `consumer_lag()`. Use consumer
+> group mode when multiple relay instances share a single outbox, or when you need
+> the operational tooling (heartbeats, dead consumer reaping, `seek_offset()` replay).
+> The pipeline's `config` JSONB controls which mode is used: include a `"group"`
+> key in the source config to activate consumer group mode.
 
 Used when `--group` is specified. Delegates coordination to pg-trickle's
 built-in consumer group SQL functions.

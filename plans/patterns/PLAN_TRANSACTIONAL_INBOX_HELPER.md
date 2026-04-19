@@ -795,6 +795,15 @@ SELECT pgtrickle.enable_inbox_ordering(
 -- Errors: InboxNotFound, InboxColumnMissing, InboxOrderingPriorityConflict
 --         (if enable_inbox_priority was already called on this inbox)
 
+-- Disable ordered processing (teardown)
+SELECT pgtrickle.disable_inbox_ordering(
+    inbox_name TEXT,
+    if_exists  BOOLEAN DEFAULT false
+) RETURNS void;
+-- Drops the next_<inbox> stream table and the pgt_inbox_ordering_config row.
+-- The original unified pending_<inbox> stream table continues to be available.
+-- Returns InboxNotFound if if_exists = false and ordering is not enabled.
+
 -- Enable priority processing for an inbox
 SELECT pgtrickle.enable_inbox_priority(
     inbox_name       TEXT,
@@ -814,15 +823,16 @@ SELECT pgtrickle.disable_inbox_priority(
     if_exists  BOOLEAN DEFAULT false
 ) RETURNS void;
 -- Drops all pending_<inbox>_<tier> stream tables and the pgt_inbox_priority_config row.
--- The original unified pending_<inbox> stream table is restored (re-created if it was
--- dropped by enable_inbox_priority). Returns InboxNotFound if if_exists = false and
--- priority is not enabled.
+-- The original unified pending_<inbox> stream table was never dropped and continues to be
+-- available. Returns InboxNotFound if if_exists = false and priority is not enabled.
 
--- Inspect ordering gaps
+-- Inspect ordering gaps (on-demand query; for high-throughput inboxes
+-- instead of continuous auto-refresh of the gaps_<inbox> stream table)
 SELECT * FROM pgtrickle.inbox_ordering_gaps(
     inbox_name TEXT
 );
 -- Columns: aggregate_id, expected_seq, gap_age_sec
+-- Returns empty set if no gaps detected.
 ```
 
 ### B.3 Aggregate-Ordered Stream Table
@@ -1166,6 +1176,9 @@ async def main():
             LIMIT $1
             FOR UPDATE SKIP LOCKED
         """, BATCH_SIZE)
+        # NOTE: This query processes messages in receipt order (unordered with respect
+        # to aggregates). For per-aggregate ordered processing (Part B), query the
+        # next_<inbox> stream table instead, which guarantees sequence ordering per aggregate.
 
         if not rows:
             await asyncio.wait([stop.wait()], timeout=POLL_SECONDS)
