@@ -6398,8 +6398,8 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 - [x] UX-2: "DVM Query Complexity Limits" section published in PERFORMANCE_COOKBOOK.md
 - [x] PERF-4: AUTO mode routes q05/q07/q08/q09 to DIFF rather than FULL at SF=1.0 after Phase 2–4 cost threshold recalibration
 - [x] PERF-5: `pgtrickle.analyze_before_delta = on` is default; EXPLAIN plans for `changes_<oid>` tables show accurate row count estimates at SF=0.1
-- [ ] UX-7: `pgtrickle.diff_output_format = 'merged'` mode passes all outbox/CDC integration tests that exercise aggregate stream tables post-DI-2
-- [ ] `just check-version-sync` passes
+- [x] UX-7: `pgtrickle.diff_output_format = 'merged'` mode passes all outbox/CDC integration tests that exercise aggregate stream tables post-DI-2
+- [x] `just check-version-sync` passes
 
 ---
 

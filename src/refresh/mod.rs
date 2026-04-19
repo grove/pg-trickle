@@ -1063,14 +1063,50 @@ fn capture_delta_to_st_buffer(
     // matching to work during differential refresh.
     let pk_hash_expr = build_content_hash_expr("d.", user_cols);
 
-    let sql = format!(
-        "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
-         (lsn, action, pk_hash, {new_col_list}) \
-         SELECT pg_current_wal_lsn(), d.__pgt_action, {pk_hash_expr}, \
-                {d_col_list} \
-         FROM __pgt_delta_{pgt_id} d \
-         WHERE d.__pgt_action IN ('I', 'D')"
-    );
+    // UX-7: When diff_output_format = 'merged', recombine DELETE+INSERT
+    // pairs with the same __pgt_row_id back into a single 'U' row for
+    // backward compatibility with consumers expecting UPDATE operations.
+    let sql = if crate::config::pg_trickle_diff_output_format()
+        == crate::config::DiffOutputFormat::Merged
+    {
+        format!(
+            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
+             (lsn, action, pk_hash, {new_col_list}) \
+             SELECT pg_current_wal_lsn(), \
+                    CASE WHEN ins.__pgt_row_id IS NOT NULL \
+                              AND del.__pgt_row_id IS NOT NULL \
+                         THEN 'U' ELSE COALESCE(ins.__pgt_action, del.__pgt_action) \
+                    END, \
+                    COALESCE({pk_ins}, {pk_del}), \
+                    {coal_cols} \
+             FROM (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'I') ins \
+             FULL OUTER JOIN \
+                  (SELECT * FROM __pgt_delta_{pgt_id} WHERE __pgt_action = 'D') del \
+             ON ins.__pgt_row_id = del.__pgt_row_id",
+            change_schema = change_schema,
+            pgt_id = pgt_id,
+            new_col_list = new_col_list,
+            pk_ins = build_content_hash_expr("ins.", user_cols),
+            pk_del = build_content_hash_expr("del.", user_cols),
+            coal_cols = user_cols
+                .iter()
+                .map(|c| {
+                    let escaped = c.replace('"', "\"\"");
+                    format!("COALESCE(ins.\"{escaped}\", del.\"{escaped}\")")
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        format!(
+            "INSERT INTO \"{change_schema}\".changes_pgt_{pgt_id} \
+             (lsn, action, pk_hash, {new_col_list}) \
+             SELECT pg_current_wal_lsn(), d.__pgt_action, {pk_hash_expr}, \
+                    {d_col_list} \
+             FROM __pgt_delta_{pgt_id} d \
+             WHERE d.__pgt_action IN ('I', 'D')"
+        )
+    };
 
     let count = Spi::connect_mut(|client| {
         let result = client
