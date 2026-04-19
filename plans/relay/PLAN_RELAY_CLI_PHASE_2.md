@@ -55,12 +55,22 @@ backends (same minus stdout, plus stdin). Phase 2 adds **10 new backends**
 covering all three major cloud providers, the IoT ecosystem, analytics
 databases, and data lake storage.
 
-Beyond backends, Phase 2 introduces **15 operational improvements**: dead-letter
+Beyond backends, Phase 2 introduces **13 operational improvements**: dead-letter
 queues, schema registry integration, message transforms, content-based routing,
-rate limiting, circuit breakers, multi-pipeline mode, config hot-reload,
-dry-run/replay, OpenTelemetry tracing, a TUI dashboard, a plugin system,
-payload encryption, webhook signature verification, and **database-stored
-configuration** — the relay's primary config source, with file/env as fallback.
+rate limiting, circuit breakers, SIGHUP config reload, dry-run/replay mode,
+OpenTelemetry tracing, a TUI dashboard, a plugin system, payload encryption,
+and webhook signature verification.
+
+> **Note:** Multi-pipeline support and database-driven hot-reload are already
+> part of Phase 1 (v0.25.0) — the relay natively runs multiple independent
+> pipelines via `relay_outbox_config` / `relay_inbox_config` SQL tables and
+> reloads on every `NOTIFY pgtrickle_relay_config` event.
+>
+> **Configuration model:** The TOML-like blocks shown throughout Part A and
+> Part B are **examples of the `config` JSONB column format** stored in
+> `pgtrickle.relay_outbox_config` / `pgtrickle.relay_inbox_config`, displayed
+> in TOML syntax for readability. The relay binary has no config file — all
+> pipeline configuration is managed via SQL.
 
 ---
 
@@ -633,24 +643,36 @@ CREATE TABLE pgtrickle.relay_dlq (
 );
 ```
 
-**CLI commands:**
+**SQL API** (all DLQ management is done via SQL functions — no CLI subcommands):
 
+```sql
+-- Inspect pending DLQ entries
+SELECT * FROM pgtrickle.relay_dlq_list();
+
+-- Retry a specific message by id
+SELECT pgtrickle.relay_dlq_retry(id := 42);
+
+-- Retry all pending messages
+SELECT pgtrickle.relay_dlq_retry_all();
+
+-- Purge resolved entries older than N days
+SELECT pgtrickle.relay_dlq_purge(retention_days := 30);
+
+-- Summary by error_kind
+SELECT * FROM pgtrickle.relay_dlq_stats();
 ```
-pgtrickle-relay dlq list          # Show pending DLQ entries
-pgtrickle-relay dlq retry <id>    # Retry a specific message
-pgtrickle-relay dlq retry-all     # Retry all pending messages
-pgtrickle-relay dlq purge         # Delete resolved entries older than N days
-pgtrickle-relay dlq stats         # DLQ summary (counts by error_kind)
-```
 
-**Configuration:**
+**Pipeline config** (in the `config` column of `relay_outbox_config` / `relay_inbox_config`):
 
-```toml
-[dlq]
-enabled = true                            # default: false in Phase 1
-max_retries = 5                           # max automatic retries before DLQ
-retry_delay_seconds = 60                  # delay between automatic retries
-retention_days = 30                       # auto-purge resolved entries
+```json
+{
+  "dlq": {
+    "enabled": true,
+    "max_retries": 5,
+    "retry_delay_seconds": 60,
+    "retention_days": 30
+  }
+}
 ```
 
 **Effort:** 2d
@@ -812,88 +834,73 @@ to the DLQ (if enabled) rather than blocking the relay loop.
 
 ### B.7 Multi-Pipeline Mode
 
-**Problem:** Phase 1 supports one source → one sink per process. Some
-deployments need multiple pipelines (e.g. forward order_events to Kafka
-AND webhook simultaneously, or relay three outboxes to different sinks).
+> **Already implemented in Phase 1.** The relay has supported multiple
+> independent pipelines per process from day one. This section documents
+> the existing behaviour for completeness.
 
-**Design:** A `pipelines` config array that defines multiple independent
-relay loops in a single process.
+Each row in `pgtrickle.relay_outbox_config` or `pgtrickle.relay_inbox_config`
+with `enabled = true` spawns an independent tokio worker task with its own
+metrics labels (`pipeline=<name>`). PostgreSQL connections are pooled via
+`deadpool-postgres`. No per-pipeline process or config file is needed.
 
-```toml
-[[pipelines]]
-name = "orders-to-kafka"
-mode = "forward"
-outbox = "order_events"
-sink = "kafka"
-group = "orders-kafka"
+```sql
+-- Forward order_events to both Kafka and webhook simultaneously
+INSERT INTO pgtrickle.relay_outbox_config (name, config) VALUES
+  ('orders-to-kafka',
+   '{"source_type": "outbox", "source": {"outbox": "order_events", "group": "orders-kafka"},
+     "sink_type": "kafka", "sink": {"brokers": "localhost:9092", "topic": "orders"}}'),
+  ('orders-to-webhook',
+   '{"source_type": "outbox", "source": {"outbox": "order_events", "group": "orders-webhook"},
+     "sink_type": "webhook", "sink": {"url": "https://api.example.com/orders"}}');
 
-[[pipelines]]
-name = "orders-to-webhook"
-mode = "forward"
-outbox = "order_events"
-sink = "webhook"
-group = "orders-webhook"
-
-[[pipelines]]
-name = "iot-to-inbox"
-mode = "reverse"
-source = "mqtt"
-inbox = "device_telemetry"
-
-[postgres]
-url = "postgres://..."
-
-[sink.kafka]
-brokers = "localhost:9092"
-topic = "orders"
-
-[sink.webhook]
-url = "https://api.example.com/orders"
-
-[source.mqtt]
-url = "mqtt://broker:1883"
-topic = "devices/+/telemetry"
+-- Reverse: MQTT device telemetry → inbox
+INSERT INTO pgtrickle.relay_inbox_config (name, config) VALUES
+  ('iot-to-inbox',
+   '{"source_type": "mqtt", "source": {"url": "mqtt://broker:1883", "topic": "devices/+/telemetry"},
+     "sink_type": "pg-inbox", "sink": {"inbox_table": "device_telemetry"}}');
 ```
 
-Each pipeline runs as an independent tokio task with its own metrics
-labels (`pipeline=<name>`). Shared connections (PostgreSQL, metrics
-endpoint) are pooled.
+Each pipeline runs as an independent tokio task. Enable or disable a pipeline
+at any time without restarting the relay:
 
-**Effort:** 2d
-
-### B.8 Config Hot-Reload
-
-**Problem:** Changing relay configuration requires a process restart.
-In Kubernetes, this means a rolling restart of the relay pods.
-
-**Design:** Watch the config file for changes (via `inotify` / `kqueue`)
-and apply non-breaking changes without restart.
-
-**Hot-reloadable settings:**
-- Routing rules and subject templates
-- Rate limit thresholds
-- Log level
-- Batch size and poll interval
-- Transform expressions
-- Circuit breaker thresholds
-
-**Not hot-reloadable** (require restart):
-- PostgreSQL connection string
-- Sink/source backend type
-- Pipeline additions/removals
-- Metrics endpoint address
-- TLS certificates
-
-```toml
-[config]
-hot_reload = true                         # default: false
-watch_interval_seconds = 5                # polling fallback if inotify unavailable
+```sql
+UPDATE pgtrickle.relay_outbox_config SET enabled = false WHERE name = 'orders-to-webhook';
+-- The relay picks up the change within milliseconds via LISTEN/NOTIFY.
 ```
 
-**Signal-based reload:** Also supports `SIGHUP` to trigger a manual
-config reload, matching common Unix daemon conventions.
+**Effort:** *(none — already in Phase 1)*
 
-**Effort:** 1.5d
+### B.8 SIGHUP Reload
+
+> **Database-driven hot-reload is already in Phase 1.** Every change to
+> `relay_outbox_config` or `relay_inbox_config` — including adding, removing,
+> enabling, disabling, or modifying any pipeline's `config` JSONB — triggers
+> a `NOTIFY pgtrickle_relay_config` event and is applied within milliseconds
+> without restarting the process. The relay has no config file.
+
+**What Phase 2 adds:** A `SIGHUP` handler so operators can force a full
+config reload from the database on demand, matching common Unix daemon
+conventions and simplifying runbooks.
+
+```bash
+# Force reload without restarting the relay process
+kill -HUP $(pidof pgtrickle-relay)
+# In Kubernetes:
+kubectl exec -it relay-pod -- kill -HUP 1
+```
+
+On receiving `SIGHUP`, the relay:
+1. Re-queries `relay_outbox_config` and `relay_inbox_config` for all rows.
+2. Starts tasks for newly enabled pipelines.
+3. Cancels tasks for disabled or deleted pipelines.
+4. Restarts tasks whose `config` JSONB has changed.
+
+**Not live-reloadable** (require full process restart):
+- `--postgres-url` / `PGTRICKLE_RELAY_POSTGRES_URL`
+- `--metrics-addr`
+- `--log-format`
+
+**Effort:** 0.5d
 
 ### B.9 Dry-Run & Replay Mode
 
@@ -901,34 +908,49 @@ config reload, matching common Unix daemon conventions.
 publishing messages. They also need to replay historical outbox entries
 (e.g. after adding a new sink).
 
+**Design:** Both modes are configured as per-pipeline flags in the `config`
+JSONB column. There are no additional CLI arguments — the relay is always
+started with the same minimal command (`pgtrickle-relay --postgres-url ...`).
+
 #### Dry-Run Mode
 
-```bash
-pgtrickle-relay forward --dry-run
+Enable dry-run on a specific pipeline by setting `"dry_run": true` in its
+config. The relay logs what would be published (subject, dedup key, payload
+size) without sending anything to the sink.
+
+```sql
+-- Enable dry-run for a pipeline
+UPDATE pgtrickle.relay_outbox_config
+   SET config = config || '{"dry_run": true}'
+ WHERE name = 'orders-to-kafka';
+
+-- Disable dry-run (return to live)
+UPDATE pgtrickle.relay_outbox_config
+   SET config = config - 'dry_run'
+ WHERE name = 'orders-to-kafka';
 ```
 
-- Polls the outbox and logs what would be published (subject, dedup key,
-  payload size) without actually publishing.
 - Validates all config, connections, and permissions.
 - Useful for testing routing rules, transforms, and new sink configs.
+- The change is picked up within milliseconds via LISTEN/NOTIFY.
 
 #### Replay Mode
 
-```bash
-pgtrickle-relay forward --replay --from-offset 1000 --to-offset 5000
+Replay a range of outbox entries by setting `replay` in the pipeline config.
+The relay reads the specified offset range without committing consumer group
+offsets, then automatically clears the replay config when complete.
+
+```sql
+-- Replay outbox entries 1000–5000 for a pipeline
+UPDATE pgtrickle.relay_outbox_config
+   SET config = config || '{"replay": {"from_offset": 1000, "to_offset": 5000}}'
+ WHERE name = 'orders-to-kafka';
+-- The relay picks up the replay config, runs it, then removes the key.
 ```
 
-- Re-reads outbox entries from a specific offset range.
-- Does **not** use consumer groups (no offset commits).
-- Combined with `--dry-run`, shows what would have been published.
+- Does **not** advance the consumer group offset.
+- Combined with `"dry_run": true`, shows what would be published.
 - Useful for backfilling a new sink with historical data.
-
-```bash
-pgtrickle-relay reverse --replay --input events-2026-04.jsonl
-```
-
-- Re-reads messages from a file and writes them to the inbox.
-- Uses `ON CONFLICT DO NOTHING` to skip duplicates safely.
 
 **Effort:** 1d
 
@@ -1184,19 +1206,18 @@ header = "X-Webhook-Signature"            # header containing the signature
 | RELAY-P2-9 | Sink + Source: Apache Pulsar | *deferred — P3* |
 | RELAY-P2-10 | Sink + Source: Arrow Flight / gRPC | *deferred — P3* |
 
-### Phase 2c — Operational Excellence (16.5 days)
+### Phase 2c — Operational Excellence (13 days)
 
 | Item | Description | Effort |
 |------|-------------|--------|
-| RELAY-P2-11 | Dead-letter queue (DLQ table + CLI commands + auto-retry) | 2d |
+| RELAY-P2-11 | Dead-letter queue (DLQ table + SQL API + auto-retry) | 2d |
 | RELAY-P2-12 | Schema Registry integration (Avro + Protobuf, Confluent SR) | 3d |
 | RELAY-P2-13 | Message transforms (JMESPath payload transforms + filter) | 1.5d |
 | RELAY-P2-14 | Content-based routing (match rules + fallback) | 1d |
 | RELAY-P2-15 | Rate limiting & back-pressure (token bucket + back-pressure) | 1d |
 | RELAY-P2-16 | Circuit breaker (failure/success thresholds, DLQ integration) | 1d |
-| RELAY-P2-17 | Multi-pipeline mode (multiple source→sink pairs in one process) | 2d |
-| RELAY-P2-18 | Config hot-reload (file watch + SIGHUP) | 1.5d |
-| RELAY-P2-19 | Dry-run & replay mode (--dry-run, --replay, --from-offset) | 1d |
+| RELAY-P2-18 | SIGHUP reload (force full config re-read from database) | 0.5d |
+| RELAY-P2-19 | Dry-run & replay mode (pipeline config flags, no CLI changes) | 1d |
 | RELAY-P2-20 | OpenTelemetry tracing (OTLP export + context propagation) | 1.5d |
 | RELAY-P2-21 | Webhook signature verification (HMAC, GitHub, Stripe, Svix) | 1d |
 
@@ -1205,7 +1226,7 @@ header = "X-Webhook-Signature"            # header containing the signature
 | Item | Description | Effort |
 |------|-------------|--------|
 | RELAY-P2-23 | Backend integration tests (Pub/Sub, Kinesis, Service Bus, ES, MQTT, ClickHouse, S3) | 3d |
-| RELAY-P2-24 | Extension integration tests (DLQ, schema registry, transforms, routing, rate limit, circuit breaker, multi-pipeline, hot-reload, dry-run, replay, OTel, encryption, webhook sig) | 2d |
+| RELAY-P2-24 | Extension integration tests (DLQ, schema registry, transforms, routing, rate limit, circuit breaker, SIGHUP reload, dry-run, replay, OTel, encryption, webhook sig) | 2d |
 | RELAY-P2-25 | Benchmarks (new backends + extensions overhead) | 1d |
 
 ### Phase 2e — Documentation & Distribution (2 days)
@@ -1236,10 +1257,10 @@ header = "X-Webhook-Signature"            # header containing the signature
 |-------|--------|
 | Phase 2a — Cloud Provider Parity | 9d |
 | Phase 2b — IoT, Analytics & Data Lake | 7.5d |
-| Phase 2c — Operational Excellence | 16.5d |
+| Phase 2c — Operational Excellence | 13d |
 | Phase 2d — Testing & Polish | 6d |
 | Phase 2e — Documentation & Distribution | 2d |
-| **Total** | **~41 days solo / ~26 days with two developers** |
+| **Total** | **~37.5 days solo / ~24 days with two developers** |
 
 Phases 2a and 2b (backends) can be parallelised with Phase 2c (extensions).
 With two developers, one focuses on backends while the other builds
@@ -1269,8 +1290,6 @@ operational features.
 | 2 | Should Event Hubs use the native SDK or just document Kafka protocol? | (a) Native SDK, (b) Document Kafka config only | **(a)** — native SDK for better Azure identity integration. Document Kafka as alternative. |
 | 3 | Should transforms support languages beyond JMESPath? | (a) JMESPath only, (b) Add CEL (Common Expression Language) | **(a)** for Phase 2. JMESPath is well-known and sufficient. |
 | 4 | Should the plugin system use WASM or shared libraries (.so/.dylib)? | (a) WASM (sandboxed, portable), (b) Shared libs (faster, easier) | **(a)** — WASM is safer and more portable. But defer to Phase 3. |
-| 5 | Should multi-pipeline share PostgreSQL connections via a pool? | (a) Shared pool (fewer connections), (b) Separate connections per pipeline | **(a)** — use `deadpool-postgres` for connection pooling across pipelines. |
-| 6 | Priority: Schema Registry or DLQ first? | (a) DLQ, (b) Schema Registry | **(a)** — DLQ is universally needed. Schema Registry is use-case dependent. |
-| 7 | Should Elasticsearch full-refresh use alias rotation or delete+reindex? | (a) Alias rotation (zero-downtime), (b) Delete + reindex | **(a)** — alias rotation is the standard Elasticsearch practice. |
-| 8 | Should we support ClickHouse via HTTP or native protocol? | (a) HTTP (simpler), (b) Native (faster) | **(a)** for Phase 2 — HTTP is simpler and well-supported by the `clickhouse` crate. |
-| 9 | Should `pgtrickle-relay config set` accept a JSON string or a file? | (a) Inline JSON string, (b) File path | **(a)** for CLI convenience; both supported. |
+| 5 | Priority: Schema Registry or DLQ first? | (a) DLQ, (b) Schema Registry | **(a)** — DLQ is universally needed. Schema Registry is use-case dependent. |
+| 6 | Should Elasticsearch full-refresh use alias rotation or delete+reindex? | (a) Alias rotation (zero-downtime), (b) Delete + reindex | **(a)** — alias rotation is the standard Elasticsearch practice. |
+| 7 | Should we support ClickHouse via HTTP or native protocol? | (a) HTTP (simpler), (b) Native (faster) | **(a)** for Phase 2 — HTTP is simpler and well-supported by the `clickhouse` crate. |
