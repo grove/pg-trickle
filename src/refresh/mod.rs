@@ -4842,9 +4842,13 @@ pub fn execute_differential_refresh(
     }
 
     // ── PERF-5: ANALYZE change buffer tables before delta execution ──
+    // Only ANALYZE TABLE/FT/MV source buffers (changes_{oid}).  ST-on-ST
+    // sources use changes_pgt_{pgt_id} which is not in catalog_source_oids;
+    // using resolved.source_oids would attempt to ANALYZE non-existent
+    // tables, causing a PostgreSQL ERROR that aborts the refresh.
     if crate::config::pg_trickle_analyze_before_delta() {
         let cb_schema = crate::config::pg_trickle_change_buffer_schema();
-        for &oid in &resolved.source_oids {
+        for &oid in &catalog_source_oids {
             let buf_name = format!("changes_{oid}");
             let analyze_sql = format!(
                 "ANALYZE \"{}\".\"{}\"",
