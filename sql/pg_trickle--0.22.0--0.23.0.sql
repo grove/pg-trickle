@@ -38,6 +38,6 @@ LANGUAGE c
 AS 'MODULE_PATHNAME', 'pgtrickle_refresh_stats_wrapper';
 
 -- Record the schema version for the upgrade chain.
-INSERT INTO pgtrickle.pgt_schema_version (version, description, installed_at)
-VALUES ('0.23.0', 'TPC-H DVM Scaling Performance', now())
+INSERT INTO pgtrickle.pgt_schema_version (version, description)
+VALUES ('0.23.0', 'TPC-H DVM Scaling Performance')
 ON CONFLICT (version) DO NOTHING;
