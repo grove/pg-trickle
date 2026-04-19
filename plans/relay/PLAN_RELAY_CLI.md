@@ -4,7 +4,7 @@
 > **Created:** 2026-04-18
 > **Category:** Tooling — Bidirectional Relay
 > **Related:** [PLAN_TRANSACTIONAL_OUTBOX_HELPER.md](../patterns/PLAN_TRANSACTIONAL_OUTBOX_HELPER.md) ·
-> [ROADMAP v0.23.0](../../ROADMAP.md#v0230--transactional-inbox--outbox-patterns)
+> [ROADMAP v0.25.0](../../ROADMAP.md#v0250--relay-cli-pgtrickle-relay)
 
 ---
 
@@ -121,7 +121,7 @@ Redis/etc. code serves both directions.
 - **No embedded PostgreSQL client library** — uses `tokio-postgres` (same as
   `pgtrickle-tui`).
 - **Message format conversion** (e.g. Avro → JSON) is not in scope for
-  v0.24.0. The relay passes JSON payloads through as-is.
+  v0.25.0. The relay passes JSON payloads through as-is.
 
 ---
 
@@ -309,6 +309,14 @@ examples.
 The relay has no config file and no environment variables for pipeline
 definitions. All pipeline config lives in the database (see [A.14](#a14-catalog-schema-config-tables)).
 The only required input at startup is the PostgreSQL connection URL:
+
+> **Note on the TOML blocks in Parts B and C:** The `[sink.nats]`,
+> `[source.kafka]`, etc. blocks shown throughout this document are **examples
+> of the `config` JSONB column format** displayed in human-readable TOML
+> syntax for clarity. The relay binary does not read a TOML config file.
+> All pipeline configuration is stored in and read from the
+> `pgtrickle.relay_outbox_config` and `pgtrickle.relay_inbox_config`
+> database tables as plain JSON objects.
 
 ```bash
 # Minimal startup
@@ -1169,7 +1177,7 @@ spec:
     spec:
       containers:
       - name: relay
-        image: grove/pgtrickle-relay:0.24.0
+        image: grove/pgtrickle-relay:0.25.0
         env:
         - name: PGTRICKLE_RELAY_POSTGRES_URL
           valueFrom:
@@ -1687,8 +1695,8 @@ source DML commit → CDC trigger → refresh MERGE → outbox INSERT + NOTIFY
 
 | Relay wake mode | p50 target | p95 target |
 |-----------------|-----------|----------|
-| Polling only (v0.23.0, `visibility_seconds = 30s`) | < 1.5 s  | < 2.5 s  |
-| LISTEN/NOTIFY wake (v0.24.0 relay) | < 100 ms | < 250 ms |
+| Polling only (v0.24.0, `visibility_seconds = 30s`) | < 1.5 s  | < 2.5 s  |
+| LISTEN/NOTIFY wake (v0.25.0 relay) | < 100 ms | < 250 ms |
 
 Add as `benches/e2e_relay_latency.rs` (Testcontainers, `tokio`, requires
 `--features e2e-bench`). Run manually; not in Criterion regression gate
@@ -1712,7 +1720,7 @@ because results are environment-sensitive.
 | Channel | Artifact |
 |---------|----------|
 | GitHub Releases | Pre-built binaries (Linux amd64/arm64, macOS amd64/arm64) |
-| Docker Hub | `grove/pgtrickle-relay:0.24.0` — minimal distroless image |
+| Docker Hub | `grove/pgtrickle-relay:0.25.0` — minimal distroless image |
 | Cargo | `cargo install pgtrickle-relay` |
 | Homebrew | `brew install grove/tap/pgtrickle-relay` |
 
@@ -1742,7 +1750,7 @@ containers:
   - name: app
     image: myapp:latest
   - name: relay
-    image: grove/pgtrickle-relay:0.24.0
+    image: grove/pgtrickle-relay:0.25.0
     env:
       - name: PGTRICKLE_RELAY_POSTGRES_URL
         valueFrom:
@@ -1780,7 +1788,7 @@ containers:
   - name: app
     image: myapp:latest
   - name: relay
-    image: grove/pgtrickle-relay:0.24.0
+    image: grove/pgtrickle-relay:0.25.0
     env:
       - name: PGTRICKLE_RELAY_POSTGRES_URL
         valueFrom:
@@ -1812,7 +1820,7 @@ pgtrickle-relay config set inbox kafka-to-orders \
 
 | Item | Description | Effort |
 |------|-------------|--------|
-| RELAY-CAT | **Catalog schema + SQL API + offset tracking.** `sql/pg_trickle--0.23.0--0.24.0.sql`: create `relay_outbox_config`, `relay_inbox_config`, and `relay_consumer_offsets` tables; shared `relay_config_notify()` trigger; 7 SQL wrapper functions. | 0.5d |
+| RELAY-CAT | **Catalog schema + SQL API + offset tracking.** `sql/pg_trickle--0.24.0--0.25.0.sql`: create `relay_outbox_config`, `relay_inbox_config`, and `relay_consumer_offsets` tables; shared `relay_config_notify()` trigger; 7 SQL wrapper functions. | 0.5d |
 | RELAY-1 | Crate scaffold, CLI parsing (`--postgres-url`, `--metrics-addr`, `--log-format`, `--log-level`), DB bootstrap (load tables, LISTEN/NOTIFY), coordinator task setup, error types, RelayMessage envelope | 2d |
 | RELAY-2 | Source + Sink traits, coordinator loop (advisory locks), worker pool dispatch, cancellation token plumbing | 1.5d |
 | RELAY-3 | Outbox poller source (simple mode with durable offsets + consumer group mode) | 2.5d |
@@ -1868,15 +1876,15 @@ pgtrickle-relay config set inbox kafka-to-orders \
 
 > **Total: ~36.5 days solo / ~23 days with two developers**
 > (Phases 1–2 forward sinks and Phase 3 reverse sources can be parallelised.
-> Requires v0.23.0 outbox + consumer groups for full forward E2E testing;
+> Requires v0.24.0 outbox + consumer groups for full forward E2E testing;
 > reverse mode only needs inbox table schema.)
 
 ### Dependencies
 
-- **Forward mode requires v0.23.0 outbox (Part A)** — the relay polls
+- **Forward mode requires v0.24.0 outbox (Part A)** — the relay polls
   `pgtrickle.outbox_<st>` and reads claim-check rows from
   `pgtrickle.outbox_delta_rows_<st>`.
-- **Forward consumer group mode requires v0.23.0 Part B** — `poll_outbox()`,
+- **Forward consumer group mode requires v0.24.0 Part B** — `poll_outbox()`,
   `commit_offset()`, `consumer_heartbeat()`, `extend_lease()`.
 - **Reverse mode requires only an inbox table** — no dependency on outbox
   implementation. Can be developed and tested independently.
@@ -1891,11 +1899,11 @@ pgtrickle-relay config set inbox kafka-to-orders \
 | # | Question | Options | Recommendation |
 |---|----------|---------|----------------|
 | 1 | Should the relay support multiple pipelines in one process? | (a) One pipeline per process (simpler), (b) Multi-pipeline coordinator (more throughput per pod) | **(b)** — one process runs a coordinator that manages all enabled pipelines via advisory locks. Multiple pods scale horizontally with zero external coordination. This is more resource-efficient and operationally simpler. See [A.15](#a15-horizontal-scaling--work-distribution). |
-| 2 | Should we support custom transforms (e.g. JMESPath, JSONata)? | (a) No transforms in v0.24.0, (b) JMESPath filter | **(a)** — out of scope. The stream table query itself is the transform layer. |
-| 3 | Dead-letter queue for the relay? | (a) Skip poison events + log, (b) DLQ table in PostgreSQL | **(a)** for v0.24.0. Log + metric is sufficient. DLQ can be added later. |
+| 2 | Should we support custom transforms (e.g. JMESPath, JSONata)? | (a) No transforms in v0.25.0, (b) JMESPath filter | **(a)** — out of scope. The stream table query itself is the transform layer. |
+| 3 | Dead-letter queue for the relay? | (a) Skip poison events + log, (b) DLQ table in PostgreSQL | **(a)** for v0.25.0. Log + metric is sufficient. DLQ can be added later. |
 | 4 | Should `pgtrickle-relay` be a workspace member or a separate repo? | (a) Workspace member (shared CI, version lock), (b) Separate repo | **(a)** — workspace member alongside `pgtrickle-tui`. Shared version, single release. |
 | 5 | Should NATS Micro integration be included for service discovery? | (a) Yes, (b) No | **(b)** for initial release. Can be added if demand exists. |
-| 6 | Google Cloud Pub/Sub as a backend? | (a) v0.24.0, (b) Post-v0.24.0 | **(b)** — add post-launch based on demand. |
-| 7 | Azure Service Bus as a backend? | (a) v0.24.0, (b) Post-v0.24.0 | **(b)** — add post-launch based on demand. |
-| 8 | Should reverse mode support arbitrary Sink (not just inbox)? | (a) Only inbox sink in v0.24.0, (b) Any sink | **(a)** — primary use-case is source→inbox. Arbitrary source→sink is architecturally possible but not a priority. |
-| 9 | Message format conversion (e.g. Avro, Protobuf)? | (a) JSON only in v0.24.0, (b) Schema registry integration | **(a)** — JSON only. Schema-aware deserialization is a post-v0.24.0 feature. |
+| 6 | Google Cloud Pub/Sub as a backend? | (a) v0.25.0, (b) Post-v0.25.0 | **(b)** — add post-launch based on demand. |
+| 7 | Azure Service Bus as a backend? | (a) v0.25.0, (b) Post-v0.25.0 | **(b)** — add post-launch based on demand. |
+| 8 | Should reverse mode support arbitrary Sink (not just inbox)? | (a) Only inbox sink in v0.25.0, (b) Any sink | **(a)** — primary use-case is source→inbox. Arbitrary source→sink is architecturally possible but not a priority. |
+| 9 | Message format conversion (e.g. Avro, Protobuf)? | (a) JSON only in v0.25.0, (b) Schema registry integration | **(a)** — JSON only. Schema-aware deserialization is a post-v0.25.0 feature. |

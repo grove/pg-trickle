@@ -15,7 +15,7 @@
 - [Goals & Non-Goals](#goals--non-goals)
 - [Background](#background)
 - [Key Differences from the Outbox Helper](#key-differences-from-the-outbox-helper)
-- [Part A — Inbox Helper (v0.23.0)](#part-a--inbox-helper-v0230)
+- [Part A — Inbox Helper (v0.24.0)](#part-a--inbox-helper-v0240)
   - [A.1 SQL API](#a1-sql-api)
   - [A.2 Catalog Schema](#a2-catalog-schema)
   - [A.3 Inbox Table Schema](#a3-inbox-table-schema)
@@ -29,7 +29,7 @@
   - [A.11 Failure Handling](#a11-failure-handling)
   - [A.12 Performance Considerations](#a12-performance-considerations)
   - [A.13 Migration & Upgrade](#a13-migration--upgrade)
-- [Part B — Ordered Processing Extension (v0.23.0)](#part-b--ordered-processing-extension-v0230)
+- [Part B — Ordered Processing Extension (v0.24.0)](#part-b--ordered-processing-extension-v0240)
   - [B.1 Goals](#b1-goals)
   - [B.2 SQL API](#b2-sql-api)
   - [B.3 Aggregate-Ordered Stream Table](#b3-aggregate-ordered-stream-table)
@@ -52,13 +52,13 @@
 
 This plan specifies two complementary features for pg_trickle:
 
-1. **Inbox Helper (v0.23.0):** A convenience layer that creates
+1. **Inbox Helper (v0.24.0):** A convenience layer that creates
    a best-practice inbox table with auto-managed stream tables for the
    pending-message queue, dead-letter queue, and processing statistics.
    It also supports *adopting* an existing hand-rolled inbox table into
    pg_trickle's monitoring infrastructure without schema changes.
 
-2. **Ordered Processing Extension (v0.23.0):** An optional layer that adds
+2. **Ordered Processing Extension (v0.24.0):** An optional layer that adds
    per-aggregate ordered processing, sequence-gap detection, priority queues,
    and partition-affinity for competing workers.
 
@@ -153,7 +153,7 @@ Understanding the asymmetry is critical for correct implementation:
 
 ---
 
-## Part A — Inbox Helper (v0.23.0)
+## Part A — Inbox Helper (v0.24.0)
 
 ### A.1 SQL API
 
@@ -409,6 +409,13 @@ payload is bounded to 8 KB to stay within `pg_notify` limits.
 
 #### 3. Statistics Stream Table (when `with_stats = true`)
 
+> **Design note:** `max_pending_age_sec` has been removed from the materialised
+> stats ST. It uses `now()` which changes on every refresh cycle, causing
+> DIFFERENTIAL to emit a spurious delta for every row every 10 seconds. Moving
+> `now()` out of the ST query allows DIFFERENTIAL mode and eliminates the O(N)
+> full scan at every 10 s interval. Use `inbox_health()` for `oldest_pending_age_sec`
+> on demand; wire its output to a Grafana/alerting integration via application code.
+
 ```sql
 SELECT pgtrickle.create_stream_table(
     'stats_<inbox_name>',
@@ -419,9 +426,7 @@ SELECT pgtrickle.create_stream_table(
             COUNT(*) FILTER (WHERE %I IS NOT NULL)          AS processed,
             COUNT(*) FILTER (WHERE %I IS NULL AND %I >= %s) AS dead_letter,
             AVG(EXTRACT(EPOCH FROM (%I - %I)))
-                FILTER (WHERE %I IS NOT NULL)                AS avg_processing_time_sec,
-            MAX(EXTRACT(EPOCH FROM (now() - %I)))
-                FILTER (WHERE %I IS NULL AND %I < %s)       AS max_pending_age_sec
+                FILTER (WHERE %I IS NOT NULL)                AS avg_processing_time_sec
           FROM %I.%I
           GROUP BY %I$$,
         event_type_col,
@@ -429,16 +434,18 @@ SELECT pgtrickle.create_stream_table(
         processed_at_col,
         processed_at_col, retry_count_col, max_retries,
         processed_at_col, received_at_col, processed_at_col,
-        received_at_col, processed_at_col, retry_count_col, max_retries,
         schema, table_name,
         event_type_col
     ),
     schedule => '10s',
-    refresh_mode => 'FULL'  -- FULL required: max_pending_age_sec uses now(),
-                            -- which changes every refresh and would cause
-                            -- DIFFERENTIAL to treat every row as changed.
+    refresh_mode => 'DIFFERENTIAL'  -- safe: no now() in query; only changes when
+                                    -- message counts change between refresh cycles.
 );
 ```
+
+> **Migration note:** If your dashboards already use `max_pending_age_sec` from
+> the stats ST, switch to `SELECT (inbox_health('...'))->>'oldest_pending_age_sec'`
+> from your monitoring layer, or add a separate single-row stream table for it.
 
 ### A.5 Poison Message Detection & DLQ Routing
 
@@ -752,7 +759,7 @@ Not supported in initial release. Users must:
 
 ---
 
-## Part B — Ordered Processing Extension (v0.23.0)
+## Part B — Ordered Processing Extension (v0.24.0)
 
 ### B.1 Goals
 
@@ -857,7 +864,7 @@ surfaced — preventing out-of-order processing.
 > every refresh. For a long-lived inbox with millions of processed messages
 > this grows without bound and will eventually degrade refresh performance.
 >
-> **v0.23.0 mitigation:** Add a partial index:
+> **v0.24.0 mitigation:** Add a partial index:
 > ```sql
 > CREATE INDEX idx_<inbox>_processed_seq
 >     ON <inbox_table> (aggregate_id, sequence_num)
@@ -877,7 +884,7 @@ surfaced — preventing out-of-order processing.
 > Operators should increase the `next_<inbox>` schedule as processed history
 > grows. Document this recommendation in the inbox runbook.
 >
-> **Post-v0.23.0 optimization:** Introduce a `pgt_inbox_sequence_state`
+> **Post-v0.24.0 optimization:** Introduce a `pgt_inbox_sequence_state`
 > catalog table with columns `(inbox_id, aggregate_id, last_processed_seq)`
 > updated atomically when processors call `advance_inbox_sequence()`.
 > This makes the `last_processed` CTE O(changed aggregates) instead of
@@ -965,8 +972,9 @@ across all priorities.
 When `disable_inbox_priority()` is called:
 1. All `pending_<inbox>_<tier>` stream tables are dropped.
 2. The `pgt_inbox_priority_config` config row is deleted.
-3. The original unified `pending_<inbox>` stream table is restored (using the
-   same DDL as at `create_inbox()` time, sourced from `pgt_inbox_config`).
+3. The original unified `pending_<inbox>` stream table is **already present**
+   (it was never dropped by `enable_inbox_priority()`), so no restoration step
+   is needed. Processors using the unified ST can resume immediately.
 
 ### B.6 Competing Workers with Partition Affinity
 
@@ -1086,6 +1094,13 @@ INBOX_TABLE  = os.environ.get('INBOX_TABLE', 'pgtrickle.payment_inbox')
 BATCH_SIZE   = int(os.environ.get('BATCH_SIZE', '50'))
 POLL_SECONDS = float(os.environ.get('POLL_SECONDS', '0.5'))
 
+# SAFETY: INBOX_TABLE is read from an environment variable set by the operator,
+# not from user input. Validate its format to prevent injection if this script
+# is ever adapted to accept CLI arguments or config file values.
+import re
+if not re.match(r'^[a-z_][a-z0-9_.]*$', INBOX_TABLE):
+    raise ValueError(f"INBOX_TABLE must be a valid schema-qualified identifier, got: {INBOX_TABLE!r}")
+
 class PoisonMessageGuard:
     """Track consecutive failures; pause processing if threshold breached."""
 
@@ -1173,6 +1188,11 @@ PG_DSN = os.environ['PG_DSN']
 WEBHOOK_SECRET = os.environ['WEBHOOK_SECRET']
 INBOX_TABLE = os.environ.get('INBOX_TABLE', 'pgtrickle.webhook_inbox')
 
+# SAFETY: INBOX_TABLE is operator-provided. Validate before use in f-strings.
+import re
+if not re.match(r'^[a-z_][a-z0-9_.]*$', INBOX_TABLE):
+    raise ValueError(f\"INBOX_TABLE must be a valid schema-qualified identifier, got: {INBOX_TABLE!r}\")
+
 db_pool: asyncpg.Pool = None
 
 @app.on_event("startup")
@@ -1221,8 +1241,8 @@ async def receive_webhook(provider: str, request: Request):
   uses correct column references.
 - `enable_inbox_tracking()` validation: missing columns, wrong types, no PK.
 - `drop_inbox()` with `cascade` and `is_managed` matrix (4 combinations).
-- `replay_inbox_messages()` with valid/invalid `where_clause`.
-- `replay_inbox_messages()` with `event_ids`.
+- `replay_inbox_messages()` with valid `event_ids` array; invalid (NULL or empty) input rejected with a clear error.
+- `replay_inbox_messages()` with `event_ids` containing unknown IDs: verify only matching messages are reset, unknown IDs silently ignored.
 - `inbox_health()` returns correct health status for various inbox states.
 - Column mapping in `pgt_inbox_config` correctly generates stream table SQL.
 
@@ -1296,7 +1316,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 - `enable_inbox_ordering()` then inject 50 messages out-of-order per aggregate:
   verify `next_<inbox>` surfaces them strictly in sequence order; verify gap
   detection fires for each missing sequence.
-- Upgrade path (v0.22.0 → v0.23.0): existing non-inbox stream tables survive;
+- Upgrade path (v0.23.0 → v0.24.0): existing non-inbox stream tables survive;
   new inbox catalog tables present; `inbox_health()` available.
 
 ---
@@ -1310,7 +1330,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 | [docs/PATTERNS.md](../../docs/PATTERNS.md) | New section "Transactional Inbox" with: basic inbox setup, DLQ flow, processor crash recovery guide, per-aggregate ordering pattern, priority queue pattern, partition affinity for competing workers, "Ordered + Priority" mutual exclusion explanation and recommended alternative (separate inboxes per priority class) |
 | [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) | Diagram of inbox pipeline with stream tables |
 | [docs/TROUBLESHOOTING.md](../../docs/TROUBLESHOOTING.md) | Common inbox issues: DLQ growth, stale pending messages, processor backpressure, gap detection slowdown at scale |
-| [CHANGELOG.md](../../CHANGELOG.md) | v0.23.0 entry for INBOX-1 through INBOX-10 and INBOX-B1 through INBOX-B6 |
+| [CHANGELOG.md](../../CHANGELOG.md) | v0.24.0 entry for INBOX-1 through INBOX-10 and INBOX-B1 through INBOX-B6 |
 | [dbt-pgtrickle/](../../dbt-pgtrickle/) | `inbox_config` property in dbt model config; `pgtrickle_create_inbox` macro; dbt docs update |
 | [examples/](../../examples/) | `inbox/inbox_writer_nats.py`, `inbox/inbox_processor.py`, `inbox/webhook_receiver.py`, `inbox/inbox_processor_ordered.py` |
 
@@ -1318,7 +1338,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 
 ## Part F — Implementation Roadmap
 
-### Part A — v0.23.0 (Essential Patterns)
+### Part A — v0.24.0 (Essential Patterns)
 
 | Item | Description | Effort |
 |------|-------------|--------|
@@ -1331,7 +1351,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 
 **Total: ~4.5 days** (matches roadmap estimate).
 
-### Part B — v0.23.0 (Production Patterns)
+### Part B — v0.24.0 (Production Patterns)
 
 | Item | Description | Effort |
 |------|-------------|--------|
@@ -1365,7 +1385,7 @@ Acceptance criteria: pending ST refresh < 5 ms at 100 pending, < 50 ms at
 
 3. **CloudEvents schema.** Should `create_inbox()` offer a CloudEvents-
    compatible schema variant with `spec_version`, `subject`,
-   `data_content_type` columns? **Proposal:** not in v0.23.0; add as an
+   `data_content_type` columns? **Proposal:** not in v0.24.0; add as an
    optional `schema_variant => 'cloudevents'` parameter later.
 
 4. **Payload validation on INSERT.** Should pg_trickle offer a trigger-based
@@ -1425,7 +1445,7 @@ Five critical questions resolved before implementation begins:
 |---|----------|----------|-----------|
 | 1 | Can ordering and priority be enabled together on the same inbox? | **No \u2014 hard error** (`InboxOrderingPriorityConflict`) | Per-aggregate ordering must surface the next sequence regardless of priority. Mixing tiers violates sequence guarantees. Use separate inboxes per priority class, each with ordering. |
 | 2 | Processor crash recovery \u2014 who is responsible? | **Application** (two-phase pattern) | pg_trickle documents: execute business logic first, set `processed_at` second. Replay via `replay_inbox_messages()`. Document in PATTERNS.md with code example. |
-| 3 | Gap detection performance at scale | **Benchmark-gated** + scale guidelines documented | < 1 s at 10K aggregates is the v0.23.0 gate. Above 100K aggregates, auto-refresh disabled; on-demand via `inbox_ordering_gaps()` only. Delta-based optimization tracked as post-v0.23.0 follow-up. |
+| 3 | Gap detection performance at scale | **Benchmark-gated** + scale guidelines documented | < 1 s at 10K aggregates is the v0.24.0 gate. Above 100K aggregates, auto-refresh disabled; on-demand via `inbox_ordering_gaps()` only. Delta-based optimization tracked as post-v0.24.0 follow-up. |
 | 4 | Naming collision resolution for stream tables | **Truncate to 56 bytes + 7-char hex suffix** | Same algorithm as outbox. Final names stored in `pgt_inbox_config` (pending/dlq/stats ST name columns). |
 | 5 | dbt integration scope | **dbt model config properties + macro** | `outbox_enabled`, `inbox_config` properties supported in dbt model config. Documented in `dbt-pgtrickle/README.md` and `docs/SQL_REFERENCE.md`. |
 

@@ -3,7 +3,7 @@
 > **Status:** Proposal (DRAFT)
 > **Created:** 2026-04-19
 > **Category:** Tooling — Relay CLI Extension
-> **Depends on:** [PLAN_RELAY_CLI.md](./PLAN_RELAY_CLI.md) (v0.24.0 Phase 1)
+> **Depends on:** [PLAN_RELAY_CLI.md](./PLAN_RELAY_CLI.md) (v0.25.0 Phase 1)
 
 ---
 
@@ -45,11 +45,11 @@
 
 ## Executive Summary
 
-Phase 2 of the `pgtrickle-relay` CLI extends the v0.24.0 foundation with
+Phase 2 of the `pgtrickle-relay` CLI extends the v0.25.0 foundation with
 additional backends for major cloud platforms and analytics systems, plus
 operational improvements that make the relay production-grade at scale.
 
-**Phase 1 (v0.24.0)** ships with 8 sink backends (NATS, Kafka, HTTP webhook,
+**Phase 1 (v0.25.0)** ships with 8 sink backends (NATS, Kafka, HTTP webhook,
 Redis Streams, SQS, RabbitMQ, PostgreSQL inbox, stdout/file) and 7 source
 backends (same minus stdout, plus stdin). Phase 2 adds **10 new backends**
 covering all three major cloud providers, the IoT ecosystem, analytics
@@ -1247,7 +1247,7 @@ operational features.
 
 ### Dependencies
 
-- **Requires Phase 1 (v0.24.0)** — all Phase 2 work builds on the
+- **Requires Phase 1 (v0.25.0)** — all Phase 2 work builds on the
   Source/Sink trait framework, relay loop, config system, and metrics
   from Phase 1.
 - **Schema Registry (B.2)** requires access to a Confluent Schema Registry
@@ -1265,7 +1265,7 @@ operational features.
 
 | # | Question | Options | Recommendation |
 |---|----------|---------|----------------|
-| 1 | Should Phase 2 be a single release or split across versions? | (a) Single v0.25.0, (b) Split: v0.25.0 (backends) + v0.26.0 (extensions) | **(b)** — split reduces risk. Ship backends first, extensions second. |
+| 1 | Should Phase 2 be a single release or split across versions? | (a) Single v0.26.0, (b) Split: v0.26.0 (backends) + v0.27.0 (extensions) | **(b)** — split reduces risk. Ship backends first, extensions second. |
 | 2 | Should Event Hubs use the native SDK or just document Kafka protocol? | (a) Native SDK, (b) Document Kafka config only | **(a)** — native SDK for better Azure identity integration. Document Kafka as alternative. |
 | 3 | Should transforms support languages beyond JMESPath? | (a) JMESPath only, (b) Add CEL (Common Expression Language) | **(a)** for Phase 2. JMESPath is well-known and sufficient. |
 | 4 | Should the plugin system use WASM or shared libraries (.so/.dylib)? | (a) WASM (sandboxed, portable), (b) Shared libs (faster, easier) | **(a)** — WASM is safer and more portable. But defer to Phase 3. |
