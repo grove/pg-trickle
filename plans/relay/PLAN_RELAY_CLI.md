@@ -998,30 +998,43 @@ references (e.g. `{"password_env": "KAFKA_PASSWORD"}`) resolved at runtime.
 #### SQL API Functions
 
 Seven PL/pgSQL wrapper functions provide a public API for managing relay
-pipelines without requiring direct table access. Validation of required JSONB
-keys and direction constraints happens inside the functions, not in application
-code. Each function validates that the required top-level keys (`source_type`,
-`sink_type`, `source`, `sink`) are present in the JSONB config and raises
-`relay.invalid_config` if not — preventing silent misconfigurations that would
-only surface at relay startup.
+pipelines without requiring direct table access.
+
+The pg-trickle side of each pipeline (the outbox name/consumer-group for
+forward pipelines; the inbox table for reverse pipelines) is a first-class
+typed parameter — not buried in JSONB. Only the external backend options live
+in the JSONB argument, keeping validation simple and making misconfigurations
+visible at call time rather than at relay startup.
 
 ```sql
--- Upsert a forward pipeline (outbox → sink).
--- source_type must be 'outbox'. Raises relay.invalid_config on bad JSON shape.
+-- Upsert a forward pipeline (outbox → external sink).
+--   outbox  — name of the pg-trickle outbox (validated against the catalog).
+--   group   — consumer-group name for offset tracking.
+--   sink    — JSONB describing the external sink backend.
+--             Required key: "type"  (e.g. "nats", "kafka", "http", "redis",
+--             "sqs", "rabbitmq", "stdout").
+--             All other keys are backend-specific.
+--             Raises relay.invalid_config if "type" is missing.
 -- enabled defaults to true; pass false to insert in disabled state.
 SELECT pgtrickle.set_relay_outbox(
     'orders-to-nats',
-    '{"source_type":"outbox","source":{"outbox":"orders","group":"order-relay"},
-      "sink_type":"nats","sink":{"url":"nats://localhost:4222"}}'
+    outbox => 'orders',
+    group  => 'order-relay',
+    sink   => '{"type":"nats","url":"nats://localhost:4222"}'
 );
 
--- Upsert a reverse pipeline (source → inbox).
--- sink_type must be 'pg-inbox'. Raises relay.invalid_config on bad JSON shape.
+-- Upsert a reverse pipeline (external source → pg-trickle inbox).
+--   inbox   — name of the pg-trickle inbox table (validated against the catalog).
+--   source  — JSONB describing the external source backend.
+--             Required key: "type"  (e.g. "kafka", "nats", "http", "redis",
+--             "sqs", "rabbitmq", "stdin").
+--             All other keys are backend-specific.
+--             Raises relay.invalid_config if "type" is missing.
 -- enabled defaults to true; pass false to insert in disabled state.
 SELECT pgtrickle.set_relay_inbox(
     'kafka-to-orders',
-    '{"source_type":"kafka","source":{"brokers":"localhost:9092","topic":"orders"},
-      "sink_type":"pg-inbox","sink":{"inbox_table":"order_inbox"}}'
+    inbox  => 'order_inbox',
+    source => '{"type":"kafka","brokers":"localhost:9092","topic":"orders"}'
 );
 
 -- Enable / disable a pipeline by name (searches both tables).
@@ -1056,8 +1069,8 @@ REVOKE ALL ON pgtrickle.relay_inbox_config     FROM pgtrickle_relay;
 REVOKE ALL ON pgtrickle.relay_consumer_offsets FROM pgtrickle_relay;
 
 -- Grant execute on the API functions only
-GRANT EXECUTE ON FUNCTION pgtrickle.set_relay_outbox(TEXT, JSONB)  TO pgtrickle_relay;
-GRANT EXECUTE ON FUNCTION pgtrickle.set_relay_inbox(TEXT, JSONB)   TO pgtrickle_relay;
+GRANT EXECUTE ON FUNCTION pgtrickle.set_relay_outbox(TEXT, TEXT, TEXT, JSONB)  TO pgtrickle_relay;
+GRANT EXECUTE ON FUNCTION pgtrickle.set_relay_inbox(TEXT, TEXT, JSONB)         TO pgtrickle_relay;
 GRANT EXECUTE ON FUNCTION pgtrickle.enable_relay(TEXT)                      TO pgtrickle_relay;
 GRANT EXECUTE ON FUNCTION pgtrickle.disable_relay(TEXT)                     TO pgtrickle_relay;
 GRANT EXECUTE ON FUNCTION pgtrickle.delete_relay(TEXT)                      TO pgtrickle_relay;
