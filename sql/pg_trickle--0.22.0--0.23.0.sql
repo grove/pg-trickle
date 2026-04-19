@@ -12,12 +12,30 @@
 -- UX-3: explain_diff_sql() SQL function (Rust-defined via pgrx)
 -- STAB-4: pgtrickle_refresh_stats() SQL function (Rust-defined via pgrx)
 --
--- No schema changes are required for this version. All new SQL functions
--- are defined in Rust via #[pg_extern] and are automatically available
--- after the shared library is loaded. The GUCs are compile-time settings
--- registered in _PG_init().
---
--- This migration file exists for the upgrade chain and version tracking.
+-- This migration adds the two new SQL functions introduced in v0.23.0.
+-- GUCs are compile-time settings registered in _PG_init() and need no SQL.
+
+-- UX-3: explain_diff_sql() — return the delta SQL for a stream table
+CREATE OR REPLACE FUNCTION pgtrickle."explain_diff_sql"(
+    "name" TEXT
+) RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'explain_diff_sql_wrapper';
+
+-- STAB-4: pgtrickle_refresh_stats() — per-table refresh timing statistics
+CREATE OR REPLACE FUNCTION pgtrickle."pgtrickle_refresh_stats"() RETURNS TABLE (
+    "stream_table" TEXT,
+    "mode" TEXT,
+    "avg_ms" double precision,
+    "p95_ms" double precision,
+    "p99_ms" double precision,
+    "refresh_count" bigint,
+    "last_refresh_at" timestamp with time zone
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'pgtrickle_refresh_stats_wrapper';
 
 -- Record the schema version for the upgrade chain.
 INSERT INTO pgtrickle.pgt_schema_version (version, description, installed_at)
