@@ -4794,6 +4794,70 @@ pub fn execute_differential_refresh(
         }
     }
 
+    // ── P1-2: Log delta SQL when GUC enabled ────────────────────────
+    if crate::config::pg_trickle_log_delta_sql() {
+        pgrx::debug1!(
+            "[pg_trickle] DELTA SQL for {}.{} (pgt_id={}):\n{}",
+            schema,
+            name,
+            st.pgt_id,
+            resolved.resolved_delta_sql,
+        );
+    }
+
+    // ── PERF-5: ANALYZE change buffer tables before delta execution ──
+    if crate::config::pg_trickle_analyze_before_delta() {
+        let cb_schema = crate::config::pg_trickle_change_buffer_schema();
+        for &oid in &resolved.source_oids {
+            let buf_name = format!("changes_{oid}");
+            let analyze_sql = format!(
+                "ANALYZE \"{}\".\"{}\"",
+                cb_schema.replace('"', "\"\""),
+                buf_name,
+            );
+            if let Err(e) = Spi::run(&analyze_sql) {
+                pgrx::debug1!("[pg_trickle] PERF-5: failed to ANALYZE {}: {}", buf_name, e);
+            }
+        }
+    }
+
+    // ── SCAL-2: Change buffer overflow alert ────────────────────────
+    let alert_threshold = crate::config::pg_trickle_max_change_buffer_alert_rows();
+    if alert_threshold > 0 && total_change_count > alert_threshold {
+        pgrx::warning!(
+            "[pg_trickle] SCAL-2: change buffer for {}.{} contains {} rows \
+             (threshold: {}). Consider increasing refresh frequency or \
+             investigating upstream write rate.",
+            schema,
+            name,
+            total_change_count,
+            alert_threshold,
+        );
+    }
+
+    // ── P5-1 / P5-2: Delta-specific planner hints from GUCs ────────
+    {
+        let delta_wm = crate::config::pg_trickle_delta_work_mem();
+        if delta_wm > 0 {
+            let work_mem_sql = format!("SET LOCAL work_mem = '{delta_wm}MB'");
+            if let Err(e) = Spi::run(&work_mem_sql) {
+                pgrx::warning!(
+                    "[pg_trickle] P5-1: failed to SET LOCAL work_mem = '{delta_wm}MB': {}. \
+                     Falling back to session work_mem.",
+                    e
+                );
+            }
+        }
+        if !crate::config::pg_trickle_delta_enable_nestloop()
+            && let Err(e) = Spi::run("SET LOCAL enable_nestloop = off")
+        {
+            pgrx::debug1!(
+                "[pg_trickle] P5-2: failed to SET LOCAL enable_nestloop = off: {}",
+                e
+            );
+        }
+    }
+
     // ── D-1: Conditional planner hints based on delta size ───────────
     // Large deltas benefit from hash joins over nested loops. Apply
     // SET LOCAL hints that are automatically reset at transaction end.
@@ -5664,6 +5728,25 @@ pub fn execute_differential_refresh(
     // is significantly faster, raise the threshold to allow more
     // differential refreshes.
     let incr_total_ms = (t_decision.as_secs_f64() + t3.duration_since(t0).as_secs_f64()) * 1000.0;
+
+    // ── UX-1: DIFF-slower-than-FULL per-query log warning ───────────
+    if crate::config::pg_trickle_log_delta_sql()
+        && let Some(last_full) = st.last_full_ms
+        && last_full > 0.0
+        && incr_total_ms > last_full
+    {
+        let ratio = incr_total_ms / last_full;
+        pgrx::warning!(
+            "[pg_trickle] DIFF refresh for {}.{} took {:.1}ms vs last FULL {:.1}ms \
+             — DIFF is {:.1}x slower",
+            schema,
+            name,
+            incr_total_ms,
+            last_full,
+            ratio,
+        );
+    }
+
     if let Some(last_full) = st.last_full_ms
         && last_full > 0.0
     {
