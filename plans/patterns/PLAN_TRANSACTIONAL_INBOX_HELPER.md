@@ -1040,7 +1040,7 @@ helper that requires unsafe SQL interpolation.
 Ships as `examples/inbox/inbox_writer_nats.py`:
 
 ```python
-import asyncio, asyncpg, json, os, signal
+import asyncio, asyncpg, json, os, re, signal
 import nats
 
 NATS_URL     = os.environ['NATS_URL']
@@ -1049,6 +1049,10 @@ SUBJECT      = os.environ.get('NATS_SUBJECT', 'payments.>')
 CONSUMER     = os.environ.get('NATS_CONSUMER', 'inbox-writer')
 STREAM       = os.environ.get('NATS_STREAM', 'PAYMENTS')
 INBOX_TABLE  = os.environ.get('INBOX_TABLE', 'pgtrickle.payment_inbox')
+
+# SAFETY: INBOX_TABLE is operator-provided. Validate before use in f-strings.
+if not re.match(r'^[a-z_][a-z0-9_.]*$', INBOX_TABLE):
+    raise ValueError(f"INBOX_TABLE must be a valid schema-qualified identifier, got: {INBOX_TABLE!r}")
 
 async def main():
     nc = await nats.connect(NATS_URL)

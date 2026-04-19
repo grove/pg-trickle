@@ -421,13 +421,23 @@ async fn worker_loop(
     db: &Client,
     shutdown: CancellationToken,
 ) -> Result<(), RelayError> {
+    // Exponential backoff on empty polls to avoid busy-spinning against a
+    // quiet outbox. Resets to min_sleep on any non-empty batch.
+    let mut empty_poll_sleep = Duration::from_millis(pipeline.poll_interval_ms);
+    const MAX_SLEEP: Duration = Duration::from_secs(5);
+
     loop {
         tokio::select! {
             batch = source.poll() => {
                 let batch = batch?;
                 if batch.is_empty() {
+                    // Back off rather than tight-loop against an empty outbox.
+                    tokio::time::sleep(empty_poll_sleep).await;
+                    empty_poll_sleep = (empty_poll_sleep * 2).min(MAX_SLEEP);
                     continue;
                 }
+                // Non-empty batch — reset backoff.
+                empty_poll_sleep = Duration::from_millis(pipeline.poll_interval_ms);
                 sink.publish(&batch).await?;
                 source.acknowledge(&batch).await?;
                 // Write durable offset atomically after each batch
@@ -632,6 +642,7 @@ async fn poll_group(
     db: &Client,
     group: &str,
     consumer_id: &str,
+    stream_table_name: &str,  // stream table name for decode_payload / outbox_rows_consumed
     batch_size: i32,
     visibility_seconds: i32,
 ) -> Result<Vec<RelayMessage>, RelayError> {
@@ -653,7 +664,7 @@ async fn poll_group(
     for row in &rows {
         let id: i64 = row.get("id");
         let payload: serde_json::Value = row.get("payload");
-        let batch = decode_payload(&payload, db, &outbox_name, id).await?;
+        let batch = decode_payload(&payload, db, stream_table_name, id).await?;
         messages.extend(batch_to_messages(&batch));
     }
     Ok(messages)
@@ -697,7 +708,7 @@ struct OutboxBatch {
 async fn decode_payload(
     payload: &serde_json::Value,
     db: &Client,
-    outbox_name: &str,
+    stream_table_name: &str,   // pg_trickle stream table name (NOT the outbox table name)
     outbox_id: i64,
 ) -> Result<OutboxBatch, RelayError> {
     let v = payload["v"].as_i64().unwrap_or(0);
@@ -713,15 +724,18 @@ async fn decode_payload(
         .unwrap_or(false);
 
     if is_claim_check {
-        // Cursor-fetch from companion table in bounded batches
+        // Cursor-fetch from companion table in bounded batches.
+        // outbox_name is derived from stream_table_name ("outbox_" + stream_table_name).
+        let outbox_name = format!("outbox_{}", stream_table_name);
         let (inserted, deleted) = fetch_claim_check_rows(
-            db, outbox_name, outbox_id
+            db, &outbox_name, outbox_id
         ).await?;
 
-        // Signal consumption complete
+        // Signal consumption complete.
+        // outbox_rows_consumed() takes the STREAM TABLE name, not the outbox table name.
         db.execute(
             "SELECT pgtrickle.outbox_rows_consumed($1, $2)",
-            &[&outbox_name, &outbox_id],
+            &[&stream_table_name, &outbox_id],
         ).await?;
 
         Ok(OutboxBatch {
@@ -755,11 +769,15 @@ async fn fetch_claim_check_rows(
     let delta_table = format!("pgtrickle.outbox_delta_rows_{}", outbox_name);
 
     let cursor_name = format!("relay_cc_{}_{}", outbox_id, uuid::Uuid::new_v4().simple());
+    // Embed outbox_id as a literal — batch_execute does not support parameter
+    // binding, so $1 would not be substituted. outbox_id is an i64 from the
+    // database, not user input, so embedding it directly is safe.
     db.batch_execute(&format!(
         "DECLARE {cursor} NO SCROLL CURSOR FOR \
-         SELECT op, payload FROM {table} WHERE outbox_id = $1 ORDER BY row_num",
+         SELECT op, payload FROM {table} WHERE outbox_id = {oid} ORDER BY row_num",
         cursor = cursor_name,
-        table = delta_table  // validated at startup against catalog
+        table = delta_table,  // validated at startup against catalog
+        oid = outbox_id,
     )).await?;
 
     let mut inserted = Vec::new();
