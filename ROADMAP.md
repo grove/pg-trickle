@@ -42,16 +42,14 @@ coverage, all in plain language.
 - [v0.23.0 — TPC-H DVM Scaling Performance](#v0230--tpch-dvm-scaling-performance)
 - [v0.24.0 — Transactional Inbox & Outbox Patterns](#v0240--transactional-inbox--outbox-patterns)
 - [v0.25.0 — Relay CLI (`pgtrickle-relay`)](#v0250--relay-cli-pgtrickle-relay)
-- [v0.26.0 — TUI Dog-Feeding Integration](#v0250--tui-dog-feeding-integration)
-- [v0.27.0 — PostgreSQL 17 Support](#v0260--postgresql-17-support)
-- [v0.28.0 — PGlite Proof of Concept](#v0270--pglite-proof-of-concept)
-- [v0.29.0 — Core Extraction (`pg_trickle_core`)](#v0280--core-extraction-pg_trickle_core)
-- [v0.30.0 — PGlite WASM Extension](#v0290--pglite-wasm-extension)
-- [v0.31.0 — PGlite Reactive Integration](#v0300--pglite-reactive-integration)
+- [v1.6.0 — TUI Dog-Feeding Integration](#v160--tui-dog-feeding-integration)
+- [v1.1.0 — PostgreSQL 17 Support](#v110--postgresql-17-support)
+- [v1.2.0 — PGlite Proof of Concept](#v120--pglite-proof-of-concept)
+- [v1.3.0 — Core Extraction (`pg_trickle_core`)](#v130--core-extraction-pg_trickle_core)
+- [v1.4.0 — PGlite WASM Extension](#v140--pglite-wasm-extension)
+- [v1.5.0 — PGlite Reactive Integration](#v150--pglite-reactive-integration)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
-- [Effort Summary](#effort-summary)
-- [References](#references)
 <!-- TOC end -->
 
 ---
@@ -95,12 +93,12 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.23.0 | TPC-H DVM scaling — diagnose and fix differential refresh perf | ✅ Released |
 | v0.24.0 | Transactional inbox & outbox patterns | Planned |
 | v0.25.0 | Relay CLI (`pgtrickle-relay`) — bidirectional outbox→sinks + sources→inbox | Planned |
-| v0.26.0 | TUI dog-feeding integration | Planned |
-| v0.27.0 | PostgreSQL 17 support | Planned |
-| v0.28.0 | PGlite proof of concept | Planned |
-| v0.29.0 | Core extraction (`pg_trickle_core`) | Planned |
-| v0.30.0 | PGlite WASM extension | Planned |
-| v0.31.0 | PGlite reactive integration | Planned |
+| v1.6.0 | TUI dog-feeding integration | Planned |
+| v1.1.0 | PostgreSQL 17 support | Planned |
+| v1.2.0 | PGlite proof of concept | Planned |
+| v1.3.0 | Core extraction (`pg_trickle_core`) | Planned |
+| v1.4.0 | PGlite WASM extension | Planned |
+| v1.5.0 | PGlite reactive integration | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 
 ---
@@ -5277,6 +5275,9 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > See [plans/PLAN_DOG_FEEDING.md](plans/PLAN_DOG_FEEDING.md) for the full
 > design, architecture, and risk analysis.
 
+<details>
+<summary>Completed items (click to expand)</summary>
+
 ### Phase 1 — Foundation
 
 | Item | Description | Effort | Ref |
@@ -6019,6 +6020,8 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 - [x] Extension upgrade path tested (`0.19.0 → 0.20.0`)
 - [x] `just check-version-sync` passes
 
+</details>
+
 ---
 
 ## v0.21.0 — Correctness, Safety & Test Hardening
@@ -6034,6 +6037,9 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > `refresh.rs` module split into focused sub-modules reduces change risk.
 > A Performance Tuning Cookbook consolidates scattered advice into an operator
 > reference.
+
+<details>
+<summary>Completed items (click to expand)</summary>
 
 ### EC-01 Fix — JOIN Delta Phantom Rows
 
@@ -6122,6 +6128,8 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 - [x] Extension upgrade path tested (`0.20.0 → 0.21.0`)
 - [x] `just check-version-sync` passes
 
+</details>
+
 ---
 
 ## v0.22.0 — Production Scalability & Downstream Integration
@@ -6138,6 +6146,9 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 > tier auto-assignment. The transactional outbox helper moves to v0.24.0
 > where it ships alongside a companion inbox helper as a complete
 > transactional messaging solution.
+
+<details>
+<summary>Completed items (click to expand)</summary>
 
 ### Downstream CDC Publication (P1 — §9.2)
 
@@ -6238,6 +6249,8 @@ Dependencies: DB-3 (uses schema version to determine needed migrations). Schema 
 - [x] Extension upgrade path tested (`0.21.0 → 0.22.0`)
 - [x] `just check-version-sync` passes
 
+</details>
+
 ---
 
 ## v0.23.0 — TPC-H DVM Scaling Performance
@@ -6260,6 +6273,9 @@ coding, then apply fixes to the smallest affected code paths.
 > [PLAN_DVM_IMPROVEMENTS.md](plans/performance/PLAN_DVM_IMPROVEMENTS.md)
 > and is validated against all 22 TPC-H queries at SF=1.0 using
 > `test_tpch_differential_correctness` after every code change.
+
+<details>
+<summary>Completed items (click to expand)</summary>
 
 ---
 
@@ -6400,6 +6416,8 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 - [x] PERF-5: `pgtrickle.analyze_before_delta = on` is default; EXPLAIN plans for `changes_<oid>` tables show accurate row count estimates at SF=0.1
 - [x] UX-7: `pgtrickle.diff_output_format = 'merged'` mode passes all outbox/CDC integration tests that exercise aggregate stream tables post-DI-2
 - [x] `just check-version-sync` passes
+
+</details>
 
 ---
 
@@ -6780,7 +6798,7 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 
 ---
 
-## v0.26.0 — TUI Dog-Feeding Integration
+## v1.6.0 — TUI Dog-Feeding Integration
 
 **Status: Planned.** See [plans/ui/PLAN_TUI_PART_3.md](plans/ui/PLAN_TUI_PART_3.md) for the full design.
 
@@ -6902,7 +6920,7 @@ TUI/CLI visualization enhancement for the dog-feeding views. Recommended from [P
 
 ---
 
-## v0.27.0 — PostgreSQL 17 Support
+## v1.1.0 — PostgreSQL 17 Support
 
 > **Release Theme**
 > This release adds PostgreSQL 17 as a supported target alongside
@@ -7000,7 +7018,7 @@ Low-hanging PostgreSQL feature opportunities identified in [plans/sql/PLAN_POSTG
 
 ---
 
-## v0.28.0 — PGlite Proof of Concept
+## v1.2.0 — PGlite Proof of Concept
 
 > **Release Theme**
 > This release validates whether PGlite users want real incremental view
@@ -7397,7 +7415,7 @@ Dependencies: None. Schema change: No (PG extension unchanged).
 
 ---
 
-## v0.29.0 — Core Extraction (`pg_trickle_core`)
+## v1.3.0 — Core Extraction (`pg_trickle_core`)
 
 > **Release Theme**
 > This release surgically separates pg_trickle's "brain" — the DVM engine,
@@ -7823,7 +7841,7 @@ Dependencies: PGL-1-1. Schema change: No.
 
 ---
 
-## v0.30.0 — PGlite WASM Extension
+## v1.4.0 — PGlite WASM Extension
 
 > **Release Theme**
 > This release delivers the first working PGlite extension — the moment
@@ -8291,7 +8309,7 @@ Dependencies: PGL-2-3, PERF-2. Schema change: No.
 
 ---
 
-## v0.31.0 — PGlite Reactive Integration
+## v1.5.0 — PGlite Reactive Integration
 
 > **Release Theme**
 > This release completes the PGlite story by bridging the gap between
@@ -8936,79 +8954,3 @@ to keep the pre-1.0 milestones focused on performance and correctness.
 
 > **Convenience API subtotal: ~2–3 days (G15-EX pulled to v0.14.0; G15-BC pulled to v0.15.0)**
 
----
-
-## Effort Summary
-
-| Milestone | Effort estimate | Cumulative | Status |
-|-----------|-----------------|------------|--------|
-| v0.1.x — Core engine + correctness | ~30h actual | 30h | ✅ Released |
-| v0.2.0 — TopK, Diamond & Transactional IVM | ✔️ Complete | 62–78h | ✅ Released |
-| v0.2.1 — Upgrade Infrastructure & Documentation | ~8h | 70–86h | ✅ Released |
-| v0.2.2 — OFFSET Support, ALTER QUERY & Upgrade Tooling | ~50–70h | 120–156h | ✅ Released |
-| v0.2.3 — Non-Determinism, CDC/Mode Gaps & Operational Polish | 45–66h | 165–222h | ✅ Released |
-| v0.3.0 — DVM Correctness, SAST & Test Coverage | ~20–30h | 185–252h | ✅ Released |
-| v0.4.0 — Parallel Refresh & Performance Hardening | ~60–94h | 245–346h | ✅ Released |
-| v0.5.0 — RLS, Operational Controls + Perf Wave 1 (A-3a only) | ~51–97h | 296–443h | ✅ Released |
-| v0.6.0 — Partitioning, Idempotent DDL & Circular Dependency Foundation | ~35–50h | 331–493h | ✅ Released |
-| v0.7.0 — Performance, Watermarks, Circular DAG Execution, Observability & Infrastructure | ~59–62h | 390–555h | |
-| v0.8.0 — pg_dump Support & Test Hardening | ~16–21d | — | |
-| v0.9.0 — Incremental Aggregate Maintenance (B-1) | ~7–9 wk | — | |
-| v0.10.0 — DVM Hardening, Connection Pooler Compat, Core Refresh Opts & Infra Prep | ~7–10d + ~26–40 wk | — | |
-| v0.11.0 — Partitioned Stream Tables, Prometheus & Grafana, Safety Hardening & Correctness | ~7–10 wk + ~12h obs + ~14–21h defaults + ~7–12h safety + ~2–4 wk should-ship | — | |
-| v0.12.0 — Scalability Foundations, Partitioning Enhancements & Correctness | ~18–27 wk + ~6–8 wk scalability + ~5–8 wk partitioning + ~1–3 wk defaults | — | |
-| v0.13.0 — Scalability Foundations, Partitioning Enhancements, MERGE Profiling & Multi-Tenant Scheduling | ~15–23 wk | — | |
-| v0.14.0 — Tiered Scheduling, UNLOGGED Buffers & Diagnostics | ~2–6 wk + ~1 wk patterns + ~2–4d stability + ~3.5–7d diagnostics + ~1–2d export + ~4–6d TUI + ~0.5d docs | — | |
-| v0.15.0 — External Test Suites & Integration | ~40–70h + ~2–3d bulk create + ~3–5d planner hints + ~2–3d cache spike + ~3–4wk parser + ~1–2wk watermark + ~2–4wk delta cost/spill | — | ✅ Released |
-| v0.16.0 — Performance & Refresh Optimization | ~1–2wk MERGE alts + ~4–6wk aggregate fast-path + ~1–2wk append-only + ~2–3wk predicate pushdown + ~2–3wk template cache + ~2–3wk buffer compaction + ~3–6wk test coverage + ~1–2wk bench CI + ~2–3d auto-indexing + ~12–22h quick wins | — | |
-| v0.17.0 — Query Intelligence & Stability | ~2–3wk cost-based strategy + ~3–4wk columnar tracking + ~32–48h TIVM Phase 4 + ~1–2d ROWS FROM + ~2–3wk SQLancer + ~2–3wk incremental DAG + ~4–8h unsafe reduction + ~1–2wk api.rs mod + ~2–3d migration guide + ~3–5d runbook + ~2–3d playground + ~2–3d doc polish | — | |
-| v0.18.0 — Hardening & Delta Performance | ~70–100h | — | |
-| v0.19.0 — Production Gap Closure & Distribution | ~4–5 weeks | — | |
-| v0.20.0 — Dog-Feeding (pg_trickle monitors itself) | ~3–4wk | — | |
-| v0.21.0 — Correctness, Safety & Test Hardening | ~6–8wk | 2026-07-16 | ✅ Released |
-| v0.22.0 — Production Scalability & Downstream Integration | ~5–6wk (parallel refresh + downstream CDC + predictive cost + SLA tier) | — | |
-| v0.23.0 — TPC-H DVM Scaling Performance | ~4d best case (spill) / ~11d likely (DVM cardinality) | — | |
-| v0.24.0 — Transactional Inbox & Outbox Patterns | ~4–5wk (outbox + inbox + consumer groups + ordered processing) | — | |
-| v0.25.0 — Relay CLI (`pgtrickle-relay`) | ~34.5d (forward + reverse + 8 backends × Source+Sink + tests + distribution) | — | |
-| v0.26.0 — TUI Dog-Feeding Integration | ~3–4wk (TUI + architecture + backend + CLI) | — | |
-| v0.27.0 — PostgreSQL 17 Support | ~2–4d | — | |
-| v0.28.0 — PGlite Proof of Concept | ~2–3wk (plugin) + ~1–2d (version bump) | — | |
-| v0.29.0 — Core Extraction (`pg_trickle_core`) | ~3–4wk (extraction) + ~1–2wk (abstraction + testing) | — | |
-| v0.30.0 — PGlite WASM Extension | ~5–7wk (WASM build) + ~2–3wk (testing + polish) | — | |
-| v0.31.0 — PGlite Reactive Integration | ~2–3wk (bridge + hooks) + ~1–2wk (examples + testing + polish) | — | |
-| v1.0.0 — Stable release (incl. PG 19 compat) | ~36–66h | — | |
-| Post-1.0 (PG compat + Native DDL) | ~38–56h (PG 16–18) + ~13–21d (Native DDL) | — | |
-| Post-1.0 (ecosystem) | 88–134h | — | |
-| Post-1.0 (scale) | 6+ months | — | |
-
----
-
-## References
-
-| Document | Purpose |
-|----------|---------|
-| [CHANGELOG.md](CHANGELOG.md) | What's been built |
-| [plans/PLAN.md](plans/PLAN.md) | Original 13-phase design plan |
-| [plans/sql/SQL_GAPS_7.md](plans/sql/SQL_GAPS_7.md) | 53 known gaps, prioritized |
-| [plans/sql/PLAN_PARALLELISM.md](plans/sql/PLAN_PARALLELISM.md) | Detailed implementation plan for true parallel refresh |
-| [plans/performance/REPORT_PARALLELIZATION.md](plans/performance/REPORT_PARALLELIZATION.md) | Parallelization options analysis |
-| [plans/performance/STATUS_PERFORMANCE.md](plans/performance/STATUS_PERFORMANCE.md) | Benchmark results |
-| [plans/ecosystem/PLAN_ECO_SYSTEM.md](plans/ecosystem/PLAN_ECO_SYSTEM.md) | Ecosystem project catalog |
-| [plans/dbt/PLAN_DBT_ADAPTER.md](plans/dbt/PLAN_DBT_ADAPTER.md) | Full dbt adapter plan |
-| [plans/infra/CITUS.md](plans/infra/CITUS.md) | Citus compatibility plan |
-| [plans/infra/PLAN_VERSIONING.md](plans/infra/PLAN_VERSIONING.md) | Versioning & compatibility policy |
-| [plans/infra/PLAN_PACKAGING.md](plans/infra/PLAN_PACKAGING.md) | PGXN / deb / rpm packaging |
-| [plans/infra/PLAN_DOCKER_IMAGE.md](plans/infra/PLAN_DOCKER_IMAGE.md) | Official Docker image (superseded by CNPG extension image) |
-| [plans/ecosystem/PLAN_CLOUDNATIVEPG.md](plans/ecosystem/PLAN_CLOUDNATIVEPG.md) | CNPG Image Volume extension image |
-| [plans/infra/PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md) | Multi-database support |
-| [plans/infra/PLAN_PG19_COMPAT.md](plans/infra/PLAN_PG19_COMPAT.md) | PostgreSQL 19 forward-compatibility |
-| [plans/sql/PLAN_UPGRADE_MIGRATIONS.md](plans/sql/PLAN_UPGRADE_MIGRATIONS.md) | Extension upgrade migrations |
-| [plans/sql/PLAN_TRANSACTIONAL_IVM.md](plans/sql/PLAN_TRANSACTIONAL_IVM.md) | Transactional IVM (immediate, same-transaction refresh) |
-| [plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md](plans/sql/PLAN_ORDER_BY_LIMIT_OFFSET.md) | ORDER BY / LIMIT / OFFSET gaps & TopK support |
-| [plans/sql/PLAN_NON_DETERMINISM.md](plans/sql/PLAN_NON_DETERMINISM.md) | Non-deterministic function handling |
-| [plans/sql/PLAN_ROW_LEVEL_SECURITY.md](plans/sql/PLAN_ROW_LEVEL_SECURITY.md) | Row-Level Security support plan (Phases 1–4) |
-| [plans/infra/PLAN_PARTITIONING_SHARDING.md](plans/infra/PLAN_PARTITIONING_SHARDING.md) | PostgreSQL partitioning & sharding compatibility |
-| [plans/infra/PLAN_PG_BACKCOMPAT.md](plans/infra/PLAN_PG_BACKCOMPAT.md) | Supporting older PostgreSQL versions (13–17) |
-| [plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md](plans/sql/PLAN_DIAMOND_DEPENDENCY_CONSISTENCY.md) | Diamond dependency consistency (multi-path refresh atomicity) |
-| [plans/adrs/PLAN_ADRS.md](plans/adrs/PLAN_ADRS.md) | Architectural decisions |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture |
