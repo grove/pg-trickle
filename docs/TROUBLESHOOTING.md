@@ -639,6 +639,21 @@ ORDER BY prepared;
    SELECT pg_reload_conf();
    ```
 
+5. **On managed PostgreSQL (RDS, Cloud SQL, Aiven, etc.)** where
+   `pg_stat_activity` is restricted to the current user's own sessions,
+   the probe will silently see no other backends and never trigger a
+   holdback. The server log will contain:
+   `pg_trickle: frontier holdback probe cannot see other PostgreSQL backends`.
+
+   Fix by granting the monitoring role to the pg_trickle service account:
+
+   ```sql
+   GRANT pg_monitor TO <pg_trickle_service_role>;
+   ```
+
+   Then restart the pg_trickle scheduler (or reload PostgreSQL) so the new
+   privilege takes effect.
+
 
 ---
 
