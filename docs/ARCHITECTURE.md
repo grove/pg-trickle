@@ -200,6 +200,30 @@ When a stream table's defining query references another stream table (rather tha
 
 **Lifecycle.** ST change buffers are created automatically when a stream table gains its first downstream consumer (`create_st_change_buffer_table()`), and dropped when the last downstream consumer is removed (`drop_st_change_buffer_table()`). On upgrade from pre-v0.11.0, existing ST-to-ST dependencies have their buffers auto-created on the first scheduler tick. Consumed rows are cleaned up by `cleanup_st_change_buffers_by_frontier()` after each successful downstream refresh.
 
+#### Frontier Visibility Holdback (Issue #536)
+
+The CDC frontier (`pgt_stream_tables.frontier`) is advanced based on **LSN ordering** while the change buffer is read under standard **MVCC visibility**. These two dimensions are orthogonal: a change buffer row may have an LSN below the new frontier yet still be invisible (uncommitted) at the moment the scheduler queries the buffer.
+
+**Failure scenario (trigger-based CDC only):**
+Without holdback, a transaction that inserts into a tracked table and commits *after* the scheduler has captured the tick watermark (`pg_current_wal_lsn()`) will have its change-buffer row permanently skipped on the next tick, because the frontier advanced past the row's LSN while the row was still uncommitted.
+
+**Fix — `frontier_holdback_mode = 'xmin'` (default):**
+Before computing the tick watermark, the scheduler probes `pg_stat_activity` and `pg_prepared_xacts` for the oldest in-progress transaction xmin. If any transaction from before the previous tick is still running, the frontier is held back to the previous tick's safe watermark rather than advancing to `pg_current_wal_lsn()`. This is a single cheap SPI round-trip per scheduler tick (~µs).
+
+The holdback algorithm (`cdc::classify_holdback`) is purely functional and unit-tested independently of the backend.
+
+**Configuration:**
+- `pg_trickle.frontier_holdback_mode` — `'xmin'` (default, safe), `'none'` (fast but can lose rows), `'lsn:<N>'` (hold back by N bytes, for debugging).
+- `pg_trickle.frontier_holdback_warn_seconds` — emit a `WARNING` (at most once per minute) when holdback has been active longer than this many seconds (default: 60).
+
+**Note:** WAL/logical-replication CDC mode is immune to this issue (commit-LSN ordering is inherently safe). The holdback is skipped when `cdc_mode = 'wal'`.
+
+**Observability:** Two Prometheus gauges are exposed:
+- `pgtrickle_frontier_holdback_lsn_bytes` — how many WAL bytes behind write_lsn the safe frontier currently is.
+- `pgtrickle_frontier_holdback_seconds` — age (in seconds) of the oldest in-progress transaction.
+
+See `plans/safety/PLAN_FRONTIER_VISIBILITY_HOLDBACK.md` for the full design rationale.
+
 ### 4. DVM Engine (`src/dvm/`)
 
 The Differential View Maintenance engine is the core of the system. It transforms the defining SQL query into an executable operator tree that can compute deltas efficiently.

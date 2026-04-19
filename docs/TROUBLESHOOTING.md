@@ -32,6 +32,7 @@ pg_trickle in production.
   - [11. Schema Change Broke Stream Table](#11-schema-change-broke-stream-table)
   - [12. Worker Pool Exhaustion](#12-worker-pool-exhaustion)
   - [13. Fuse Tripped (Circuit Breaker)](#13-fuse-tripped-circuit-breaker)
+  - [14. Stream Table Appears Stuck Behind a Long Transaction](#14-stream-table-appears-stuck-behind-a-long-transaction)
 
 ---
 
@@ -537,11 +538,6 @@ ORDER BY duration_ms DESC;
 
 ### 13. Fuse Tripped (Circuit Breaker)
 
-**Symptoms:**
-- Stream table shows `fuse_state = 'BLOWN'` or refresh is paused
-- `fuse_status()` reports a tripped fuse
-- No refreshes happening despite active scheduler
-
 **Diagnosis:**
 
 ```sql
@@ -559,6 +555,85 @@ SELECT pgtrickle.reset_fuse('my_stream_table');
 
 See the [Fuse Circuit Breaker tutorial](tutorials/FUSE_CIRCUIT_BREAKER.md) for
 details on fuse thresholds and configuration.
+
+
+---
+
+### 14. Stream Table Appears Stuck Behind a Long Transaction
+
+**Symptoms:**
+- A stream table's `data_timestamp` is not advancing even though the source
+  table is receiving new inserts.
+- The `pgtrickle_frontier_holdback_lsn_bytes` Prometheus gauge is non-zero.
+- Server log contains: `pg_trickle: frontier holdback active — the oldest in-progress transaction is Ns old`.
+
+**Cause:**
+`frontier_holdback_mode = 'xmin'` (the default) prevents the scheduler from
+advancing the frontier while any in-progress transaction exists that is older
+than the previous tick's xmin baseline.  A long-running or forgotten session
+holding an open transaction will pause frontier advancement for all stream
+tables on that PostgreSQL server.
+
+This is intentional: without the holdback, a transaction that inserts into a
+tracked source table and commits *after* the scheduler ticks would have its
+change permanently lost (see Issue #536 and `plans/safety/PLAN_FRONTIER_VISIBILITY_HOLDBACK.md`).
+
+**Diagnosis:**
+
+```sql
+-- Find the oldest in-progress transaction
+SELECT pid, usename, state, application_name,
+       backend_xmin,
+       EXTRACT(EPOCH FROM (now() - xact_start))::int AS xact_age_secs,
+       query
+FROM pg_stat_activity
+WHERE backend_xmin IS NOT NULL
+  AND state <> 'idle'
+ORDER BY xact_start;
+
+-- Check for prepared (2PC) transactions
+SELECT gid, prepared,
+       EXTRACT(EPOCH FROM (now() - prepared))::int AS age_secs,
+       owner, database
+FROM pg_prepared_xacts
+ORDER BY prepared;
+```
+
+**Resolution:**
+
+1. **Identify and terminate the blocking session:**
+
+   ```sql
+   SELECT pg_terminate_backend(pid)
+   FROM pg_stat_activity
+   WHERE state = 'idle in transaction'
+     AND backend_xmin IS NOT NULL
+   ORDER BY xact_start
+   LIMIT 1;
+   ```
+
+2. **Rollback a forgotten 2PC transaction:**
+
+   ```sql
+   ROLLBACK PREPARED 'gid_from_pg_prepared_xacts';
+   ```
+
+3. **For benchmark or known-safe workloads only**, disable holdback to restore
+   the pre-fix fast path (risks silent data loss):
+
+   ```sql
+   ALTER SYSTEM SET pg_trickle.frontier_holdback_mode = 'none';
+   SELECT pg_reload_conf();
+   ```
+
+4. **Suppress the warning** (while keeping holdback active) by raising the
+   threshold:
+
+   ```sql
+   ALTER SYSTEM SET pg_trickle.frontier_holdback_warn_seconds = 300;
+   SELECT pg_reload_conf();
+   ```
+
 
 ---
 
@@ -590,3 +665,5 @@ When investigating any issue, follow this sequence:
 | `pg_trickle.fixed_point_max_iterations` | `10` | Circular pipeline iteration limit |
 | `pg_trickle.differential_change_ratio_threshold` | `0.5` | Falls back to FULL above this ratio |
 | `pg_trickle.auto_backoff` | `on` | Stretches intervals up to 8x under load |
+| `pg_trickle.frontier_holdback_mode` | `xmin` | `none` disables holdback (unsafe); `xmin` = safe default |
+| `pg_trickle.frontier_holdback_warn_seconds` | `60` | Warn after holding back for this many seconds |

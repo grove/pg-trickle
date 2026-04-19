@@ -927,6 +927,65 @@ fn normalize_diff_output_format(value: Option<String>) -> DiffOutputFormat {
     }
 }
 
+// ── Issue #536: Frontier Visibility Holdback ───────────────────────────────
+
+/// #536: Frontier holdback mode for the trigger-based CDC path.
+///
+/// Controls whether the scheduler holds back the frontier LSN to avoid
+/// silently skipping change-buffer rows from long-running transactions
+/// that committed after the previous tick captured the watermark.
+///
+/// | Value | Meaning |
+/// |-------|---------|
+/// | `"xmin"` (default) | Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
+/// | `"none"` | No holdback — current fast behaviour. Can silently lose rows under long-running transactions. |
+/// | `"lsn:<N>"` | Hold back the frontier by exactly N bytes for debugging. |
+pub static PGS_FRONTIER_HOLDBACK_MODE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"xmin"));
+
+/// #536: Emit a WARNING when the frontier holdback has been active for
+/// longer than this many seconds.
+///
+/// A holdback occurs when a long-running (or forgotten) transaction keeps
+/// the scheduler from advancing the frontier. When this threshold is
+/// exceeded, a WARNING is emitted at most once per minute so operators
+/// can identify the blocking session.
+///
+/// Set to 0 to disable the warning (not recommended for production).
+pub static PGS_FRONTIER_HOLDBACK_WARN_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(60);
+
+/// #536: Frontier holdback mode enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontierHoldbackMode {
+    /// Probe pg_stat_activity + pg_prepared_xacts and cap to safe LSN (default).
+    Xmin,
+    /// No holdback — fast but can lose rows under long transactions.
+    None,
+    /// Hold back the frontier by exactly N bytes (debugging only).
+    LsnBytes(u64),
+}
+
+impl FrontierHoldbackMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FrontierHoldbackMode::Xmin => "xmin",
+            FrontierHoldbackMode::None => "none",
+            FrontierHoldbackMode::LsnBytes(_) => "lsn:<bytes>",
+        }
+    }
+}
+
+pub fn normalize_frontier_holdback_mode(value: Option<String>) -> FrontierHoldbackMode {
+    match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("none") => FrontierHoldbackMode::None,
+        Some(s) if s.starts_with("lsn:") => {
+            let bytes: u64 = s["lsn:".len()..].parse().unwrap_or(0);
+            FrontierHoldbackMode::LsnBytes(bytes)
+        }
+        _ => FrontierHoldbackMode::Xmin,
+    }
+}
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -1878,6 +1937,34 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // #536: Frontier visibility holdback GUCs.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.frontier_holdback_mode",
+        c"Frontier holdback mode to prevent silent data loss from long-running transactions.",
+        c"'xmin' (default): probe pg_stat_activity + pg_prepared_xacts once per tick and \
+           cap the frontier to the safe upper bound, preventing change-buffer rows from \
+           uncommitted transactions from being silently skipped. \
+           'none': no holdback (fast but can lose rows under long-lived transactions). \
+           'lsn:<N>': hold back by exactly N bytes (debugging only).",
+        &PGS_FRONTIER_HOLDBACK_MODE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_trickle.frontier_holdback_warn_seconds",
+        c"Emit a WARNING when frontier holdback exceeds this many seconds (0 = disabled).",
+        c"When a long-running or forgotten transaction keeps the scheduler from advancing \
+           the frontier for longer than this many seconds, a WARNING is emitted at most \
+           once per minute to help operators identify the blocking session. \
+           Set to 0 to disable the warning.",
+        &PGS_FRONTIER_HOLDBACK_WARN_SECONDS,
+        0,    // min (0 = disabled)
+        3600, // max (1 hour)
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -2352,12 +2439,27 @@ pub fn pg_trickle_diff_output_format() -> DiffOutputFormat {
     )
 }
 
+/// #536: Returns the current frontier holdback mode.
+pub fn pg_trickle_frontier_holdback_mode() -> FrontierHoldbackMode {
+    normalize_frontier_holdback_mode(
+        PGS_FRONTIER_HOLDBACK_MODE
+            .get()
+            .and_then(|cs| cs.to_str().ok().map(str::to_owned)),
+    )
+}
+
+/// #536: Returns the frontier holdback warning threshold in seconds (0 = disabled).
+pub fn pg_trickle_frontier_holdback_warn_seconds() -> i32 {
+    PGS_FRONTIER_HOLDBACK_WARN_SECONDS.get()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CdcTriggerMode, DiffOutputFormat, DogFeedingAutoApply, MergeJoinStrategy, MergeStrategy,
-        ParallelRefreshMode, RefreshStrategy, UserTriggersMode, VolatileFunctionPolicy,
-        normalize_cdc_trigger_mode, normalize_diff_output_format, normalize_dog_feeding_auto_apply,
+        CdcTriggerMode, DiffOutputFormat, DogFeedingAutoApply, FrontierHoldbackMode,
+        MergeJoinStrategy, MergeStrategy, ParallelRefreshMode, RefreshStrategy, UserTriggersMode,
+        VolatileFunctionPolicy, normalize_cdc_trigger_mode, normalize_diff_output_format,
+        normalize_dog_feeding_auto_apply, normalize_frontier_holdback_mode,
         normalize_merge_join_strategy, normalize_merge_strategy, normalize_parallel_refresh_mode,
         normalize_recursive_max_depth, normalize_refresh_strategy, normalize_user_triggers_mode,
         normalize_volatile_function_policy, threshold_mb_to_bytes,
@@ -2872,5 +2974,56 @@ mod tests {
                 fmt
             );
         }
+    }
+
+    // ── #536: FrontierHoldbackMode normalizer tests ──────────────────
+
+    #[test]
+    fn test_normalize_frontier_holdback_mode_defaults_to_xmin() {
+        assert_eq!(
+            normalize_frontier_holdback_mode(None),
+            FrontierHoldbackMode::Xmin
+        );
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("xmin".to_string())),
+            FrontierHoldbackMode::Xmin
+        );
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("XMIN".to_string())),
+            FrontierHoldbackMode::Xmin
+        );
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("unexpected".to_string())),
+            FrontierHoldbackMode::Xmin
+        );
+    }
+
+    #[test]
+    fn test_normalize_frontier_holdback_mode_none() {
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("none".to_string())),
+            FrontierHoldbackMode::None
+        );
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("NONE".to_string())),
+            FrontierHoldbackMode::None
+        );
+    }
+
+    #[test]
+    fn test_normalize_frontier_holdback_mode_lsn_bytes() {
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("lsn:1048576".to_string())),
+            FrontierHoldbackMode::LsnBytes(1_048_576)
+        );
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("lsn:0".to_string())),
+            FrontierHoldbackMode::LsnBytes(0)
+        );
+        // Invalid number → 0 bytes
+        assert_eq!(
+            normalize_frontier_holdback_mode(Some("lsn:notanumber".to_string())),
+            FrontierHoldbackMode::LsnBytes(0)
+        );
     }
 }
