@@ -42,6 +42,9 @@ coverage, all in plain language.
 - [v0.23.0 — TPC-H DVM Scaling Performance](#v0230--tpch-dvm-scaling-performance)
 - [v0.24.0 — Transactional Inbox & Outbox Patterns](#v0240--transactional-inbox--outbox-patterns)
 - [v0.25.0 — Relay CLI (`pgtrickle-relay`)](#v0250--relay-cli-pgtrickle-relay)
+- [v0.26.0 — Join Correctness & Durability Hardening](#v0260--join-correctness--durability-hardening)
+- [v0.27.0 — Scheduler Scalability & Pooler Performance](#v0270--scheduler-scalability--pooler-performance)
+- [v0.28.0 — Test & Concurrency Hardening](#v0280--test--concurrency-hardening)
 - [v1.6.0 — TUI Dog-Feeding Integration](#v160--tui-dog-feeding-integration)
 - [v1.1.0 — PostgreSQL 17 Support](#v110--postgresql-17-support)
 - [v1.2.0 — PGlite Proof of Concept](#v120--pglite-proof-of-concept)
@@ -93,6 +96,9 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.23.0 | TPC-H DVM scaling — diagnose and fix differential refresh perf | ✅ Released |
 | v0.24.0 | Transactional inbox & outbox patterns | Planned |
 | v0.25.0 | Relay CLI (`pgtrickle-relay`) — bidirectional outbox→sinks + sources→inbox | Planned |
+| v0.26.0 | Join correctness & durability hardening | Planned |
+| v0.27.0 | Scheduler scalability & pooler performance | Planned |
+| v0.28.0 | Test & concurrency hardening | Planned |
 | v1.6.0 | TUI dog-feeding integration | Planned |
 | v1.1.0 | PostgreSQL 17 support | Planned |
 | v1.2.0 | PGlite proof of concept | Planned |
@@ -6794,6 +6800,281 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 - [ ] RELAY-31: All reverse Testcontainers integration tests pass per source
 - [ ] RELAY-32: Reverse dedup: duplicate source message produces 1 inbox row; crash recovery zero loss
 - [ ] Extension upgrade path tested (`0.23.0 → 0.24.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.26.0 — Join Correctness & Durability Hardening
+
+**Status: Planned.** Sourced from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3, §4, §6.
+
+> **Release Theme**
+> This release closes the remaining **critical correctness bugs** and
+> **data-durability gaps** identified in the v0.23.0 deep assessment.
+> The EC-01 join phantom-row bug — deferred since v0.21.0 — is finally
+> resolved, restoring full DIFFERENTIAL correctness for multi-table
+> LEFT/RIGHT/FULL JOINs under mixed DML. Change-buffer durability
+> becomes configurable, and a two-phase frontier commit eliminates the
+> crash-replay window. Supporting work includes TOAST-aware CDC hashing,
+> partitioned-source publication health checks, history retention, and
+> a unit-test campaign for the v0.21–v0.23 surface area.
+
+### EC-01 Join Correctness Fix
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| EC01-1 | **Row-id hash convergence for Part 1b.** Modify `src/dvm/operators/join.rs` so the Part 1b arm (Δ⋈R₀) hashes only the left-side PK, ensuring both Part 1a and 1b emit the same `__pgt_row_id` for a given logical row. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #1 |
+| EC01-2 | **PH-D1 cross-cycle phantom cleanup.** Extend the PH-D1 delete path in `src/refresh/phd1.rs` to reconcile orphaned row ids from prior cycles, not just the current delta. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #1 |
+| EC01-3 | **Remove Q15 from IMMEDIATE_SKIP_ALLOWLIST.** Re-enable TPC-H Q15 in IMMEDIATE mode correctness tests after EC01-1/2 land. | 0.5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #1 |
+| EC01-4 | **Proptest harness for join cross-cycle convergence.** 5,000-iteration property test asserting INSERT/UPDATE/DELETE sequences on multi-table JOINs converge to the same result as a full refresh. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #1 |
+
+### Durability & Frontier Atomicity
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| DUR-1 | **Two-phase frontier commit.** Write a tentative frontier to a side column before TRUNCATE; finalise after MERGE commits; reconcile on startup. Unifies the manual-refresh and scheduler code paths. | 5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #2 |
+| DUR-2 | **`pg_trickle.change_buffer_durability` GUC.** New GUC with values `unlogged` (default, current behaviour), `logged` (WAL-logged change buffers), `sync` (logged + synchronous commit). | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #2 |
+| DUR-3 | **Crash-recovery E2E test for frontier consistency.** Kill bgworker between TRUNCATE and frontier-store; assert no phantom replays or lost rows on restart. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #2 |
+
+### CDC Hardening
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| CDC-1 | **Eliminate two `unwrap()` sites in `src/cdc.rs`.** Convert `build_changed_cols_bitmask_expr().unwrap()` to `?` with a new `PgTrickleError::ChangedColsBitmaskFailed` variant. | 0.5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #3 |
+| CDC-2 | **Partitioned-source publication rebuild.** On scheduler tick, compare `pg_publication_tables.pubviaroot` against source `relkind = 'p'`; rebuild publication with `publish_via_partition_root = true` if mismatched. Emit `refresh_reason = 'publication_rebuild'`. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #4 |
+| CDC-3 | **TOAST-aware CDC hashing.** Include `pg_column_size()` for TOASTable columns (`attstorage IN ('e', 'x')`) in the row-id hash to detect in-place TOAST rewrites. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §3 #5 |
+| CDC-4 | **TOAST workload E2E tests.** Add jsonb-update and bytea-update scenarios to `tests/e2e_cdc_edge_case_tests.rs`. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Operational Improvements
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| OPS-1 | **`pg_trickle.refresh_history_retention_days` GUC.** Default 7 days. Bgworker prunes stale rows in 1k-row batches during idle ticks. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| OPS-2 | **Frozen-stream-table detector.** New dog-feeding view `df_frozen_stream_tables` that flags any ST whose `last_refresh_at < now() - 5 × refresh_interval` with recent CDC activity. Alert via `pgtrickle_alert` NOTIFY. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| OPS-3 | **Missing internal catalog indexes.** Add composite indexes on `pgt_stream_tables(status, scc_id)`, `pgt_refresh_history(pgt_id, action, data_timestamp)`, `pgt_change_tracking(source_relid)`, and a partial index on `changes_<oid>(__pgt_action)`. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+
+### Test Coverage (TEST-6/7/8)
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| TEST-6 | **Unit tests for `src/api/publication.rs`.** Cover `fit_linear_regression`, `predict_diff_duration_ms`, `should_preempt_to_full`, `assign_tier_for_sla`, `maybe_adjust_tier_for_sla`, boundary cases (0, negative, NaN). 25+ tests. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| TEST-7 | **Unit tests for `src/api/diagnostics.rs`.** Cover `explain_query_rewrite`, `diagnose_errors`, `validate_query`, 5 `gather_*` helpers. 20+ tests. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| TEST-8 | **Unit tests for `src/metrics_server.rs`.** Cover port-conflict handling, timeout behaviour, malformed HTTP request, OpenMetrics format conformance. 10+ tests. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Implementation Phases
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Phase 1 | EC-01 fix: row-id hash convergence + PH-D1 cleanup + proptest | Days 1–8 |
+| Phase 2 | Durability: two-phase frontier + change_buffer_durability GUC + crash test | Days 8–18 |
+| Phase 3 | CDC hardening: unwrap removal, publication rebuild, TOAST hashing + tests | Days 18–26 |
+| Phase 4 | Operational: history retention, frozen-ST detector, catalog indexes | Days 26–31 |
+| Phase 5 | Test campaign: TEST-6/7/8 unit tests for publication, diagnostics, metrics | Days 31–37 |
+| Phase 6 | Integration testing, documentation, upgrade script | Days 37–42 |
+
+> **v0.26.0 total: ~8–9 weeks** (~42 person-days solo)
+
+**Exit criteria:**
+- [ ] EC01-1: Part 1b arm hashes left-side PK only; TPC-H Q07 passes multi-cycle correctness
+- [ ] EC01-2: PH-D1 cleans up prior-cycle phantoms; no residual rows after 10 cycles
+- [ ] EC01-3: Q15 removed from IMMEDIATE_SKIP_ALLOWLIST; TPC-H Q15 passes IMMEDIATE mode
+- [ ] EC01-4: 5,000-iteration proptest passes for JOIN convergence
+- [ ] DUR-1: Two-phase frontier commit implemented; manual and scheduler paths unified
+- [ ] DUR-2: `change_buffer_durability = 'logged'` creates WAL-logged change buffers; `'unlogged'` preserves current behaviour
+- [ ] DUR-3: Crash-recovery E2E: kill bgworker mid-refresh → restart → zero lost/duplicated rows
+- [ ] CDC-1: Zero `unwrap()` calls in `src/cdc.rs` production paths
+- [ ] CDC-2: Converting a source table to partitioned triggers automatic publication rebuild
+- [ ] CDC-3: TOAST-only column update detected and propagated in DIFFERENTIAL mode
+- [ ] CDC-4: jsonb + bytea TOAST E2E tests pass
+- [ ] OPS-1: History older than retention_days is pruned automatically; GUC documented
+- [ ] OPS-2: Frozen-ST detector fires alert when ST stalls with active CDC source
+- [ ] OPS-3: Internal catalog indexes exist; scheduler tick time reduced at 100+ STs
+- [ ] TEST-6: 25+ publication.rs unit tests pass (predictive model boundary cases)
+- [ ] TEST-7: 20+ diagnostics.rs unit tests pass
+- [ ] TEST-8: 10+ metrics_server.rs unit tests pass (port conflict, timeout, format)
+- [ ] Extension upgrade path tested (`0.25.0 → 0.26.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.27.0 — Scheduler Scalability & Pooler Performance
+
+**Status: Planned.** Sourced from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §5, §7.
+
+> **Release Theme**
+> This release pushes the comfortable operating point from "hundreds" to
+> **thousands** of stream tables on commodity hardware. The scheduler stops
+> reloading the full catalog on every tick, the template cache becomes
+> shared across all backends via shmem, change detection is batched, and
+> the DAG rebuild path uses copy-on-write to avoid blocking dispatch.
+> Connection-pooler deployments (PgBouncer, RDS Proxy, Supabase) see the
+> biggest win: the shared L0 cache eliminates the 30–45 ms cold-start tax
+> per backend. The predictive cost model gets robustness guards, and
+> downstream publications gain subscriber-lag tracking.
+
+### Catalog & Scheduler Scalability
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| SCAL-1 | **Shmem catalog snapshot cache.** Cache `pgt_stream_tables` rows in shared memory, keyed by DAG generation counter. Invalidated on DDL via `DAG_REBUILD_SIGNAL`. Eliminates per-tick SPI reload (20–200 ms win at 100–1000 STs). | 4d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §5 |
+| SCAL-2 | **Batched change detection.** Combine per-source `SELECT EXISTS(...)` queries into a single `UNION ALL` CTE per refresh group. ~80% reduction in per-tick change-detection cost. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+| SCAL-3 | **Split PGS_STATE lock.** Replace the single `PgLwLock` in `src/shmem.rs` with per-concern locks (`dag_lock`, `metrics_lock`, `worker_pool_lock`). Use `share()` for read-only `dag_version` reads. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+| SCAL-4 | **Copy-on-write DAG rebuild.** Compute the new topological order out-of-line (no exclusive lock), then atomically swap the pointer. Defers full rebuild to idle ticks when possible. | 4d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| SCAL-5 | **Persistent worker pool option.** New `pg_trickle.worker_pool_size` GUC (default 0 = current spawn-per-task). Workers loop on a shmem queue instead of being registered and deregistered each tick (~2 ms/worker saved). | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+
+### Template Cache & Pooler Latency
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| CACHE-1 | **Shared shmem L0 template cache.** `dshash`-based cache in shared memory keyed by `(pgt_id, cache_generation)`. All backends in the same database share one compiled template set. Eliminates 30–45 ms cold-start tax in pooled-connection workloads. | 5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §7 |
+| CACHE-2 | **L1 LRU eviction.** Bound the per-backend thread-local cache with `pg_trickle.template_cache_max_entries` GUC (default 256). Evict least-recently-used entries. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| CACHE-3 | **`pgtrickle.clear_caches()` SQL function.** Manual cache flush for all levels (L0 shmem + L1 thread-local + L2 catalog). Useful during debugging and emergency migration. | 0.5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+
+### Hot-Path Allocation Reduction
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PERF-1 | **xxh3 streaming hash.** Replace `pg_trickle_hash_multi` string-concat + scalar xxhash with `xxh3` streaming API (`update`/`finalize`). Eliminates per-row `String` allocation on the CDC hot path. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+| PERF-2 | **Pre-sized SQL buffer in project operator.** Replace per-column `format!` calls in `src/dvm/operators/project.rs` with a single pre-sized `String` and `write!` macro. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+| PERF-3 | **Shmem adaptive cost-model state.** Cache `last_full_ms`/`last_diff_ms` per ST in shared memory with atomic updates. Prevents parallel workers from reading stale timing data via SPI. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §5 |
+
+### Predictive Model & Publication Durability
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| PRED-1 | **Robustness guards on predictive cost model.** Clamp predictions to `[0.5×, 4×] last_full_ms`; use median+MAD instead of mean+SD; require non-degenerate variance; ignore predictions during first 60 s after CREATE. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| PUB-1 | **Subscriber-LSN tracking for downstream publications.** Track subscriber LSN per publication; refuse to TRUNCATE change buffer until all subscribers have acknowledged past the buffer's max LSN; emit WARNING when a subscriber lags more than `pg_trickle.publication_lag_warn_lsn`. | 4d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| PUB-2 | **Multi-DB worker fairness.** Add `pgtrickle.worker_allocation_status()` monitoring view (per-DB used/quota/queued). Document recommended quota allocation in `docs/SCALING.md`. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+
+### Implementation Phases
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Phase 1 | Catalog & scheduler scalability: shmem cache, batched detection, lock split | Days 1–13 |
+| Phase 2 | Template cache: L0 dshash, L1 LRU, clear_caches() | Days 13–21 |
+| Phase 3 | Hot-path: xxh3 hash, project buffer, shmem cost-model | Days 21–27 |
+| Phase 4 | Predictive model guards + publication durability + worker fairness | Days 27–36 |
+| Phase 5 | Benchmarks, documentation, upgrade script, integration testing | Days 36–42 |
+
+> **v0.27.0 total: ~8–9 weeks** (~42 person-days solo)
+
+**Exit criteria:**
+- [ ] SCAL-1: Scheduler tick at 1000 STs completes in < 20 ms (down from ~200 ms)
+- [ ] SCAL-2: Change detection for 10-source ST issues 1 query instead of 10
+- [ ] SCAL-3: PGS_STATE replaced by 3 per-concern locks; read-only paths use `share()`
+- [ ] SCAL-4: DAG rebuild does not hold exclusive lock during computation; swap is atomic
+- [ ] SCAL-5: `worker_pool_size = 4` starts persistent workers; spawn cost eliminated
+- [ ] CACHE-1: Second backend connecting to same DB hits L0 cache; no parse/differentiate cost
+- [ ] CACHE-2: L1 cache respects `template_cache_max_entries`; evicts LRU on overflow
+- [ ] CACHE-3: `pgtrickle.clear_caches()` flushes all three levels; next refresh re-populates
+- [ ] PERF-1: `pg_trickle_hash_multi` allocates zero intermediate Strings per row
+- [ ] PERF-2: Project operator uses single pre-sized buffer; 50-column ST shows measurable improvement
+- [ ] PERF-3: Parallel workers read cost-model state from shmem, not SPI
+- [ ] PRED-1: Sawtooth workload test: model recovers within 5 samples after outlier spike
+- [ ] PUB-1: Publication with lagged subscriber emits WARNING; change buffer not truncated until ack
+- [ ] PUB-2: `worker_allocation_status()` returns per-DB used/quota/queued
+- [ ] Benchmark regression gate passes (no regressions vs v0.26.0 baseline)
+- [ ] Extension upgrade path tested (`0.26.0 → 0.27.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.28.0 — Test & Concurrency Hardening
+
+**Status: Planned.** Sourced from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §6, §9.
+
+> **Release Theme**
+> This release closes the **test coverage and concurrency gaps** identified
+> in the v0.23.0 assessment. The concurrency matrix (ALTER + REFRESH,
+> DROP + REFRESH, parallel-worker duplicate pick) is fully tested.
+> The ARCH-1B refactor completes the `src/refresh/mod.rs` sub-module
+> migration. New fuzz targets cover the cron parser and CDC trigger
+> payload. The predictive cost model gets an accuracy harness, and the
+> SLA tier assignment gets a damping mechanism to prevent oscillation.
+> Error handling is tightened: typed error variants replace bare
+> `pgrx::error!` calls in diagnostics and publication paths.
+
+### Concurrency Test Matrix
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| CONC-1 | **Simultaneous ALTER + REFRESH test.** E2E test: one connection runs `alter_stream_table(query => ...)` while another is mid-refresh. Assert no deadlock, catalog stays consistent, refresh either completes or is cleanly aborted. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| CONC-2 | **Simultaneous DROP + REFRESH test.** E2E test: `drop_stream_table()` while refresh is in progress. Assert clean abort, no orphaned change buffers, no dangling catalog rows. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| CONC-3 | **Parallel-worker duplicate-pick test.** Deterministic E2E: pre-register a slow refresh under one worker, ask the dispatcher for a second task, assert it picks a different ST. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| CONC-4 | **Concurrent canary promotion race test.** Two concurrent refreshes trigger buffer promotion simultaneously; assert exactly one succeeds and metadata is consistent. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Predictive Model & SLA Stability
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| SLA-1 | **Predictive cost model accuracy harness.** New `tests/e2e_predictive_cost_tests.rs` with sawtooth, bursty, and single-spike workloads. Assert: (a) model recovers within N samples after outlier, (b) preemption to FULL only fires when actually faster. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| SLA-2 | **SLA tier oscillation damping.** Implement hysteresis: require 3 consecutive breaches before downgrading tier, 3 consecutive successes before upgrading. Property test asserting ≤ 2 transitions per simulated hour. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| SLA-3 | **SLA tier oscillation property test.** Proptest with randomised latency distributions around the SLA boundary. Assert tier stability. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Fuzz & Scale Testing
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| FUZZ-1 | **Cron parser fuzz target.** `fuzz/fuzz_targets/cron_fuzz.rs` — pathological input strings for `parse_cron_expr()`. Guards against DoS. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| FUZZ-2 | **GUC string→enum fuzz target.** Fuzz GUC coercion paths for `refresh_mode`, `cdc_mode`, `change_buffer_durability`, `diff_output_format`. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| FUZZ-3 | **CDC trigger payload fuzz target.** Fuzz the trigger payload deserialization path in `src/cdc.rs` with malformed row data. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| SCALE-1 | **Partition-count scale test.** `#[ignore]`-by-default E2E test creating 1,000 partitions on a source table; assert trigger-install + first refresh completes within 60 s. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+| SCALE-2 | **Multi-DB worker starvation test.** E2E: two databases, one floods the worker pool; assert the other's hot-tier ST still refreshes within SLA. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Architecture: ARCH-1B Refresh Sub-Module Migration
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| ARCH-1B-1 | **Migrate refresh orchestration to `src/refresh/orchestrator.rs`.** Move scheduling integration, adaptive mode selection, and reinitialize logic out of `mod.rs`. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| ARCH-1B-2 | **Migrate delta SQL generation to `src/refresh/codegen.rs`.** Move template building, DVM codegen, and SQL string construction. | 3d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| ARCH-1B-3 | **Migrate MERGE execution to `src/refresh/merge.rs`.** Move differential, full, and topk MERGE executors. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+| ARCH-1B-4 | **Migrate PH-D1 logic to `src/refresh/phd1.rs`.** Move phantom cleanup strategy; co-locates with EC01-2 cross-cycle cleanup from v0.26.0. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4 |
+
+### Error Handling Tightening
+
+| Item | Description | Effort | Ref |
+|------|-------------|--------|-----|
+| ERR-1 | **Typed `DiagnosticError` variant.** Add to `src/error.rs`; replace bare `pgrx::error!` in `src/api/diagnostics.rs` and `src/monitor.rs`. | 1d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §9 |
+| ERR-2 | **Typed `PublicationError` variant.** Add to `src/error.rs`; replace bare `pgrx::error!` in `src/api/publication.rs`. | 0.5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §9 |
+| ERR-3 | **Scheduler timestamp errors with HINT.** Add HINT ("check system clock") to 3 bare `pgrx::error!` calls in `src/scheduler.rs` for TimestampWithTimeZone construction failures. | 0.5d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §9 |
+| ERR-4 | **Crash-recovery test for downstream publication.** Kill postmaster with active `stream_table_to_publication()` subscriber; restart; verify subscriber catches up with zero data loss. | 2d | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §6 |
+
+### Implementation Phases
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Phase 1 | Concurrency tests: ALTER+REFRESH, DROP+REFRESH, worker duplicate, canary race | Days 1–6 |
+| Phase 2 | Predictive model harness + SLA damping + property tests | Days 6–12 |
+| Phase 3 | Fuzz targets + partition scale test + multi-DB starvation test | Days 12–18 |
+| Phase 4 | ARCH-1B: orchestrator, codegen, merge, phd1 sub-module migration | Days 18–27 |
+| Phase 5 | Error handling: typed variants, HINT context, publication crash test | Days 27–31 |
+| Phase 6 | Integration testing, documentation, upgrade script | Days 31–36 |
+
+> **v0.28.0 total: ~7–8 weeks** (~36 person-days solo)
+
+**Exit criteria:**
+- [ ] CONC-1: ALTER + REFRESH concurrent test passes without deadlock or corruption
+- [ ] CONC-2: DROP + REFRESH concurrent test passes; no orphaned artifacts
+- [ ] CONC-3: Parallel workers never pick the same ST for simultaneous refresh
+- [ ] CONC-4: Concurrent canary promotion produces consistent metadata
+- [ ] SLA-1: Predictive model accuracy harness: sawtooth, burst, spike workloads all pass
+- [ ] SLA-2: SLA tier oscillation damping: ≤ 2 transitions/hour under boundary workload
+- [ ] SLA-3: SLA tier proptest passes 10,000 iterations
+- [ ] FUZZ-1: Cron parser fuzz target runs 10M iterations without panic
+- [ ] FUZZ-2: GUC coercion fuzz target runs 10M iterations without panic
+- [ ] FUZZ-3: CDC trigger payload fuzz target runs 10M iterations without panic
+- [ ] SCALE-1: 1,000-partition source: trigger install + first refresh < 60 s
+- [ ] SCALE-2: Worker starvation test: hot-tier ST refreshes within SLA despite flooded pool
+- [ ] ARCH-1B-1: `src/refresh/orchestrator.rs` contains all scheduling/adaptive logic
+- [ ] ARCH-1B-2: `src/refresh/codegen.rs` contains all delta SQL template construction
+- [ ] ARCH-1B-3: `src/refresh/merge.rs` contains all MERGE executors
+- [ ] ARCH-1B-4: `src/refresh/phd1.rs` contains all phantom cleanup logic
+- [ ] ARCH-1B: `src/refresh/mod.rs` reduced to < 500 LOC (re-exports + shared types)
+- [ ] ERR-1: Zero bare `pgrx::error!` calls in `src/api/diagnostics.rs` and `src/monitor.rs`
+- [ ] ERR-2: Zero bare `pgrx::error!` calls in `src/api/publication.rs`
+- [ ] ERR-3: Scheduler timestamp errors include HINT
+- [ ] ERR-4: Publication crash-recovery E2E: subscriber catches up after postmaster restart
+- [ ] Extension upgrade path tested (`0.27.0 → 0.28.0`)
 - [ ] `just check-version-sync` passes
 
 ---
