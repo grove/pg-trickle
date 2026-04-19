@@ -3057,6 +3057,12 @@ pub fn classify_holdback(prev_oldest_xmin: u64, current_oldest_xmin: u64) -> boo
     current_oldest_xmin <= prev_oldest_xmin
 }
 
+/// Set to `true` after the first time we emit a warning about restricted
+/// `pg_stat_activity` access (e.g. RDS / Cloud SQL without `pg_monitor`).
+/// Prevents log spam -- warn once per server process lifetime.
+static WARNED_PG_MONITOR_ACCESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Probe the cluster for the current write LSN and the oldest in-progress
 /// transaction xmin, then compute the safe frontier upper bound.
 ///
@@ -3081,6 +3087,11 @@ pub fn compute_safe_upper_bound(
 ) -> Result<(String, String, u64, u64), PgTrickleError> {
     // One query fetches everything: write LSN, min xmin from active backends,
     // min xmin from 2PC prepared transactions, and age of the oldest txn.
+    // The fourth column counts all other backends visible to this role.
+    // When it is 0 the role cannot see other sessions -- typical on
+    // managed services (RDS, Cloud SQL) where pg_stat_activity is
+    // restricted to the current user's own connections.  We emit a
+    // one-time WARNING so operators can grant pg_monitor.
     let result = Spi::connect(|client| {
         let rows = client
             .select(
@@ -3106,7 +3117,9 @@ pub fn compute_safe_upper_bound(
                 SELECT
                     pg_current_wal_lsn()::text,
                     COALESCE(MIN(xmin), 0)::bigint,
-                    COALESCE(MAX(age_secs), 0)::bigint
+                    COALESCE(MAX(age_secs), 0)::bigint,
+                    (SELECT COUNT(*) FROM pg_stat_activity
+                     WHERE pid <> pg_backend_pid())::bigint AS visible_other_backends
                 FROM active_xmins",
                 None,
                 &[],
@@ -3116,6 +3129,7 @@ pub fn compute_safe_upper_bound(
         let mut write_lsn = String::from("0/0");
         let mut min_xmin: i64 = 0;
         let mut max_age: i64 = 0;
+        let mut visible_other_backends: i64 = 0;
 
         for row in rows {
             write_lsn = row
@@ -3124,12 +3138,37 @@ pub fn compute_safe_upper_bound(
                 .unwrap_or_else(|| "0/0".to_string());
             min_xmin = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
             max_age = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+            visible_other_backends = row.get::<i64>(4).unwrap_or(None).unwrap_or(0);
         }
 
-        Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age))
+        Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age, visible_other_backends))
     })?;
 
-    let (write_lsn, min_xmin_i64, age_secs_i64) = result;
+    let (write_lsn, min_xmin_i64, age_secs_i64, visible_other_backends) = result;
+
+    // Detect restricted pg_stat_activity access. A healthy PostgreSQL server
+    // always has background processes (checkpointer, autovacuum launcher, etc.)
+    // visible to superusers / pg_monitor members. If we see 0 other backends,
+    // the role likely cannot read other sessions -- warn once so operators can
+    // grant pg_monitor to the pg_trickle service account.
+    if visible_other_backends == 0
+        && WARNED_PG_MONITOR_ACCESS
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        pgrx::warning!(
+            "pg_trickle: frontier holdback probe cannot see other PostgreSQL backends \
+             in pg_stat_activity. On managed services (RDS, Cloud SQL) this means \
+             long-running transactions from other sessions will NOT trigger a holdback, \
+             risking silent data loss. \
+             Fix: GRANT pg_monitor TO <pg_trickle_service_role>;"
+        );
+    }
     let current_oldest_xmin = if min_xmin_i64 > 0 {
         min_xmin_i64 as u64
     } else {
