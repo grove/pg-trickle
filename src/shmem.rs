@@ -38,6 +38,21 @@ pub struct PgTrickleSharedState {
     /// When true, more DDL events arrived than the ring can hold.
     /// The scheduler must do a full O(V+E) DAG rebuild.
     inv_overflow: bool,
+
+    // ── #536: Frontier visibility holdback ───────────────────────────
+    /// The oldest `backend_xmin` (including 2PC) seen at the previous
+    /// scheduler tick. Used by the xmin holdback algorithm to detect
+    /// long-running transactions that span a tick boundary.
+    ///
+    /// 0 means "not yet recorded" (first tick or holdback disabled).
+    pub last_tick_oldest_xmin: u64,
+
+    /// The safe frontier LSN upper bound computed at the last scheduler tick,
+    /// stored as a raw u64 (see `version::lsn_to_u64` / `version::u64_to_lsn`).
+    ///
+    /// Dynamic refresh workers read this value and use it (capped with their
+    /// own current write_lsn) as their tick watermark. 0 means unset.
+    pub last_tick_safe_lsn_u64: u64,
 }
 
 impl Default for PgTrickleSharedState {
@@ -50,6 +65,8 @@ impl Default for PgTrickleSharedState {
             inv_ring: [0; INVALIDATION_RING_CAPACITY],
             inv_count: 0,
             inv_overflow: false,
+            last_tick_oldest_xmin: 0,
+            last_tick_safe_lsn_u64: 0,
         }
     }
 }
@@ -136,6 +153,23 @@ pub static TEMPLATE_CACHE_L1_HITS: PgAtomic<AtomicU64> =
 pub static TEMPLATE_CACHE_EVICTIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_template_cache_evictions") };
 
+/// #536: Current frontier holdback in LSN bytes (gauge).
+///
+/// Set to 0 when the frontier is not held back.
+/// Set to `write_lsn - safe_lsn` in bytes when a long-running transaction
+/// is preventing the frontier from advancing.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static FRONTIER_HOLDBACK_LSN_BYTES: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_frontier_holdback_lsn") };
+
+/// #536: Age (in seconds) of the oldest in-progress transaction contributing
+/// to a frontier holdback (gauge).
+///
+/// Set to 0 when no holdback is active.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static FRONTIER_HOLDBACK_AGE_SECS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_frontier_holdback_age") };
+
 /// Register shared memory allocations. Called from `_PG_init()`.
 pub fn init_shared_memory() {
     pg_shmem_init!(PGS_STATE);
@@ -149,6 +183,8 @@ pub fn init_shared_memory() {
     pg_shmem_init!(TEMPLATE_CACHE_MISSES);
     pg_shmem_init!(TEMPLATE_CACHE_L1_HITS);
     pg_shmem_init!(TEMPLATE_CACHE_EVICTIONS);
+    pg_shmem_init!(FRONTIER_HOLDBACK_LSN_BYTES);
+    pg_shmem_init!(FRONTIER_HOLDBACK_AGE_SECS);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -440,6 +476,78 @@ pub fn current_reconcile_epoch() -> u64 {
     RECONCILE_EPOCH
         .get()
         .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ── #536: Frontier visibility holdback helpers ─────────────────────────────
+
+/// Read the oldest-xmin seen at the previous scheduler tick.
+///
+/// Returns 0 when shmem is unavailable or no baseline has been recorded.
+pub fn last_tick_oldest_xmin() -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    PGS_STATE.share().last_tick_oldest_xmin
+}
+
+/// Persist the oldest-xmin from the current tick so next tick can compare.
+pub fn set_last_tick_oldest_xmin(xmin: u64) {
+    if !is_shmem_available() {
+        return;
+    }
+    PGS_STATE.exclusive().last_tick_oldest_xmin = xmin;
+}
+
+/// Read the safe frontier LSN (u64) written by the coordinator at the last tick.
+///
+/// Dynamic refresh workers use this as a conservative upper bound.
+/// Returns 0 when shmem is unavailable or unset.
+pub fn last_tick_safe_lsn_u64() -> u64 {
+    if !is_shmem_available() {
+        return 0;
+    }
+    PGS_STATE.share().last_tick_safe_lsn_u64
+}
+
+/// Persist the safe frontier LSN (u64) so dynamic workers can read it.
+pub fn set_last_tick_safe_lsn(lsn_u64: u64) {
+    if !is_shmem_available() {
+        return;
+    }
+    // Update both fields atomically under the same lock.
+    PGS_STATE.exclusive().last_tick_safe_lsn_u64 = lsn_u64;
+}
+
+/// Update the holdback gauge metrics.
+///
+/// - `lsn_bytes`: how many bytes behind write_lsn the safe frontier is.
+/// - `age_secs`: age (seconds) of the oldest in-progress transaction.
+pub fn update_holdback_metrics(lsn_bytes: u64, age_secs: u64) {
+    if !is_shmem_available() {
+        return;
+    }
+    FRONTIER_HOLDBACK_LSN_BYTES
+        .get()
+        .store(lsn_bytes, std::sync::atomic::Ordering::Relaxed);
+    FRONTIER_HOLDBACK_AGE_SECS
+        .get()
+        .store(age_secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read the current holdback gauge metrics.
+///
+/// Returns `(lsn_bytes, age_secs)`.
+pub fn read_holdback_metrics() -> (u64, u64) {
+    if !is_shmem_available() {
+        return (0, 0);
+    }
+    let lsn = FRONTIER_HOLDBACK_LSN_BYTES
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let age = FRONTIER_HOLDBACK_AGE_SECS
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed);
+    (lsn, age)
 }
 
 /// Flag indicating whether shared memory was initialized via _PG_init.

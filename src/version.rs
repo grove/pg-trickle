@@ -142,6 +142,20 @@ pub fn lsn_gt(a: &str, b: &str) -> bool {
 
 /// Parse a PostgreSQL LSN string (`"X/Y"`) into a `u64`.
 #[inline]
+pub fn lsn_to_u64(s: &str) -> u64 {
+    parse_lsn(s)
+}
+
+/// Format a `u64` LSN value back into PostgreSQL `"X/Y"` notation.
+#[inline]
+pub fn u64_to_lsn(v: u64) -> String {
+    let hi = (v >> 32) as u32;
+    let lo = v as u32;
+    format!("{hi:X}/{lo:08X}")
+}
+
+/// Parse a PostgreSQL LSN string (`"X/Y"`) into a `u64`.
+#[inline]
 fn parse_lsn(s: &str) -> u64 {
     match s.split_once('/') {
         Some((hi_s, lo_s)) => {

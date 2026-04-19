@@ -3016,6 +3016,143 @@ pub fn estimate_pending_changes(pgt_id: i64) -> Option<i64> {
     })
 }
 
+// ── #536: Frontier visibility holdback ────────────────────────────────────
+
+/// Pure-logic holdback classifier — no SPI calls, fully unit-testable.
+///
+/// Returns `true` when the frontier should be held back to prevent
+/// silently skipping change-buffer rows from a long-running transaction.
+///
+/// # Arguments
+/// - `prev_oldest_xmin`: the minimum `backend_xmin` observed at the
+///   **previous** scheduler tick. `0` means "no baseline yet" (first tick
+///   or holdback was just enabled).
+/// - `current_oldest_xmin`: the minimum `backend_xmin` across all
+///   currently in-progress transactions (regular + 2PC). `0` means
+///   there are no in-progress transactions right now.
+///
+/// # Decision logic
+/// - No in-progress transactions → safe to advance → returns `false`.
+/// - First tick (no baseline) and in-progress transaction exists → hold
+///   back conservatively → returns `true`.
+/// - `current_oldest_xmin <= prev_oldest_xmin` → the same (or an older)
+///   transaction from before the last tick is still running → returns `true`.
+/// - `current_oldest_xmin > prev_oldest_xmin` → all pre-baseline
+///   transactions committed; new ones are safe → returns `false`.
+pub fn classify_holdback(prev_oldest_xmin: u64, current_oldest_xmin: u64) -> bool {
+    if current_oldest_xmin == 0 {
+        // No in-progress transactions — always safe to advance.
+        return false;
+    }
+    if prev_oldest_xmin == 0 {
+        // No baseline from previous tick; be conservative.
+        return true;
+    }
+    // Hold back if the oldest still-running xmin is at or before the baseline.
+    current_oldest_xmin <= prev_oldest_xmin
+}
+
+/// Probe the cluster for the current write LSN and the oldest in-progress
+/// transaction xmin, then compute the safe frontier upper bound.
+///
+/// This performs a **single SPI round-trip** per scheduler tick.
+/// The call must be made inside a `BackgroundWorker::transaction` block.
+///
+/// # Arguments
+/// - `prev_oldest_xmin`: value from `shmem::last_tick_oldest_xmin()` —
+///   the oldest xmin seen at the previous tick.
+///
+/// # Returns
+/// `(safe_lsn, write_lsn, current_oldest_xmin, oldest_txn_age_secs)`
+/// - `safe_lsn`: the LSN the frontier may safely advance to.
+/// - `write_lsn`: the actual current write LSN (for holdback metric).
+/// - `current_oldest_xmin`: value to persist via
+///   `shmem::set_last_tick_oldest_xmin()` for the next tick.
+/// - `oldest_txn_age_secs`: age of the oldest in-progress txn in seconds
+///   (0 when no holdback is active, for the warning threshold check).
+pub fn compute_safe_upper_bound(
+    prev_watermark_lsn: Option<&str>,
+    prev_oldest_xmin: u64,
+) -> Result<(String, String, u64, u64), PgTrickleError> {
+    // One query fetches everything: write LSN, min xmin from active backends,
+    // min xmin from 2PC prepared transactions, and age of the oldest txn.
+    let result = Spi::connect(|client| {
+        let rows = client
+            .select(
+                "WITH active_xmins AS (
+                    SELECT
+                        backend_xmin::text::bigint AS xmin,
+                        EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS age_secs
+                    FROM pg_stat_activity
+                    WHERE backend_xmin IS NOT NULL
+                      AND state <> 'idle'
+                      AND pid <> pg_backend_pid()
+                    UNION ALL
+                    SELECT
+                        transaction::text::bigint AS xmin,
+                        EXTRACT(EPOCH FROM (now() - prepared))::bigint AS age_secs
+                    FROM pg_prepared_xacts
+                )
+                SELECT
+                    pg_current_wal_lsn()::text,
+                    COALESCE(MIN(xmin), 0)::bigint,
+                    COALESCE(MAX(age_secs), 0)::bigint
+                FROM active_xmins",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut write_lsn = String::from("0/0");
+        let mut min_xmin: i64 = 0;
+        let mut max_age: i64 = 0;
+
+        for row in rows {
+            write_lsn = row
+                .get::<String>(1)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
+            min_xmin = row.get::<i64>(2).unwrap_or(None).unwrap_or(0);
+            max_age = row.get::<i64>(3).unwrap_or(None).unwrap_or(0);
+        }
+
+        Ok::<_, PgTrickleError>((write_lsn, min_xmin, max_age))
+    })?;
+
+    let (write_lsn, min_xmin_i64, age_secs_i64) = result;
+    let current_oldest_xmin = if min_xmin_i64 > 0 {
+        min_xmin_i64 as u64
+    } else {
+        0
+    };
+    let oldest_txn_age_secs = if age_secs_i64 > 0 {
+        age_secs_i64 as u64
+    } else {
+        0
+    };
+
+    let should_hold = classify_holdback(prev_oldest_xmin, current_oldest_xmin);
+
+    let safe_lsn = if should_hold {
+        // Hold back to the previous watermark when one exists.
+        match prev_watermark_lsn {
+            Some(prev) if !prev.is_empty() && prev != "0/0" => prev.to_string(),
+            // First tick or no previous watermark: advance anyway to avoid
+            // stalling indefinitely.
+            _ => write_lsn.clone(),
+        }
+    } else {
+        write_lsn.clone()
+    };
+
+    Ok((
+        safe_lsn,
+        write_lsn,
+        current_oldest_xmin,
+        oldest_txn_age_secs,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3559,5 +3696,45 @@ mod tests {
     #[test]
     fn test_promote_negative_threshold_returns_false() {
         assert!(!should_promote_inner(999_999, false, "auto", -1));
+    }
+
+    // ── #536: classify_holdback unit tests ─────────────────────────
+
+    #[test]
+    fn test_classify_holdback_no_active_txns_never_holds() {
+        // current_oldest_xmin == 0 means no in-progress transactions.
+        assert!(!classify_holdback(0, 0));
+        assert!(!classify_holdback(100, 0));
+        assert!(!classify_holdback(u64::MAX, 0));
+    }
+
+    #[test]
+    fn test_classify_holdback_first_tick_with_active_txn_holds() {
+        // prev_oldest_xmin == 0 means no baseline yet.
+        assert!(classify_holdback(0, 50));
+        assert!(classify_holdback(0, 1));
+        assert!(classify_holdback(0, u64::MAX));
+    }
+
+    #[test]
+    fn test_classify_holdback_same_xmin_holds() {
+        // Same long-running transaction still active.
+        assert!(classify_holdback(100, 100));
+    }
+
+    #[test]
+    fn test_classify_holdback_xmin_advanced_safe() {
+        // All pre-baseline transactions committed; new ones are newer.
+        assert!(!classify_holdback(100, 101));
+        assert!(!classify_holdback(100, 200));
+        assert!(!classify_holdback(100, u64::MAX));
+    }
+
+    #[test]
+    fn test_classify_holdback_xmin_retreated_holds() {
+        // current xmin smaller than prev (defensive — xids are monotone
+        // but we handle it safely).
+        assert!(classify_holdback(200, 100));
+        assert!(classify_holdback(200, 1));
     }
 }

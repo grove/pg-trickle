@@ -715,6 +715,191 @@ fn parse_worker_extra(extra: &str) -> Option<(String, i64)> {
     Some((db_name, job_id))
 }
 
+// ── #536: Frontier holdback tick watermark helpers ─────────────────────────
+
+/// Unix-epoch timestamp of the last holdback-active WARNING, used to
+/// rate-limit warnings to at most one per minute.
+static LAST_HOLDBACK_WARN_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Compute the tick watermark for the **coordinator** (main scheduler loop).
+///
+/// Applies the `frontier_holdback_mode` GUC logic:
+/// - `"none"` / watermark disabled: use raw `pg_current_wal_lsn()`.
+/// - `"xmin"`: probe `pg_stat_activity` + `pg_prepared_xacts` and hold back
+///    if a long-running transaction would cause data loss.
+/// - `"lsn:<N>"`: hold back by exactly N bytes.
+///
+/// Side effects (when holdback fires):
+/// - Updates `shmem::last_tick_oldest_xmin` for the next tick.
+/// - Updates `shmem::last_tick_safe_lsn_u64` for dynamic workers.
+/// - Updates the holdback gauge metrics.
+/// - Emits a WARNING when holdback age exceeds the warn threshold.
+///
+/// # Arguments
+/// - `prev_watermark_lsn`: the safe LSN from the previous tick, if any.
+///
+/// # Returns
+/// `(tick_watermark, current_oldest_xmin, oldest_txn_age_secs)`
+fn compute_coordinator_tick_watermark(
+    prev_watermark_lsn: Option<&str>,
+) -> (Option<String>, u64, u64) {
+    if !config::pg_trickle_tick_watermark_enabled() {
+        return (None, 0, 0);
+    }
+
+    let mode = config::pg_trickle_frontier_holdback_mode();
+
+    match mode {
+        config::FrontierHoldbackMode::None => {
+            let lsn = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None);
+            // Store raw write LSN for workers.
+            if let Some(ref l) = lsn {
+                shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
+            }
+            shmem::update_holdback_metrics(0, 0);
+            (lsn, 0, 0)
+        }
+
+        config::FrontierHoldbackMode::Xmin => {
+            // Skip the probe when CDC mode is WAL — commit-LSN ordering
+            // is already safe in logical-replication mode.
+            if config::pg_trickle_cdc_mode() == "wal" {
+                let lsn =
+                    Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None);
+                if let Some(ref l) = lsn {
+                    shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
+                }
+                shmem::update_holdback_metrics(0, 0);
+                return (lsn, 0, 0);
+            }
+
+            let prev_oldest_xmin = shmem::last_tick_oldest_xmin();
+
+            match cdc::compute_safe_upper_bound(prev_watermark_lsn, prev_oldest_xmin) {
+                Ok((safe_lsn, write_lsn, current_oldest_xmin, age_secs)) => {
+                    // Persist for next tick and for dynamic workers.
+                    shmem::set_last_tick_oldest_xmin(current_oldest_xmin);
+                    let safe_u64 = version::lsn_to_u64(&safe_lsn);
+                    shmem::set_last_tick_safe_lsn(safe_u64);
+
+                    // Update holdback gauge metrics.
+                    let write_u64 = version::lsn_to_u64(&write_lsn);
+                    let holdback_bytes = write_u64.saturating_sub(safe_u64);
+                    shmem::update_holdback_metrics(holdback_bytes, age_secs);
+
+                    // Warn when holdback has been active longer than the threshold.
+                    if holdback_bytes > 0 {
+                        emit_holdback_warning_if_needed(age_secs);
+                    }
+
+                    (Some(safe_lsn), current_oldest_xmin, age_secs)
+                }
+                Err(e) => {
+                    // On probe failure, fall back to current write LSN.
+                    log!(
+                        "pg_trickle: holdback probe failed ({}); using raw write LSN",
+                        e
+                    );
+                    let lsn =
+                        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None);
+                    if let Some(ref l) = lsn {
+                        shmem::set_last_tick_safe_lsn(version::lsn_to_u64(l));
+                    }
+                    shmem::update_holdback_metrics(0, 0);
+                    (lsn, 0, 0)
+                }
+            }
+        }
+
+        config::FrontierHoldbackMode::LsnBytes(offset_bytes) => {
+            let write_lsn_str = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
+            let write_u64 = version::lsn_to_u64(&write_lsn_str);
+            let safe_u64 = write_u64.saturating_sub(offset_bytes);
+            let safe_lsn = version::u64_to_lsn(safe_u64);
+            shmem::set_last_tick_safe_lsn(safe_u64);
+            shmem::update_holdback_metrics(offset_bytes.min(write_u64), 0);
+            (Some(safe_lsn), 0, 0)
+        }
+    }
+}
+
+/// Compute the tick watermark for a **dynamic refresh worker**.
+///
+/// Dynamic workers run after the coordinator and do not have access to
+/// the previous tick's `prev_watermark_lsn`. They read the coordinator-
+/// computed safe watermark from shared memory and cap it with the current
+/// write LSN (in case the worker starts significantly after the tick).
+///
+/// When holdback is disabled or shmem is unavailable, falls back to
+/// `pg_current_wal_lsn()`.
+fn compute_worker_tick_watermark() -> Option<String> {
+    if !config::pg_trickle_tick_watermark_enabled() {
+        return None;
+    }
+
+    let mode = config::pg_trickle_frontier_holdback_mode();
+
+    match mode {
+        config::FrontierHoldbackMode::None => {
+            Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
+        }
+
+        config::FrontierHoldbackMode::Xmin | config::FrontierHoldbackMode::LsnBytes(_) => {
+            // Read the safe watermark the coordinator stored in shmem.
+            let safe_lsn_u64 = shmem::last_tick_safe_lsn_u64();
+
+            if safe_lsn_u64 == 0 {
+                // No coordinator value yet — fall back to raw write LSN.
+                return Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None);
+            }
+
+            // Cap with current write LSN: don't advance past what's available now.
+            let write_lsn_str = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
+            let write_u64 = version::lsn_to_u64(&write_lsn_str);
+            let effective_u64 = safe_lsn_u64.min(write_u64);
+            Some(version::u64_to_lsn(effective_u64))
+        }
+    }
+}
+
+/// Rate-limited WARNING for when frontier holdback has been active longer
+/// than `pg_trickle.frontier_holdback_warn_seconds`.
+///
+/// Emits at most one WARNING per minute.
+fn emit_holdback_warning_if_needed(oldest_txn_age_secs: u64) {
+    let warn_secs = config::pg_trickle_frontier_holdback_warn_seconds();
+    if warn_secs <= 0 {
+        return;
+    }
+    if oldest_txn_age_secs < warn_secs as u64 {
+        return;
+    }
+
+    // Rate-limit: emit at most once per minute.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last_warn = LAST_HOLDBACK_WARN_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_secs.saturating_sub(last_warn) < 60 {
+        return;
+    }
+    LAST_HOLDBACK_WARN_SECS.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+
+    pgrx::warning!(
+        "pg_trickle: frontier holdback active — the oldest in-progress transaction is {}s old \
+         (threshold: {}s). Stream tables may lag behind. \
+         Check pg_stat_activity for long-running sessions. \
+         To suppress: SET pg_trickle.frontier_holdback_warn_seconds = 0.",
+        oldest_txn_age_secs,
+        warn_secs,
+    );
+}
+
 /// Execute a singleton unit: refresh a single stream table using the existing inline path.
 fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
     let pgt_id = job.root_pgt_id;
@@ -794,11 +979,8 @@ fn execute_worker_singleton(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::Success;
     }
 
-    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-    } else {
-        None
-    };
+    // #536: Use holdback-aware watermark for dynamic workers.
+    let tick_watermark: Option<String> = compute_worker_tick_watermark();
     let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
     let action = refresh::determine_refresh_action(&st, has_changes);
 
@@ -836,11 +1018,8 @@ fn execute_worker_atomic_group(job: &SchedulerJob, is_repeatable_read: bool) -> 
 
     let subtxn = SubTransaction::begin();
 
-    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-    } else {
-        None
-    };
+    // #536: Use holdback-aware watermark for dynamic workers.
+    let tick_watermark: Option<String> = compute_worker_tick_watermark();
     let mut refreshed_count: usize = 0;
 
     // BOOT-4: Build gated-source set once for the whole group.
@@ -994,11 +1173,8 @@ fn execute_worker_immediate_closure(job: &SchedulerJob) -> RefreshOutcome {
         return RefreshOutcome::Success;
     }
 
-    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-    } else {
-        None
-    };
+    // #536: Use holdback-aware watermark for dynamic workers.
+    let tick_watermark: Option<String> = compute_worker_tick_watermark();
     let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
     let action = refresh::determine_refresh_action(&st, has_changes);
 
@@ -1038,11 +1214,8 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
         }
     }
 
-    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-    } else {
-        None
-    };
+    // #536: Use holdback-aware watermark for dynamic workers.
+    let tick_watermark: Option<String> = compute_worker_tick_watermark();
 
     let mut prev_row_counts: HashMap<i64, i64> = member_ids
         .iter()
@@ -1161,11 +1334,8 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
         job.job_id,
     );
 
-    let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-        Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-    } else {
-        None
-    };
+    // #536: Use holdback-aware watermark for dynamic workers.
+    let tick_watermark: Option<String> = compute_worker_tick_watermark();
 
     // BOOT-4: Build gated-source set once for the whole group.
     let gated_oids = load_gated_source_oids();
@@ -2146,6 +2316,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // with a fresh snapshot captures the committed edge changes.
     let mut pending_full_rebuild = false;
 
+    // #536: Previous tick's safe frontier watermark, used by the holdback
+    // algorithm to determine whether any long-running transaction spans a
+    // tick boundary.  Reset to None on scheduler restart.
+    let mut prev_tick_watermark: Option<String> = None;
+
     // Per-ST retry state (in-memory only, reset on scheduler restart)
     let mut retry_states: HashMap<i64, RetryState> = HashMap::new();
     let retry_policy = RetryPolicy::default();
@@ -2627,14 +2802,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
         // Run the scheduler tick inside a transaction
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
-            // CSS1: Capture tick watermark for cross-source snapshot consistency.
-            // All refreshes in this tick will cap their LSN consumption to this value,
-            // ensuring every stream table in the tick shares the same consistent LSN view.
-            let tick_watermark: Option<String> = if config::pg_trickle_tick_watermark_enabled() {
-                Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text").unwrap_or(None)
-            } else {
-                None
-            };
+            // CSS1 / #536: Capture tick watermark for cross-source snapshot consistency
+            // with frontier holdback to prevent silent data loss from long-running
+            // transactions that span a tick boundary.
+            let (tick_watermark, _current_oldest_xmin, _holdback_age_secs) =
+                compute_coordinator_tick_watermark(prev_tick_watermark.as_deref());
+            // Persist this tick's safe watermark for the next tick's holdback comparison.
+            prev_tick_watermark.clone_from(&tick_watermark);
 
             // Step A: Check if DAG needs rebuild
             let current_version = shmem::current_dag_version();
