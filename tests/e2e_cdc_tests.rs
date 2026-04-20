@@ -1030,3 +1030,84 @@ async fn test_sec2_unprivileged_dml_captured_by_immediate_cdc() {
         .await;
     assert!(!gone, "deleted row must not appear in stream table");
 }
+
+// ── INV-CACHE1: Change buffer sequence invariant ───────────────────────
+
+/// INV-CACHE1: The change buffer BIGSERIAL sequence must have CACHE = 1.
+///
+/// With CACHE > 1 backends pre-allocate sequence blocks, decoupling
+/// assignment order from row-lock serialization order. This causes the
+/// compaction and delta pipelines (ORDER BY change_id) to silently pick
+/// stale data as the final state for a row — silent data corruption.
+///
+/// This test verifies:
+/// 1. A freshly created change buffer has CACHE = 1.
+/// 2. Manually altering the sequence to CACHE > 1 causes check_cdc_health()
+///    to emit a CRITICAL alert string.
+/// 3. Restoring CACHE = 1 clears the alert.
+#[tokio::test]
+async fn test_inv_cache1_change_buffer_sequence_cache_is_one() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE cache1_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO cache1_src VALUES (1, 'a')").await;
+    db.create_st(
+        "cache1_st",
+        "SELECT id, val FROM cache1_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.refresh_st("cache1_st").await;
+
+    let source_oid = db.table_oid("cache1_src").await;
+    let seq_name = format!("pgtrickle_changes.changes_{}_change_id_seq", source_oid);
+
+    // 1. Fresh sequence must have CACHE = 1.
+    let cache_size: i64 = db
+        .query_scalar(&format!(
+            "SELECT cache_size FROM pg_sequences \
+             WHERE schemaname = 'pgtrickle_changes' \
+               AND sequencename = 'changes_{}_change_id_seq'",
+            source_oid
+        ))
+        .await;
+    assert_eq!(
+        cache_size, 1,
+        "change buffer sequence must have CACHE = 1 (INV-CACHE1)"
+    );
+
+    // 2. Manually corrupt: set CACHE = 32. check_cdc_health() must alert.
+    db.execute(&format!("ALTER SEQUENCE {} CACHE 32", seq_name))
+        .await;
+
+    let alert: Option<String> = db
+        .query_scalar_opt(
+            "SELECT alert FROM pgtrickle.check_cdc_health() WHERE alert IS NOT NULL LIMIT 1",
+        )
+        .await;
+    assert!(
+        alert.is_some(),
+        "check_cdc_health() must return an alert when sequence CACHE > 1"
+    );
+    let alert_text = alert.unwrap();
+    assert!(
+        alert_text.contains("CACHE > 1") || alert_text.contains("cache_size"),
+        "alert must mention CACHE > 1, got: {alert_text}"
+    );
+
+    // 3. Restore CACHE = 1. check_cdc_health() must clear the alert.
+    db.execute(&format!("ALTER SEQUENCE {} CACHE 1", seq_name))
+        .await;
+
+    let alert_after_fix: Option<String> = db
+        .query_scalar_opt(
+            "SELECT alert FROM pgtrickle.check_cdc_health() WHERE alert LIKE '%CACHE%' LIMIT 1",
+        )
+        .await;
+    assert!(
+        alert_after_fix.is_none(),
+        "check_cdc_health() must not alert after CACHE is restored to 1"
+    );
+}

@@ -33,6 +33,7 @@ pg_trickle in production.
   - [12. Worker Pool Exhaustion](#12-worker-pool-exhaustion)
   - [13. Fuse Tripped (Circuit Breaker)](#13-fuse-tripped-circuit-breaker)
   - [14. Stream Table Appears Stuck Behind a Long Transaction](#14-stream-table-appears-stuck-behind-a-long-transaction)
+  - [15. Stale Data After High-Concurrency Writes (Sequence Cache Inversion)](#15-stale-data-after-high-concurrency-writes-sequence-cache-inversion)
 
 ---
 
@@ -654,6 +655,80 @@ ORDER BY prepared;
    Then restart the pg_trickle scheduler (or reload PostgreSQL) so the new
    privilege takes effect.
 
+
+---
+
+### 15. Stale Data After High-Concurrency Writes (Sequence Cache Inversion)
+
+**Symptoms:**
+- A stream table consistently shows an outdated value for a row that is
+  being updated frequently by concurrent sessions.
+- The issue is reproducible under high write concurrency but not with a
+  single writer.
+- `pgtrickle.check_cdc_health()` returns a `CRITICAL: change buffer
+  sequence(s) have CACHE > 1` alert.
+
+**Cause:**
+Someone manually altered a change buffer sequence to use `CACHE > 1` (e.g.
+to reduce sequence LWLock contention). The change buffer BIGSERIAL sequence
+**must** use `CACHE 1` — this is a hard correctness invariant, not a
+performance knob.
+
+With `CACHE > 1`, PostgreSQL backends pre-allocate blocks of sequence
+values. Two concurrent transactions modifying the same row can commit in an
+order that inverts their pre-cached `change_id` values:
+
+1. **Backend A** caches `[16, 31]` and starts updating row `id=1`.
+2. **Backend B** caches `[33, 64]`, updates the same row with
+   `change_id=33`, and commits first.
+3. **Backend A** commits last (true final state), but its `change_id=16`.
+4. The compaction/delta pipeline uses `ORDER BY change_id DESC` to find the
+   final state → picks `change_id=33` (Backend B's **stale** data).
+
+Silent data corruption. See [issue #536](https://github.com/grove/pg-trickle/issues/536)
+for full analysis.
+
+**Diagnosis:**
+
+```sql
+-- check_cdc_health() surfaces the problem:
+SELECT source_table, cdc_mode, alert
+FROM pgtrickle.check_cdc_health()
+WHERE alert IS NOT NULL;
+
+-- Directly inspect all change buffer sequences:
+SELECT schemaname, sequencename, cache_size
+FROM pg_sequences
+WHERE schemaname = 'pgtrickle_changes'
+  AND (sequencename LIKE 'changes_%_change_id_seq'
+    OR sequencename LIKE 'changes_pgt_%_change_id_seq')
+  AND cache_size > 1;
+```
+
+**Resolution:**
+
+1. Reset every affected sequence back to `CACHE 1`:
+
+   ```sql
+   -- Replace <seq_name> with the sequencename from the query above.
+   ALTER SEQUENCE pgtrickle_changes.<seq_name> CACHE 1;
+   ```
+
+2. Verify the alert is gone:
+
+   ```sql
+   SELECT alert FROM pgtrickle.check_cdc_health() WHERE alert IS NOT NULL;
+   -- Should return zero rows.
+   ```
+
+3. **Do NOT increase CACHE to reduce LWLock contention.** The only
+   structural solution for high-concurrency `change_id` contention is to
+   switch to the WAL/logical-decoding CDC backend, which uses commit-LSN
+   ordering and has no sequence at all:
+
+   ```sql
+   SELECT pgtrickle.alter_stream_table('my_st', cdc_mode => 'wal');
+   ```
 
 ---
 
