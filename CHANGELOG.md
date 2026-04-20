@@ -7,8 +7,8 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [0.24.0 — Join Correctness & Durability Hardening](#0240--join-correctness--durability-hardening)
 - [Unreleased](#unreleased)
+- [0.24.0 — Join Correctness & Durability Hardening](#0240--join-correctness--durability-hardening)
 - [0.22.0 — Downstream CDC, Parallel Refresh & Predictive Cost Model](#0220--downstream-cdc-parallel-refresh--predictive-cost-model)
 - [0.21.0 — Correctness, Safety & Test Hardening](#0210--correctness-safety--test-hardening)
 - [0.20.0 — Dog Feeding](#0200--dog-feeding)
@@ -38,6 +38,10 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — 2026-02-26](#011--2026-02-26)
 - [0.1.0 — 2026-02-26](#010--2026-02-26)
 <!-- TOC end -->
+
+---
+
+## [Unreleased]
 
 ---
 
@@ -109,17 +113,6 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
   - `pgt_refresh_history(pgt_id, action, data_timestamp)`
   - `pgt_change_tracking(source_relid)`
 
-### Testing
-
-- **25+ unit tests** for `publication.rs` (TEST-6): SLA tier assignment
-  boundary cases, parse_qualified_name edge cases, quote_ident variations.
-- **20+ unit tests** for `diagnostics.rs` (TEST-7): Duration parsing,
-  version validation, format routing.
-- **10+ unit tests** for `metrics_server.rs` (TEST-8): HTTP request routing,
-  OpenMetrics content-type, port-zero disablement, health endpoints.
-
-## [Unreleased]
-
 ### Safety
 
 - **Frontier Visibility Holdback** (issue #536) — Closes a silent data-loss
@@ -177,6 +170,12 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ### Testing
 
+- **25+ unit tests** for `publication.rs` (TEST-6): SLA tier assignment
+  boundary cases, parse_qualified_name edge cases, quote_ident variations.
+- **20+ unit tests** for `diagnostics.rs` (TEST-7): Duration parsing,
+  version validation, format routing.
+- **10+ unit tests** for `metrics_server.rs` (TEST-8): HTTP request routing,
+  OpenMetrics content-type, port-zero disablement, health endpoints.
 - **5 new E2E tests** in `tests/e2e_long_txn_visibility_tests.rs` covering:
   - GUC defaults and `mode = 'none'` regression guard
   - `READ COMMITTED` long transaction holdback
