@@ -3,7 +3,7 @@
 //! ΔI(Scan(T)) reads from the change buffer table for T.
 //!
 //! The change buffer table `pgtrickle_changes.changes_<oid>` contains:
-//! - change_id BIGSERIAL — insertion ordering (no PK index)
+//! - change_id BIGSERIAL — insertion ordering (CACHE 1 invariant, see cdc.rs)
 //! - lsn PG_LSN
 //! - action CHAR(1) — 'I', 'U', 'D'
 //! - pk_hash BIGINT — pre-computed PK hash (optional)

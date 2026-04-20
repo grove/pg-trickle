@@ -213,8 +213,17 @@ known-clean OLTP workloads.
 
 ## 7. Out-of-scope follow-ups (separate issues)
 
-1. **Sequence cache contention on `change_id`** — evaluate `CACHE 32+`
-   default; document that gaps are harmless.
+1. ~~**Sequence cache contention on `change_id`** — evaluate `CACHE 32+`
+   default; document that gaps are harmless.~~
+   **Retracted (2026-04-20):** Increasing `CACHE` above 1 is **unsafe**.
+   With `CACHE > 1`, concurrent transactions modifying the same row can
+   commit in an order that inverts their pre-cached sequence values,
+   causing compaction/delta pipelines (`ORDER BY change_id`) to pick stale
+   data as the final state — silent data corruption.  `CACHE 1` is a hard
+   correctness requirement for the trigger-based CDC path; the throughput
+   ceiling this imposes is a fundamental limitation that only the
+   WAL/logical-decoding backend can eliminate.  See issue #536 (last
+   comment by @Teletele-Lin) for the full analysis.
 2. **Atomic frontier+buffer commit** — covered by
    [PLAN_OVERALL_ASSESSMENT_2.md](../PLAN_OVERALL_ASSESSMENT_2.md).
 3. **WAL/logical-decoding CDC as default** — already on roadmap; this fix

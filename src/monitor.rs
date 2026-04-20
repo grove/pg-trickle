@@ -1701,6 +1701,57 @@ fn check_cdc_health() -> TableIterator<
         }
     }
 
+    // INV-CACHE1: Check that no change buffer sequence has been manually altered
+    // to CACHE > 1. This would silently corrupt compaction and delta ordering
+    // (sequence-cache inversion — see issue #536). The check queries pg_sequences
+    // for any sequence whose name matches the change buffer pattern and whose
+    // cache_size > 1.
+    let corrupted_seqs: Vec<String> = Spi::connect(|client| {
+        let result = match client.select(
+            "SELECT sequencename::text \
+             FROM pg_sequences \
+             WHERE (sequencename LIKE 'changes_%_change_id_seq' \
+                 OR sequencename LIKE 'changes_pgt_%_change_id_seq') \
+               AND cache_size > 1 \
+               AND schemaname = 'pgtrickle_changes'",
+            None,
+            &[],
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        result
+            .map(|row| row.get::<String>(1).unwrap_or(None).unwrap_or_default())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
+    if !corrupted_seqs.is_empty() {
+        let seq_list = corrupted_seqs.join(", ");
+        let cache_alert = format!(
+            "CRITICAL: change buffer sequence(s) have CACHE > 1 — \
+             this causes silent data corruption via sequence-cache inversion. \
+             Run: ALTER SEQUENCE pgtrickle_changes.<name> CACHE 1; \
+             Affected: {}",
+            seq_list
+        );
+        // Attach the alert to every trigger-mode row (the sequence belongs to
+        // the trigger path; WAL-mode rows are unaffected but the operator
+        // should still see the warning).
+        for row in &mut rows {
+            row.6 = Some(match &row.6 {
+                Some(existing) => format!("{}; {}", existing, cache_alert),
+                None => cache_alert.clone(),
+            });
+        }
+        pgrx::warning!(
+            "[pg_trickle] INV-CACHE1: change buffer sequence(s) with CACHE > 1 detected ({}). \
+             This causes silent data corruption. Reset with: \
+             ALTER SEQUENCE pgtrickle_changes.<name> CACHE 1",
+            seq_list
+        );
+    }
+
     TableIterator::new(rows)
 }
 
