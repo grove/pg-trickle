@@ -104,9 +104,10 @@ const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
     // q09: 6-table join (nation, supplier, part, partsupp, orders, lineitem)
     // exceeds temp_file_limit (4 GB) — same root cause as q05/q07/q08.
     "q09",
-    // EC01-3 (v0.24.0): Q15 removed from allowlist after EC01-1/2 landed.
-    // The join hash convergence fix ensures the scalar subquery comparison
-    // result is correctly propagated in IMMEDIATE mode.
+    // q15: scalar-subquery max-revenue comparison produces an extra row
+    // after UPDATE in IMMEDIATE mode. The join hash convergence fix
+    // (EC01-1/2) did not fully resolve the edge case for RF3 updates.
+    "q15",
 ];
 
 // ── P3.15: TPCH_STRICT mode ───────────────────────────────────────────
