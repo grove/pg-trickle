@@ -104,12 +104,11 @@ const IMMEDIATE_SKIP_ALLOWLIST: &[&str] = &[
     // q09: 6-table join (nation, supplier, part, partsupp, orders, lineitem)
     // exceeds temp_file_limit (4 GB) — same root cause as q05/q07/q08.
     "q09",
-    // q15: derived-table join with scalar subquery comparison
-    // `total_revenue = (SELECT MAX(...))`.  When an UPDATE to lineitem
-    // changes which supplier has the maximum revenue, the IVM trigger
-    // correctly inserts the new top-supplier row but cannot remove the
-    // old one because the scalar subquery result changed — a known
-    // limitation of trigger-based IVM for non-monotonic WHERE filters.
+    // q15: scalar subquery over a window aggregate (max revenue via CTE)
+    // still produces an extra row in IMMEDIATE mode after EC01-1/2 fixes.
+    // The IVM trigger fires before the CTE result is committed, leaving a
+    // stale row that only disappears on the next full refresh.
+    // Tracked for fix in a future release; re-added to allowlist until resolved.
     "q15",
 ];
 

@@ -19,7 +19,7 @@ async fn test_dog_feeding_setup_creates_five_stream_tables() {
     // Setup dog-feeding.
     db.execute("SELECT pgtrickle.setup_dog_feeding()").await;
 
-    // Verify all five DF stream tables exist.
+    // Verify all six DF stream tables exist.
     let count: i64 = db
         .query_scalar(
             "SELECT count(*) FROM pgtrickle.pgt_stream_tables
@@ -27,8 +27,8 @@ async fn test_dog_feeding_setup_creates_five_stream_tables() {
         )
         .await;
     assert_eq!(
-        count, 5,
-        "setup_dog_feeding should create 5 DF stream tables"
+        count, 6,
+        "setup_dog_feeding should create 6 DF stream tables"
     );
 }
 
@@ -55,7 +55,7 @@ async fn test_dog_feeding_setup_idempotent_three_calls() {
              WHERE pgt_schema = 'pgtrickle' AND pgt_name LIKE 'df_%'",
         )
         .await;
-    assert_eq!(count, 5, "3× setup should still produce exactly 5 DF STs");
+    assert_eq!(count, 6, "3× setup should still produce exactly 6 DF STs");
 }
 
 // ── DF-F5 + STAB-5: teardown + partial teardown ────────────────────────────
@@ -79,7 +79,7 @@ async fn test_dog_feeding_teardown_drops_all_stream_tables() {
              WHERE pgt_schema = 'pgtrickle' AND pgt_name LIKE 'df_%'",
         )
         .await;
-    assert_eq!(before, 5);
+    assert_eq!(before, 6);
 
     // Teardown.
     db.execute("SELECT pgtrickle.teardown_dog_feeding()").await;
@@ -146,13 +146,13 @@ async fn test_dog_feeding_status_reports_all_five() {
     let count: i64 = db
         .query_scalar("SELECT count(*) FROM pgtrickle.dog_feeding_status()")
         .await;
-    assert_eq!(count, 5, "dog_feeding_status should report 5 rows");
+    assert_eq!(count, 6, "dog_feeding_status should report 6 rows");
 
     // All should exist.
     let all_exist: bool = db
         .query_scalar("SELECT bool_and(exists) FROM pgtrickle.dog_feeding_status()")
         .await;
-    assert!(all_exist, "all five DF STs should report exists = true");
+    assert!(all_exist, "all six DF STs should report exists = true");
 }
 
 #[tokio::test]
@@ -163,8 +163,8 @@ async fn test_dog_feeding_status_before_setup() {
         .query_scalar("SELECT count(*) FROM pgtrickle.dog_feeding_status()")
         .await;
     assert_eq!(
-        count, 5,
-        "dog_feeding_status should report 5 rows even before setup"
+        count, 6,
+        "dog_feeding_status should report 6 rows even before setup"
     );
 
     let any_exist: bool = db
@@ -207,7 +207,7 @@ async fn test_dog_feeding_full_lifecycle() {
     let count: i64 = db
         .query_scalar("SELECT count(*) FROM pgtrickle.dog_feeding_status() WHERE exists")
         .await;
-    assert_eq!(count, 5);
+    assert_eq!(count, 6);
 
     // Teardown.
     db.execute("SELECT pgtrickle.teardown_dog_feeding()").await;
@@ -1087,7 +1087,7 @@ async fn test_soak_dog_feeding_with_many_user_sts() {
         .query_scalar("SELECT df_refresh_fraction FROM pgtrickle.scheduler_overhead()")
         .await;
     if let Some(f) = fraction {
-        // In a test with 20 user STs and 5 DF STs, fraction should be moderate.
+        // In a test with 20 user STs and 6 DF STs, fraction should be moderate.
         assert!(
             f < 0.50,
             "TEST-5: DF fraction with 20 user STs should be < 50% (got {:.1}%)",

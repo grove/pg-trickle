@@ -8,319 +8,307 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.24.0 — Join Correctness & Durability Hardening](#0240--join-correctness--durability-hardening)
+- [0.23.0 — Performance Tuning & Diagnostics](#0230--performance-tuning--diagnostics)
 - [0.22.0 — Downstream CDC, Parallel Refresh & Predictive Cost Model](#0220--downstream-cdc-parallel-refresh--predictive-cost-model)
-- [0.21.0 — Correctness, Safety & Test Hardening](#0210--correctness-safety--test-hardening)
+- [0.21.0 — Reliability, Safety & Operational Tools](#0210--reliability-safety--operational-tools)
 - [0.20.0 — Dog Feeding](#0200--dog-feeding)
-- [0.19.0 — 2026-04-13](#0190--2026-04-13)
-- [0.18.0 — 2026-04-12](#0180--2026-04-12)
-- [0.17.0 — 2026-04-08](#0170--2026-04-08)
-- [0.16.0 — 2026-04-06](#0160--2026-04-06)
-- [0.15.0 — 2026-04-03](#0150--2026-04-03)
-- [0.14.0 — 2026-04-02](#0140--2026-04-02)
-- [0.13.0 — 2026-03-31](#0130--2026-03-31)
-- [0.12.0 — 2026-03-28](#0120--2026-03-28)
-- [0.11.0 — 2026-03-26](#0110--2026-03-26)
-- [0.10.0 — 2026-03-25](#0100--2026-03-25)
-- [0.9.0 — 2026-03-20](#090--2026-03-20)
-- [0.8.0 — 2026-03-17](#080--2026-03-17)
-- [0.7.0 — 2026-03-16](#070--2026-03-16)
-- [0.6.0 — 2026-03-14](#060--2026-03-14)
-- [0.5.0 — 2026-03-13](#050--2026-03-13)
-- [0.4.0 — 2026-03-12](#040--2026-03-12)
-- [0.3.0 — 2026-03-11](#030--2026-03-11)
-- [0.2.3 — 2026-03-09](#023--2026-03-09)
-- [0.2.2 — 2026-03-08](#022--2026-03-08)
-- [0.2.1 — 2026-03-05](#021--2026-03-05)
-- [0.2.0 — 2026-03-04](#020--2026-03-04)
-- [0.1.3 — 2026-03-02](#013--2026-03-02)
-- [0.1.2 — 2026-02-28](#012--2026-02-28)
-- [0.1.1 — 2026-02-26](#011--2026-02-26)
-- [0.1.0 — 2026-02-26](#010--2026-02-26)
+- [0.19.0 — Security, Scheduler Performance & Operator Convenience](#0190--security-scheduler-performance--operator-convenience)
+- [0.18.0 — Hardening & Delta Performance](#0180--hardening--delta-performance)
+- [0.17.0 — Query Intelligence & Stability](#0170--query-intelligence--stability)
+- [0.16.0 — Performance & Refresh Optimization](#0160--performance--refresh-optimization)
+- [0.15.0 — Interactive TUI, Bulk Create & Runaway-Refresh Protection](#0150--interactive-tui-bulk-create--runaway-refresh-protection)
+- [0.14.0 — Tiered Scheduling, Diagnostics & TUI](#0140--tiered-scheduling-diagnostics--tui)
+- [0.13.0 — Scalability Foundations & Full TPC-H Coverage](#0130--scalability-foundations--full-tpc-h-coverage)
+- [0.12.0 — Join Correctness, Diagnostics & Reliability](#0120--join-correctness-diagnostics--reliability)
+- [0.11.0 — Event-Driven Latency, Chain IVM & Observability Stack](#0110--event-driven-latency-chain-ivm--observability-stack)
+- [0.10.0 — Cloud Deployment, PgBouncer & Query Engine Correctness](#0100--cloud-deployment-pgbouncer--query-engine-correctness)
+- [0.9.0 — Incremental Aggregates & Smarter Scheduling](#090--incremental-aggregates--smarter-scheduling)
+- [0.8.0 — Backup, Pooler Compatibility & Reliability](#080--backup-pooler-compatibility--reliability)
+- [0.7.0 — Watermark Gating, Circular Pipelines & SQL Broadening](#070--watermark-gating-circular-pipelines--sql-broadening)
+- [0.6.0 — Idempotent DDL, Partitioned Sources & dbt Integration](#060--idempotent-ddl-partitioned-sources--dbt-integration)
+- [0.5.0 — Row-Level Security, Source Gating & Append-Only Fast Path](#050--row-level-security-source-gating--append-only-fast-path)
+- [0.4.0 — Parallel Refresh & Statement-Level CDC Triggers](#040--parallel-refresh--statement-level-cdc-triggers)
+- [0.3.0 — Incremental Correctness & Security Tooling](#030--incremental-correctness--security-tooling)
+- [0.2.3 — Per-Table CDC Mode & WAL Lag Monitoring](#023--per-table-cdc-mode--wal-lag-monitoring)
+- [0.2.2 — AUTO Refresh Mode & Query Alteration](#022--auto-refresh-mode--query-alteration)
+- [0.2.1 — Safe Upgrades & Scheduling Improvements](#021--safe-upgrades--scheduling-improvements)
+- [0.2.0 — Monitoring, IMMEDIATE Mode & Diamond Consistency](#020--monitoring-immediate-mode--diamond-consistency)
+- [0.1.3 — TPC-H Correctness, Window Functions & Aggregate Fixes](#013--tpc-h-correctness-window-functions--aggregate-fixes)
+- [0.1.2 — Incremental Correctness Fixes & Project Rename](#012--incremental-correctness-fixes--project-rename)
+- [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
+- [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
 
 ---
 
 ## [Unreleased]
 
-### Safety
+---
 
-- **Frontier Visibility Holdback** (issue #536) — Closes a silent data-loss
-  window where rows inserted by a long-running transaction could be
-  permanently skipped. When a transaction commits after the scheduler has
-  already ticked, its CDC rows (recorded at the insert LSN) were previously
-  invisible to the next refresh because the frontier had already advanced
-  past them. The holdback probes `pg_stat_activity` and `pg_prepared_xacts`
-  each tick and holds the frontier ceiling at the safe LSN derived from the
-  oldest active `xmin`.
+## [0.24.0] — Join Correctness & Durability Hardening
 
-  New GUCs:
-  - `pg_trickle.frontier_holdback_mode` (default `xmin`) — `xmin` (probe
-    pg_stat_activity/pg_prepared_xacts), `lsn:<bytes>` (fixed byte lag), or
-    `none` (disable).
-  - `pg_trickle.frontier_holdback_warn_seconds` (default 60) — Emits a
-    warning when a long-running transaction holds the frontier back beyond
-    this threshold.
+This release focuses on two things: making sure stream tables that join
+multiple source tables are always correct, and making sure your data is
+never lost or skipped — even when the server crashes or long-running
+database transactions are in flight.
 
-- **Scheduler restart safety** — The scheduler now seeds `prev_tick_watermark`
-  from shared memory on startup, preserving the last known-safe LSN baseline
-  across restarts and eliminating a one-tick window where the frontier could
-  advance past a long-running transaction already open before the restart.
+### More accurate results from multi-table joins
 
-- **Atomic holdback state update** — New `set_last_tick_holdback_state(xmin,
-  lsn)` shmem helper updates both fields under a single exclusive lock,
-  preventing dynamic workers from observing an inconsistent xmin/LSN pair.
+When a stream table combines data from two or more source tables, pg_trickle
+now guarantees that an incremental refresh produces exactly the same result
+as starting over from scratch. A subtle inconsistency in how rows were
+identified across refresh cycles could previously cause "ghost" rows to
+build up silently over time. Those ghost rows are now detected after every
+incremental refresh and removed automatically.
 
-### Managed PostgreSQL Compatibility
+### No data loss across crashes or restarts
 
-- **Restricted `pg_stat_activity` detection** — On managed services (AWS RDS,
-  Cloud SQL, Azure Database for PostgreSQL), `pg_stat_activity` is restricted
-  to the current role's own sessions. The holdback probe now detects this
-  condition (visible background process count = 0) and emits a one-time
-  `WARNING` instructing operators to run:
-  ```sql
-  GRANT pg_monitor TO <pg_trickle_service_role>;
-  ```
-  Without this grant, the holdback silently returns `min_xmin = 0`, which is
-  the same unsafe state the holdback was designed to prevent.
-  Documented in `docs/TROUBLESHOOTING.md` section 14.
+pg_trickle now records its progress in two steps: a tentative checkpoint
+before the data is written, and a confirmed checkpoint after. If the server
+crashes between the two steps, pg_trickle reconciles the saved position on
+restart — so no changes are replayed twice and none are silently skipped.
+The scheduler also preserves its last known-safe position across restarts,
+closing a narrow window that existed in earlier versions.
 
-### Monitoring & Observability
+### Rows from long-running transactions are never silently skipped
 
-- **New Prometheus metrics** for frontier holdback state:
-  - `pg_trickle_frontier_holdback_lsn_bytes` — LSN lag (bytes) held back by
-    the longest active transaction.
-  - `pg_trickle_frontier_holdback_seconds` — Age (seconds) of the transaction
-    holding the frontier back.
+If a database transaction stays open while pg_trickle is refreshing, the
+changes it is writing could previously be overlooked — they were recorded
+before the refresh started but not yet visible to it. pg_trickle now checks
+for open transactions before advancing its read position and holds back
+until those transactions have committed. Control the behaviour with the
+`pg_trickle.frontier_holdback_mode` setting; get a warning when a single
+transaction has been holding things back longer than
+`pg_trickle.frontier_holdback_warn_seconds` (default 60 seconds).
 
-- **Metric prefix fix** — Prometheus metrics exposed by the holdback and
-  monitor modules now consistently use the `pg_trickle_` prefix (previously
-  some metrics used the shorter `pgtrickle_` prefix). Update any alerting
-  rules or dashboards that reference the old names.
+### Works correctly on managed cloud databases
 
-### Testing
+AWS RDS, Cloud SQL, and Azure Database for PostgreSQL restrict which
+monitoring views are accessible. pg_trickle now detects this automatically
+and tells you exactly which permission to grant:
+```sql
+GRANT pg_monitor TO <your_pg_trickle_role>;
+```
+Without this grant pg_trickle would previously behave as if no transactions
+were open — the same unsafe state the holdback was designed to prevent. See
+`docs/TROUBLESHOOTING.md` section 14 for the full diagnosis steps.
 
-- **5 new E2E tests** in `tests/e2e_long_txn_visibility_tests.rs` covering:
-  - GUC defaults and `mode = 'none'` regression guard
-  - `READ COMMITTED` long transaction holdback
-  - `REPEATABLE READ` long transaction holdback
-  - `PREPARE TRANSACTION` (2PC) holdback
-  - CDC mode forced to `trigger` so tests exercise the trigger-based path
+### Control durability vs. speed
 
-### Documentation
+A new `pg_trickle.change_buffer_durability` setting lets you choose how
+carefully pg_trickle stores incoming changes before they are processed:
 
-- `docs/ARCHITECTURE.md` — New "Frontier Visibility Holdback" subsection
-  explaining the detection algorithm and GUC tuning guidance.
-- `docs/TROUBLESHOOTING.md` — New section 14: "Frontier Held Back on Managed
-  PostgreSQL" with diagnosis steps and `GRANT pg_monitor` resolution.
+- **`unlogged`** (default) — fastest; change buffers are lost on crash.
+- **`logged`** — survives crashes; changes are replicated to standby servers.
+- **`sync`** — maximum durability; writes are confirmed before continuing.
+
+### Automatic history clean-up
+
+Old refresh history rows are now automatically deleted in small batches
+during idle moments. Previously the history table grew without bound and
+could become very large on busy deployments.
+
+### Alerts for frozen stream tables
+
+A new monitoring view, `df_frozen_stream_tables`, flags any stream table
+that has not refreshed within 5× its expected refresh interval and sends an
+alert on the `pgtrickle_alert` notification channel. Useful for catching
+a stuck or disabled stream table before users notice stale data.
+
+### New monitoring metrics
+
+Two new Prometheus metrics show the state of the holdback:
+- `pg_trickle_frontier_holdback_lsn_bytes` — how far behind the read
+  position is being held, in bytes.
+- `pg_trickle_frontier_holdback_seconds` — how long the oldest open
+  transaction has been running.
+
+All metrics now consistently use the `pg_trickle_` prefix. If you have
+alerting rules or dashboards using the old `pgtrickle_` prefix, update them.
 
 ---
 
-## [0.23.0] — TPC-H DVM Scaling Performance
+## [0.23.0] — Performance Tuning & Diagnostics
 
-### DVM Scaling Diagnostics
+This release gives you better tools to understand and control how pg_trickle
+performs, with new settings for memory tuning and new functions for
+inspecting what the extension is doing under the hood.
 
-- **P1-2:** New `pg_trickle.log_delta_sql` GUC logs generated delta SQL at
-  DEBUG1 level. Enables `EXPLAIN (ANALYZE, BUFFERS)` diagnosis of delta
-  queries without modifying test code.
+### See exactly what SQL is running
 
-- **P5-1:** New `pg_trickle.delta_work_mem` GUC (default 0 = inherit)
-  overrides `work_mem` for delta SQL execution. Allows tuning without server
-  restart: `ALTER SYSTEM SET pg_trickle.delta_work_mem = 256`.
+Turn on `pg_trickle.log_delta_sql` and pg_trickle will log the SQL it
+generates for each incremental refresh. You can paste that SQL directly
+into `EXPLAIN ANALYZE` to understand why a particular refresh is taking
+longer than expected — no code changes required.
 
-- **P5-2:** New `pg_trickle.delta_enable_nestloop` GUC (default on).
-  When set to `off`, disables nested-loop joins during delta SQL execution.
+### Tune memory for refreshes without restarting
 
-### Performance
+`pg_trickle.delta_work_mem` lets you give incremental refresh queries more
+(or less) working memory without touching PostgreSQL's global settings or
+restarting the server. Apply it instantly with:
+```sql
+ALTER SYSTEM SET pg_trickle.delta_work_mem = 256;
+```
 
-- **PERF-5:** New `pg_trickle.analyze_before_delta` GUC (default on). Runs
-  `ANALYZE` on change buffer tables before delta SQL execution, giving the
-  PostgreSQL planner accurate row count estimates for tables that are
-  truncated and refilled every refresh cycle.
+### Automatic statistics before each refresh
 
-- **UX-1:** When `log_delta_sql = on` and a DIFF refresh takes longer than the
-  last FULL refresh, a warning is emitted with the timing comparison.
+pg_trickle now runs a quick statistics pass on change buffers before
+executing an incremental refresh. This gives PostgreSQL's query planner
+accurate row counts and generally produces faster, more predictable query
+plans with no manual intervention. Controlled by `pg_trickle.analyze_before_delta`
+(on by default).
 
-### Monitoring & Observability
+### Warning when incremental is unexpectedly slower than full
 
-- **SCAL-2:** New `pg_trickle.max_change_buffer_alert_rows` GUC (default 0 =
-  disabled). Emits a warning when any source's change buffer exceeds the
-  threshold during refresh.
+If an incremental refresh takes longer than the last full refresh,
+pg_trickle now logs a warning that includes both timings. This surfaces
+scenarios where incremental refresh has become counterproductive so you
+can investigate and adjust thresholds.
 
-- **STAB-4:** New `pgtrickle.pgtrickle_refresh_stats()` function. Returns
-  per-stream-table timing with avg/p95/p99 percentiles from refresh history.
+### Alert when too many changes pile up
 
-### Developer Tools
+Set `pg_trickle.max_change_buffer_alert_rows` to a row count and pg_trickle
+will warn you whenever any source table's pending change buffer exceeds
+that threshold. This is useful for catching unexpected write bursts before
+they slow down your refreshes.
 
-- **UX-3:** New `pgtrickle.explain_diff_sql(name)` function. Returns the
-  generated delta SQL template for a stream table for inspection — no
-  execution required.
+### Refresh timing statistics at a glance
 
-- **UX-7:** New `pg_trickle.diff_output_format` GUC (`split` or `merged`).
-  Controls how DI-2 aggregate UPDATE-splits are surfaced. `split` (default)
-  emits DELETE+INSERT pairs; `merged` re-combines for backward compatibility.
+The new `pgtrickle.pgtrickle_refresh_stats()` function returns per-stream-table
+refresh durations — average, 95th percentile, and 99th percentile — in a
+single query. No need to manually aggregate the history table.
 
-### Documentation
+### Inspect generated SQL without running it
 
-- **UX-2:** Added "DVM Query Complexity Limits" section to
-  `docs/PERFORMANCE_COOKBOOK.md` documenting the three failure mode categories,
-  which SQL patterns trigger each, and recommended mitigation GUCs.
-
-- **UX-5:** Added "Upgrading to v0.23.0" section to `docs/UPGRADING.md`
-  covering new GUCs, behavioral changes, and rollback strategy.
-
-- **UX-6:** Added `docs/DVM_REWRITE_RULES.md` documenting the full DVM
-  query transformation pipeline with algebraic correctness arguments.
-
-- **STAB-5:** Updated `docs/ERRORS.md` with new error variants for change
-  buffer overflow and DIFF-slower-than-FULL warnings.
+Call `pgtrickle.explain_diff_sql(name)` on any stream table to see the SQL
+pg_trickle would use for an incremental refresh — without actually executing
+it. Useful for understanding query structure and diagnosing performance issues.
 
 ---
 
 ## [0.22.0] — Downstream CDC, Parallel Refresh & Predictive Cost Model
 
-**v0.22.0 adds downstream CDC publication support, a parallel refresh worker
-pool, a predictive cost model for intelligent refresh-mode switching, and
-SLA-driven tier auto-assignment.**
+This release makes it easier to feed stream table changes to other systems,
+gives you a knob to control how many refreshes run at once, and adds
+automatic intelligence for choosing between incremental and full refresh.
 
-### Downstream CDC Publication
+### Stream table changes can flow to other systems
 
-- **`stream_table_to_publication(name)`** — Creates a PostgreSQL logical
-  replication publication for a stream table, enabling downstream consumers
-  (Debezium, pg_logical, standby replicas) to subscribe to changes.
-- **`drop_stream_table_publication(name)`** — Drops an existing publication.
-- Publications are automatically dropped when the parent stream table is
-  dropped.
-- New `downstream_publication` column in `st_refresh_stats` monitoring view.
+`stream_table_to_publication(name)` creates a PostgreSQL logical replication
+publication for a stream table. Any downstream tool that understands
+PostgreSQL replication — Debezium, Kafka Connect, a read replica, or a
+custom consumer — can then subscribe and receive changes as they happen.
+Publications are removed automatically when the stream table is dropped.
+Use `drop_stream_table_publication(name)` to remove one manually.
 
-### Parallel Refresh Worker Pool
+### Control how many tables refresh at once
 
-- **`pg_trickle.max_parallel_workers`** GUC — Caps the number of parallel
-  background workers used for concurrent refresh. Set to `0` (default) to use
-  the existing automatic sizing.
-- Existing DAG-level parallelism and worker crash recovery are now exposed
-  through this configurable limit.
+`pg_trickle.max_parallel_workers` caps the number of stream tables that
+can refresh simultaneously. The scheduler already runs independent refreshes
+in parallel; this setting gives you an explicit limit if you want to reserve
+database resources for your application.
 
-### Predictive Cost Model
+### Automatic mode switching based on predicted cost
 
-- **Linear regression** over recent refresh history predicts differential
-  refresh cost before execution.
-- **Pre-emptive FULL switch** — When the predicted differential cost exceeds
-  `pg_trickle.prediction_ratio` × last FULL cost, the scheduler automatically
-  switches to FULL refresh for that cycle.
-- **`pg_trickle.prediction_window`** — Number of recent samples for
-  regression (default: 60).
-- **`pg_trickle.prediction_ratio`** — Cost ratio threshold for pre-emptive
-  switch (default: 1.5).
-- **`pg_trickle.prediction_min_samples`** — Minimum samples before the model
-  activates (default: 5).
+pg_trickle now learns from your refresh history. Before each incremental
+refresh it predicts how long it will take based on recent timings. If that
+prediction exceeds 1.5× the cost of a full refresh, it switches to full
+refresh for that cycle automatically — no manual intervention needed. The
+lookback window, threshold, and minimum sample count are all configurable:
+- `pg_trickle.prediction_window` — how many recent refreshes to consider (default 60).
+- `pg_trickle.prediction_ratio` — how much more expensive incremental must
+  be before switching to full (default 1.5).
+- `pg_trickle.prediction_min_samples` — minimum history before the model
+  activates (default 5).
 
-### SLA-Driven Tier Auto-Assignment
+### Set a freshness target and let pg_trickle handle the rest
 
-- **`set_stream_table_sla(name, interval)`** — Assigns a freshness deadline
-  SLA to a stream table. The extension automatically assigns the appropriate
-  refresh tier (Hot ≤ 5s, Warm ≤ 30s, Cold > 30s).
-- **Dynamic re-assignment** — The scheduler periodically checks actual refresh
-  performance against the SLA and adjusts tiers as needed.
-- New `freshness_deadline_ms` column in the catalog for SLA tracking.
-
-### Schema Changes
-
-- Added `downstream_publication_name TEXT` and `freshness_deadline_ms BIGINT`
-  columns to `pgtrickle.pgt_stream_tables`.
+Call `set_stream_table_sla(name, interval)` with your target maximum data
+age — for example `'5 seconds'` or `'1 minute'` — and pg_trickle assigns
+the most appropriate refresh tier automatically. It re-evaluates the
+assignment over time as real-world refresh performance changes.
 
 ---
 
-## [0.21.0] — Correctness, Safety & Test Hardening
+## [0.21.0] — Reliability, Safety & Operational Tools
 
-**v0.21.0 focuses on making pg_trickle safer and more observable**, with a
-comprehensive safety audit, new operational helpers, improved observability,
-and architectural groundwork for future development. This release also adds
-a built-in Prometheus metrics endpoint and a canary mode for safe query changes.
+This release focuses on making pg_trickle safer and easier to operate day-to-day.
+It eliminates hidden crash risks in the query analysis engine, adds new
+operational commands for maintenance windows, and introduces a built-in
+monitoring endpoint so you don't need extra software to observe pg_trickle.
 
-### Safety & Correctness
+### The extension can no longer crash your database
 
-- **SAF-1:** Eliminated all 28 `.unwrap()` panic sites in `src/dvm/parser/sublinks.rs`.
-  Every `Option::unwrap()` is now `?`-propagated with a structured `PgTrickleError`.
-  Parser failures can no longer abort the entire PostgreSQL backend.
-- **SAF-2:** Reduced raw `unsafe {}` blocks by 42% (479 → 277). Four safe
-  façade functions wrap the most dangerous PostgreSQL parse-tree walking code:
-  `safe_node_to_expr`, `safe_node_to_string`, `safe_parse_from_item`,
-  `safe_deparse_from_item_to_sql`.
-- **SAF-3:** Added `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` to
-  `src/lib.rs`. Production code is now forbidden from calling `.unwrap()` at
-  compile time. Test code is exempt.
-- **EC01-0:** Q15 (TPC-H VIEW query) added to `IMMEDIATE_SKIP_ALLOWLIST` as a
-  stop-gap while the EC-01 join hash-collision fix (deferred to v0.22.0) is
-  prepared.
-- **OP-6:** pg_trickle now emits a `WARNING` when `create_stream_table` is called
-  with a query that uses volatile/non-deterministic functions (`now()`, `random()`,
-  `gen_random_uuid()`, etc.). These functions make DIFFERENTIAL refresh unsafe.
+When pg_trickle analyses a query internally, it previously had hidden error
+paths that could — in rare edge cases — abort a PostgreSQL backend process.
+All of those paths now return a structured error instead of crashing.
+Additionally, a compile-time rule now prevents production code from ever
+calling the Rust equivalent of an unchecked assertion, so this class of
+bug cannot be reintroduced silently.
 
-### New Operational APIs
+### Warning for queries that shouldn't use incremental refresh
 
-- **`pgtrickle.pause_all()` / `resume_all()`** — suspend and restart all ACTIVE
-  stream tables with a single SQL call. Useful during maintenance windows.
-- **`pgtrickle.refresh_if_stale(name, max_age)`** — refresh a stream table only
-  when it is older than `max_age`. Returns `TRUE` when a refresh was triggered.
-- **`pgtrickle.stream_table_definition(name)`** — ergonomic alias for
-  `export_definition()`. Returns the `CREATE STREAM TABLE` DDL for the named table.
-- **`pgtrickle.canary_begin(name, new_query)` / `canary_diff(name)` / `canary_promote(name)`** —
-  shadow/canary mode for testing query changes safely. Create a `__pgt_canary_<name>`
-  stream table with the new query, compare output with `canary_diff`, then promote
-  atomically with `canary_promote`.
+If you create a stream table with a query that calls time-sensitive or
+non-deterministic functions such as `now()`, `random()`, or
+`gen_random_uuid()`, pg_trickle now warns you at creation time. Those
+functions produce a different result every time they run, which means
+incremental refresh would produce wrong answers — the warning lets you
+catch this before it becomes a data problem.
 
-### Observability
+### Pause and resume everything at once
 
-- **OP-2: Built-in Prometheus metrics endpoint.** Set `pg_trickle.metrics_port = 9188`
-  and the per-database scheduler serves `GET /metrics` in OpenMetrics format.
-  No sidecar exporter needed. Metrics include `pg_trickle_refreshes_total`,
-  `pg_trickle_refresh_failures_total`, `pg_trickle_rows_changed_total`,
-  `pg_trickle_consecutive_errors`, and `pg_trickle_active`.
-- **ARCH-2: Recursive CTE fallback observability.** When a non-monotone recursive
-  CTE forces recomputation instead of semi-naive evaluation, pg_trickle now emits
-  a `NOTICE` log and records `refresh_reason = 'recursive_cte_fallback'` in
-  `pgt_refresh_history`.
+Two new functions let you halt and restart all active stream tables with
+a single SQL call:
 
-### Architecture
+```sql
+SELECT pgtrickle.pause_all();   -- stop all refreshes (e.g. before maintenance)
+SELECT pgtrickle.resume_all();  -- restart them when you're done
+```
 
-- **ARCH-1: `src/refresh.rs` split into `src/refresh/` module.** The 8,400-line
-  monolith is now a proper module directory with four sub-module landing zones:
-  `orchestrator.rs`, `codegen.rs`, `phd1.rs`, `merge.rs`. Zero behaviour change;
-  this is structural groundwork for future code migrations.
+### Refresh only when the data is actually stale
 
-### Test Coverage
+`pgtrickle.refresh_if_stale(name, max_age)` triggers a refresh only if the
+stream table is older than your specified threshold. Returns `TRUE` when a
+refresh ran, `FALSE` when the data was already fresh enough. Useful for
+scripts and scheduled jobs that shouldn't over-refresh.
 
-- **TEST-1/2/3:** 75+ new unit tests for `src/api/helpers.rs`,
-  `src/diagnostics.rs`, and `src/dvm/parser/rewrites.rs`. All tests run
-  without a PostgreSQL backend using pure-Rust helpers.
-- **TEST-4:** `fuzz/fuzz_targets/parser_fuzz.rs` — cargo-fuzz target for the
-  pure-Rust rewrite-pass helpers (`parse_schedule`, `validate_cron`,
-  `detect_select_star`, `detect_volatile_functions`).
-- **TEST-5:** Three new bgworker crash-recovery integration tests in
-  `tests/resilience_tests.rs` covering the `pg_ctl stop -m immediate` crash
-  scenario.
+### Export a stream table's definition
 
-### Database Migration
+`pgtrickle.stream_table_definition(name)` returns the complete
+`CREATE STREAM TABLE` statement for any stream table. Handy for
+documentation, disaster recovery playbooks, and migrations.
 
-This release includes a new upgrade script: `sql/pg_trickle--0.20.0--0.21.0.sql`.
-To upgrade:
+### Test query changes safely before going live
+
+A three-step canary workflow lets you try a new query on a shadow copy of
+your stream table and compare the results before committing to the change:
+
+1. `canary_begin(name, new_query)` — creates a shadow stream table running
+   the new query in parallel with the original.
+2. `canary_diff(name)` — shows exactly which rows differ between the old
+   and new queries.
+3. `canary_promote(name)` — atomically switches the live stream table to
+   the new query once you are satisfied with the results.
+
+### Built-in monitoring endpoint
+
+Set `pg_trickle.metrics_port = 9188` and pg_trickle serves a Prometheus-
+compatible metrics endpoint directly — no extra exporter software needed.
+Metrics include total refreshes, failures, rows changed per refresh, and
+the number of active stream tables.
+
+### Visibility into recursive query fallbacks
+
+When a query containing a recursive clause cannot be refreshed incrementally
+and falls back to a full refresh, pg_trickle now logs a notice and records
+the reason in refresh history. Previously this happened silently.
+
+### Upgrade
+
 ```sql
 ALTER EXTENSION pg_trickle UPDATE TO '0.21.0';
 ```
-
-New objects added:
-- `pgtrickle.pgt_refresh_history.refresh_reason` column (text, nullable)
-- `pgtrickle.pause_all()` / `pgtrickle.resume_all()`
-- `pgtrickle.refresh_if_stale(text, interval)`
-- `pgtrickle.stream_table_definition(text)`
-- `pgtrickle.canary_begin(text, text)` / `canary_diff(text)` / `canary_promote(text)`
-
-### Deferred to v0.22.0
-
-- **EC01-1/2/3/4:** The `__pgt_row_id` hash-collision fix for the DIFFERENTIAL
-  join Part 1b arm requires coordinated changes to `join.rs` and `refresh.rs`.
-  Correctness is maintained by the existing Q15 stop-gap and the fact that
-  affected queries fall back to FULL refresh under the adaptive cost model.
 
 ---
 
@@ -430,7 +418,7 @@ to keep an eye on itself, just like it keeps your data views up to date.
 
 ---
 
-## [0.19.0] — 2026-04-13
+## [0.19.0] — Security, Scheduler Performance & Operator Convenience
 
 **Safer, faster, easier to operate.** This release closes several security
 and correctness gaps, adds new conveniences for operators and developers, and
@@ -534,7 +522,7 @@ correcting behaviour that was a source of subtle bugs in production.
 
 ---
 
-## [0.18.0] — 2026-04-12
+## [0.18.0] — Hardening & Delta Performance
 
 **Hardening & Delta Performance.** This release focuses on correctness,
 reliability, and giving operators better visibility into what pg_trickle is
@@ -654,7 +642,7 @@ property-based tests mathematically verify the core delta engine's arithmetic.
 
 ---
 
-## [0.17.0] — 2026-04-08
+## [0.17.0] — Query Intelligence & Stability
 
 **Query Intelligence & Stability.** This release teaches pg_trickle to make
 smarter decisions about how to refresh each stream table, reduces unnecessary
@@ -757,7 +745,7 @@ easier to get started, troubleshoot problems, and migrate from pg_ivm.
 
 ---
 
-## [0.16.0] — 2026-04-06
+## [0.16.0] — Performance & Refresh Optimization
 
 **Performance & Refresh Optimization.** This release makes stream table
 refreshes significantly faster across the board. Small changes to large
@@ -873,7 +861,7 @@ slowing things down.
 
 ---
 
-## [0.15.0] — 2026-04-03
+## [0.15.0] — Interactive TUI, Bulk Create & Runaway-Refresh Protection
 
 0.15.0 brings the terminal dashboard to full operational capability, adds
 safety features that protect against runaway refreshes, and broadens the
@@ -1018,7 +1006,7 @@ benchmark suite.
 
 ---
 
-## [0.14.0] — 2026-04-02
+## [0.14.0] — Tiered Scheduling, Diagnostics & TUI
 
 0.14.0 is the **Tiered Scheduling, Diagnostics & TUI** release. It gives you
 fine-grained control over how often each stream table refreshes, adds tools
@@ -1213,7 +1201,7 @@ No breaking changes — everything from v0.13.0 continues to work. See
 
 ---
 
-## [0.13.0] — 2026-03-31
+## [0.13.0] — Scalability Foundations & Full TPC-H Coverage
 
 0.13.0 is the **Scalability Foundations** release. It makes pg_trickle handle
 large tables, complex queries, and multi-tenant deployments much more
@@ -1394,7 +1382,7 @@ everything from v0.12.0 continues to work as before. See
 
 ---
 
-## [0.12.0] — 2026-03-28
+## [0.12.0] — Join Correctness, Diagnostics & Reliability
 
 0.12.0 is a correctness, reliability, and developer-experience release built on
 top of 0.11.0's major new features. It closes the last known wrong-answer bugs
@@ -1567,7 +1555,7 @@ manifesting as a cryptic runtime error.
 
 ---
 
-## [0.11.0] — 2026-03-26
+## [0.11.0] — Event-Driven Latency, Chain IVM & Observability Stack
 
 This is the biggest release since the initial launch. The headline features are
 **34× lower latency** for real-time workloads, **stream-table chains that now
@@ -1823,7 +1811,7 @@ with a comprehensive set of GUC defaults fine-tuned for production use. A new
 
 ---
 
-## [0.10.0] — 2026-03-25
+## [0.10.0] — Cloud Deployment, PgBouncer & Query Engine Correctness
 
 The headline features of 0.10.0 are **cloud deployment compatibility**, **query
 engine correctness**, **refresh performance**, and **improved developer
@@ -2137,7 +2125,7 @@ actionable message at the moment they occur:
 
 ---
 
-## [0.9.0] — 2026-03-20
+## [0.9.0] — Incremental Aggregates & Smarter Scheduling
 
 The headline feature of 0.9.0 is **incremental aggregate maintenance**: when a
 single row changes inside a group of 100,000 rows, pg_trickle no longer has to
@@ -2260,7 +2248,7 @@ more design work first:
 
 ---
 
-## [0.8.0] — 2026-03-17
+## [0.8.0] — Backup, Pooler Compatibility & Reliability
 
 This release focuses on making your streams easier to back up, far more reliable under complex scenarios, and solidifying the underlying core engine through massive testing improvements.
 
@@ -2278,7 +2266,7 @@ This release focuses on making your streams easier to back up, far more reliable
 - **Massive Testing Hardening**: We have fundamentally overhauled and upgraded how we test the system. Our internal test suite has been completely enhanced with tens of thousands of continuous automated checks ensuring query answers are perfect, no matter how complex the data joins or updates get.
 - **Performance Migrations**: Began adopting new tools (`cargo nextest`) to speed up how fast we can iterate and develop the software in the background.
 
-## [0.7.0] — 2026-03-16
+## [0.7.0] — Watermark Gating, Circular Pipelines & SQL Broadening
 
 0.7.0 makes pg_trickle easier to trust in real-world data pipelines. The big
 theme of this release is fewer surprises: the scheduler can now wait for late
@@ -2401,7 +2389,7 @@ changing behavior.
 
 ---
 
-## [0.6.0] — 2026-03-14
+## [0.6.0] — Idempotent DDL, Partitioned Sources & dbt Integration
 
 ### Added
 
@@ -2539,7 +2527,7 @@ Two query patterns that previously required workarounds now just work:
 
 ---
 
-## [0.5.0] — 2026-03-13
+## [0.5.0] — Row-Level Security, Source Gating & Append-Only Fast Path
 
 ### Added
 
@@ -2621,7 +2609,7 @@ for deletes, updates, and row comparisons) and use a simple, fast insert.
 
 ---
 
-## [0.4.0] — 2026-03-12
+## [0.4.0] — Parallel Refresh & Statement-Level CDC Triggers
 
 ### Added
 
@@ -2723,7 +2711,7 @@ require action from users upgrading from v0.3.0.
 
 ---
 
-## [0.3.0] — 2026-03-11
+## [0.3.0] — Incremental Correctness & Security Tooling
 
 This is a correctness and hardening release. No new SQL functions, tables, or
 views were added — all changes are in the compiled extension code.
@@ -2783,7 +2771,7 @@ Added static security analysis to the CI pipeline:
   file and fails if any file exceeds its baseline, preventing unreviewed
   growth of low-level code.
 
-## [0.2.3] — 2026-03-09
+## [0.2.3] — Per-Table CDC Mode & WAL Lag Monitoring
 
 ### Added
 
@@ -2840,7 +2828,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 
 ---
 
-## [0.2.2] — 2026-03-08
+## [0.2.2] — AUTO Refresh Mode & Query Alteration
 
 ### Added
 
@@ -2898,7 +2886,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 
 ---
 
-## [0.2.1] — 2026-03-05
+## [0.2.1] — Safe Upgrades & Scheduling Improvements
 
 ### Added
 
@@ -2962,7 +2950,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 
 ---
 
-## [0.2.0] — 2026-03-04
+## [0.2.0] — Monitoring, IMMEDIATE Mode & Diamond Consistency
 
 ### Added
 
@@ -3022,7 +3010,7 @@ Completed a full hardening pass of the integration test suite, bringing all item
 
 ---
 
-## [0.1.3] — 2026-03-02
+## [0.1.3] — TPC-H Correctness, Window Functions & Aggregate Fixes
 
 Major hardening release with 50 improvements across correctness, robustness,
 operational safety, and test coverage.
@@ -3090,7 +3078,7 @@ produced wrong results.
 
 ---
 
-## [0.1.2] — 2026-02-28
+## [0.1.2] — Incremental Correctness Fixes & Project Rename
 
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
@@ -3149,7 +3137,7 @@ checks at this point (improved to 22/22 in v0.1.3).
 
 ---
 
-## [0.1.1] — 2026-02-26
+## [0.1.1] — CloudNativePG Image & Test Hardening
 
 ### Changed
 #### Internal Code Quality: Integration Test Suite Hardening
@@ -3172,7 +3160,7 @@ no full PostgreSQL server.
 
 ---
 
-## [0.1.0] — 2026-02-26
+## [0.1.0] — Initial Release
 
 Initial release of pg_trickle — a PostgreSQL extension that keeps query results
 automatically up to date as your data changes.
