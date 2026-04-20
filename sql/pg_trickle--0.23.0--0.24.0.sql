@@ -65,9 +65,9 @@ CREATE OR REPLACE FUNCTION pgtrickle."self_monitoring_status"() RETURNS TABLE (
 AS 'MODULE_PATHNAME', 'self_monitoring_status_wrapper';
 
 -- Drop the old function names.
-DROP FUNCTION IF EXISTS pgtrickle."setup_self_monitoring"();
-DROP FUNCTION IF EXISTS pgtrickle."teardown_self_monitoring"();
-DROP FUNCTION IF EXISTS pgtrickle."self_monitoring_status"();
+DROP FUNCTION IF EXISTS pgtrickle."setup_dog_feeding"();
+DROP FUNCTION IF EXISTS pgtrickle."teardown_dog_feeding"();
+DROP FUNCTION IF EXISTS pgtrickle."dog_feeding_status"();
 
 -- Update initiated_by CHECK constraint: add SELF_MONITOR, remove SELF_MONITOR.
 -- Use a two-step approach: drop the old constraint, add the new one.
