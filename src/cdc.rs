@@ -410,6 +410,23 @@ pub fn create_change_buffer_table(
         ""
     };
 
+    // INVARIANT: change_id uses BIGSERIAL which defaults to CACHE 1.
+    // CACHE 1 is a **hard correctness requirement** — do NOT increase it.
+    //
+    // With CACHE > 1, backends pre-allocate sequence blocks. Two concurrent
+    // transactions modifying the same row can commit in an order that
+    // inverts their cached sequence values (Tx B commits first with
+    // change_id=33, Tx A commits last with change_id=16). The compaction
+    // and delta pipelines use ORDER BY change_id to determine first/last
+    // state per PK — a cache inversion causes them to pick the stale row
+    // as the final state (silent data corruption).
+    //
+    // With CACHE 1, nextval() is called at trigger fire time while the
+    // row lock is held, so change_id order matches row-lock serialization
+    // order for same-row modifications.
+    //
+    // The WAL/logical-decoding CDC backend is immune (uses commit-LSN
+    // ordering). See: https://github.com/grove/pg-trickle/issues/536
     let sql = format!(
         "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_{oid} (\
             change_id   BIGSERIAL,\
@@ -511,6 +528,10 @@ pub fn create_st_change_buffer_table(
         ""
     };
 
+    // INVARIANT: change_id BIGSERIAL must use CACHE 1 (the default).
+    // See the base-table change buffer comment above for the full
+    // rationale — increasing CACHE causes sequence-cache inversion that
+    // silently corrupts compaction and delta ordering. Ref: issue #536.
     let sql = format!(
         "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_pgt_{id} (\
             change_id   BIGSERIAL,\
