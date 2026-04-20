@@ -879,6 +879,31 @@ async fn test_upgrade_schema_additions_from_sql() {
         to_version
     );
 
+    // Pre-collect all functions explicitly DROPped anywhere in the upgrade
+    // chain.  A function created in step N and then dropped in step M > N
+    // will not exist in the final state, so we must skip those assertions.
+    let dropped_functions: std::collections::HashSet<(String, String)> = sql_files
+        .iter()
+        .flat_map(|p| {
+            let raw = std::fs::read_to_string(p).unwrap_or_default();
+            let content: String = raw
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            regex_lite::Regex::new(r#"(?i)DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(\w+)\."(\w+)""#)
+                .unwrap()
+                .captures_iter(&content)
+                .map(|c| {
+                    (
+                        c.get(1).unwrap().as_str().to_lowercase(),
+                        c.get(2).unwrap().as_str().to_lowercase(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     let mut checks = 0;
 
     for sql_path in &sql_files {
@@ -959,6 +984,10 @@ async fn test_upgrade_schema_additions_from_sql() {
         {
             let schema = cap.get(1).unwrap().as_str().to_lowercase();
             let func = cap.get(2).unwrap().as_str().to_lowercase();
+            // Skip functions explicitly dropped later in the same upgrade chain
+            if dropped_functions.contains(&(schema.clone(), func.clone())) {
+                continue;
+            }
             let exists: bool = db
                 .query_scalar(&format!(
                     "SELECT EXISTS( \
