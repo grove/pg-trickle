@@ -317,6 +317,13 @@ GET  /api/v1/relay/pipelines            All relay pipelines (forward + reverse)
 GET  /api/v1/relay/pipelines/:id        Single pipeline detail
 GET  /api/v1/relay/pipelines/:id/lag    Lag metrics for a pipeline
 
+# Dead letter queue
+GET  /api/v1/dlq                        All unresolved dead letters (paginated)
+GET  /api/v1/dlq/:pipeline              Dead letters for one pipeline
+POST /api/v1/dlq/:id/retry              Re-attempt delivery of one dead letter
+POST /api/v1/dlq/:id/discard           Mark resolved without retry
+POST /api/v1/dlq/discard-all/:pipeline Bulk discard for a pipeline
+
 # Operational detail (sub-resources of Health in the UI)
 GET  /api/v1/cdc/sources                CDC source table status
 GET  /api/v1/cdc/buffers                Change buffer sizes
@@ -827,7 +834,8 @@ form.
 ### Health Scorecard
 
 Aggregates all `health_check()` results, slot health, change buffer
-sizes, and relay pipeline lag into a single page. Severity-sorted.
+sizes, relay pipeline lag, and dead letter counts into a single page.
+Severity-sorted.
 
 | Check | Status | Detail | Remediation |
 |-------|--------|--------|-------------|
@@ -837,7 +845,44 @@ sizes, and relay pipeline lag into a single page. Severity-sorted.
 | Buffer growth | 🔴 Critical | `orders`: 15,204 rows, growing | [Investigate →] |
 | Relay: kafka-fwd | ✅ Connected | 0 lag rows | — |
 | Relay: nats-rev | ⚠️ Degraded | 342 lag rows, 12s behind | [View pipeline →] |
+| Dead letters | 🔴 Critical | 47 unresolved across 2 pipelines | [View DLQ →] |
 | Fuses | ✅ All armed | 0 blown | — |
+
+**Dead letter queues.** When a relay message fails permanently —
+payload decode error, schema mismatch, permanent sink rejection — the
+message is written to `pgtrickle.relay_dead_letters` instead of being
+silently discarded. A non-zero and growing DLQ count is a health check
+failure surfaced here and in `breach_events`.
+
+```sql
+CREATE TABLE pgtrickle.relay_dead_letters (
+    id           BIGSERIAL PRIMARY KEY,
+    failed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    pipeline_name TEXT NOT NULL,         -- FK to relay_inbox/outbox_config.name
+    direction    TEXT NOT NULL,          -- 'inbox' or 'outbox'
+    error_type   TEXT NOT NULL,          -- 'decode', 'sink_permanent', 'inbox_permanent'
+    error_message TEXT NOT NULL,
+    raw_payload  JSONB,                  -- best-effort capture of the failed message
+    retry_count  INT NOT NULL DEFAULT 0,
+    resolved_at  TIMESTAMPTZ,            -- NULL = unresolved
+    resolved_by  TEXT                   -- 'manual', 'retry_success', 'discarded'
+);
+```
+
+The WebUI DLQ view (linked from Health) shows unresolved dead letters
+per pipeline with payload inspection, retry, and discard actions.
+A table's inbox dead letter count is also visible in the Tables list
+when the table has an associated relay inbox — a non-zero count is
+another signal that data is not arriving as expected.
+
+API:
+```
+GET  /api/v1/dlq                        All unresolved dead letters (paginated)
+GET  /api/v1/dlq/:pipeline              Dead letters for one pipeline
+POST /api/v1/dlq/:id/retry              Re-attempt delivery of one dead letter
+POST /api/v1/dlq/:id/discard           Mark as resolved without retry
+POST /api/v1/dlq/discard-all/:pipeline Bulk discard for a pipeline
+```
 
 Links in the "Remediation" column navigate to the relevant detail page
 or action form.

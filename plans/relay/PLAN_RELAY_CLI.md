@@ -944,11 +944,20 @@ lifecycle:
 | Source connection lost | Reconnect with exponential backoff. Pause relay until reconnected. |
 | Sink connection lost | Reconnect with exponential backoff. Pause relay until reconnected. |
 | Sink publish failure (transient) | Retry the batch up to 3 times with backoff. Do not acknowledge. |
-| Sink publish failure (permanent, e.g. 400) | Log error, skip the message, emit `relay_errors_total{kind="sink_permanent"}`. Advance offset to avoid poison-pill blocking. |
-| Payload decode error | Log error, skip the message. Emit `relay_errors_total{kind="decode"}`. |
-| Claim-check fetch failure | Retry up to 3 times. If permanent, log + skip + emit error metric. |
+| Sink publish failure (permanent, e.g. 400) | Write to `pgtrickle.relay_dead_letters` (`error_type = 'sink_permanent'`). Advance offset. Emit `relay_errors_total{kind="sink_permanent"}`. |
+| Payload decode error | Write to `pgtrickle.relay_dead_letters` (`error_type = 'decode'`). Advance offset. Emit `relay_errors_total{kind="decode"}`. |
+| Claim-check fetch failure | Retry up to 3 times. If permanent, write to DLQ (`error_type = 'claim_check'`). |
 | Inbox write failure (transient) | Retry with backoff. Do not ack source message. |
-| Inbox write failure (permanent) | Log error, skip message, emit `relay_errors_total{kind="inbox_permanent"}`. |
+| Inbox write failure (permanent) | Write to `pgtrickle.relay_dead_letters` (`error_type = 'inbox_permanent'`). Advance offset. Emit `relay_errors_total{kind="inbox_permanent"}`. |
+
+**No silent message loss.** Every permanently-failed message is written
+to `pgtrickle.relay_dead_letters` before advancing the offset.
+Silent discard (log + skip) is not acceptable — see AGENTS.md:
+"Data loss is unacceptable."
+
+`raw_payload` is captured best-effort (may be NULL if the message was
+undecipherable before any fields could be extracted). `pipeline_name`,
+`error_type`, `error_message`, and `failed_at` are always recorded.
 
 All retries use jittered exponential backoff to avoid thundering herds.
 
