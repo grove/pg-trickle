@@ -49,193 +49,176 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.25.0] — Scheduler Scalability & Pooler Performance
 
-This release pushes the comfortable operating point from "hundreds" to
-**thousands** of stream tables on commodity hardware. The scheduler stops
-reloading the full catalog on every tick, the template cache gains LRU
-eviction and cross-backend sharing, change detection is batched, and the DAG
-rebuild path uses copy-on-write to avoid blocking dispatch. Connection-pooler
-deployments (PgBouncer, RDS Proxy, Supabase) see the biggest win: the shared
-L0 cache signal eliminates repeated DVM parse work across backend sessions.
-The predictive cost model gets robustness guards against outlier workloads,
-and downstream publications gain subscriber-lag tracking.
+pg_trickle now comfortably manages **thousands of stream tables** on commodity
+hardware — a significant jump from the practical ceiling of a few hundred in
+earlier releases. The scheduler avoids reloading the full catalog on every
+tick, change detection is batched into far fewer database round-trips, and a
+new cache-sharing mechanism means connecting backends can skip expensive
+query re-parsing entirely. If you use a connection pooler such as PgBouncer,
+RDS Proxy, or Supabase Pooler, this release delivers the largest latency
+improvement to date.
 
-### Scheduler & Catalog Scalability
+### Scales to thousands of stream tables
 
-- **Shmem catalog snapshot cache (SCAL-1):** Stream table metadata is now
-  cached per backend, keyed by DAG version number. When the version matches
-  the shared-memory counter, the per-tick SPI catalog reload (20–200 ms at
-  100–1 000 stream tables) is skipped entirely.
+Previously, the scheduler queried the catalog on every tick — a process that
+grew slower as the stream table count increased. Metadata is now cached per
+backend and only reloaded when the dependency graph actually changes. Checking
+whether source tables have new rows is batched across an entire refresh group
+into a single query, down from one query per source per tick. Dependency-graph
+rebuilds now happen in the background without blocking ongoing refreshes, so
+you never get a stall when a stream table is created or dropped.
 
-- **Batched cross-group change detection (SCAL-2):** The new
-  `batched_has_source_changes()` helper combines change detection for an
-  entire refresh group into one SQL query using `UNION ALL` with `EXISTS`,
-  reducing per-tick SPI round-trips from O(STs × sources) toward O(1).
+**New GUC: `pg_trickle.worker_pool_size`** (default `0` = spawn-per-task).
+Set this to a positive number to keep that many background workers running
+permanently, eliminating roughly 2 ms of spawn overhead per worker on
+high-throughput deployments.
 
-- **Split PGS_STATE lock (SCAL-3):** The monolithic `PGS_STATE` shared-memory
-  lock has been split into three per-concern locks — `PGS_STATE` (DAG +
-  invalidation ring), `SCHEDULER_META_STATE` (PID, status, last wake), and
-  `TICK_WATERMARK_STATE` (xmin, safe LSN). Read-only watermark reads no
-  longer block DAG invalidation writes.
+### Faster connections through poolers
 
-- **Copy-on-write DAG rebuild (SCAL-4):** New DAG computation is now
-  explicitly structured as a copy-on-write operation — the expensive
-  `StDag::build_from_catalog()` call happens outside any lock, and the result
-  is atomically swapped into place. Readers always observe a consistent view.
+A new shared-memory signal lets each connecting backend check whether the
+query-template cache is already warm. If it is, the backend skips query
+parsing entirely and jumps straight to the cached result. This matters most in
+pooled environments — PgBouncer, RDS Proxy, Supabase — where backends connect
+and disconnect frequently and re-parsing on every connection was a hidden cost.
 
-- **Persistent worker pool option (SCAL-5):** New
-  `pg_trickle.worker_pool_size` GUC (default 0 = spawn-per-task). When set
-  to N > 0, N persistent background workers are registered that loop on the
-  job queue instead of being spawned and de-registered each tick, eliminating
-  the ~2 ms per-worker spawn overhead.
+The per-backend template cache is now bounded by
+**`pg_trickle.template_cache_max_entries`** (default `0` = unbounded). When
+the limit is reached, the least-recently-used entry is evicted automatically,
+keeping memory usage predictable on servers with many concurrent backends.
 
-### Template Cache & Pooler Latency
+A new SQL function, **`pgtrickle.clear_caches()`**, flushes all cache levels
+in one call — useful after schema changes or when debugging unexpected
+behaviour.
 
-- **L0 cross-backend cache signal (CACHE-1):** A new `L0_POPULATED_VERSION`
-  shmem atomic counter lets backends know whether the L2 catalog template
-  cache has been populated at the current `CACHE_GENERATION`. When the signal
-  is set, a connecting backend can skip the DVM parse entirely and fall
-  straight through to the L2 catalog lookup.
+### Lower overhead on high-write workloads
 
-- **L1 LRU eviction (CACHE-2):** The per-backend thread-local template cache
-  is now bounded by `pg_trickle.template_cache_max_entries` (default 0 =
-  unbounded). When the limit is reached, the least-recently-used entry is
-  evicted before inserting a new one. Evictions are tracked in the
-  `TEMPLATE_CACHE_EVICTIONS` shmem counter.
+Change fingerprinting — the hashing that identifies which rows changed —
+now streams values directly into the hash function instead of building a
+temporary string per row, eliminating one heap allocation per incoming change.
+SQL buffers in the query-projection step are pre-sized rather than repeatedly
+concatenated. Refresh timing data (how long full and incremental refreshes
+take) is stored in shared memory so parallel workers can read it without a
+catalog round-trip.
 
-- **`pgtrickle.clear_caches()` SQL function (CACHE-3):** Manually flush all
-  three cache levels (L1 thread-local, L2 catalog table, and bump
-  `CACHE_GENERATION`) from a single SQL call. Useful during emergency
-  migration and post-DDL debugging.
+### More conservative refresh-mode predictions
 
-### Hot-Path Allocation Reduction
+The predictive model that decides when to fall back from incremental to full
+refresh is now more stable. It waits for at least 60 seconds of history before
+making any prediction — preventing erratic switches on fresh deployments —
+removes statistical outliers before fitting, and keeps its output within a
+reasonable band around recent observed timings.
 
-- **xxh3 streaming hash (PERF-1):** `pg_trickle_hash_multi` now uses the
-  `xxh3` streaming API (`Xxh3::update` + `Xxh3::digest`) instead of
-  concatenating column values into an intermediate `String`. Per-row heap
-  allocations on the CDC hot path are eliminated.
+### Subscriber lag tracking for downstream publications
 
-- **Pre-sized SQL buffer in project operator (PERF-2):** The project operator
-  in `src/dvm/operators/project.rs` now pre-sizes its output `String` and
-  uses `write!` macros instead of repeated `format!` + string concatenation.
+If you use `stream_table_to_publication()` to feed a downstream system,
+pg_trickle now monitors how far behind each subscriber's replication slot has
+fallen. When a subscriber exceeds **`pg_trickle.publication_lag_warn_bytes`**,
+a warning is logged and change-buffer cleanup is paused for that slot until it
+catches up — preventing data loss for slow consumers.
 
-- **Shmem adaptive cost-model state (PERF-3):** Per-stream-table
-  `last_full_ms` / `last_diff_ms` refresh timing is now stored in shared
-  memory (`COST_MODEL_STATE`). Parallel workers read from shmem instead of
-  SPI, eliminating a catalog round-trip per worker dispatch.
+A new SQL function, **`pgtrickle.worker_allocation_status()`**, returns
+per-database worker usage, quotas, and queue depth across the cluster. Useful
+for diagnosing scheduler starvation in multi-tenant deployments.
 
-### Predictive Model & Publication Durability
+### Upgrade notes
 
-- **Robustness guards on predictive cost model (PRED-1):** The linear
-  regression model now requires at least 60 seconds of history before making
-  predictions (cold-start guard), filters outliers using IQR before fitting,
-  and clamps predictions to `[0.5×, 4×] last_full_ms` to prevent runaway
-  full-refresh promotions.
-
-- **Subscriber-LSN tracking for downstream publications (PUB-1):** pg_trickle
-  now monitors `pg_replication_slots.confirmed_flush_lsn` for all publication
-  slots. When a subscriber falls behind by more than
-  `pg_trickle.publication_lag_warn_bytes` bytes, a WARNING is emitted and
-  change-buffer truncation is deferred until the subscriber catches up.
-
-- **Multi-DB worker fairness view (PUB-2):** New
-  `pgtrickle.worker_allocation_status()` SQL function returns per-database
-  worker used / quota / queued counts alongside the cluster-wide active and
-  maximum worker counts. Useful for diagnosing scheduler starvation in
-  multi-tenant deployments.
-
-### Upgrade Notes
-
-- **Hash function change:** `pg_trickle_hash_multi` now uses xxh3 instead of
-  xxh64. Row IDs will differ from previous releases. Run
-  `SELECT pgtrickle.reinitialize('<schema>.<table>')` to regenerate row IDs
-  after upgrading if you rely on stable row ID values across versions.
-
-- **No schema changes** except the two new SQL functions (`clear_caches` and
-  `worker_allocation_status`) registered by the upgrade script. No data
-  migration is required.
+- **Row ID change:** The internal hash function changed from xxh64 to xxh3.
+  If your application relies on stable pg_trickle row ID values across
+  versions, run `SELECT pgtrickle.reinitialize('<schema>.<table>')` on each
+  affected stream table after upgrading.
+- **No schema changes** beyond two new SQL functions (`clear_caches` and
+  `worker_allocation_status`). No data migration required.
 
 ---
 
 ## [0.24.0] — Join Correctness & Durability Hardening
 
-This release focuses on two things: making sure stream tables that join
-multiple source tables are always correct, and making sure your data is
-never lost or skipped — even when the server crashes or long-running
-database transactions are in flight.
+This release focuses on two themes: **correctness** — ensuring stream tables
+that join multiple source tables always give you the right answer — and
+**durability** — ensuring your data is never lost or skipped, even when the
+server crashes or long-running transactions are in flight.
 
 ### More accurate results from multi-table joins
 
-When a stream table combines data from two or more source tables, pg_trickle
-now guarantees that an incremental refresh produces exactly the same result
-as starting over from scratch. A subtle inconsistency in how rows were
-identified across refresh cycles could previously cause "ghost" rows to
-build up silently over time. Those ghost rows are now detected after every
-incremental refresh and removed automatically.
+When a stream table combines rows from two or more source tables, pg_trickle
+now guarantees that an incremental refresh produces exactly the same result as
+a full recompute from scratch. A subtle bug in how rows were tracked across
+refresh cycles could previously cause phantom rows to accumulate silently over
+time. Those phantom rows are now detected automatically after every incremental
+refresh and cleaned up.
 
 ### No data loss across crashes or restarts
 
-pg_trickle now records its progress in two steps: a tentative checkpoint
-before the data is written, and a confirmed checkpoint after. If the server
-crashes between the two steps, pg_trickle reconciles the saved position on
-restart — so no changes are replayed twice and none are silently skipped.
-The scheduler also preserves its last known-safe position across restarts,
-closing a narrow window that existed in earlier versions.
+pg_trickle now records its progress in a crash-safe sequence: it saves its
+intent before writing data, then marks completion afterwards. If the server
+goes down between those two steps, pg_trickle reconciles its position on
+restart — no changes are processed twice and none are silently dropped. The
+scheduler also persists its last known-safe position across restarts, closing
+a narrow gap that existed in earlier versions.
 
-### Rows from long-running transactions are never silently skipped
+### Long-running transactions no longer cause missed changes
 
-If a database transaction stays open while pg_trickle is refreshing, the
-changes it is writing could previously be overlooked — they were recorded
+If a database transaction stays open while pg_trickle is running a refresh,
+the changes it is writing could previously be overlooked — they were captured
 before the refresh started but not yet visible to it. pg_trickle now checks
-for open transactions before advancing its read position and holds back
-until those transactions have committed. Control the behaviour with the
-`pg_trickle.frontier_holdback_mode` setting; get a warning when a single
-transaction has been holding things back longer than
-`pg_trickle.frontier_holdback_warn_seconds` (default 60 seconds).
+for open transactions before advancing its read position and waits for them to
+commit first.
+
+- **`pg_trickle.frontier_holdback_mode`** — controls the holdback behaviour.
+- **`pg_trickle.frontier_holdback_warn_seconds`** (default `60`) — logs a
+  warning when a transaction has been blocking progress longer than this
+  threshold.
 
 ### Works correctly on managed cloud databases
 
-AWS RDS, Cloud SQL, and Azure Database for PostgreSQL restrict which
-monitoring views are accessible. pg_trickle now detects this automatically
-and tells you exactly which permission to grant:
+AWS RDS, Cloud SQL, and Azure Database for PostgreSQL restrict access to
+certain monitoring views. pg_trickle now detects this automatically and tells
+you exactly what to do:
+
 ```sql
 GRANT pg_monitor TO <your_pg_trickle_role>;
 ```
-Without this grant pg_trickle would previously behave as if no transactions
-were open — the same unsafe state the holdback was designed to prevent. See
-`docs/TROUBLESHOOTING.md` section 14 for the full diagnosis steps.
 
-### Control durability vs. speed
+Without this grant, pg_trickle previously behaved as if no transactions were
+open — the same unsafe condition the holdback feature was built to prevent.
+See `docs/TROUBLESHOOTING.md` section 14 for full diagnosis steps.
 
-A new `pg_trickle.change_buffer_durability` setting lets you choose how
-carefully pg_trickle stores incoming changes before they are processed:
+### Choose your durability level
 
-- **`unlogged`** (default) — fastest; change buffers are lost on crash.
-- **`logged`** — survives crashes; changes are replicated to standby servers.
-- **`sync`** — maximum durability; writes are confirmed before continuing.
+The new **`pg_trickle.change_buffer_durability`** setting controls how
+carefully incoming changes are stored before processing:
+
+- **`unlogged`** (default) — fastest; change buffers do not survive a server
+  crash.
+- **`logged`** — survives crashes and replicates to standby servers.
+- **`sync`** — maximum safety; every write is confirmed to disk before
+  continuing.
 
 ### Automatic history clean-up
 
-Old refresh history rows are now automatically deleted in small batches
-during idle moments. Previously the history table grew without bound and
-could become very large on busy deployments.
+Old refresh history rows are now pruned automatically in small background
+batches during idle time. Previously the history table grew without bound,
+which could become noticeable on busy deployments.
 
 ### Alerts for frozen stream tables
 
-A new monitoring view, `df_frozen_stream_tables`, flags any stream table
-that has not refreshed within 5× its expected refresh interval and sends an
-alert on the `pgtrickle_alert` notification channel. Useful for catching
-a stuck or disabled stream table before users notice stale data.
+The new **`pgtrickle.df_frozen_stream_tables`** view flags any stream table
+that has not refreshed within 5× its expected interval, and sends a
+notification on the `pgtrickle_alert` channel. Useful for catching a stuck or
+disabled stream table before users notice stale data.
 
 ### New monitoring metrics
 
-Two new Prometheus metrics show the state of the holdback:
-- `pg_trickle_frontier_holdback_lsn_bytes` — how far behind the read
-  position is being held, in bytes.
-- `pg_trickle_frontier_holdback_seconds` — how long the oldest open
+Two new Prometheus metrics expose holdback state:
+
+- **`pg_trickle_frontier_holdback_lsn_bytes`** — how far behind the read
+  position is being held, in bytes of WAL.
+- **`pg_trickle_frontier_holdback_seconds`** — how long the oldest blocking
   transaction has been running.
 
-All metrics now consistently use the `pg_trickle_` prefix. If you have
-alerting rules or dashboards using the old `pgtrickle_` prefix, update them.
+> **Note:** All metrics now use the `pg_trickle_` prefix consistently. If
+> your dashboards or alerting rules use the old `pgtrickle_` prefix, update
+> them before upgrading.
 
 ---
 
