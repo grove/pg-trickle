@@ -500,8 +500,18 @@ individual node.
 **Three zoom levels:**
 
 **Level 0 — Systems overview (landing).** One node per PostgreSQL
-schema. External relay endpoints (Kafka, NATS, etc.) appear as leaf
-nodes attached to the schema containing their inbox/outbox table.
+schema. External relay endpoints (Kafka, NATS, webhook, etc.) appear
+as leaf circles attached to the schema that contains their inbox or
+outbox table.
+
+A schema can have **multiple relay inboxes from different backends** —
+one Kafka consumer, one webhook receiver, one file watcher — all
+writing into the same `erp_raw` schema. At Level 0 they each appear
+as a separate leaf circle on the `erp_raw` node. The schema remains
+the single named group: "Is ERP data healthy?" is answered by
+`erp_raw`'s aggregate status badge, regardless of how many backends
+feed it or what transport they use. The schema is the logical unit;
+the relay endpoints are transport plumbing.
 
 **Level 1 — Group detail.** Click a schema group or an edge between
 two groups to see all individual nodes within that scope. Shows
@@ -1226,23 +1236,29 @@ named.
 **Level 0 — Systems overview (hub-and-spoke).** One node per schema.
 Each schema node shows: object count, aggregate SLA status (worst
 child), pipeline count on connecting edges. External relay endpoints
-appear as unlabelled leaf nodes attached to the schemas that contain
-their inbox/outbox tables. This view is always readable regardless of
+appear as leaf circles attached to the schemas that contain their
+inbox/outbox tables. Multiple inboxes feeding the same schema
+(Kafka + webhook + file, all writing into `erp_raw`) each get their
+own leaf circle — but the schema is the single named node answering
+"Is ERP data healthy?" This view is always readable regardless of
 total object count.
 
 ```
-┌────────┐     ┌─────────┐     ┌───────────┐     ┌───────────┐     ┌──────┐
-│ Kafka  │────▶│ erp_raw │────▶│ canonical │────▶│ analytics │────▶│ NATS │
-│        │     │ 3 tables│     │ 45 tables │     │ 8 tables  │     │      │
-│        │     │ ● 3     │     │● 43🟡1🔴1 │     │ ● 8       │     │      │
-└────────┘     └─────────┘     └───────────┘     └───────────┘     └──────┘
+●Kafka─┐
+       ├──▶┌─────────┐     ┌───────────┐     ┌───────────┐
+●HTTP──┘   │ erp_raw │────▶│ canonical │────▶│ analytics │────▶NATS●
+           │ 5 tables│     │ 45 tables │     │ 8 tables  │
+           │ ● 5     │     │● 43🟡1🔴1 │     │ ● 8       │────▶Kafka●
+           └─────────┘     └───────────┘     └───────────┘
 ```
 
-Middle: PG schemas. Leaf nodes on left: relay reverse pipeline
-endpoints (backend type icon + connected/disconnected status). Leaf
-nodes on right: relay forward pipeline endpoints. Layout position is
-auto-inferred: schemas that contain only base tables and relay inboxes
-are placed left; schemas with outboxes and relay forwards are placed
+Middle: PG schemas. Leaf circles on left: relay reverse pipeline
+endpoints (backend type icon + connected/disconnected). Leaf circles
+on right: relay forward pipeline endpoints. Multiple endpoints on the
+same side of a schema are shown as a stack of circles. Layout
+position is auto-inferred: schemas that contain only base tables and
+relay inboxes are placed left; schemas with outboxes and relay
+forwards are placed
 right; everything else is center. No configuration required.
 
 **Level 1 — Schema detail.** Click a schema group → shows all individual
