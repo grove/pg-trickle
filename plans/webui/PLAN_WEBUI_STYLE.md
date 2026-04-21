@@ -200,7 +200,7 @@ Status colours are used on:
 | Node type | Border colour | Fill colour (dark) | Fill colour (light) |
 |-----------|--------------|-------------------|-------------------|
 | Schema group (Level 0) | Worst-child SLA colour | `zinc-900` | `white` |
-| External system group (Level 0) | `zinc-600` | `zinc-800` | `zinc-100` |
+| External relay endpoint (Level 0 leaf) | `blue-500` (connected) / `red-500` (disconnected) | `zinc-800` | `zinc-100` |
 | External source (Kafka, NATS) | `zinc-600` | `zinc-800` | `zinc-100` |
 | Relay pipeline | `blue-500` (connected) / `red-500` (disconnected) | `blue-950` / `red-950` | `blue-50` / `red-50` |
 | Inbox / Outbox table | `teal-500` | `teal-950` | `teal-50` |
@@ -352,35 +352,35 @@ right edge, top nav to bottom edge). No page heading, no padding. The
 graph IS the page.
 
 The landing view is **Level 0 — Systems overview**: one node per
-PostgreSQL schema, one node per relay connection name, arranged as a
-hub-and-spoke. This view is always readable regardless of total node
-count.
+PostgreSQL schema, with external relay endpoints as leaf nodes.
+This view is always readable regardless of total node count.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  [breadcrumb: Systems]                              [legend] │
 │                                                              │
-│  ┌──────────┐     ┌─────────┐     ┌───────────┐             │
-│  │ erp-kafka│────▶│ erp_raw │────▶│ canonical │──┐          │
-│  │ 3 topics │     │ 3 tables│     │ 45 tables │  │          │
-│  │ ● 3      │     │ ● 3     │     │ ●43 🟡1 🔴1│  │          │
-│  └──────────┘     └─────────┘     └───────────┘  │          │
-│  ┌──────────┐            ▲               │       │          │
-│  │ crm-kafka│────▶ ┌─────┴───┐           ▼       │          │
-│  │ 2 topics │     │ crm_raw │     ┌───────────┐  │          │
-│  │ ● 2      │     │ 2 tables│     │ analytics │──┼─▶ [nats] │
-│  └──────────┘     └─────────┘     │ 8 tables  │  │          │
-│                                   │ ● 8       │  │          │
-│                                   └───────────┘  │          │
-│                                                  ▼          │
-│                                           ┌────────────┐    │
-│                                           │ kafka-sink │    │
-│                                           │ 2 topics   │    │
-│                                           └────────────┘    │
-│                                                              │
+│  ●Kafka──▶┌─────────┐     ┌───────────┐             │
+│           │ erp_raw │────▶│ canonical │──┐          │
+│  ●Kafka──▶│ 5 tables│     │ 45 tables │  │          │
+│           │ ● 5     │     │●43 🟡1 🔴1│  │          │
+│           └─────────┘     └───────────┘  │          │
+│           ┌─────────┐           │        │          │
+│           │ crm_raw │─────────▶ │        │          │
+│           │ 2 tables│           │        │          │
+│           └─────────┘           ▼        │          │
+│                          ┌───────────┐   │          │
+│                          │ analytics │───┼──▶ NATS● │
+│                          │ 8 tables  │   │          │
+│                          │ ● 8       │   ▼          │
+│                          └───────────┘  Kafka●      │
+│                                                      │
 │  [minimap]                              [zoom +/−] [fit]    │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+External relay endpoints are leaf circles (●) showing backend type
+icon and connected/disconnected status — not separately named groups.
+The schemas provide all meaningful grouping.
 
 **Drilling in (Level 1).** Click a schema group node (e.g. `erp_raw`)
 or click an edge between two groups (e.g. `erp_raw → canonical`).

@@ -87,7 +87,7 @@ The current getting-started path requires:
 
 1. Install the PostgreSQL extension
 2. Write SQL to create stream tables and configure CDC
-3. Install the relay binary and write TOML configuration
+3. Install the relay binary and configure it via SQL
 4. Use the TUI or raw SQL to monitor
 
 Each step requires a different tool and a different skill set. The WebUI
@@ -404,10 +404,12 @@ write operations. SQL preview before every action.
 | **Manual refresh** | `SELECT pgtrickle.refresh(...)` |
 | **Pause/resume stream table** | `SELECT pgtrickle.alter_stream_table(...)` |
 
-**Backend form:** When creating a pipeline, the form includes a dropdown
-for backend type (Kafka, NATS, Redis, etc.) and renders the relevant
-fields dynamically. Credential fields display as `${env:VAR}` references
-with documentation inline — secrets never pass through the WebUI.
+**Backend form:** When creating a pipeline, the form generates the
+`INSERT INTO pgtrickle.relay_outbox_config` or `relay_inbox_config` SQL
+with the JSONB config object. Credential fields are shown as
+`${env:VAR_NAME}` or `${file:/path/to/secret}` reference tokens —
+the relay resolves these from the process environment at startup.
+Secrets never pass through the WebUI or get stored in the database.
 
 ### Tier 3 — Stream Table Wizard & Full Setup (Deprioritized)
 
@@ -498,11 +500,8 @@ individual node.
 **Three zoom levels:**
 
 **Level 0 — Systems overview (landing).** One node per PostgreSQL
-schema and one node per relay connection name. Hub-and-spoke layout.
-Always readable regardless of total stream table count. Each node
-shows: object count, aggregate SLA status (worst child), pipeline
-count on connecting edges. See [OQ-12](#oq-12-large-deployment-ui-scalability)
-for the full design.
+schema. External relay endpoints (Kafka, NATS, etc.) appear as leaf
+nodes attached to the schema containing their inbox/outbox table.
 
 **Level 1 — Group detail.** Click a schema group or an edge between
 two groups to see all individual nodes within that scope. Shows
@@ -523,7 +522,7 @@ directly.
 | Node type | Shape | Colour | Badge |
 |-----------|-------|--------|-------|
 | Schema group (Level 0) | Rounded rectangle, thick border | Worst-child SLA colour | Object count + status summary |
-| External system (Level 0) | Rounded rectangle | Grey | Pipeline count + backend icon |
+| External relay endpoint (Level 0 leaf) | Circle | Blue (connected) / Red (disconnected) | Backend type icon |
 | External source (Kafka, NATS, ...) | Rounded rectangle | Grey | Backend icon |
 | Relay pipeline | Hexagon | Blue (connected) / Red (disconnected) | Lag rows |
 | Inbox / Outbox table | Rectangle, dashed border | Teal | Buffer depth |
@@ -1205,68 +1204,69 @@ most firewall-friendly option and covers remote agents, CI/CD
 pipelines, and browser-based tools. stdio transport (for local agents)
 and raw WebSocket can be added later if needed.
 
-### OQ-12: Large-deployment UI scalability
+### OQ-12: Large-deployment UI scalability — schema-based semantic zoom
 
 ~~pg-trickle can scale to 1000+ stream tables. The WebUI's topology
 graph and list views must handle this, but the right approach is an
 open design question.~~
 
-**Decision: Multi-level semantic zoom using schemas and connection
-names.** The topology graph uses a three-level hierarchy derived
-entirely from existing PostgreSQL and relay configuration — no new
-metadata required.
+**Decision: Multi-level semantic zoom using schemas only.** The topology
+graph groups all objects — including inbox and outbox tables — by
+PostgreSQL schema. No new metadata, no JSONB parsing, no naming
+conventions required.
 
-Two grouping axes, both pre-existing:
+**Single grouping axis: PostgreSQL schemas.** Every PG object (stream
+table, base table, inbox table, outbox table) has exactly one schema
+via `pg_class.relnamespace`. That schema IS the group. External relay
+endpoints (Kafka brokers, NATS servers) are simple leaf nodes on the
+edge of the schema that contains their inbox/outbox table — they show
+backend type and connection status but are not separately grouped or
+named.
 
-| Axis | Mechanism | Source |
-|---|---|---|
-| PG objects (stream tables, base tables, inboxes, outboxes) | PostgreSQL schemas | `pg_class.relnamespace` |
-| External systems (Kafka brokers, NATS servers, etc.) | Relay connection names | `[connections.*]` in relay TOML |
-
-**Level 0 — Systems overview (hub-and-spoke).** One node per schema
-(for PG objects) and one node per relay connection name (for external
-systems). Each node shows: object count, aggregate SLA status (worst
-child), pipeline count on edges. This view is always readable
-regardless of total node count — even 50 source systems produce a
-manageable graph.
+**Level 0 — Systems overview (hub-and-spoke).** One node per schema.
+Each schema node shows: object count, aggregate SLA status (worst
+child), pipeline count on connecting edges. External relay endpoints
+appear as unlabelled leaf nodes attached to the schemas that contain
+their inbox/outbox tables. This view is always readable regardless of
+total object count.
 
 ```
-┌──────────┐     ┌─────────┐     ┌───────────┐     ┌───────────┐     ┌───────────────┐
-│ erp-kafka│────▶│ erp_raw │────▶│ canonical │────▶│ analytics │────▶│analytics-nats │
-│ 3 topics │     │ 3 tables│     │ 45 tables │     │ 8 tables  │     │ 2 subjects    │
-│ ● 3      │     │ ● 3     │     │ ● 43 🟡1 🔴1│  │ ● 8      │     │ ● 2           │
-└──────────┘     └─────────┘     └───────────┘     └───────────┘     └───────────────┘
+┌────────┐     ┌─────────┐     ┌───────────┐     ┌───────────┐     ┌──────┐
+│ Kafka  │────▶│ erp_raw │────▶│ canonical │────▶│ analytics │────▶│ NATS │
+│        │     │ 3 tables│     │ 45 tables │     │ 8 tables  │     │      │
+│        │     │ ● 3     │     │● 43🟡1🔴1 │     │ ● 8       │     │      │
+└────────┘     └─────────┘     └───────────┘     └───────────┘     └──────┘
 ```
 
-Left: relay connection names (reverse/inbound). Middle: PG schemas.
-Right: relay connection names (forward/outbound). Layout position is
-auto-inferred: schemas containing only base tables + relay inboxes
-are placed left; schemas with outboxes + relay forwards are placed
-right; everything else is center. No manual layout configuration
-required.
+Middle: PG schemas. Leaf nodes on left: relay reverse pipeline
+endpoints (backend type icon + connected/disconnected status). Leaf
+nodes on right: relay forward pipeline endpoints. Layout position is
+auto-inferred: schemas that contain only base tables and relay inboxes
+are placed left; schemas with outboxes and relay forwards are placed
+right; everything else is center. No configuration required.
 
-**Level 1 — Schema / connection detail.** Click a schema group or an
-edge between two groups → shows all individual nodes within that
-scope, with edges to/from adjacent groups. Supports **partial
-pipelines**: "Show me all flows from `erp-kafka` to `canonical`"
-without rendering what happens downstream of canonical.
+**Level 1 — Schema detail.** Click a schema group → shows all individual
+nodes within that schema, with edges to adjacent schemas and to the
+external relay endpoints. Supports **partial pipelines**: clicking the
+edge between `erp_raw` and `canonical` shows only the flows between
+those two schemas.
 
-**Level 2 — Individual flow.** Click a specific node or flow → full
-pipeline detail (every node with staleness, buffer depth, SLA). Same
-as the pipeline detail view.
+**Level 2 — Individual flow.** Click a specific flow → full pipeline
+detail (every node with staleness, buffer depth, SLA). Same as the
+pipeline detail view.
 
 **Fallback for no grouping.** If all objects are in the `public` schema
-and no relay connections are configured, the topology falls back to
-the flat graph (all individual nodes). The WebUI shows a hint:
-"Organize stream tables into schemas to enable the systems overview."
+and no relay connections are configured, the topology renders a flat
+graph with all individual nodes directly. No extra clicks required for
+small deployments.
 
-**Why schemas, not a custom grouping table.** Schemas are PostgreSQL's
-native organizational primitive. They align with dbt's `schema` config,
-data vault patterns (raw/business vault schemas), medallion
-architecture (bronze/silver/gold), and standard access control
-(`GRANT USAGE ON SCHEMA`). Adding a `layer` or `source_group` column
-would duplicate what schemas already provide and diverge from
-PostgreSQL conventions.
+**Why schemas only, not a custom grouping table.** Schemas are
+PostgreSQL's native organizational primitive. They align with dbt's
+`schema` config, data vault patterns (raw/business vault schemas),
+medallion architecture (bronze/silver/gold), and standard access
+control (`GRANT USAGE ON SCHEMA`). Inbox and outbox tables already
+live in meaningful schemas by convention — no additional metadata
+needed to group them.
 
 **API support:**
 
