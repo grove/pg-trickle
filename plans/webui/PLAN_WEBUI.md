@@ -79,6 +79,55 @@ an accessible alternative to managed streaming platforms (RisingWave
 Cloud, Confluent Cloud, Materialize) while retaining PostgreSQL as the
 foundation.
 
+### Key architectural decisions
+
+**No logic in JavaScript.** Every derived value that an external tool
+(Grafana, Prometheus, alertmanager) could usefully see is computed in
+the database or API layer, never in the browser. The three layers are:
+- *DB* — structural table types, E2E lag, SLA %, root-cause/blast-radius
+  classification. All queryable directly from SQL.
+- *API* — assembles transport annotations from relay config tables;
+  computes nothing that SQL cannot.
+- *Browser* — graph layout positions, relative timestamps, UI state.
+
+**Topology = schemas only.** The Level 0 topology graph shows one node
+per PostgreSQL schema. External transports (Kafka, NATS, webhook) are
+small icon annotations on schema nodes, not separate graph nodes. A
+typical shop uses one Kafka cluster for everything — a Kafka node would
+add noise, not information. Layout is computed automatically from
+inter-schema edge direction by dagre/elkjs with no manual tier
+assignment.
+
+**Tables list, not a pipelines list.** There is no separate "pipelines"
+concept. A pipeline is just a table plus its upstream lineage — the same
+thing. Each stream table has a structural type (inbox / outbox / leaf /
+intermediate / union / orphan) inferred from the DAG by
+`pgtrickle.table_classifications`. E2E lag is shown on every table, not
+just leaf tables. Fan-in/fan-out topologies (10 sources × 10 sinks)
+produce N table rows, not 100 path rows.
+
+**Root cause vs inherited breach in the DB.** `pgtrickle.breach_events`
+is a stream table that classifies each breach as `root` (independent
+failure) or `inherited` (cascade from upstream). The UI, Grafana
+dashboards, and Prometheus alerts all read from this single source of
+truth. The sidebar badge counts root cause events only — not downstream
+noise. A single broken inbox cascading to 10 outputs produces 1 alert
+entry and 1 badge count, not 11.
+
+**Bidirectional lineage on every table.** The table detail page shows
+upstream (root cause analysis — what feeds this table?) and downstream
+(blast radius — what breaks if this table fails?) in a single centred
+lineage view. Clicking any node re-centres the view on that node.
+Toggling between table-level and column-level granularity happens in
+the same canvas.
+
+**Single-schema auto-navigate with breadcrumb.** If the deployment has
+only one schema, the topology opens directly at Level 1 (individual
+nodes) rather than a pointless single-node Level 0. The breadcrumb
+always shows `Systems > <schema>` so the operator can navigate back,
+see the schemas-as-groups model, and understand how a second schema
+would appear.
+
 ---
 
 ## Motivation
