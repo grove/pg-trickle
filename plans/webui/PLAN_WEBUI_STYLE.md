@@ -199,6 +199,8 @@ Status colours are used on:
 
 | Node type | Border colour | Fill colour (dark) | Fill colour (light) |
 |-----------|--------------|-------------------|-------------------|
+| Schema group (Level 0) | Worst-child SLA colour | `zinc-900` | `white` |
+| External system group (Level 0) | `zinc-600` | `zinc-800` | `zinc-100` |
 | External source (Kafka, NATS) | `zinc-600` | `zinc-800` | `zinc-100` |
 | Relay pipeline | `blue-500` (connected) / `red-500` (disconnected) | `blue-950` / `red-950` | `blue-50` / `red-50` |
 | Inbox / Outbox table | `teal-500` | `teal-950` | `teal-50` |
@@ -349,20 +351,82 @@ and spatial arrangement.
 right edge, top nav to bottom edge). No page heading, no padding. The
 graph IS the page.
 
+The landing view is **Level 0 — Systems overview**: one node per
+PostgreSQL schema, one node per relay connection name, arranged as a
+hub-and-spoke. This view is always readable regardless of total node
+count.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  [breadcrumb: Systems]                              [legend] │
+│                                                              │
+│  ┌──────────┐     ┌─────────┐     ┌───────────┐             │
+│  │ erp-kafka│────▶│ erp_raw │────▶│ canonical │──┐          │
+│  │ 3 topics │     │ 3 tables│     │ 45 tables │  │          │
+│  │ ● 3      │     │ ● 3     │     │ ●43 🟡1 🔴1│  │          │
+│  └──────────┘     └─────────┘     └───────────┘  │          │
+│  ┌──────────┐            ▲               │       │          │
+│  │ crm-kafka│────▶ ┌─────┴───┐           ▼       │          │
+│  │ 2 topics │     │ crm_raw │     ┌───────────┐  │          │
+│  │ ● 2      │     │ 2 tables│     │ analytics │──┼─▶ [nats] │
+│  └──────────┘     └─────────┘     │ 8 tables  │  │          │
+│                                   │ ● 8       │  │          │
+│                                   └───────────┘  │          │
+│                                                  ▼          │
+│                                           ┌────────────┐    │
+│                                           │ kafka-sink │    │
+│                                           │ 2 topics   │    │
+│                                           └────────────┘    │
+│                                                              │
+│  [minimap]                              [zoom +/−] [fit]    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Drilling in (Level 1).** Click a schema group node (e.g. `erp_raw`)
+or click an edge between two groups (e.g. `erp_raw → canonical`).
+The graph transitions to show individual nodes within that scope:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  [breadcrumb: Systems > erp_raw → canonical]      [legend]  │
+│                                                              │
+│  erp_raw                        canonical                   │
+│  ┌──────────────┐               ┌─────────────────────┐     │
+│  │ orders_inbox │──▶ orders_raw ──▶ orders_canonical   │     │
+│  │              │   3s stale       5s stale             │     │
+│  └──────────────┘               └─────────────────────┘     │
+│  ┌──────────────┐               ┌─────────────────────┐     │
+│  │ items_inbox  │──▶ items_raw  ──▶ items_canonical    │     │
+│  │              │   2s stale       4s stale             │     │
+│  └──────────────┘               └─────────────────────┘     │
+│  ┌──────────────┐               ┌─────────────────────┐     │
+│  │ stock_inbox  │──▶ stock_raw  ──▶ stock_canonical 🟡 │     │
+│  │              │   12s stale      45s stale            │     │
+│  └──────────────┘               └─────────────────────┘     │
+│                                                              │
+│  [minimap]                              [zoom +/−] [fit]    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Breadcrumb at top allows navigation back to Level 0. Individual
+nodes show their staleness badges and SLA colours inline.
+
+For **small deployments** (all objects in `public`, no relay), Level 0
+and Level 1 collapse into a single flat graph showing all nodes
+directly — no extra clicks needed.
+
 **Overlays on the graph canvas:**
 
-- **Top-left:** Minimap (reactflow built-in or Cytoscape plugin). ~200×120 px,
-  semi-transparent background. Shows full graph with current viewport
-  highlighted.
-- **Top-right:** Legend toggle button. Clicking opens a floating legend
-  showing node shapes, colours, and edge encodings.
+- **Top-left:** Minimap (~200×120 px, semi-transparent background).
+- **Top-right:** Legend toggle button.
 - **Bottom-left:** Zoom controls (+/−/fit), layout reset button.
 - **Bottom-right:** Time slider (for historical replay, Tier 2+).
   Hidden by default, toggled by a clock icon.
 
-**Right panel (Sheet):** Clicking a node opens a `Sheet` (shadcn/ui
-slide-over panel) from the right edge, ~400 px wide. The graph
-shifts/compresses to accommodate. The sheet shows:
+**Right panel (Sheet):** Clicking an individual node (Level 1+) opens
+a `Sheet` (shadcn/ui slide-over panel) from the right edge, ~400 px
+wide. Clicking a group node (Level 0) drills into Level 1 instead.
+The sheet shows:
 
 - Node name (monospace, with copy button)
 - Status badge (healthy/warning/breach)

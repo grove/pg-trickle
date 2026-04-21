@@ -490,25 +490,40 @@ optimized for different tasks:
 
 ### Unified Topology Graph
 
-The centrepiece of the WebUI. A single interactive graph showing the
-complete event flow, including relay nodes:
+The centrepiece of the WebUI. A multi-level interactive graph using
+**semantic zoom** — the graph shows the logical structure at whatever
+level of detail the user is looking at, from systems overview to
+individual node.
 
-```
-[Kafka topic] ──▶ relay reverse ──▶ [inbox: orders_raw]
-                                          │
-                                          ▼
-                                [stream: revenue_7d]
-                                          │
-                                [stream: regional_summary]
-                                          │
-                                          ▼
-                               [outbox: summary_out] ──▶ relay forward ──▶ [NATS subject]
-```
+**Three zoom levels:**
+
+**Level 0 — Systems overview (landing).** One node per PostgreSQL
+schema and one node per relay connection name. Hub-and-spoke layout.
+Always readable regardless of total stream table count. Each node
+shows: object count, aggregate SLA status (worst child), pipeline
+count on connecting edges. See [OQ-12](#oq-12-large-deployment-ui-scalability)
+for the full design.
+
+**Level 1 — Group detail.** Click a schema group or an edge between
+two groups to see all individual nodes within that scope. Shows
+partial pipelines between adjacent groups (e.g., all flows from
+`erp_raw` to `canonical`). This is the level where individual stream
+table nodes appear with their status badges.
+
+**Level 2 — Individual flow.** Click a specific flow line to see the
+full pipeline detail — every node from source to sink with staleness,
+buffer depth, SLA budget.
+
+For **small deployments** (all objects in `public`, no relay), Level 0
+and Level 1 collapse into a single flat graph showing all nodes
+directly.
 
 **Node types and visual encoding:**
 
 | Node type | Shape | Colour | Badge |
 |-----------|-------|--------|-------|
+| Schema group (Level 0) | Rounded rectangle, thick border | Worst-child SLA colour | Object count + status summary |
+| External system (Level 0) | Rounded rectangle | Grey | Pipeline count + backend icon |
 | External source (Kafka, NATS, ...) | Rounded rectangle | Grey | Backend icon |
 | Relay pipeline | Hexagon | Blue (connected) / Red (disconnected) | Lag rows |
 | Inbox / Outbox table | Rectangle, dashed border | Teal | Buffer depth |
@@ -518,13 +533,18 @@ complete event flow, including relay nodes:
 **Edge encoding:**
 
 - Width proportional to throughput (rows/sec over last 5 min)
+- At Level 0: width proportional to pipeline count, colour = worst SLA
 - Colour: green (healthy), amber (lag growing), red (SLA breach)
 - Animated dots for active data flow (like RisingWave's backpressure)
 
 **Interactions:**
 
-- Click a node → opens detail panel (stats, config, history)
+- Click a group node (Level 0) → drill into Level 1 (schema detail)
+- Click an edge between groups → show partial pipelines between them
+- Click a node (Level 1) → opens detail panel (stats, config, history)
 - Hover an edge → shows throughput, lag, last update timestamp
+- Breadcrumb trail at top: Systems > erp_raw > orders_raw
+- Back button / breadcrumb returns to previous zoom level
 - Time slider → replays historical state using `refresh_timeline()` data
 - Zoom/pan, drag-to-rearrange
 - Deep-linkable: `/ui/topology?focus=revenue_7d` highlights a node
@@ -1187,51 +1207,77 @@ and raw WebSocket can be added later if needed.
 
 ### OQ-12: Large-deployment UI scalability
 
-pg-trickle can scale to 1000+ stream tables. The WebUI's topology
+~~pg-trickle can scale to 1000+ stream tables. The WebUI's topology
 graph and list views must handle this, but the right approach is an
-open design question.
+open design question.~~
 
-**Industry precedent:** No comparable tool shows a global topology
-graph at scale. RisingWave's relation graph breaks above ~100 nodes.
-Snowflake and Databricks both use **per-object lineage** (click a
-table → see its upstream/downstream) rather than a global graph, plus
-hierarchical browsing and search for discovery.
+**Decision: Multi-level semantic zoom using schemas and connection
+names.** The topology graph uses a three-level hierarchy derived
+entirely from existing PostgreSQL and relay configuration — no new
+metadata required.
 
-The pattern across all three:
+Two grouping axes, both pre-existing:
 
-| Concern | How they solve it |
-|---|---|
-| Discovery | Search + filter + hierarchical browse |
-| Understanding relationships | Per-object scoped lineage graph |
-| Global overview | Lists with status indicators, not graphs |
-| Scale | Pagination / virtual scroll + server-side filtering |
+| Axis | Mechanism | Source |
+|---|---|---|
+| PG objects (stream tables, base tables, inboxes, outboxes) | PostgreSQL schemas | `pg_class.relnamespace` |
+| External systems (Kafka brokers, NATS servers, etc.) | Relay connection names | `[connections.*]` in relay TOML |
 
-**What we know:**
+**Level 0 — Systems overview (hub-and-spoke).** One node per schema
+(for PG objects) and one node per relay connection name (for external
+systems). Each node shows: object count, aggregate SLA status (worst
+child), pipeline count on edges. This view is always readable
+regardless of total node count — even 50 source systems produce a
+manageable graph.
 
-- The global topology graph works well for small deployments (<50–100
-  nodes) and is the right landing page for them.
-- For large deployments, the primary navigation shifts to search +
-  pipeline list + per-object scoped lineage.
-- The API must support server-side filtering, pagination, and scoped
-  topology queries (`GET /api/v1/dag/topology?focus=<name>&depth=N`).
-- Virtual scrolling (`@tanstack/react-table`) handles 10k-row lists
-  in the browser.
+```
+┌──────────┐     ┌─────────┐     ┌───────────┐     ┌───────────┐     ┌───────────────┐
+│ erp-kafka│────▶│ erp_raw │────▶│ canonical │────▶│ analytics │────▶│analytics-nats │
+│ 3 topics │     │ 3 tables│     │ 45 tables │     │ 8 tables  │     │ 2 subjects    │
+│ ● 3      │     │ ● 3     │     │ ● 43 🟡1 🔴1│  │ ● 8      │     │ ● 2           │
+└──────────┘     └─────────┘     └───────────┘     └───────────┘     └───────────────┘
+```
 
-**Open sub-questions:**
+Left: relay connection names (reverse/inbound). Middle: PG schemas.
+Right: relay connection names (forward/outbound). Layout position is
+auto-inferred: schemas containing only base tables + relay inboxes
+are placed left; schemas with outboxes + relay forwards are placed
+right; everything else is center. No manual layout configuration
+required.
 
-1. At what node count should the landing page switch from global graph
-   to pipeline list? (~50? ~100? User-configurable?)
-2. Should the global graph show a clustered/summarized view at scale
-   (collapsed groups with health badges) or simply not render?
-3. Should the scoped graph (per-object lineage) be a separate page or
-   a filtered state of the topology page
-   (`/ui/topology?focus=revenue_7d&depth=2`)?
-4. How should the search experience work — command palette, search bar
-   in sidebar, or both?
+**Level 1 — Schema / connection detail.** Click a schema group or an
+edge between two groups → shows all individual nodes within that
+scope, with edges to/from adjacent groups. Supports **partial
+pipelines**: "Show me all flows from `erp-kafka` to `canonical`"
+without rendering what happens downstream of canonical.
 
-This requires prototyping and user testing. The Tier 1 implementation
-should target the <100 node case (global graph + pipeline list). The
-large-deployment UX is a Tier 2 design task.
+**Level 2 — Individual flow.** Click a specific node or flow → full
+pipeline detail (every node with staleness, buffer depth, SLA). Same
+as the pipeline detail view.
+
+**Fallback for no grouping.** If all objects are in the `public` schema
+and no relay connections are configured, the topology falls back to
+the flat graph (all individual nodes). The WebUI shows a hint:
+"Organize stream tables into schemas to enable the systems overview."
+
+**Why schemas, not a custom grouping table.** Schemas are PostgreSQL's
+native organizational primitive. They align with dbt's `schema` config,
+data vault patterns (raw/business vault schemas), medallion
+architecture (bronze/silver/gold), and standard access control
+(`GRANT USAGE ON SCHEMA`). Adding a `layer` or `source_group` column
+would duplicate what schemas already provide and diverge from
+PostgreSQL conventions.
+
+**API support:**
+
+```
+GET /api/v1/dag/topology?level=0             Systems overview
+GET /api/v1/dag/topology?level=1&schema=erp_raw  Schema drill-in
+GET /api/v1/dag/topology?level=1&from=erp_raw&to=canonical
+                                              Partial pipeline view
+GET /api/v1/dag/topology?focus=revenue_7d&depth=2
+                                              Per-object neighbourhood
+```
 
 ### OQ-11: Agent guardrails
 
