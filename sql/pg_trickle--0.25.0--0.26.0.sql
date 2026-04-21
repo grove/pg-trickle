@@ -1,0 +1,34 @@
+-- pg_trickle 0.25.0 → 0.26.0 upgrade migration
+-- ============================================
+--
+-- v0.26.0 — Test & Concurrency Hardening
+--
+-- All changes in this release are code-only (no SQL schema changes):
+--
+-- CONC-1: Simultaneous ALTER + REFRESH E2E test (code-only)
+-- CONC-2: Simultaneous DROP + REFRESH E2E test (code-only)
+-- CONC-3: Parallel-worker duplicate-pick E2E test (code-only)
+-- CONC-4: Concurrent canary promotion race E2E test (code-only)
+-- SLA-1:  Predictive cost model accuracy harness (code-only)
+-- SLA-2:  SLA tier oscillation damping with hysteresis (code-only)
+-- SLA-3:  SLA tier oscillation property test (code-only)
+-- FUZZ-1: Cron parser fuzz target (code-only)
+-- FUZZ-2: GUC string→enum fuzz target (code-only)
+-- FUZZ-3: CDC trigger payload fuzz target (code-only)
+-- SCALE-1: Partition-count scale test (code-only)
+-- SCALE-2: Multi-DB worker starvation test (code-only)
+-- ARCH-1B: Refresh sub-module migration (code-only)
+--   - src/refresh/orchestrator.rs: RefreshAction, determine_refresh_action,
+--     cost model, execute_reinitialize_refresh
+--   - src/refresh/codegen.rs: SQL template builders, MERGE SQL cache,
+--     planner hints, change-buffer cleanup, ST-to-ST delta capture
+--   - src/refresh/merge.rs: execute_differential_refresh, execute_full_refresh,
+--     execute_topk_refresh, execute_no_data_refresh, partition helpers
+--   - src/refresh/mod.rs: reduced to <500 LOC (re-exports + shared types)
+-- ERR-1: Typed DiagnosticError variant (code-only)
+-- ERR-2: Typed PublicationError variant (code-only)
+-- ERR-3: Scheduler timestamp errors with HINT (code-only)
+-- ERR-4: Crash-recovery E2E test for publication downstream (code-only)
+--
+-- No SQL schema objects were added, modified, or removed in this release.
+-- This file is intentionally empty beyond this comment block.
