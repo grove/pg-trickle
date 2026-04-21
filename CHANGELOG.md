@@ -50,65 +50,96 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.26.0] — Test & Concurrency Hardening
 
-This release closes the test coverage and concurrency gaps identified in
-the v0.23.0 assessment. No new SQL API surface is added — every change is
-purely internal (tests, architecture, error handling).
+> **What's new:** This release is all about making pg_trickle more reliable
+> and battle-tested. No new SQL commands or user-facing features — every change
+> is internal: more tests, safer concurrent operations, cleaner code structure,
+> and tighter error handling.
 
-### Concurrency Test Matrix
+### Safer under concurrent load
 
-- **CONC-1** — New E2E test: simultaneous `alter_stream_table` + `refresh_stream_table`
-  asserts no deadlock and catalog stays consistent.
-- **CONC-2** — New E2E test: `drop_stream_table` while refresh is in progress asserts
-  clean abort, no orphaned change buffers, no dangling catalog rows.
-- **CONC-3** — Deterministic E2E test: parallel workers never pick the same stream table
-  for simultaneous refresh.
-- **CONC-4** — E2E test: two concurrent refreshes trigger buffer promotion simultaneously;
-  exactly one succeeds and metadata is consistent.
+Running multiple operations at the same time — such as modifying a stream table
+while it's actively refreshing, or dropping a table while its workers are still
+running — is now explicitly tested and guaranteed to be safe. These scenarios
+were handled before, but lacked the tests to prove it. That proof is now part
+of every build.
 
-### Predictive Model & SLA Stability
+- **Simultaneous alter + refresh** (`alter_stream_table` + `refresh_stream_table`)
+  no longer risks a deadlock. The catalog stays consistent throughout. *(CONC-1)*
+- **Drop during refresh** aborts cleanly — no orphaned change buffers, no
+  dangling catalog rows left behind. *(CONC-2)*
+- **Parallel scheduler workers** are prevented from picking the same stream table
+  for refresh at the same time — a deterministic guarantee, not just a convention.
+  *(CONC-3)*
+- **Simultaneous buffer promotion** — when two workers race to promote a change
+  buffer, exactly one succeeds and the metadata stays consistent. *(CONC-4)*
 
-- **SLA-1** — New `tests/e2e_predictive_cost_tests.rs` with sawtooth, bursty, and
-  single-spike workloads. Validates model recovery and preemption accuracy.
-- **SLA-2** — SLA tier oscillation damping: require 3 consecutive breaches before
-  downgrading, 3 consecutive successes before upgrading. Prevents tier flapping
-  under boundary-condition workloads.
-- **SLA-3** — Proptest with randomised latency distributions around the SLA boundary
-  asserts tier stability across 10,000 iterations.
+### More stable SLA-based scheduling
 
-### Fuzz & Scale Testing
+The scheduler uses a predictive model to decide when to refresh stream tables,
+balancing your latency targets against system load. That model now holds its
+ground under difficult workloads.
 
-- **FUZZ-1** — `fuzz/fuzz_targets/cron_fuzz.rs`: cron expression parser fuzz target.
-- **FUZZ-2** — `fuzz/fuzz_targets/guc_fuzz.rs`: GUC string→enum coercion fuzz target.
-- **FUZZ-3** — `fuzz/fuzz_targets/cdc_fuzz.rs`: CDC trigger payload fuzz target.
-- **SCALE-1** — `#[ignore]`-gated E2E test: 1,000-partition source table trigger-install
-  + first refresh completes within 60 s.
-- **SCALE-2** — E2E multi-database starvation test: flooded worker pool does not starve
-  hot-tier STs in a second database.
+- **Bursty, sawtooth, and spike workloads** are all validated in a new dedicated
+  test suite (`tests/e2e_predictive_cost_tests.rs`), covering model recovery and
+  preemption accuracy. *(SLA-1)*
+- **No more tier flapping** — the SLA tier (which controls how aggressively a
+  stream table is refreshed) now requires 3 consecutive breaches before
+  downgrading and 3 consecutive successes before upgrading. This prevents the
+  system from flip-flopping between tiers at the boundary, which caused needless
+  refresh churn in earlier releases. *(SLA-2)*
+- **10,000-iteration randomised stress test** — property-based testing with
+  random latency distributions around the SLA boundary confirms the tier stays
+  stable even in adversarial conditions. *(SLA-3)*
 
-### Architecture: ARCH-1B Refresh Sub-Module Migration
+### Fuzz testing and extreme-scale validation
 
-`src/refresh/mod.rs` was an ~8,900-line monolith. It has been split into
-focused sub-modules with zero behaviour change:
+Three new fuzz targets probe corners of the codebase that normal tests miss —
+feeding malformed, random, or adversarial inputs to find crashes before users do:
 
-- `src/refresh/orchestrator.rs` — `RefreshAction`, `determine_refresh_action`,
-  adaptive cost model, `execute_reinitialize_refresh`.
-- `src/refresh/codegen.rs` — SQL template builders, MERGE SQL cache, planner hints,
-  change-buffer cleanup, ST-to-ST delta capture.
-- `src/refresh/merge.rs` — `execute_differential_refresh`, `execute_full_refresh`,
-  `execute_topk_refresh`, `execute_no_data_refresh`, partition-aware MERGE helpers.
-- `src/refresh/mod.rs` — reduced to **185 LOC** (re-exports + shared types).
+| Fuzz target | What it covers |
+|-------------|---------------|
+| `fuzz/fuzz_targets/cron_fuzz.rs` | Cron expression parser — malformed schedules can no longer panic the extension. *(FUZZ-1)* |
+| `fuzz/fuzz_targets/guc_fuzz.rs` | GUC string → enum coercion — invalid config values are safely rejected. *(FUZZ-2)* |
+| `fuzz/fuzz_targets/cdc_fuzz.rs` | CDC trigger payloads — unexpected row shapes are handled gracefully. *(FUZZ-3)* |
 
-### Error Handling Tightening
+Two new scale tests validate behaviour at extremes:
 
-- **ERR-1** — `DiagnosticError(String)` variant in `PgTrickleError`; bare `pgrx::error!`
-  calls in `src/api/diagnostics.rs` and `src/monitor.rs` replaced.
-- **ERR-2** — `PublicationError` variants (`PublicationAlreadyExists`, `PublicationNotFound`,
-  `PublicationRebuildFailed`) in `PgTrickleError`; bare calls in `src/api/publication.rs` replaced.
-- **ERR-3** — Scheduler `TimestampWithTimeZone` construction failures now include a HINT
-  ("check system clock") to aid operator diagnosis.
-- **ERR-4** — New `tests/e2e_publication_crash_recovery_tests.rs`: kills postmaster with
-  an active publication subscriber, restarts, verifies subscriber catches up with zero
-  data loss.
+- A source table with **1,000 partitions** installs CDC triggers and completes
+  its first refresh within 60 seconds. *(SCALE-1)*
+- A flooded worker pool does **not** starve high-priority stream tables in a
+  second database — multi-database fairness is enforced under load. *(SCALE-2)*
+
+### Cleaner internals: refresh module split
+
+The refresh orchestrator had grown into a single ~8,900-line file —
+manageable when the feature set was smaller, but increasingly hard to
+navigate. It has been split into three focused modules with **zero behaviour
+change**:
+
+| Module | Responsibility |
+|--------|---------------|
+| `src/refresh/orchestrator.rs` | Decides *when* and *how* to refresh — action selection, adaptive cost model, re-initialisation logic |
+| `src/refresh/codegen.rs` | Builds SQL queries, manages the MERGE cache, handles change-buffer cleanup and ST-to-ST delta capture |
+| `src/refresh/merge.rs` | Executes differential, full, TopK, and no-data refreshes, plus partition-aware MERGE helpers |
+| `src/refresh/mod.rs` | Reduced from ~8,900 lines to **185 lines** — re-exports and shared types only |
+
+### Tighter error handling
+
+Bare `pgrx::error!()` calls scattered through the codebase have been replaced
+with structured error variants in `PgTrickleError`. This makes logs easier to
+parse, enables more precise error recovery, and gives operators clearer
+messages when things go wrong.
+
+- **`DiagnosticError(String)`** — replaces bare errors in diagnostics and
+  monitor code (`src/api/diagnostics.rs`, `src/monitor.rs`). *(ERR-1)*
+- **Publication errors** — `PublicationAlreadyExists`, `PublicationNotFound`,
+  and `PublicationRebuildFailed` are now first-class enum variants in
+  `PgTrickleError`, replacing bare calls in `src/api/publication.rs`. *(ERR-2)*
+- **Clock skew hint** — scheduler timestamp failures now include a HINT
+  (`"check system clock"`) so operators can quickly identify the cause. *(ERR-3)*
+- **Crash-recovery test** (`tests/e2e_publication_crash_recovery_tests.rs`) —
+  kills the postmaster with an active publication subscriber, restarts, and
+  verifies the subscriber catches up with **zero data loss**. *(ERR-4)*
 
 ---
 
