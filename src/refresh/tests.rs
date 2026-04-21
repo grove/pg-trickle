@@ -115,7 +115,7 @@ fn test_execute_differential_refresh_rejects_unpopulated_stream_table() {
             assert!(message.contains("unpopulated stream table public.test_st"));
             assert!(message.contains("FULL refresh is required first"));
         }
-        other => panic!("expected InvalidArgument, got {other:?}"),
+        other => panic!("expected InvalidArgument, got {other:?}"), // nosemgrep: semgrep.rust.panic-in-sql-path
     }
 }
 
@@ -132,7 +132,7 @@ fn test_execute_differential_refresh_rejects_empty_frontier() {
             assert!(message.contains("public.test_st"));
             assert!(message.contains("no previous frontier exists"));
         }
-        other => panic!("expected InvalidArgument, got {other:?}"),
+        other => panic!("expected InvalidArgument, got {other:?}"), // nosemgrep: semgrep.rust.panic-in-sql-path
     }
 }
 
@@ -360,7 +360,7 @@ fn test_merge_template_cache_insert_and_retrieve() {
 
     let entry = MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().get(&42).cloned());
     assert!(entry.is_some());
-    let entry = entry.unwrap();
+    let entry = entry.unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(entry.defining_query_hash, 12345);
     assert_eq!(entry.source_oids, vec![100, 200]);
 
@@ -606,7 +606,7 @@ fn test_extract_using_clause_for_estimation() {
     let using_end = merge_sql.find(" AS d ON ");
     assert!(using_start.is_some());
     assert!(using_end.is_some());
-    let clause = &merge_sql[using_start.unwrap()..using_end.unwrap()];
+    let clause = &merge_sql[using_start.unwrap()..using_end.unwrap()]; // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(clause, "(SELECT * FROM delta)");
 }
 
@@ -614,8 +614,8 @@ fn test_extract_using_clause_for_estimation() {
 fn test_extract_using_clause_complex_cte() {
     let merge_sql = r#"MERGE INTO "s"."t" AS st USING (WITH cte AS NOT MATERIALIZED (SELECT a FROM b) SELECT * FROM cte) AS d ON st.id = d.id WHEN MATCHED THEN DELETE"#;
 
-    let using_start = merge_sql.find("USING ").map(|p| p + 6).unwrap();
-    let using_end = merge_sql.find(" AS d ON ").unwrap();
+    let using_start = merge_sql.find("USING ").map(|p| p + 6).unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
+    let using_end = merge_sql.find(" AS d ON ").unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     let clause = &merge_sql[using_start..using_end];
     assert!(clause.starts_with("(WITH cte AS NOT MATERIALIZED"));
     assert!(clause.ends_with("SELECT * FROM cte)"));
@@ -2083,21 +2083,21 @@ fn test_build_keyless_delete_template_counts_correctly() {
 
 #[test]
 fn test_parse_hash_bound_spec_basic() {
-    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 2)").unwrap();
+    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 2)").unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(m, 4);
     assert_eq!(r, 2);
 }
 
 #[test]
 fn test_parse_hash_bound_spec_various_values() {
-    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 8, remainder 7)").unwrap();
+    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 8, remainder 7)").unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(m, 8);
     assert_eq!(r, 7);
 }
 
 #[test]
 fn test_parse_hash_bound_spec_remainder_zero() {
-    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 0)").unwrap();
+    let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 0)").unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(m, 4);
     assert_eq!(r, 0);
 }
@@ -2233,7 +2233,7 @@ fn test_multi_frontier_cleanup_never_deletes_unconsumed() {
     ];
 
     let safe_lsn =
-        compute_safe_cleanup_lsn(&consumer_frontiers).expect("should have a safe threshold");
+        compute_safe_cleanup_lsn(&consumer_frontiers).expect("should have a safe threshold"); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(safe_lsn, "0/200"); // MIN of all consumers
 
     let retained = retained_after_cleanup(&buffer_entries, &safe_lsn);
