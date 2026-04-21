@@ -269,7 +269,7 @@ under Health as sub-sections, not as top-level navigation.
 ├──────────────┬──────────────────────────────────────────┤
 │              │                                          │
 │  ◈ Topology  │         [main content area]              │
-│  ⇀ Pipelines │                                          │
+│  ⊞ Tables    │                                          │
 │  ♥ Health  2 │                                          │
 │  ▲ Activity 3│                                          │
 │              │                                          │
@@ -287,7 +287,7 @@ under Health as sub-sections, not as top-level navigation.
 | Item | Icon | Badge | Target |
 |------|------|-------|--------|
 | Topology | Graph icon | — | `/ui/topology` (landing) |
-| Pipelines | Arrow-right-left icon | Count of flows in breach | `/ui/pipelines` |
+| Tables | Table icon | Count of tables in SLA breach | `/ui/tables` |
 | Health | Heart icon | Count of critical + warning checks | `/ui/health` |
 | Activity | Bell icon | Count of unread alerts | `/ui/activity` |
 | Settings | Gear icon (bottom-pinned) | — | `/ui/settings` |
@@ -310,12 +310,10 @@ Next.js App Router with the following route structure:
 /ui/topology                → Topology graph (landing page)
 /ui/topology?focus=<name>   → Topology with node highlighted
 /ui/topology?focus=<name>&depth=2 → Scoped neighbourhood graph
-/ui/pipelines               → Pipelines (end-to-end flows) list
-/ui/pipelines/[id]          → Pipeline detail (ordered node list)
-/ui/pipelines/[id]/[name]   → Stream table detail within a pipeline
-/ui/tables/[name]           → Stream table detail (standalone, for deep links)
-/ui/tables/[name]/lineage   → Column-level lineage (full page)
-/ui/tables/[name]/operators → DVM operator inspector (full page)
+/ui/tables                  → Tables list (all stream tables, sorted worst SLA first)
+/ui/tables/[schema]/[table]          → Table detail + bidirectional lineage
+/ui/tables/[schema]/[table]/lineage  → Column-level lineage (full page)
+/ui/tables/[schema]/[table]/operators → DVM operator inspector (full page)
 /ui/health                  → Health scorecard (CDC, fuses, slots, workers as sub-sections)
 /ui/activity                → Alerts + refresh timeline (tabbed or stacked)
 /ui/settings                → Configuration view
@@ -327,8 +325,9 @@ Displayed at the top of the content area, below the page heading:
 
 ```
 Topology                                  ← no breadcrumb (root page)
-Pipelines > orders → analytics            ← pipeline detail
-Pipelines > orders → analytics > revenue_7d ← table detail within a pipeline
+Tables                                    ← tables list
+Tables > analytics.regional_summary       ← table detail
+Tables > analytics.regional_summary > revenue_7d  ← upstream node detail
 Health > CDC Sources                      ← health sub-section
 ```
 
@@ -437,116 +436,198 @@ The sheet shows:
 
 Clicking "View detail →" navigates to the full detail page.
 
-### Pipelines List
+### Tables List
 
-The primary list view. Shows end-to-end data flows derived from the
-DAG, sorted worst-first by default.
+The primary list view. Every stream table annotated with its structural
+type, sorted worst SLA first by default.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Pipelines                                      [search 🔍] │
-│                    [All ▼] [Mode: All ▼] [SLA: All ▼]     │
+│  Tables                                         [search 🔍] │
+│             [Schema: All ▼] [Type: All ▼] [SLA: All ▼]    │
 ├──────────────────────────────────────────────────────────────┤
-│  Flow                  Nodes  E2E Lag    SLA      Status  │
-│  ───────────────────  ─────  ─────────  ───────  ────── │
-│  orders → regional_sum  5      45s        ████ 75% 🟡     │
-│  Kafka → analytics      3      12s        ██░ 20%  🟢     │
-│  events → NATS          2      3s         █░ 10%   🟢     │
-│  customers (orphan)     1      0s         ─         ─     │
-│  ...                                                      │
+│  Table                Type          Staleness  E2E Lag  SLA  │
+│  ───────────────────  ──────────    ─────────  ───────  ─── │
+│  analytics.regional_summary  leaf union  45s   61s  ████ 🔴  │
+│  analytics.revenue_7d        intermediate 12s  28s  ██░ 🟡   │
+│  erp_raw.orders_raw          inbox        3s    3s  █ 🟢     │
+│  erp_raw.customers           orphan       —     —   —        │
+│  ...                                                         │
 ├──────────────────────────────────────────────────────────────┤
-│  8 flows                                                  │
+│  24 tables                                                   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- **Flow column:** Source → sink shorthand. Monospace.
-- **Nodes column:** Count of stream tables + relay connectors in the path.
-- **E2E Lag:** Cumulative staleness from source to sink.
-- **SLA column:** Progress bar of the worst node in the flow.
-- **Status column:** Coloured dot (green/amber/red) for quick scanning.
-- **Sortable columns:** Default sort by SLA budget descending (worst
-  first — problems at the top).
-- **Row click:** Navigates to pipeline detail.
-- **Faceted filters:** Schema, refresh mode (DIFF/FULL), SLA status
-  (healthy/warning/breach).
-- **Search:** Matches any node name in the flow.
+- **Type column:** Badge chips (inbox / outbox / leaf / intermediate /
+  union / orphan). Multiple badges allowed.
+- **Staleness:** How stale this table's own data is.
+- **E2E Lag:** Max cumulative staleness from any root to this table.
+- **SLA column:** Progress bar of the worst SLA breach in the upstream
+  chain, including this table.
+- **Row click:** Navigates to table detail.
+- **Sortable columns:** Default sort by SLA budget descending.
+- **Faceted filters:** Schema, type badge, refresh mode (DIFF/FULL), SLA status.
+- **Search:** Matches table name or schema.
 
-### Pipeline Detail
+### Table Detail
 
-Ordered list of every node in the flow, from source to sink.
+Shows the table's own metrics plus its **bidirectional lineage** —
+upstream (root causes) on the left, this table in the centre,
+downstream (blast radius) on the right.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  ← Pipelines                                               │
-│  orders → regional_summary             [View in Topology]  │
-│  ● Warning · 5 nodes · E2E lag: 45s                         │
+│  ← Tables                                                    │
+│  analytics.regional_summary       leaf union  [View in Topology] │
+│  🔴 SLA breach · 5 upstream · 2 downstream · E2E lag: 61s    │
 ├──────────────────────────────────────────────────────────────┤
-│                                                            │
-│  ○ orders (base table)          CDC: trigger · 0 buffer    │
-│  │                                                        │
-│  ● orders_raw (stream, DIFF)    3s stale · 0 buffer       │
-│  │                                                        │
-│  ● revenue_7d (stream, DIFF)    12s stale · 0 buffer      │
-│  │                                                        │
-│  ● regional_summary (stream)    45s stale · 1,204 buffer  │
-│  │                                        ⚠️ SLA 75%       │
-│  ○ NATS:analytics (relay fwd)   ● Connected · 0 lag        │
-│                                                            │
+│  [Overview]  [Lineage]  [History]  [Operators]  [SQL]          │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  Staleness       Buffer Depth      Last Refresh     Avg (1h)  │
+│  45s             1,204 rows        61s ago          180ms     │
+│  E2E Lag: 61s                                                  │
+│                                                               │
+│  Lineage (Overview tab — condensed)                           │
+│                                                               │
+│  UPSTREAM (root causes)        THIS       DOWNSTREAM (impact)  │
+│  ○ orders ──►                                                  │
+│  ├● orders_raw ──►               ┌────────────┐  ►● NATS outbox  │
+│  │ └● revenue_7d ─►─►─►  │ regional  │  ►● exec_report  │
+│  ○ costs ──►              │ _summary  │                    │
+│  └● costs_raw ──►         └────────────┘                    │
+│    └● costs_7d ─►─►─►                                       │
+│                                                               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- Each node row is clickable → opens stream table detail (inline
-  expand or navigate to `/ui/pipelines/[id]/[name]`).
-- "View in Topology" button opens the topology graph focused on this
-  flow's nodes.
-- The vertical line connecting nodes visualizes the flow direction.
-- Nodes are annotated with: type (base/stream/relay), refresh mode,
-  staleness, buffer depth, SLA status.
-- Cumulative lag builds up visually down the list — you can see where
-  in the chain the latency is added.
+- Upstream nodes are coloured by SLA status — quickly shows which
+  branch is the root cause of a breach.
+- Downstream nodes are coloured by SLA status — shows blast radius.
+- Click any node → navigates to that table's detail (lineage re-centres on clicked node).
+- "View in Topology" scopes the topology graph to this neighbourhood.
+- The **Lineage** tab expands this to a full-canvas interactive graph.
 
-### Stream Table Detail
+### Table Detail — Full Page
 
-Tabbed layout. Page heading shows table name + status badge.
+All table navigation (from list, from lineage, from topology) lands on
+the same page at `/ui/tables/[schema]/[table]`. Five tabs:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  ← Tables                                                     │
-│  revenue_7d                              [Refresh ↻] [⋯]    │
-│  ● Healthy · DIFFERENTIAL · every 60s                        │
+│  ← Tables                                                    │
+│  analytics.regional_summary  [leaf] [union]   [Refresh ↻][⋯]│
+│  🔴 SLA breach · DIFFERENTIAL · every 60s                    │
 ├──────────────────────────────────────────────────────────────┤
-│  [Overview]  [History]  [Lineage]  [Operators]  [SQL]        │
-├──────────────────────────────────────────────────────────────┤
+│  [Overview]  [Lineage]  [History]  [Operators]  [SQL]        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Action buttons (top right, always visible):**
+- `Refresh ↻` — triggers manual refresh (previewed if Tier 2+)
+- `⋯` dropdown — Pause, Resume, View in Topology, Copy table name
+
+---
+
+**Overview tab** (default)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Staleness   Buffer Depth   Last Refresh   Avg (1h)  E2E Lag │
+│  45s         1,204 rows     61s ago        180ms     61s     │
 │                                                               │
-│  Staleness       Buffer Depth      Last Refresh     Avg (1h) │
-│  12s             0 rows            3s ago           45ms     │
+│  ┌─ Refresh sparkline (1h) ──────────────────────────────┐  │
+│  │ ▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁          │  │
+│  └───────────────────────────────────────────────────────┘  │
 │                                                               │
-│  ┌─ Refresh History (sparkline, 1h) ────────────────────┐   │
-│  │  ▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁▁▂▃▂▁▂▃▃▂▁        │   │
-│  └──────────────────────────────────────────────────────┘   │
+│  Mini lineage (upstream left · this centre · downstream right)│
+│  ○ orders ──►                                                │
+│  ├● orders_raw ──►           ┌─────────────┐  ►● NATS outbox│
+│  │ └● revenue_7d ───────────►│regional_sum │  ►● exec_report│
+│  ○ costs ──►                 └─────────────┘                │
+│  └● costs_7d ────────────────►                              │
 │                                                               │
 │  Columns                                                      │
-│  Name             Type         Nullable   Source              │
-│  ─────────────    ──────────   ────────   ──────────         │
-│  region           text         NO         customers.region   │
-│  total_revenue    numeric      NO         SUM(orders.amount) │
-│  order_count      bigint       NO         COUNT(*)           │
-│                                                               │
+│  Name              Type       Nullable   DVM source          │
+│  ──────────────    ────────   ────────   ───────────────     │
+│  region            text       NO         orders.region       │
+│  revenue_total     numeric    NO         SUM(orders.amount)  │
+│  order_count       bigint     NO         COUNT(*)            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Tabs:**
+---
 
-- **Overview:** Metrics cards + column list + sparkline (default tab)
-- **History:** Full refresh log table (paginated, sortable by duration/time/delta size)
-- **Lineage:** Column-level lineage graph (per-column DAG, rendered in a sub-graph)
-- **Operators:** DVM operator tree (graphviz-wasm rendering)
-- **SQL:** View definition + compiled delta SQL side-by-side (read-only code blocks)
+**Lineage tab** — full-canvas bidirectional graph
 
-**Action buttons (top right):**
+```
+┌──────────────────────────────────────────────────────────────┐
+│  [Table lineage ●]  [Column lineage ○]       [depth: all ▼] │
+├──────────────────────────────────────────────────────────────┐
+│                                                               │
+│   ○ orders           ┌─────────────┐   ● NATS outbox        │
+│   ├─●orders_raw ────►│             │                         │
+│   │  └─●revenue_7d ─►│regional_sum │──►● exec_report        │
+│   ○ costs            │             │                         │
+│   └──●costs_7d ─────►└─────────────┘                        │
+│                                                               │
+│  [minimap]                              [zoom +/−] [fit]    │
+└──────────────────────────────────────────────────────────────┘
+```
 
-- "Refresh ↻" — triggers manual refresh (SQL preview if Tier 2+)
-- "⋯" dropdown — Pause, Resume, View in Topology, Copy table name
+Toggle between **Table lineage** (node = table) and **Column lineage**
+(node = individual column — shows which upstream columns feed each
+output column). Clicking any node navigates to its detail page,
+re-centering the lineage graph. Depth slider (1 hop / 2 hops / all)
+controls how far upstream and downstream to render.
+
+---
+
+**History tab** — refresh log
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Time             Mode   Duration   Rows Δ   Status          │
+│  ────────────     ─────  ────────   ──────   ──────          │
+│  13:42:01         DIFF   45ms       +12      ✅              │
+│  13:41:01         DIFF   180ms      +3,204   ✅              │
+│  13:40:01         FULL   2,400ms    —        ✅ (fuse reset) │
+│  13:39:01         DIFF   —          —        🔴 error        │
+│  ...                                                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Paginated, sortable. Click a row → expands to show error detail or
+delta summary.
+
+---
+
+**Operators tab** — DVM operator tree
+
+Graphviz-wasm rendering of the compiled differential operator tree.
+Read-only. Shows how the SQL query was decomposed into
+`Filter → Join → Aggregate → Consolidate` operators. Useful for
+debugging why a table uses FULL refresh (unsupported operator visible
+here).
+
+---
+
+**SQL tab** — view definition + delta SQL
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  View definition (source)      Delta SQL (compiled)          │
+│  ───────────────────────────   ─────────────────────────    │
+│  SELECT region,                WITH _delta AS (             │
+│    SUM(amount) AS revenue,       SELECT ...                  │
+│    COUNT(*) AS order_count       FROM pgtrickle_changes...   │
+│  FROM orders                   )                            │
+│  GROUP BY region               UPDATE regional_summary ...  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Both panels are read-only syntax-highlighted code blocks. Side-by-side
+on wide screens, stacked on narrow.
 
 ### SLA Budget Dashboard
 

@@ -247,17 +247,13 @@ guarantees from Phase 0. Breaking changes require a version bump
 and automation scripts depend on predictable schemas.
 
 ```
-# Flows — end-to-end data paths derived from the DAG
-GET  /api/v1/flows                      All end-to-end flows (source → sink paths)
-GET  /api/v1/flows/:id                  Single flow detail (all nodes in the path)
-
-# Stream tables
-GET  /api/v1/tables                     Stream table list + status
-GET  /api/v1/tables/:name               Detail view for one stream table
-GET  /api/v1/tables/:name/history       Refresh history
-GET  /api/v1/tables/:name/lineage       Column-level lineage
-GET  /api/v1/tables/:name/operator-tree DVM operator tree (DOT format)
-GET  /api/v1/tables/:name/sample        Sample rows (LIMIT 50)
+# Tables — stream tables with type annotations and E2E lag
+GET  /api/v1/tables                     All stream tables (type, staleness, E2E lag, SLA)
+GET  /api/v1/tables/:schema/:table      Table detail + bidirectional lineage
+GET  /api/v1/tables/:schema/:table/history       Refresh history
+GET  /api/v1/tables/:schema/:table/lineage       Column-level lineage
+GET  /api/v1/tables/:schema/:table/operator-tree DVM operator tree (DOT format)
+GET  /api/v1/tables/:schema/:table/sample        Sample rows (LIMIT 50)
 
 # Health (aggregates CDC, fuses, slots, workers, relay status)
 GET  /api/v1/health                     Health scorecard
@@ -440,73 +436,80 @@ writing SQL manually.
 
 ## Key Features — Detailed Design
 
-### Pipelines (End-to-End Flows)
+### Tables
 
-The primary navigational concept in the WebUI. A **pipeline** (also
-called a **flow**) is an end-to-end data path derived from the DAG:
-every maximal path from a leaf source (base table or relay reverse
-input) to a leaf sink (stream table with no dependents, or relay
-forward output).
+The primary list view. Every stream table in the deployment, annotated
+with its structural role derived from the DAG. No separate "pipelines"
+concept — a pipeline is just a table plus its upstream lineage, so the
+two views are the same thing.
+
+**Structural type** is inferred from the DAG and relay config at query
+time:
+
+| Type | How inferred |
+|------|-------------|
+| **inbox** | A relay inbox config writes into this table |
+| **outbox** | A relay outbox config reads from this table |
+| **source** | Base table with CDC; no stream-table ancestors |
+| **intermediate** | Has both upstream and downstream stream tables |
+| **leaf** | Stream table with no stream-table descendants |
+| **orphan** | No upstream source and no relay inbox |
+| **union** | Multiple upstream stream tables (fan-in) |
+
+These types are not mutually exclusive — a table can be `leaf + union`.
+They are shown as small badge chips on each row.
+
+**E2E lag** is computed for every table: the maximum cumulative
+staleness from any root source to this table. For a leaf table this is
+the end-to-end delivery latency. For an intermediate table it shows
+how stale its inputs are. This single metric is more useful than
+separating "pipeline E2E lag" (leaves only) from "table staleness"
+(all) — it degrades gracefully.
 
 ```
-Kafka:orders → orders_raw → revenue_7d → regional_summary → NATS:analytics
+Table                 Type          Staleness  E2E Lag   SLA
+────────────────────  ───────────   ─────────  ────────  ────────────
+regional_summary      leaf union    45s        61s       ████████ 🔴
+revenue_7d            intermediate  12s        28s       ████ 🟡
+orders_raw            inbox         3s         3s        █ 🟢
+canonical             intermediate  5s         18s       ██ 🟢
+customers             orphan        —          —         —
 ```
 
-That is one pipeline. pg-trickle doesn't store pipelines as a formal
-object — they are computed at query time from the DAG. The
-`GET /api/v1/flows` endpoint returns all maximal source-to-sink paths,
-each with:
+- **Row click:** Opens table detail with bidirectional lineage.
+- **Sort:** Default is worst SLA first (problems at the top).
+- **Faceted filters:** Schema, type badge, refresh mode (DIFF/FULL), SLA status.
+- **Search:** Matches table name or schema.
 
-- A stable ID (hash of the node sequence)
-- The ordered list of nodes in the path
-- Aggregate SLA status (worst node determines the flow's status)
-- End-to-end latency (cumulative staleness from source to sink)
-- Throughput (minimum throughput across edges — the bottleneck)
+**Table detail** shows the table's own metrics plus its **bidirectional
+lineage**: upstream on the left (root cause analysis — what feeds this
+table and how stale is each branch?) and downstream on the right (blast
+radius — what depends on this table and what breaks if it's unhealthy?).
+The upstream and downstream DAGs are shown together in a single lineage
+view with the selected table centred. Both upstream and downstream nodes
+are clickable to navigate to their own detail pages.
 
-**Why pipelines instead of tables or relay connectors as the list view:**
-Users think in terms of data flows, not individual nodes. "Is my
-orders-to-analytics flow healthy?" is a more natural question than
-"Is `regional_summary` healthy?" The pipeline view answers the first
-question directly. Individual node detail (stream table stats, relay
-connector config) is accessed by clicking a node within a pipeline.
-
-A stream table that appears in multiple flows (e.g., a shared dimension
-table like `customers`) appears in multiple pipeline rows — correctly
-reflecting its operational blast radius.
-
-**Orphan tables** (stream tables with no downstream consumers and no
-upstream relay source) appear as single-node pipelines. This makes
-orphans visible rather than hidden.
-
-The **Pipelines** page is the list/tabular view of the same information
-that the **Topology** page shows spatially. Two views of the same data,
-optimized for different tasks:
+The **Tables** page and the **Topology** page are two views of the
+same data:
 
 | Task | Best view |
 |---|---|
 | Understand system architecture | Topology (graph) |
-| Find the flow breaching SLA | Pipelines (sorted by worst SLA) |
-| Trace data from source to sink | Pipeline detail (ordered node list) |
-| Filter by refresh mode or schema | Pipelines list with faceted filters |
-| See end-to-end latency | Pipeline detail (cumulative lag) |
+| Find the table breaching SLA | Tables (sorted by worst SLA) |
+| Trace what feeds a specific table | Table detail (lineage — upstream side) |
+| Trace what depends on a table | Table detail (lineage — downstream side) |
+| Filter by type or refresh mode | Tables list with faceted filters |
+| See end-to-end latency | Tables list (E2E lag column) |
 
-**Pipelines are always maximal paths.** A pipeline goes from a leaf
-source all the way to a leaf sink — there is no separate addressable
-concept of a "partial pipeline" (e.g. `a→b` within `a→b→c`). Partial
-views are accessed by interacting within a pipeline or topology view:
+**Sub-views within lineage.** Sub-sections are accessed by interacting
+within the view:
 
-- **Click a node** inside the pipeline detail → opens a detail panel
-  for that node; shows its immediate upstream and downstream edges.
+- **Click a node** in the lineage view → navigates to that table's
+  own detail page (centering the lineage on the new node).
 - **Topology `?focus=<name>&depth=N`** → scopes the graph to the
-  N-hop neighbourhood around a named node. This is the URL to
-  bookmark when you only care about one segment of a longer chain.
-- **Click an edge between two schema groups** in the Topology Level 0
-  view → drills into Level 1 scoped to flows between those two
-  schemas only.
-
-Keeping pipelines as maximal paths avoids duplicate entries in the
-pipelines list — `a→b` and `a→b→c` would otherwise both appear and
-require users to decide which is "the real one".
+  N-hop neighbourhood around any named node.
+- **Click an edge between two schema groups** in Topology Level 0 →
+  drills into Level 1 scoped to flows between those two schemas.
 
 ### Unified Topology Graph
 
