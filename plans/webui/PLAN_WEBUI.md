@@ -490,6 +490,24 @@ optimized for different tasks:
 | Filter by refresh mode or schema | Pipelines list with faceted filters |
 | See end-to-end latency | Pipeline detail (cumulative lag) |
 
+**Pipelines are always maximal paths.** A pipeline goes from a leaf
+source all the way to a leaf sink — there is no separate addressable
+concept of a "partial pipeline" (e.g. `a→b` within `a→b→c`). Partial
+views are accessed by interacting within a pipeline or topology view:
+
+- **Click a node** inside the pipeline detail → opens a detail panel
+  for that node; shows its immediate upstream and downstream edges.
+- **Topology `?focus=<name>&depth=N`** → scopes the graph to the
+  N-hop neighbourhood around a named node. This is the URL to
+  bookmark when you only care about one segment of a longer chain.
+- **Click an edge between two schema groups** in the Topology Level 0
+  view → drills into Level 1 scoped to flows between those two
+  schemas only.
+
+Keeping pipelines as maximal paths avoids duplicate entries in the
+pipelines list — `a→b` and `a→b→c` would otherwise both appear and
+require users to decide which is "the real one".
+
 ### Unified Topology Graph
 
 The centrepiece of the WebUI. A multi-level interactive graph using
