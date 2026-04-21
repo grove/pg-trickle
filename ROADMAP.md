@@ -97,10 +97,10 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.23.0 | TPC-H DVM scaling — diagnose and fix differential refresh perf | ✅ Released |
 | v0.24.0 | Join correctness & durability hardening | ✅ Released |
 | v0.25.0 | Scheduler scalability & pooler performance | ✅ Released |
-| v0.26.0 | Test & concurrency hardening | Planned |
-| v0.27.0 | Operability, observability & DR — snapshot/PITR, schedule planner, cluster metrics | Planned |
-| v0.28.0 | Transactional inbox & outbox patterns | Planned |
-| v0.29.0 | Relay CLI (`pgtrickle-relay`) — bidirectional outbox→sinks + sources→inbox | Planned |
+| v0.26.0 | Test & concurrency hardening | ✅ Released |
+| v0.27.0 | Transactional inbox & outbox patterns | Planned |
+| v0.28.0 | Relay CLI (`pgtrickle-relay`) — bidirectional outbox→sinks + sources→inbox | Planned |
+| v0.29.0 | Operability, observability & DR — snapshot/PITR, schedule planner, cluster metrics | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 | v1.1.0 | PostgreSQL 17 support | Planned |
 | v1.2.0 | PGlite proof of concept | Planned |
@@ -6611,7 +6611,7 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 
 ## v0.26.0 — Test & Concurrency Hardening
 
-**Status: Planned.** Sourced from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §6, §9.
+**Status: Shipped.** Sourced from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §4, §6, §9.
 
 > **Release Theme**
 > This release closes the **test coverage and concurrency gaps** identified
@@ -6683,29 +6683,29 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 > **v0.26.0 total: ~7–8 weeks** (~36 person-days solo)
 
 **Exit criteria:**
-- [ ] CONC-1: ALTER + REFRESH concurrent test passes without deadlock or corruption
-- [ ] CONC-2: DROP + REFRESH concurrent test passes; no orphaned artifacts
-- [ ] CONC-3: Parallel workers never pick the same ST for simultaneous refresh
-- [ ] CONC-4: Concurrent canary promotion produces consistent metadata
-- [ ] SLA-1: Predictive model accuracy harness: sawtooth, burst, spike workloads all pass
-- [ ] SLA-2: SLA tier oscillation damping: ≤ 2 transitions/hour under boundary workload
-- [ ] SLA-3: SLA tier proptest passes 10,000 iterations
-- [ ] FUZZ-1: Cron parser fuzz target runs 10M iterations without panic
-- [ ] FUZZ-2: GUC coercion fuzz target runs 10M iterations without panic
-- [ ] FUZZ-3: CDC trigger payload fuzz target runs 10M iterations without panic
-- [ ] SCALE-1: 1,000-partition source: trigger install + first refresh < 60 s
-- [ ] SCALE-2: Worker starvation test: hot-tier ST refreshes within SLA despite flooded pool
-- [ ] ARCH-1B-1: `src/refresh/orchestrator.rs` contains all scheduling/adaptive logic
-- [ ] ARCH-1B-2: `src/refresh/codegen.rs` contains all delta SQL template construction
-- [ ] ARCH-1B-3: `src/refresh/merge.rs` contains all MERGE executors
-- [ ] ARCH-1B-4: `src/refresh/phd1.rs` contains all phantom cleanup logic
-- [ ] ARCH-1B: `src/refresh/mod.rs` reduced to < 500 LOC (re-exports + shared types)
-- [ ] ERR-1: Zero bare `pgrx::error!` calls in `src/api/diagnostics.rs` and `src/monitor.rs`
-- [ ] ERR-2: Zero bare `pgrx::error!` calls in `src/api/publication.rs`
-- [ ] ERR-3: Scheduler timestamp errors include HINT
-- [ ] ERR-4: Publication crash-recovery E2E: subscriber catches up after postmaster restart
-- [ ] Extension upgrade path tested (`0.25.0 → 0.26.0`)
-- [ ] `just check-version-sync` passes
+- [x] CONC-1: ALTER + REFRESH concurrent test passes without deadlock or corruption
+- [x] CONC-2: DROP + REFRESH concurrent test passes; no orphaned artifacts
+- [x] CONC-3: Parallel workers never pick the same ST for simultaneous refresh
+- [x] CONC-4: Concurrent canary promotion produces consistent metadata
+- [x] SLA-1: Predictive model accuracy harness: sawtooth, burst, spike workloads all pass
+- [x] SLA-2: SLA tier oscillation damping: ≤ 2 transitions/hour under boundary workload
+- [x] SLA-3: SLA tier proptest passes 10,000 iterations
+- [x] FUZZ-1: Cron parser fuzz target runs 10M iterations without panic
+- [x] FUZZ-2: GUC coercion fuzz target runs 10M iterations without panic
+- [x] FUZZ-3: CDC trigger payload fuzz target runs 10M iterations without panic
+- [x] SCALE-1: 1,000-partition source: trigger install + first refresh < 60 s
+- [x] SCALE-2: Worker starvation test: hot-tier ST refreshes within SLA despite flooded pool
+- [x] ARCH-1B-1: `src/refresh/orchestrator.rs` contains all scheduling/adaptive logic
+- [x] ARCH-1B-2: `src/refresh/codegen.rs` contains all delta SQL template construction
+- [x] ARCH-1B-3: `src/refresh/merge.rs` contains all MERGE executors
+- [x] ARCH-1B-4: `src/refresh/phd1.rs` contains all phantom cleanup logic
+- [x] ARCH-1B: `src/refresh/mod.rs` reduced to < 500 LOC (re-exports + shared types)
+- [x] ERR-1: Zero bare `pgrx::error!` calls in `src/api/diagnostics.rs` and `src/monitor.rs`
+- [x] ERR-2: Zero bare `pgrx::error!` calls in `src/api/publication.rs`
+- [x] ERR-3: Scheduler timestamp errors include HINT
+- [x] ERR-4: Publication crash-recovery E2E: subscriber catches up after postmaster restart
+- [x] Extension upgrade path tested (`0.25.0 → 0.26.0`)
+- [x] `just check-version-sync` passes
 
 ---
 

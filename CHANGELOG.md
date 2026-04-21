@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.26.0 — Test & Concurrency Hardening](#0260--test--concurrency-hardening)
 - [0.25.0 — Scheduler Scalability & Pooler Performance](#0250--scheduler-scalability--pooler-performance)
 - [0.24.0 — Join Correctness & Durability Hardening](#0240--join-correctness--durability-hardening)
 - [0.23.0 — Performance Tuning & Diagnostics](#0230--performance-tuning--diagnostics)
@@ -44,6 +45,70 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.26.0] — Test & Concurrency Hardening
+
+This release closes the test coverage and concurrency gaps identified in
+the v0.23.0 assessment. No new SQL API surface is added — every change is
+purely internal (tests, architecture, error handling).
+
+### Concurrency Test Matrix
+
+- **CONC-1** — New E2E test: simultaneous `alter_stream_table` + `refresh_stream_table`
+  asserts no deadlock and catalog stays consistent.
+- **CONC-2** — New E2E test: `drop_stream_table` while refresh is in progress asserts
+  clean abort, no orphaned change buffers, no dangling catalog rows.
+- **CONC-3** — Deterministic E2E test: parallel workers never pick the same stream table
+  for simultaneous refresh.
+- **CONC-4** — E2E test: two concurrent refreshes trigger buffer promotion simultaneously;
+  exactly one succeeds and metadata is consistent.
+
+### Predictive Model & SLA Stability
+
+- **SLA-1** — New `tests/e2e_predictive_cost_tests.rs` with sawtooth, bursty, and
+  single-spike workloads. Validates model recovery and preemption accuracy.
+- **SLA-2** — SLA tier oscillation damping: require 3 consecutive breaches before
+  downgrading, 3 consecutive successes before upgrading. Prevents tier flapping
+  under boundary-condition workloads.
+- **SLA-3** — Proptest with randomised latency distributions around the SLA boundary
+  asserts tier stability across 10,000 iterations.
+
+### Fuzz & Scale Testing
+
+- **FUZZ-1** — `fuzz/fuzz_targets/cron_fuzz.rs`: cron expression parser fuzz target.
+- **FUZZ-2** — `fuzz/fuzz_targets/guc_fuzz.rs`: GUC string→enum coercion fuzz target.
+- **FUZZ-3** — `fuzz/fuzz_targets/cdc_fuzz.rs`: CDC trigger payload fuzz target.
+- **SCALE-1** — `#[ignore]`-gated E2E test: 1,000-partition source table trigger-install
+  + first refresh completes within 60 s.
+- **SCALE-2** — E2E multi-database starvation test: flooded worker pool does not starve
+  hot-tier STs in a second database.
+
+### Architecture: ARCH-1B Refresh Sub-Module Migration
+
+`src/refresh/mod.rs` was an ~8,900-line monolith. It has been split into
+focused sub-modules with zero behaviour change:
+
+- `src/refresh/orchestrator.rs` — `RefreshAction`, `determine_refresh_action`,
+  adaptive cost model, `execute_reinitialize_refresh`.
+- `src/refresh/codegen.rs` — SQL template builders, MERGE SQL cache, planner hints,
+  change-buffer cleanup, ST-to-ST delta capture.
+- `src/refresh/merge.rs` — `execute_differential_refresh`, `execute_full_refresh`,
+  `execute_topk_refresh`, `execute_no_data_refresh`, partition-aware MERGE helpers.
+- `src/refresh/mod.rs` — reduced to **185 LOC** (re-exports + shared types).
+
+### Error Handling Tightening
+
+- **ERR-1** — `DiagnosticError(String)` variant in `PgTrickleError`; bare `pgrx::error!`
+  calls in `src/api/diagnostics.rs` and `src/monitor.rs` replaced.
+- **ERR-2** — `PublicationError` variants (`PublicationAlreadyExists`, `PublicationNotFound`,
+  `PublicationRebuildFailed`) in `PgTrickleError`; bare calls in `src/api/publication.rs` replaced.
+- **ERR-3** — Scheduler `TimestampWithTimeZone` construction failures now include a HINT
+  ("check system clock") to aid operator diagnosis.
+- **ERR-4** — New `tests/e2e_publication_crash_recovery_tests.rs`: kills postmaster with
+  an active publication subscriber, restarts, verifies subscriber catches up with zero
+  data loss.
 
 ---
 
