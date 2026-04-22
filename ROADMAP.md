@@ -7357,6 +7357,7 @@ entry can survive a failed apply and be reused in the next statement. Register a
 | PERF-1 | Implement L0 shared-shmem dshash template cache | L | P1 |
 | PERF-2 | Bound parser memory via `max_parse_nodes` GUC + `XactCallback` | M | P1 |
 | PERF-3 | Add missing benchmark suite (SNAP, PLAN, CLUS, IVM apply, WAL decoder) | M | P1 |
+| PERF-4 | Reduce catalog hot-path in `metrics_summary()` / `cluster_worker_summary()` | M | P2 |
 
 **PERF-1 — L0 dshash shared-memory template cache.**
 `src/shmem.rs:680–710` wires `L0_POPULATED_VERSION` as a signal that the L2
@@ -7384,6 +7385,15 @@ apply path, WAL decoder poll loop, multi-database fairness. Add a benchmark
 file or extend `benches/refresh_bench.rs` to cover all seven.
 **Schema change:** No.
 
+**PERF-4 — Reduce catalog hot-path in `metrics_summary()` and `cluster_worker_summary()`.**
+Both new v0.27.0 functions re-query `pgtrickle.pgt_stream_tables` and
+`pg_stat_activity` on every Prometheus scrape (default 5 s interval). At
+200+ stream tables this adds a full catalog scan per database every 5 s, on
+top of the scheduler's own reads. Introduce a short-lived shmem-backed
+snapshot for these read paths that both surfaces share, refreshed once per
+scheduler tick. Controlled by `pg_trickle.metrics_catalog_snapshot_ttl_ms`
+GUC (default 4000 ms). **Schema change:** No.
+
 ---
 
 ### Scalability
@@ -7392,6 +7402,7 @@ file or extend `benches/refresh_bench.rs` to cover all seven.
 |----|-------|--------|----------|
 | SCAL-1 | Replace text-based SPI error classification with SQLSTATE codes | M | P0 |
 | SCAL-2 | Replace `refresh::*` blanket re-exports with explicit `pub use` | XS | P1 |
+| SCAL-3 | Remove dead `#[allow(unused_imports)]` shims in `refresh/orchestrator.rs` | XS | P2 |
 
 **SCAL-1 — SQLSTATE-based error classification.**
 `classify_spi_error_retryable` at `src/error.rs:213–260` matches English text
@@ -7405,6 +7416,13 @@ pgrx (`pg_sys::ErrorData.sqlerrcode`) and classify by 5-character code.
 orchestrator::*;`, promoting every new public symbol automatically. Convert to
 explicit re-export lists to enforce module boundary discipline without breaking
 callers. **Schema change:** No.
+
+**SCAL-3 — Remove dead `#[allow(unused_imports)]` in `refresh/orchestrator.rs`.**
+Every import at `src/refresh/orchestrator.rs:6–26` is annotated
+`#[allow(unused_imports)]` — a maintenance hazard left over from the ARCH-1B
+split. Removing an actually-unused import won't surface a warning, and the
+imports become silently misleading. Convert each `use` to a concrete symbol and
+remove the lint-suppression attribute. **Schema change:** No.
 
 ---
 
@@ -7420,6 +7438,13 @@ callers. **Schema change:** No.
 | UX-6 | Ship first-party Grafana dashboard JSON in `monitoring/grafana/` | M | P1 |
 | UX-7 | Document `pg_trickle_dump` in `BACKUP_AND_RESTORE.md` | XS | P1 |
 | UX-8 | Add snapshot/PITR walkthrough to `GETTING_STARTED.md` | S | P1 |
+| UX-9 | Document `change_buffer_durability` + `frontier_holdback_*` in `PRE_DEPLOYMENT.md` | XS | P1 |
+| UX-10 | Add atomicity-gap warning + concurrent-restore note to `BACKUP_AND_RESTORE.md` | XS | P1 |
+| UX-11 | Add FAQ entries: snapshot how-to, `schedule_recommendation_min_samples` tuning | XS | P2 |
+| UX-12 | Add RELEASE.md checklist item for SNAP/PLAN/CLUS/METR migration script | XS | P2 |
+| UX-13 | Add snapshot demo to `PLAYGROUND.md` | XS | P2 |
+| UX-14 | Track CNPG 1.29 compatibility: update `cnpg/cluster-example.yaml` and CI | S | P1 |
+| UX-15 | Open tracking issue for dbt-core 1.11 upgrade path | XS | P1 |
 
 **UX-1** — `schedule_recommendation_min_samples` (default 20),
 `schedule_alert_cooldown_seconds` (default 300), `metrics_request_timeout_ms`
@@ -7462,6 +7487,48 @@ in `BACKUP_AND_RESTORE.md`.
 `GETTING_STARTED.md` with a worked example: take a snapshot, simulate data
 loss, restore from snapshot, verify.
 
+**UX-9** — `PRE_DEPLOYMENT.md` does not mention `change_buffer_durability`
+(`unlogged|logged|sync`, default `unlogged`) or the `frontier_holdback_lsn_bytes`
+gauge. These are operationally critical: operators setting `sync` for durability
+need to know the write-amplification cost before deployment.
+**Schema change:** No.
+
+**UX-10** — `BACKUP_AND_RESTORE.md` does not warn about the atomicity gap
+in `snapshot_stream_table` / `restore_from_snapshot` identified in §3.2 (no
+subxact bracket; crash between `CREATE TABLE AS` and catalog INSERT leaves
+an orphan table; mid-restore `TRUNCATE` + interrupted `INSERT` leaves
+the storage table truncated). Add an explicit "Known Limitations" callout
+until STAB-1 is fixed. Also document that `restore_from_snapshot` should not
+be called while a concurrent `refresh_stream_table` is in flight.
+**Schema change:** No.
+
+**UX-11** — `FAQ.md` has no entry for "How do I take a snapshot?" or
+"How do I tune `schedule_recommendation_min_samples`?". Add both with links
+to `BACKUP_AND_RESTORE.md` and `CONFIGURATION.md`.
+**Schema change:** No.
+
+**UX-12** — `RELEASE.md` checklist should include a step to verify the
+SNAP/PLAN/CLUS/METR migration script
+(`sql/pg_trickle--0.26.0--0.27.0.sql`) passes
+`scripts/check_upgrade_completeness.sh`. Add to the release runbook.
+**Schema change:** No.
+
+**UX-13** — `PLAYGROUND.md` has no snapshot demo. Add a `snapshot_stream_table`
+→ data loss simulation → `restore_from_snapshot` example that works in the
+`playground/docker-compose.yml` environment.
+**Schema change:** No.
+
+**UX-14** — `cnpg/cluster-example.yaml` targets CNPG 1.28+. CNPG 1.29 ships
+in 2026-Q2. Refresh the manifest, add a CI job using the updated image, and
+verify the ImageVolume mount still works under the new CNPG operator.
+**Schema change:** No.
+
+**UX-15** — `dbt-pgtrickle/AGENTS.md` pins `dbt-core ~=1.10` and notes
+Python 3.13 only (mashumaro dep can't build on 3.14). dbt-core 1.11 is in
+beta. Open a tracking GitHub issue: note the mashumaro blocker, watch the
+1.11 release, and add a CI job testing against 1.11 once the dep resolves.
+**Schema change:** No.
+
 ---
 
 ### Test Coverage
@@ -7479,6 +7546,9 @@ loss, restore from snapshot, verify.
 | TEST-9 | Fuzz: snapshot SQL builder | S | P1 |
 | TEST-10 | Fuzz: DAG SCC graph shapes | S | P2 |
 | TEST-11 | EC-01 deterministic reproducer (replaces flaky `test_tpch_q07_*`) | M | P0 |
+| TEST-12 | E2E: snapshot under concurrent `refresh_stream_table` | S | P1 |
+| TEST-13 | E2E: snapshot → `pg_dump` → `pg_restore` round-trip | M | P1 |
+| TEST-14 | Promote G17-MDB multi-database soak test from `stability-tests.yml` to `ci.yml` | S | P1 |
 
 ---
 
@@ -7495,6 +7565,11 @@ loss, restore from snapshot, verify.
 - **SCAL-1** changes observable retry semantics. Roll out behind a
   `pg_trickle.use_sqlstate_classification` GUC (default `false`) initially,
   flip to `true` in v0.31.0 after one release of parallel validation.
+- **UX-14** (CNPG 1.29) depends on CNPG 1.29 being available; if the release
+  slips past the v0.30.0 window, defer to v1.0.0 but keep the tracking issue
+  open.
+- **UX-15** (dbt 1.11) is purely a tracking concern — no code changes are
+  required in this release.
 
 ### Implementation Phases
 
@@ -7504,11 +7579,12 @@ loss, restore from snapshot, verify.
 | Phase 2 | P0 docs: UX-1, UX-2, TEST-6, TEST-11 | Days 6–9 |
 | Phase 3 | P1 stability + safety: STAB-2, STAB-3, STAB-5, STAB-6, CORR-2, CORR-3 | Days 9–14 |
 | Phase 4 | P1 architecture: SCAL-2, PERF-1, PERF-2 | Days 14–19 |
-| Phase 5 | P1 test coverage: TEST-1 through TEST-9, PERF-3 | Days 19–25 |
-| Phase 6 | P1 docs & UX: UX-3 through UX-8, UX-5 TUI | Days 25–30 |
+| Phase 5 | P1 test coverage: TEST-1 through TEST-14, PERF-3 | Days 19–26 |
+| Phase 6 | P1 docs & UX: UX-3 through UX-15, TUI parity | Days 26–32 |
 
-> **v0.30.0 total: ~5–6 weeks** (correctness-critical path ~10 days;
-> documentation and test coverage ~12 days; architecture improvements ~8 days)
+> **v0.30.0 total: ~6–7 weeks** (correctness-critical path ~10 days;
+> documentation and test coverage ~14 days; architecture improvements ~8 days;
+> new test targets ~6 days)
 
 **Exit criteria:**
 - [ ] CORR-1: `test_tpch_q07_ec01b_combined_delete` passes reliably over 50 runs; IMMEDIATE-mode property tests show zero phantom drift
@@ -7528,7 +7604,15 @@ loss, restore from snapshot, verify.
 - [ ] UX-4: All eight SNAP/PLAN/CLUS/METR functions have full SQL_REFERENCE entries
 - [ ] UX-5: TUI shows SNAP/PLAN/CLUS/METR panels
 - [ ] UX-6: `monitoring/grafana/pg_trickle.json` ships and renders in Grafana 11+
+- [ ] UX-9: `PRE_DEPLOYMENT.md` documents `change_buffer_durability` and `frontier_holdback_lsn_bytes`
+- [ ] UX-10: `BACKUP_AND_RESTORE.md` Known Limitations section added; concurrent-restore warning present
+- [ ] UX-14: `cnpg/cluster-example.yaml` updated to CNPG 1.29; CI job green (or issue opened if 1.29 not yet released)
+- [ ] UX-15: dbt-core 1.11 tracking issue opened with mashumaro blocker documented
 - [ ] TEST-7/8/9: New fuzz targets run in CI; no crashes after 24 h
+- [ ] TEST-12: Snapshot under concurrent refresh test passes
+- [ ] TEST-13: `pg_dump` → `pg_restore` round-trip test passes for snapshot tables
+- [ ] TEST-14: G17-MDB multi-database soak test runs in `ci.yml` on every push to main
+- [ ] SCAL-3: Dead `#[allow(unused_imports)]` removed from `refresh/orchestrator.rs`; `just lint` clean
 - [ ] Extension upgrade path tested (`0.29.0 → 0.30.0`)
 - [ ] `just check-version-sync` passes
 
@@ -7579,8 +7663,11 @@ forward-compatibility.
 | R5 | **Docker Hub official image.** Publish `pgtrickle/pg_trickle:1.0.0-pg18` and `:latest` to Docker Hub. Sync Dockerfile.hub version tag with release. Automate via GitHub Actions release workflow. | 2–4h | — |
 | R6 | **Version sync automation.** Ensure `just check-version-sync` covers all version references (Cargo.toml, extension control files, Dockerfile.hub, dbt_project.yml, CNPG manifests). Add to CI as a blocking check. | 2–3h | — |
 | SAST-SEMGREP | **Elevate Semgrep to blocking in CI.** CodeQL and cargo-deny already block; Semgrep is advisory-only. Flip to blocking for consistent safety gating. Before flipping, verify zero findings across all current rules. | 1–2h | [PLAN_SAST.md](plans/testing/PLAN_SAST.md) |
+| OTL-1 | **OpenTelemetry tracing spans.** Add `pgtrickle.refresh`, `pgtrickle.cdc_capture`, and `pgtrickle.snapshot` spans via the OTel SDK so every pg_trickle operation is visible to OTel collectors. Minimum viable: trace_id propagation through the refresh pipeline; attribute set = `stream_table`, `refresh_mode`, `rows_processed`. | 4–8h | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.6 |
+| SIGN-1 | **Cosign-sign GHCR release images.** Add `cosign sign` step to the GitHub Actions release workflow for `grove/pg-trickle`, `grove/pgtrickle-relay`, and `pg_trickle-ext` GHCR images. Attach Rekor transparency log entry. Document `cosign verify` command in `SECURITY.md`. | 2–4h | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.11 |
+| MDB-1 | **Promote G17-MDB multi-database soak test to `ci.yml`.** The `stability-tests.yml` G17-MDB job runs multi-database scenarios in isolation. Move it to `ci.yml` under the "Push to main" trigger alongside the existing soak test. Gate it on a 30-min wall-clock budget for PR CI; use the full 2-hour run on schedule. | 2–3h | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.10 |
 
-> **v1.0.0 total: ~36–66 hours** (incl. PG 19 compat ~18–36h + release engineering ~18–30h)
+> **v1.0.0 total: ~42–78 hours** (incl. PG 19 compat ~18–36h + release engineering ~18–30h + OTel/cosign/MDB ~8–12h)
 
 **Exit criteria:**
 - [ ] A3: PG 19 builds and passes full E2E suite
@@ -7591,7 +7678,10 @@ forward-compatibility.
 - [x] CNPG cluster-example.yaml validated (Image Volume approach)
 - [ ] `just check-version-sync` passes and blocks CI on mismatch
 - [ ] SAST-SEMGREP: Semgrep elevated to blocking in CI; zero findings verified
-- [ ] Upgrade path from v0.29.0 tested
+- [ ] OTL-1: OTel refresh/CDC/snapshot spans emitted; visible in Jaeger test run
+- [ ] SIGN-1: All GHCR release images cosign-signed; `cosign verify grove/pg-trickle:1.0.0` passes
+- [ ] MDB-1: G17-MDB soak test runs in `ci.yml` on push to main; green
+- [ ] Upgrade path from v0.30.0 tested
 - [ ] Semantic versioning policy in effect
 
 ---
@@ -9646,6 +9736,7 @@ Rewrite the trigger function builders to reference the ENR by name.
 |----|-------|--------|----------|
 | SCAL-1 | Back-pressure signal when change buffer exceeds threshold | S | P2 |
 | SCAL-2 | Multi-DB singleton refresh broker concept (design only) | S | P2 |
+| SCAL-3 | Shared catalog snapshot for `metrics_summary()` / `cluster_worker_summary()` (if deferred from v0.30.0) | M | P2 |
 
 **SCAL-1** — Expose a `pgtrickle_alert change_buffer_backpressure` event
 when a change buffer grows past `pg_trickle.buffer_alert_threshold` for
@@ -9876,8 +9967,6 @@ The following items from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSES
 |------|-------------|----------|-----|
 | POST-XC | **Cross-cluster fan-out via `pgtrickle-relay`.** A relay mode that reads from one cluster's outbox and applies to another cluster's inbox. Optional CRDT-style conflict resolution for last-write-wins counters. Enables multi-region read-replica patterns without a full replication setup. | Medium | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §7 |
 | POST-VIS | **GUI workflow designer + visual DAG editor.** Extend `pgtrickle-tui` with a visual DAG editor and an EXPLAIN-DIFF preview that shows the rewritten DVM SQL alongside expected delta size. Lowers on-boarding ramp for SQL developers unfamiliar with IVM semantics. | Medium | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §7 |
-| POST-OTL | **OpenTelemetry tracing spans.** Emit per-refresh, per-CDC-capture, and per-snapshot spans so OTel collectors can correlate pg_trickle latency with upstream service traces. Minimum viable: `pgtrickle.refresh`, `pgtrickle.cdc_capture`, `pgtrickle.snapshot` spans with standard attributes. | Medium | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.6 |
-| POST-SIGN | **Cosign-sign GHCR release images.** Add `cosign sign` step to the GitHub Actions release workflow for `grove/pg-trickle`, `grove/pgtrickle-relay`, and `pg_trickle-ext` images. Attach signatures to GHCR. Document verification in `SECURITY.md`. | Medium | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.11 |
 | POST-HELM | **First-party Helm chart.** A `charts/pg-trickle` Helm chart that wraps the CNPG ImageVolume deployment pattern. Publishes to a GitHub Pages chart repository at `grove.github.io/pg-trickle`. Supports multi-database cluster deployments via values. | Medium | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.3 |
 | POST-LLM | **LLM-assisted advisor (`pgtrickle.advise()`).** A SQL function backed by a small open model (e.g. Phi-3 via PL/Python) that takes a query and returns recommendations: refresh mode, schedule, source-table index suggestions, and flagged anti-patterns. Onboarding accelerator for users unfamiliar with IVM tuning. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.9 |
 | POST-GQL | **GraphQL / PostGraphile integration.** A PostGraphile v5 plugin that exposes stream tables as subscription-capable GraphQL types. Clients subscribe to a stream table via GraphQL subscriptions backed by the v1.8.0 `pgtrickle.subscribe()` NOTIFY channel. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.5 |
