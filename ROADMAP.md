@@ -7445,6 +7445,9 @@ remove the lint-suppression attribute. **Schema change:** No.
 | UX-13 | Add snapshot demo to `PLAYGROUND.md` | XS | P2 |
 | UX-14 | Track CNPG 1.29 compatibility: update `cnpg/cluster-example.yaml` and CI | S | P1 |
 | UX-15 | Open tracking issue for dbt-core 1.11 upgrade path | XS | P1 |
+| UX-16 | Add noisy-neighbour example + alert to `docs/integrations/multi-tenant.md` | XS | P3 |
+| UX-17 | Add `recommend_schedule` tuning recipe to `PERFORMANCE_COOKBOOK.md` | XS | P3 |
+| UX-18 | Annotate `dbt-pgtrickle/README.md` with compatible extension version range | XS | P3 |
 
 **UX-1** — `schedule_recommendation_min_samples` (default 20),
 `schedule_alert_cooldown_seconds` (default 300), `metrics_request_timeout_ms`
@@ -7529,6 +7532,22 @@ beta. Open a tracking GitHub issue: note the mashumaro blocker, watch the
 1.11 release, and add a CI job testing against 1.11 once the dep resolves.
 **Schema change:** No.
 
+**UX-16** — `docs/integrations/multi-tenant.md` is excellent but has no worked
+example of a noisy-neighbour scenario. Add one: show a high-frequency stream
+table starving others, the Prometheus alert expression, and the remediation
+step (`pg_trickle.per_db_refresh_quota_ms`). **Schema change:** No.
+
+**UX-17** — `PERFORMANCE_COOKBOOK.md` should include a recipe:
+"Use `recommend_schedule` to right-size a 100-table dbt project." Walk
+through a cold-start, initial history collection, and the first
+auto-recommendation. Link to `CONFIGURATION.md` for the relevant GUCs.
+**Schema change:** No.
+
+**UX-18** — `dbt-pgtrickle/README.md` does not state which extension version
+it is tested against. Add a compatibility matrix row (e.g.
+`dbt-pgtrickle 0.5.x` → `pg_trickle ≥0.25.0`) so users know what to pin.
+**Schema change:** No.
+
 ---
 
 ### Test Coverage
@@ -7549,6 +7568,11 @@ beta. Open a tracking GitHub issue: note the mashumaro blocker, watch the
 | TEST-12 | E2E: snapshot under concurrent `refresh_stream_table` | S | P1 |
 | TEST-13 | E2E: snapshot → `pg_dump` → `pg_restore` round-trip | M | P1 |
 | TEST-14 | Promote G17-MDB multi-database soak test from `stability-tests.yml` to `ci.yml` | S | P1 |
+| TEST-15 | E2E: WAL decoder failure injection (slot missing / wrong plugin) | S | P2 |
+| TEST-16 | E2E: statement-level CDC with mixed INSERT/UPDATE/DELETE ordering invariants | S | P2 |
+| TEST-17 | E2E: `restore_from_snapshot` rollback on mid-INSERT constraint violation | S | P2 |
+| TEST-18 | Property: `cluster_worker_summary` consistency under crash (proptest) | S | P2 |
+| TEST-19 | Property: predictive planner monotone in history length (proptest) | S | P2 |
 
 ---
 
@@ -7579,12 +7603,12 @@ beta. Open a tracking GitHub issue: note the mashumaro blocker, watch the
 | Phase 2 | P0 docs: UX-1, UX-2, TEST-6, TEST-11 | Days 6–9 |
 | Phase 3 | P1 stability + safety: STAB-2, STAB-3, STAB-5, STAB-6, CORR-2, CORR-3 | Days 9–14 |
 | Phase 4 | P1 architecture: SCAL-2, PERF-1, PERF-2 | Days 14–19 |
-| Phase 5 | P1 test coverage: TEST-1 through TEST-14, PERF-3 | Days 19–26 |
-| Phase 6 | P1 docs & UX: UX-3 through UX-15, TUI parity | Days 26–32 |
+| Phase 5 | P1/P2 test coverage: TEST-1 through TEST-19, PERF-3 | Days 19–27 |
+| Phase 6 | P1/P2/P3 docs & UX: UX-3 through UX-18, TUI parity | Days 27–34 |
 
-> **v0.30.0 total: ~6–7 weeks** (correctness-critical path ~10 days;
+> **v0.30.0 total: ~7–8 weeks** (correctness-critical path ~10 days;
 > documentation and test coverage ~14 days; architecture improvements ~8 days;
-> new test targets ~6 days)
+> new test targets ~8 days; Low-priority doc polish ~4 days)
 
 **Exit criteria:**
 - [ ] CORR-1: `test_tpch_q07_ec01b_combined_delete` passes reliably over 50 runs; IMMEDIATE-mode property tests show zero phantom drift
