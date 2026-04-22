@@ -27,7 +27,7 @@ open-source project and welcomes contributions of all kinds.
 
 ```bash
 # Install pgrx
-cargo install cargo-pgrx --version "=0.17.0"
+cargo install cargo-pgrx --version "=0.18.0"
 cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 
 # Build

@@ -8,7 +8,7 @@
 [![Roadmap](https://img.shields.io/badge/Roadmap-view-informational)](ROADMAP.md)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![PostgreSQL 18](https://img.shields.io/badge/PostgreSQL-18-blue?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![pgrx 0.17](https://img.shields.io/badge/pgrx-0.17-orange)](https://github.com/pgcentralfoundation/pgrx)
+[![pgrx 0.18](https://img.shields.io/badge/pgrx-0.18-orange)](https://github.com/pgcentralfoundation/pgrx)
 
 > **Pre-1.0 Notice:** pg_trickle is under active development and has not yet reached a stable 1.0 release. The core feature set is extensive and thoroughly tested, but APIs and configuration options may still change between minor versions. See [ROADMAP.md](ROADMAP.md) for the planned path to 1.0.
 
@@ -323,7 +323,7 @@ For full benchmark methodology and how to run your own benchmarks, see [docs/BEN
 ### Prerequisites
 
 - PostgreSQL 18.x
-- Rust 1.85+ (edition 2024) with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17.x
+- Rust 1.85+ (edition 2024) with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.18.x
 
 ### Install
 

@@ -3,7 +3,7 @@
 
 FROM rust:latest AS builder
 
-# Install Rust nightly toolchain (required for cargo-pgrx v0.17 edition2024)
+# Install Rust nightly toolchain (required for cargo-pgrx v0.18 edition2024)
 RUN rustup install nightly && rustup default nightly
 
 # Install PostgreSQL 18 dev dependencies
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 COPY . /build
 
-# Build extension (cargo-pgrx v0.17+ requires Rust nightly for edition2024)
+# Build extension (cargo-pgrx v0.18+ requires Rust nightly for edition2024)
 # Initialize pgrx to use system PostgreSQL, then package the extension
 RUN cargo install cargo-pgrx && \
     export PGRX_HOME=/pgrx && \

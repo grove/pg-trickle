@@ -63,7 +63,7 @@ ENV PATH="${HOME}/.cargo/bin:${PATH}"
 # under /home/vscode/.pgrx, which is volume-mounted in the devcontainer.
 # Initialization is performed in .devcontainer/devcontainer.json lifecycle hooks
 # after mounts are attached and ownership is corrected.
-RUN cargo install --locked cargo-pgrx --version 0.17.0
+RUN cargo install --locked cargo-pgrx --version 0.18.0
 
 # ── just (command runner) ───────────────────────────────────────────────────
 RUN cargo install just

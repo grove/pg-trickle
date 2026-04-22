@@ -139,7 +139,7 @@ SELECT pgtrickle.create_stream_table(
 ### Prerequisites
 
 - PostgreSQL 18.x
-- Rust 1.82+ with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17.x
+- Rust 1.82+ with [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.18.x
 
 ### Build and Install
 
