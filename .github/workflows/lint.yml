@@ -21,6 +21,7 @@ on:
       - 'coverage/**'
       - 'cnpg/**'
       - 'scripts/**'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -35,6 +36,7 @@ on:
       - 'coverage/**'
       - 'cnpg/**'
       - 'scripts/**'
+      - '.github/workflows/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
