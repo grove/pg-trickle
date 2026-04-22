@@ -20,6 +20,8 @@ use crate::template_cache;
 use crate::version;
 use crate::wal_decoder;
 
+pub(crate) mod inbox;
+pub(crate) mod outbox;
 pub(crate) mod publication;
 
 // ── G13-EH: Enriched error reporting ────────────────────────────────────────
@@ -482,6 +484,125 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
                  compatible. Re-create the snapshot with the current version."
                     .to_string(),
             )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // OUTBOX-1..6 / OUTBOX-B1..B7 (v0.28.0): Outbox & consumer group errors
+        PgTrickleError::OutboxAlreadyEnabled(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("outbox already enabled for stream table: {}", name),
+                "",
+            )
+            .set_hint(
+                "Use pgtrickle.disable_outbox() first if you want to re-enable with \
+                 different settings."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::OutboxNotEnabled(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("outbox not enabled for stream table: {}", name),
+                "",
+            )
+            .set_hint("Use pgtrickle.enable_outbox(name) to enable the outbox pattern.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::OutboxRequiresNotImmediateMode(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!(
+                    "outbox requires deferred refresh mode for stream table: {}",
+                    name
+                ),
+                "",
+            )
+            .set_hint(
+                "Change the stream table's refresh_mode from IMMEDIATE to AUTO, FULL, or \
+                 DIFFERENTIAL before enabling the outbox pattern."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::ConsumerGroupAlreadyExists(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("consumer group already exists: {}", name),
+                "",
+            )
+            .set_hint("Choose a different group name or drop the existing group first.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::ConsumerGroupNotFound(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("consumer group not found: {}", name),
+                "",
+            )
+            .set_hint(
+                "Use pgtrickle.create_consumer_group() to create a new consumer group.".to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        // INBOX-1..9 / INBOX-B1..B4 (v0.28.0): Inbox errors
+        PgTrickleError::InboxAlreadyExists(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("inbox already exists: {}", name),
+                "",
+            )
+            .set_hint("Choose a different inbox name or drop the existing inbox first.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::InboxNotFound(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("inbox not found: {}", name),
+                "",
+            )
+            .set_hint(
+                "Use pgtrickle.create_inbox() to create a new inbox. Check inbox name \
+                 with pgtrickle.inbox_status()."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::InboxTableNotFound(table) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+                format!("inbox table not found: {}", table),
+                "",
+            )
+            .set_hint("Verify the table exists and is schema-qualified correctly.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::InboxColumnMissing(table, col) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
+                format!("inbox column missing in {}: {}", table, col),
+                "",
+            )
+            .set_hint("Ensure all required inbox columns exist in the target table.".to_string())
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::InboxOrderingPriorityConflict(name) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("ordering and priority config conflict for inbox: {}", name),
+                "",
+            )
+            .set_hint("Disable one of ordering or priority before enabling the other.".to_string())
             .report(PgLogLevel::ERROR);
             unreachable!()
         }

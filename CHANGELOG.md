@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.28.0 — Transactional Inbox & Outbox Patterns](#0280--transactional-inbox--outbox-patterns)
 - [0.27.0 — Operability, Observability & DR](#0270--operability-observability--dr)
 - [0.26.0 — Test & Concurrency Hardening](#0260--test--concurrency-hardening)
 - [0.25.0 — Scheduler Scalability & Pooler Performance](#0250--scheduler-scalability--pooler-performance)
@@ -46,6 +47,100 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.28.0] — Transactional Inbox & Outbox Patterns
+
+### Highlights
+
+- **Transactional outbox**: Enable the outbox pattern on any stream table with
+  `enable_outbox()`. Each refresh writes a header row to a dedicated outbox table,
+  with a claim-check path for large deltas. Consumers poll via `poll_outbox()`,
+  commit offsets, extend leases, and send heartbeats.
+- **Consumer groups**: Kafka-style consumer group API with per-consumer committed
+  offsets, visibility leases, seek-to-offset (for replay), and liveness heartbeats.
+  `consumer_lag()` provides real-time per-consumer lag metrics.
+- **Transactional inbox**: `create_inbox()` provisions a named inbox table with
+  managed `<name>_pending`, `<name>_dlq`, and `<name>_stats` stream tables.
+  Bring-your-own-table mode available via `enable_inbox_tracking()`.
+- **Per-aggregate ordering**: `enable_inbox_ordering()` creates a `next_<inbox>`
+  stream table that surfaces only the next unprocessed message per aggregate,
+  eliminating concurrency hazards without application-side coordination.
+- **Priority tiers**: `enable_inbox_priority()` registers a priority column for
+  cost-model–aware ordering of inbox messages.
+- **Horizontal partitioning**: `inbox_is_my_partition()` provides FNV-1a
+  consistent-hash partition assignment for multi-worker inbox processing without
+  external coordination.
+- **Replay support**: `replay_inbox_messages()` resets message state for
+  selective re-processing.
+
+### New SQL Functions
+
+| Function | Description |
+|----------|-------------|
+| `pgtrickle.enable_outbox(name, retention_hours)` | OUTBOX-1: Enable outbox pattern for a stream table |
+| `pgtrickle.disable_outbox(name, if_exists)` | OUTBOX-2: Disable outbox pattern |
+| `pgtrickle.outbox_status(name)` | OUTBOX-3: JSONB summary of outbox state |
+| `pgtrickle.outbox_rows_consumed(stream_table, outbox_id)` | OUTBOX-6: Mark rows consumed, free claim-check delta rows |
+| `pgtrickle.create_consumer_group(name, outbox, auto_offset_reset)` | OUTBOX-B1: Create a named consumer group |
+| `pgtrickle.drop_consumer_group(name, if_exists)` | OUTBOX-B2: Drop a consumer group |
+| `pgtrickle.poll_outbox(group, consumer, batch_size, visibility_seconds)` | OUTBOX-B3: Poll for new outbox messages |
+| `pgtrickle.commit_offset(group, consumer, last_offset)` | OUTBOX-B4: Commit the consumed offset |
+| `pgtrickle.extend_lease(group, consumer, extension_seconds)` | OUTBOX-B4: Extend the visibility lease |
+| `pgtrickle.seek_offset(group, consumer, new_offset)` | OUTBOX-B4: Seek to an arbitrary offset |
+| `pgtrickle.consumer_heartbeat(group, consumer)` | OUTBOX-B5: Signal consumer liveness |
+| `pgtrickle.consumer_lag(group)` | OUTBOX-B6: Per-consumer lag metrics |
+| `pgtrickle.create_inbox(name, ...)` | INBOX-1: Create a named transactional inbox |
+| `pgtrickle.drop_inbox(name, if_exists, cascade)` | INBOX-2: Drop a named inbox |
+| `pgtrickle.enable_inbox_tracking(name, table_ref, ...)` | INBOX-3: BYOT inbox tracking mode |
+| `pgtrickle.inbox_health(name)` | INBOX-4: JSONB health summary |
+| `pgtrickle.inbox_status(name)` | INBOX-5: Table summary of one or all inboxes |
+| `pgtrickle.replay_inbox_messages(name, event_ids)` | INBOX-6: Reset messages for replay |
+| `pgtrickle.enable_inbox_ordering(inbox, aggregate_id_col, seq_col)` | INBOX-B1: Enable per-aggregate ordering |
+| `pgtrickle.disable_inbox_ordering(inbox, if_exists)` | INBOX-B1: Disable per-aggregate ordering |
+| `pgtrickle.enable_inbox_priority(inbox, priority_col, tiers)` | INBOX-B2: Enable priority-tier processing |
+| `pgtrickle.disable_inbox_priority(inbox, if_exists)` | INBOX-B2: Disable priority-tier processing |
+| `pgtrickle.inbox_ordering_gaps(inbox_name)` | INBOX-B3: Detect sequence gaps per aggregate |
+| `pgtrickle.inbox_is_my_partition(aggregate_id, worker_id, total_workers)` | INBOX-B4: Consistent-hash partition check |
+
+### New Catalog Tables
+
+| Table | Description |
+|-------|-------------|
+| `pgtrickle.pgt_outbox_config` | Per-stream-table outbox configuration |
+| `pgtrickle.pgt_consumer_groups` | Named consumer groups |
+| `pgtrickle.pgt_consumer_offsets` | Per-consumer committed offsets & heartbeats |
+| `pgtrickle.pgt_consumer_leases` | Active visibility leases |
+| `pgtrickle.pgt_inbox_config` | Named inbox configurations |
+| `pgtrickle.pgt_inbox_ordering_config` | Per-inbox ordering configurations |
+| `pgtrickle.pgt_inbox_priority_config` | Per-inbox priority-tier configurations |
+
+### New GUC Variables
+
+| GUC | Default | Description |
+|-----|---------|-------------|
+| `pg_trickle.outbox_enabled` | `true` | Master switch for the outbox subsystem |
+| `pg_trickle.outbox_retention_hours` | `24` | Default outbox row retention |
+| `pg_trickle.outbox_drain_batch_size` | `1000` | Rows per drain pass |
+| `pg_trickle.outbox_inline_threshold_rows` | `10000` | Rows before claim-check path activates |
+| `pg_trickle.outbox_skip_empty_delta` | `true` | Skip writing an outbox row on empty delta |
+| `pg_trickle.consumer_dead_threshold_hours` | `24` | Hours before a consumer is considered dead |
+| `pg_trickle.inbox_enabled` | `true` | Master switch for the inbox subsystem |
+| `pg_trickle.inbox_processed_retention_hours` | `72` | Retention for processed inbox messages |
+| `pg_trickle.inbox_dlq_alert_max_per_refresh` | `10` | DLQ alert threshold per refresh cycle |
+
+### Upgrade
+
+```sql
+-- From v0.27.0:
+ALTER EXTENSION pg_trickle UPDATE TO '0.28.0';
+```
+
+Or use the provided upgrade migration:
+```
+sql/pg_trickle--0.27.0--0.28.0.sql
+```
 
 ---
 

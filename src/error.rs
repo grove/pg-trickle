@@ -161,6 +161,49 @@ pub enum PgTrickleError {
     /// SNAP-2 (v0.27.0): The snapshot schema version does not match the current extension version.
     #[error("snapshot schema version mismatch: {0}")]
     SnapshotSchemaVersionMismatch(String),
+
+    // ── Outbox errors (OUTBOX, v0.28.0) ──────────────────────────────────
+    /// OUTBOX-1 (v0.28.0): Outbox already enabled for this stream table.
+    #[error("outbox already enabled for stream table: {0}")]
+    OutboxAlreadyEnabled(String),
+
+    /// OUTBOX-2 (v0.28.0): Outbox not enabled for this stream table.
+    #[error("outbox not enabled for stream table: {0}")]
+    OutboxNotEnabled(String),
+
+    /// OUTBOX-3 (v0.28.0): Outbox is incompatible with IMMEDIATE refresh mode.
+    #[error("outbox requires deferred refresh mode for stream table: {0}")]
+    OutboxRequiresNotImmediateMode(String),
+
+    // ── Inbox errors (INBOX, v0.28.0) ────────────────────────────────────
+    /// INBOX-1 (v0.28.0): An inbox with the given name already exists.
+    #[error("inbox already exists: {0}")]
+    InboxAlreadyExists(String),
+
+    /// INBOX-2 (v0.28.0): The specified inbox was not found.
+    #[error("inbox not found: {0}")]
+    InboxNotFound(String),
+
+    /// INBOX-3 (v0.28.0): The target inbox table was not found.
+    #[error("inbox table not found: {0}")]
+    InboxTableNotFound(String),
+
+    /// INBOX-4 (v0.28.0): A required column is missing from the inbox table.
+    #[error("inbox column missing in {0}: {1}")]
+    InboxColumnMissing(String, String),
+
+    /// INBOX-B3 (v0.28.0): Ordering and priority config conflict on this inbox.
+    #[error("inbox ordering and priority config conflict for inbox: {0}")]
+    InboxOrderingPriorityConflict(String),
+
+    // ── Consumer group errors (OUTBOX-B, v0.28.0) ────────────────────────
+    /// OUTBOX-B1 (v0.28.0): A consumer group with the given name already exists.
+    #[error("consumer group already exists: {0}")]
+    ConsumerGroupAlreadyExists(String),
+
+    /// OUTBOX-B2 (v0.28.0): The specified consumer group was not found.
+    #[error("consumer group not found: {0}")]
+    ConsumerGroupNotFound(String),
 }
 
 impl PgTrickleError {
@@ -356,6 +399,18 @@ impl PgTrickleError {
             PgTrickleError::SnapshotAlreadyExists(_)
             | PgTrickleError::SnapshotSourceNotFound(_)
             | PgTrickleError::SnapshotSchemaVersionMismatch(_) => PgTrickleErrorKind::User,
+
+            // OUTBOX/INBOX/CONSUMER (v0.28.0): All user-facing.
+            PgTrickleError::OutboxAlreadyEnabled(_)
+            | PgTrickleError::OutboxNotEnabled(_)
+            | PgTrickleError::OutboxRequiresNotImmediateMode(_)
+            | PgTrickleError::InboxAlreadyExists(_)
+            | PgTrickleError::InboxNotFound(_)
+            | PgTrickleError::InboxTableNotFound(_)
+            | PgTrickleError::InboxColumnMissing(_, _)
+            | PgTrickleError::InboxOrderingPriorityConflict(_)
+            | PgTrickleError::ConsumerGroupAlreadyExists(_)
+            | PgTrickleError::ConsumerGroupNotFound(_) => PgTrickleErrorKind::User,
         }
     }
 }
