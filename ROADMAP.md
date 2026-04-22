@@ -54,9 +54,9 @@ coverage, all in plain language.
 - [v1.4.0 — PGlite WASM Extension](#v140--pglite-wasm-extension)
 - [v1.5.0 — PGlite Reactive Integration](#v150--pglite-reactive-integration)
 - [v1.6.0 — TUI Self-Monitoring Integration](#v160--tui-self-monitoring-integration)
-- [v1.7.0 — Performance & Scheduler Intelligence](#v170--performance--scheduler-intelligence)
-- [v1.8.0 — Reactive Subscriptions & Zero-Downtime Operations](#v180--reactive-subscriptions--zero-downtime-operations)
-- [v1.9.0 — Temporal IVM & Columnar Materialization](#v190--temporal-ivm--columnar-materialization)
+- [v0.31.0 — Performance & Scheduler Intelligence](#v0310--performance--scheduler-intelligence)
+- [v0.32.0 — Reactive Subscriptions & Zero-Downtime Operations](#v0320--reactive-subscriptions--zero-downtime-operations)
+- [v0.33.0 — Temporal IVM & Columnar Materialization](#v0330--temporal-ivm--columnar-materialization)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 <!-- TOC end -->
 
@@ -113,9 +113,9 @@ from the v0.1.x series to 1.0 and beyond.
 | v1.4.0 | PGlite WASM extension | Planned |
 | v1.5.0 | PGlite reactive integration | Planned |
 | v1.6.0 | TUI self-monitoring integration | Planned |
-| v1.7.0 | Performance & scheduler intelligence — adaptive batching, plan-aware routing, L0 dshash cache | Planned |
-| v1.8.0 | Reactive subscriptions & zero-downtime operations — subscribe() API, shadow-ST ALTER QUERY | Planned |
-| v1.9.0 | Temporal IVM & columnar materialization — time-travel, SCD-2, columnar storage backend | Planned |
+| v0.31.0 | Performance & scheduler intelligence — adaptive batching, plan-aware routing, L0 dshash cache | Planned |
+| v0.32.0 | Reactive subscriptions & zero-downtime operations — subscribe() API, shadow-ST ALTER QUERY | Planned |
+| v0.33.0 | Temporal IVM & columnar materialization — time-travel, SCD-2, columnar storage backend | Planned |
 
 ---
 
@@ -9687,12 +9687,12 @@ TUI/CLI visualization enhancement for the self-monitoring views. Recommended fro
 
 ---
 
-## v1.7.0 — Performance & Scheduler Intelligence
+## v0.31.0 — Performance & Scheduler Intelligence
 
 **Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §4, §5, §10.3, §10.4.
 
 > **Release Theme**
-> v1.7.0 turns the scheduler from a round-robin dispatcher into an adaptive
+> v0.31.0 turns the scheduler from a round-robin dispatcher into an adaptive
 > execution engine. Three orthogonal improvements land together: adaptive
 > batching groups stream tables that share a source so the change-buffer scan
 > is paid once per source per cycle; plan-aware delta routing selects
@@ -9772,7 +9772,7 @@ but it gives operators the Prometheus alert hook they need.
 expensive source-table scans across databases in the same cluster. A foreign-
 data-wrapper view shared across two databases today causes each scheduler to
 pay the full scan cost independently. The design doc need not ship code; it
-should inform v1.8+ or Post-1.0 architecture.
+should inform v0.32.0+ or Post-1.0 architecture.
 
 ---
 
@@ -9792,17 +9792,17 @@ should inform v1.8+ or Post-1.0 architecture.
 - [ ] PERF-2: Plan-aware strategy flip logged; benchmark shows no regression; unit-tested with mock EXPLAIN output
 - [ ] PERF-3: `pgtrickle_ivm_lock_mode_total{mode="exclusive_due_to_parse_error"}` metric emitted; visible in `metrics_summary()`
 - [ ] PERF-4: IVM trigger functions reference ENR by name; temp tables eliminated; E2E parity tests pass
-- [ ] Extension upgrade path tested (`1.6.0 → 1.7.0`)
+- [ ] Extension upgrade path tested (`1.6.0 → 0.31.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v1.8.0 — Reactive Subscriptions & Zero-Downtime Operations
+## v0.32.0 — Reactive Subscriptions & Zero-Downtime Operations
 
 **Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.1, §10.8.
 
 > **Release Theme**
-> v1.8.0 delivers two long-requested operational capabilities. Reactive
+> v0.32.0 delivers two long-requested operational capabilities. Reactive
 > subscriptions expose stream-table changes as PostgreSQL `NOTIFY` events,
 > enabling browser-side reactive UIs and event-driven microservices with
 > nothing but a standard PG connection — no Kafka, no Debezium, no Hasura.
@@ -9887,17 +9887,17 @@ cycle after the swap. **Schema change:** Yes — add `in_shadow_build BOOLEAN` a
 - [ ] CORR-1: NOTIFY coalescing tested at 10 Hz refresh; client receives ≤ 1 NOTIFY per `notify_coalesce_ms` window
 - [ ] UX-3: Shadow-ST builds in background; swap is atomic; live table readable throughout; rollback on convergence failure documented
 - [ ] UX-4: `view_evolution_status()` returns `in_progress | converged | failed` with row counts
-- [ ] Extension upgrade path tested (`1.7.0 → 1.8.0`)
+- [ ] Extension upgrade path tested (`0.31.0 → 0.32.0`)
 - [ ] `just check-version-sync` passes
 
 ---
 
-## v1.9.0 — Temporal IVM & Columnar Materialization
+## v0.33.0 — Temporal IVM & Columnar Materialization
 
 **Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.2, §10.7.
 
 > **Release Theme**
-> v1.9.0 unlocks two analytic workload patterns that the current streaming
+> v0.33.0 unlocks two analytic workload patterns that the current streaming
 > engine cannot serve. Temporal IVM lets a stream table maintain a rolling
 > history of how its rows have changed over time — providing first-class
 > SCD-Type-2 semantics without external ETL or separate audit tables.
@@ -9962,7 +9962,7 @@ merge strategy for columnar targets). Add a `storage_backend` column to
 ### Conflicts & Risks
 
 - **CORR-1** requires a non-trivial DVM engine extension (two-dimensional
-  frontier). Spike in v1.8.0 first; do not commit to the milestone until
+  frontier). Spike in v0.32.0 first; do not commit to the milestone until
   the spike proves the approach is sound.
 - **CORR-2** depends on the Citus columnar or pg_mooncake extension being
   present; CI must add a Testcontainers image with one of these available.
@@ -9978,7 +9978,7 @@ merge strategy for columnar targets). Add a `storage_backend` column to
 - [ ] TEST-1: Temporal round-trip test passes: insert → update → delete, query at t₀/t₁/t₂ returns correct historical rows
 - [ ] TEST-2: SCD-Type-2 dimension pattern: slowly-changing customer table materialised with full history, current-version query using `WHERE valid_to IS NULL`
 - [ ] CORR-2/UX-3: Columnar stream table creates; `delete_insert` strategy used automatically; columnar MERGE E2E parity test passes
-- [ ] Extension upgrade path tested (`1.8.0 → 1.9.0`)
+- [ ] Extension upgrade path tested (`0.32.0 → 0.33.0`)
 - [ ] `just check-version-sync` passes
 
 ---
@@ -9993,7 +9993,7 @@ The following items from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSES
 | POST-VIS | **GUI workflow designer + visual DAG editor.** Extend `pgtrickle-tui` with a visual DAG editor and an EXPLAIN-DIFF preview that shows the rewritten DVM SQL alongside expected delta size. Lowers on-boarding ramp for SQL developers unfamiliar with IVM semantics. | Medium | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §7 |
 | POST-HELM | **First-party Helm chart.** A `charts/pg-trickle` Helm chart that wraps the CNPG ImageVolume deployment pattern. Publishes to a GitHub Pages chart repository at `grove.github.io/pg-trickle`. Supports multi-database cluster deployments via values. | Medium | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.3 |
 | POST-LLM | **LLM-assisted advisor (`pgtrickle.advise()`).** A SQL function backed by a small open model (e.g. Phi-3 via PL/Python) that takes a query and returns recommendations: refresh mode, schedule, source-table index suggestions, and flagged anti-patterns. Onboarding accelerator for users unfamiliar with IVM tuning. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.9 |
-| POST-GQL | **GraphQL / PostGraphile integration.** A PostGraphile v5 plugin that exposes stream tables as subscription-capable GraphQL types. Clients subscribe to a stream table via GraphQL subscriptions backed by the v1.8.0 `pgtrickle.subscribe()` NOTIFY channel. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.5 |
+| POST-GQL | **GraphQL / PostGraphile integration.** A PostGraphile v5 plugin that exposes stream tables as subscription-capable GraphQL types. Clients subscribe to a stream table via GraphQL subscriptions backed by the v0.32.0 `pgtrickle.subscribe()` NOTIFY channel. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.5 |
 | POST-MDSB | **Multi-database singleton refresh broker.** A cluster-level broker that de-duplicates expensive source-table scans when multiple databases in the same cluster share a source table (e.g. via FDW). Each database's scheduler registers intent with the broker; the broker assigns one scheduler as the "owner" of the scan per cycle. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §4.7 |
 | POST-PGXN | **PG Extension Network listing.** Submit `pg_trickle` to the [PG Extension Network](https://pgxn.org/) and the [PostgreSQL Extension Directory](https://ext.pgxn.org/). Update `META.json` for PGXN-compatible distribution. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.12 |
 | POST-POOL | **Pgcat / Odyssey connection pooler compatibility.** Validate and document pg_trickle behaviour under Pgcat (transaction mode) and Odyssey (transaction mode). Fix any incompatibilities. Update `docs/CONFIGURATION.md` pooler matrix. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.9 |
