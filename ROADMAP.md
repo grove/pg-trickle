@@ -44,9 +44,12 @@ coverage, all in plain language.
 - [v0.25.0 — Scheduler Scalability & Pooler Performance](#v0250--scheduler-scalability--pooler-performance)
 - [v0.26.0 — Test & Concurrency Hardening](#v0260--test--concurrency-hardening)
 - [v0.27.0 — Operability, Observability & DR](#v0270--operability-observability--dr)
-- [v0.28.0 — Pre-GA Correctness & Stability Sprint](#v0280--pre-ga-correctness--stability-sprint)
-- [v0.29.0 — Transactional Inbox & Outbox Patterns](#v0290--transactional-inbox--outbox-patterns)
-- [v0.30.0 — Relay CLI (`pgtrickle-relay`)](#v0300--relay-cli-pgtrickle-relay)
+- [v0.28.0 — Transactional Inbox & Outbox Patterns](#v0280--transactional-inbox--outbox-patterns)
+- [v0.29.0 — Relay CLI (`pgtrickle-relay`)](#v0290--relay-cli-pgtrickle-relay)
+- [v0.30.0 — Pre-GA Correctness & Stability Sprint](#v0300--pre-ga-correctness--stability-sprint)
+- [v0.31.0 — Performance & Scheduler Intelligence](#v0310--performance--scheduler-intelligence)
+- [v0.32.0 — Reactive Subscriptions & Zero-Downtime Operations](#v0320--reactive-subscriptions--zero-downtime-operations)
+- [v0.33.0 — Temporal IVM & Columnar Materialization](#v0330--temporal-ivm--columnar-materialization)
 - [v1.0.0 — Stable Release](#v100--stable-release)
 - [v1.1.0 — PostgreSQL 17 Support](#v110--postgresql-17-support)
 - [v1.2.0 — PGlite Proof of Concept](#v120--pglite-proof-of-concept)
@@ -54,9 +57,6 @@ coverage, all in plain language.
 - [v1.4.0 — PGlite WASM Extension](#v140--pglite-wasm-extension)
 - [v1.5.0 — PGlite Reactive Integration](#v150--pglite-reactive-integration)
 - [v1.6.0 — TUI Self-Monitoring Integration](#v160--tui-self-monitoring-integration)
-- [v1.7.0 — Performance & Scheduler Intelligence](#v170--performance--scheduler-intelligence)
-- [v1.8.0 — Reactive Subscriptions & Zero-Downtime Operations](#v180--reactive-subscriptions--zero-downtime-operations)
-- [v1.9.0 — Temporal IVM & Columnar Materialization](#v190--temporal-ivm--columnar-materialization)
 - [Post-1.0 — Scale, Ecosystem & Platform Expansion](#post-10--scale-ecosystem--platform-expansion)
 <!-- TOC end -->
 
@@ -103,9 +103,12 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.25.0 | Scheduler scalability & pooler performance | ✅ Released |
 | v0.26.0 | Test & concurrency hardening | ✅ Released |
 | v0.27.0 | Operability, observability & DR — snapshot/PITR, schedule planner, cluster metrics | ✅ Released |
-| v0.28.0 | Pre-GA correctness & stability sprint — EC-01 fix, snapshot atomicity, SQLSTATE classifier, caches | Planned |
-| v0.29.0 | Transactional inbox & outbox patterns | Planned |
-| v0.30.0 | Relay CLI (`pgtrickle-relay`) | Planned |
+| v0.28.0 | Transactional inbox & outbox patterns | Planned |
+| v0.29.0 | Relay CLI (`pgtrickle-relay`) | Planned |
+| v0.30.0 | Pre-GA correctness & stability sprint — EC-01 fix, snapshot atomicity, SQLSTATE classifier, caches | Planned |
+| v0.31.0 | Performance & scheduler intelligence — adaptive batching, plan-aware routing, L0 dshash cache | Planned |
+| v0.32.0 | Reactive subscriptions & zero-downtime operations — subscribe() API, shadow-ST ALTER QUERY | Planned |
+| v0.33.0 | Temporal IVM & columnar materialization — time-travel, SCD-2, columnar storage backend | Planned |
 | v1.0.0 | Stable release (incl. PG 19 compatibility) | Planned |
 | v1.1.0 | PostgreSQL 17 support | Planned |
 | v1.2.0 | PGlite proof of concept | Planned |
@@ -113,9 +116,6 @@ from the v0.1.x series to 1.0 and beyond.
 | v1.4.0 | PGlite WASM extension | Planned |
 | v1.5.0 | PGlite reactive integration | Planned |
 | v1.6.0 | TUI self-monitoring integration | Planned |
-| v1.7.0 | Performance & scheduler intelligence — adaptive batching, plan-aware routing, L0 dshash cache | Planned |
-| v1.8.0 | Reactive subscriptions & zero-downtime operations — subscribe() API, shadow-ST ALTER QUERY | Planned |
-| v1.9.0 | Temporal IVM & columnar materialization — time-travel, SCD-2, columnar storage backend | Planned |
 
 ---
 
@@ -6853,7 +6853,7 @@ Phase 1–5 DVM code changes and the TPC-H scaling investigation. Items marked
 
 ---
 
-## v0.28.0 — Pre-GA Correctness & Stability Sprint
+## v0.30.0 — Pre-GA Correctness & Stability Sprint
 
 **Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §3, §4, §7, §8.
 This release must land **before** v1.0.0 GA. Its purpose is to close every
@@ -6861,7 +6861,7 @@ P0 and P1 gap identified in the v0.27.0 assessment so that the stable
 release inherits a clean correctness baseline.
 
 > **Release Theme**
-> v0.28.0 is the quality gate before the feature-rich v0.29–v0.30 arc and
+> v0.30.0 is the quality gate before the feature-rich v0.28–v0.29 arc and
 > the v1.0 stable release. It fixes the remaining correctness defects that
 > could produce silent wrong answers (EC-01 phantom drift, snapshot
 > non-atomicity), eliminates the operational failure modes that could
@@ -7213,7 +7213,7 @@ it is tested against. Add a compatibility matrix row (e.g.
   `pg_trickle.use_sqlstate_classification` GUC (default `false`) initially,
   flip to `true` in v0.31.0 after one release of parallel validation.
 - **UX-14** (CNPG 1.29) depends on CNPG 1.29 being available; if the release
-  slips past the v0.28.0 window, defer to v1.0.0 but keep the tracking issue
+  slips past the v0.30.0 window, defer to v1.0.0 but keep the tracking issue
   open.
 - **UX-15** (dbt 1.11) is purely a tracking concern — no code changes are
   required in this release.
@@ -7229,7 +7229,7 @@ it is tested against. Add a compatibility matrix row (e.g.
 | Phase 5 | P1/P2 test coverage: TEST-1 through TEST-19, PERF-3 | Days 19–27 |
 | Phase 6 | P1/P2/P3 docs & UX: UX-3 through UX-18, TUI parity | Days 27–34 |
 
-> **v0.28.0 total: ~7–8 weeks** (correctness-critical path ~10 days;
+> **v0.30.0 total: ~7–8 weeks** (correctness-critical path ~10 days;
 > documentation and test coverage ~14 days; architecture improvements ~8 days;
 > new test targets ~8 days; Low-priority doc polish ~4 days)
 
@@ -7265,7 +7265,7 @@ it is tested against. Add a compatibility matrix row (e.g.
 
 ---
 
-## v0.29.0 — Transactional Inbox & Outbox Patterns
+## v0.28.0 — Transactional Inbox & Outbox Patterns
 
 **Status: Planned.** Driven by [PLAN_TRANSACTIONAL_OUTBOX_HELPER.md](plans/patterns/PLAN_TRANSACTIONAL_OUTBOX_HELPER.md) and [PLAN_TRANSACTIONAL_INBOX_HELPER.md](plans/patterns/PLAN_TRANSACTIONAL_INBOX_HELPER.md). Outbox helper moved here from v0.22.0 to ship alongside the inbox helper and production-grade advanced features as a complete transactional messaging solution.
 
@@ -7289,18 +7289,18 @@ it is tested against. Add a compatibility matrix row (e.g.
 
 ---
 
-### Known Limitations in v0.29.0
+### Known Limitations in v0.28.0
 
 | Limitation | Rationale | Future Path |
 |------------|-----------|-------------|
 | **Outbox requires DIFFERENTIAL mode.** `enable_outbox()` on `IMMEDIATE`-mode stream tables returns `OutboxRequiresNotImmediateMode`. | Outbox writes one row per refresh cycle inside the refresh transaction. IMMEDIATE refreshes fire inside every source transaction; adding an outbox INSERT there imposes that cost on every application write. | Post-1.0 opt-in GUC if demand justifies. |
 | **Ordering and priority are mutually exclusive per inbox.** Calling both `enable_inbox_ordering()` and `enable_inbox_priority()` on the same inbox returns `InboxOrderingPriorityConflict`. | Per-aggregate sequence ordering must surface the next message in sequence regardless of priority level; priority tiers violate that guarantee. | Use separate inboxes per priority class, each with `enable_inbox_ordering()` applied independently. |
-| **Gap detection degrades above ~100K aggregates.** The `gaps_<inbox>` stream table uses `LEAD()` over pending messages, which is O(N log N) in pending message count — not O(sequence range). This is a significant improvement over the `generate_series` approach; however, refresh time still scales with pending message volume. | Acceptable up to ~1M pending messages at 30 s schedule. Above 10M pending messages, auto-refresh may be slow; use `inbox_ordering_gaps()` for on-demand checks. | Post-v0.29.0: delta-based detection scanning only aggregates with recent activity. |
+| **Gap detection degrades above ~100K aggregates.** The `gaps_<inbox>` stream table uses `LEAD()` over pending messages, which is O(N log N) in pending message count — not O(sequence range). This is a significant improvement over the `generate_series` approach; however, refresh time still scales with pending message volume. | Acceptable up to ~1M pending messages at 30 s schedule. Above 10M pending messages, auto-refresh may be slow; use `inbox_ordering_gaps()` for on-demand checks. | Post-v0.28.0: delta-based detection scanning only aggregates with recent activity. |
 | **Consumer groups provide at-least-once delivery per consumer instance, not exactly-once globally.** | Exactly-once is achieved by composition: relay uses broker idempotency keys; inbox uses `ON CONFLICT (event_id) DO NOTHING`. Three-layer deduplication is more resilient than a monolithic exactly-once guarantee. | Design decision. Documented in PATTERNS.md and SQL_REFERENCE.md. |
-| **AUTO mode may fall back to FULL refresh while outbox is enabled.** When AUTO refresh falls back to FULL, the outbox header row carries `"full_refresh": true`. If the number of current rows exceeds `outbox_inline_threshold_rows`, the claim-check path applies: rows land in `outbox_delta_rows_<st>` and the relay fetches via cursor. A `pg_trickle_alert outbox_full_refresh` event is emitted regardless of which path is taken. Relays must detect the `full_refresh` flag, apply snapshot semantics (upsert rather than publish-as-new), and handle either inline or claim-check payloads. | AUTO refresh adapts to IVM cost at runtime; blocking the FULL fallback permanently would compromise the adaptation that makes AUTO useful. The sentinel flag preserves correctness; the claim-check path prevents memory exhaustion on large tables. | Reference relay updated in OUTBOX-8 to demonstrate all combinations. Post-v0.29.0: consider a GUC to disable FULL fallback per ST when outbox is enabled. |
-| **`next_<inbox>` ordered ST scans all processed rows.** The `last_processed` CTE in the aggregate-ordered ST runs `MAX(sequence_num) GROUP BY aggregate_id` over every processed row on each refresh. For inboxes with large volumes of processed history this grows without bound. | A partial index `(aggregate_id, sequence_num) WHERE processed_at IS NOT NULL` is created by `enable_inbox_ordering()` to mitigate this at v0.29.0, making it an index-only scan. Scaling thresholds: < 100K rows → < 5 ms at 1 s schedule; 100K–1M → increase schedule to `5s`; > 1M → increase to `10s–30s`; > 10M → use `inbox_ordering_gaps()` on-demand only. | Post-v0.29.0: introduce `pgt_inbox_sequence_state` catalog table updated atomically via `advance_inbox_sequence()`, making the CTE O(changed aggregates). |
+| **AUTO mode may fall back to FULL refresh while outbox is enabled.** When AUTO refresh falls back to FULL, the outbox header row carries `"full_refresh": true`. If the number of current rows exceeds `outbox_inline_threshold_rows`, the claim-check path applies: rows land in `outbox_delta_rows_<st>` and the relay fetches via cursor. A `pg_trickle_alert outbox_full_refresh` event is emitted regardless of which path is taken. Relays must detect the `full_refresh` flag, apply snapshot semantics (upsert rather than publish-as-new), and handle either inline or claim-check payloads. | AUTO refresh adapts to IVM cost at runtime; blocking the FULL fallback permanently would compromise the adaptation that makes AUTO useful. The sentinel flag preserves correctness; the claim-check path prevents memory exhaustion on large tables. | Reference relay updated in OUTBOX-8 to demonstrate all combinations. Post-v0.28.0: consider a GUC to disable FULL fallback per ST when outbox is enabled. |
+| **`next_<inbox>` ordered ST scans all processed rows.** The `last_processed` CTE in the aggregate-ordered ST runs `MAX(sequence_num) GROUP BY aggregate_id` over every processed row on each refresh. For inboxes with large volumes of processed history this grows without bound. | A partial index `(aggregate_id, sequence_num) WHERE processed_at IS NOT NULL` is created by `enable_inbox_ordering()` to mitigate this at v0.28.0, making it an index-only scan. Scaling thresholds: < 100K rows → < 5 ms at 1 s schedule; 100K–1M → increase schedule to `5s`; > 1M → increase to `10s–30s`; > 10M → use `inbox_ordering_gaps()` on-demand only. | Post-v0.28.0: introduce `pgt_inbox_sequence_state` catalog table updated atomically via `advance_inbox_sequence()`, making the CTE O(changed aggregates). |
 | **Global consumer monitoring STs created once, not reference-counted.** `pgt_consumer_status`, `pgt_consumer_group_lag`, `pgt_consumer_active_leases` are auto-created on the first `create_consumer_group()` call. They must be created idempotently and torn down only when the last consumer group for an outbox is dropped. | A single set of monitoring STs per outbox is correct and cheaper than per-group STs. | Implementation: `create_stream_table()` called with `if_not_exists := true`; `drop_consumer_group()` decrements a reference count and drops STs at zero. |
-| **Outbox relay latency bounded by poll interval.** Relays discover new outbox rows by polling. The pg_trickle extension emits `pg_notify('pgtrickle_outbox_new', outbox_table_name)` after each outbox INSERT (v0.29.0), but the `pgtrickle-relay` binary does not yet use LISTEN — it starts polling on the standard interval. Minimum relay latency today equals the poll interval (`visibility_seconds`). | The NOTIFY is cheap (≈2 µs, inside the existing refresh transaction) and is emitted from v0.29.0 onwards so relay authors can begin using it immediately. The `pgtrickle-relay` CLI will use LISTEN/NOTIFY in v0.30.0. | v0.30.0 relay: subscribe to `pgtrickle_outbox_new` for sub-100 ms wake-up (see E2E latency benchmark in PLAN_RELAY_CLI.md §E.5). |
+| **Outbox relay latency bounded by poll interval.** Relays discover new outbox rows by polling. The pg_trickle extension emits `pg_notify('pgtrickle_outbox_new', outbox_table_name)` after each outbox INSERT (v0.28.0), but the `pgtrickle-relay` binary does not yet use LISTEN — it starts polling on the standard interval. Minimum relay latency today equals the poll interval (`visibility_seconds`). | The NOTIFY is cheap (≈2 µs, inside the existing refresh transaction) and is emitted from v0.28.0 onwards so relay authors can begin using it immediately. The `pgtrickle-relay` CLI will use LISTEN/NOTIFY in v0.29.0. | v0.29.0 relay: subscribe to `pgtrickle_outbox_new` for sub-100 ms wake-up (see E2E latency benchmark in PLAN_RELAY_CLI.md §E.5). |
 | **`replay_inbox_messages()` accepts only explicit event ID lists.** A free-form `where_clause` parameter was removed to eliminate SQL injection risk. | `EXPLAIN`-based validation of dynamic SQL is insufficient; parameterised `WHERE event_id = ANY($1)` is the safe API. | Operators who need filter-based replay should run a parameterised `SELECT ARRAY_AGG(event_id) ... WHERE <condition>` first, then pass the result to `replay_inbox_messages()`. |
 
 ---
@@ -7451,7 +7451,7 @@ it is tested against. Add a compatibility matrix row (e.g.
 | B-TEST | Part B integration tests, multi-relay E2E, ordered inbox E2E | Days 28–31 |
 | B-DOC | Part B documentation, advanced PATTERNS.md sections, reference relay implementations | Days 31–33 |
 
-> **v0.29.0 total: ~6–7 weeks solo / ~4–5 weeks with two developers working Part A and Part B tracks in parallel** (Part A: essential patterns + Part B: production patterns)
+> **v0.28.0 total: ~6–7 weeks solo / ~4–5 weeks with two developers working Part A and Part B tracks in parallel** (Part A: essential patterns + Part B: production patterns)
 
 **Exit criteria:**
 - [ ] OUTBOX-1/2: `enable_outbox()` creates outbox table + `pgt_outbox_latest_<st>` view with correct schema; catalog row present
@@ -7498,7 +7498,7 @@ it is tested against. Add a compatibility matrix row (e.g.
 
 ---
 
-## v0.30.0 — Relay CLI (`pgtrickle-relay`)
+## v0.29.0 — Relay CLI (`pgtrickle-relay`)
 
 **Status: Planned.** See [plans/relay/PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md) for the full design.
 
@@ -7510,7 +7510,7 @@ it is tested against. Add a compatibility matrix row (e.g.
 > sources and writes them into pg-trickle inbox tables. Both directions share
 > symmetric Source/Sink trait abstractions, config system, observability, and
 > error handling. Implemented as a workspace member alongside `pgtrickle-tui`,
-> with 8 backends behind Cargo feature flags. The relay makes the v0.29.0
+> with 8 backends behind Cargo feature flags. The relay makes the v0.28.0
 > outbox and inbox immediately usable — zero custom relay code required.
 >
 > See [plans/relay/PLAN_RELAY_CLI.md](plans/relay/PLAN_RELAY_CLI.md)
@@ -7594,9 +7594,9 @@ it is tested against. Add a compatibility matrix row (e.g.
 | Phase 4 | Tests: unit, Testcontainers integration (forward + reverse), consumer group E2E, benchmarks | Days 25–32 |
 | Phase 5 | Distribution: Docker, CI binaries, Homebrew, docs, cargo publish | Days 32–34.5 |
 
-> **v0.30.0 total: ~36.5 days solo / ~23 days with two developers**
+> **v0.29.0 total: ~36.5 days solo / ~23 days with two developers**
 > (Phases 1–2 forward sinks and Phase 3 reverse sources can be parallelised.
-> Requires v0.29.0 outbox + consumer groups for full forward E2E; reverse
+> Requires v0.28.0 outbox + consumer groups for full forward E2E; reverse
 > mode only needs inbox table schema.)
 
 **Exit criteria:**
@@ -7638,6 +7638,302 @@ it is tested against. Add a compatibility matrix row (e.g.
 - [ ] RELAY-31: All reverse Testcontainers integration tests pass per source
 - [ ] RELAY-32: Reverse dedup: duplicate source message produces 1 inbox row; crash recovery zero loss
 - [ ] Extension upgrade path tested (`0.28.0 → 0.29.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.31.0 — Performance & Scheduler Intelligence
+
+**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §4, §5, §10.3, §10.4.
+
+> **Release Theme**
+> v0.31.0 turns the scheduler from a round-robin dispatcher into an adaptive
+> execution engine. Three orthogonal improvements land together: adaptive
+> batching groups stream tables that share a source so the change-buffer scan
+> is paid once per source per cycle; plan-aware delta routing selects
+> `merge_strategy` per-refresh from `EXPLAIN ANALYZE` output instead of
+> requiring per-stream-table tuning; and the L0 shared-shmem dshash cache
+> (if not completed in v0.30.0) finishes the three-tier caching story by
+> placing hot delta SQL in shared memory, making cold backends
+> indistinguishable from warm ones. Each improvement is independently
+> deployable and hidden behind a GUC, so operators can adopt them
+> incrementally.
+
+---
+
+### Performance
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| PERF-1 | Adaptive batching: coalesce STs sharing a source table | L | P1 |
+| PERF-2 | Plan-aware delta routing: auto-select `merge_strategy` | M | P1 |
+| PERF-3 | IVM lock-mode observability counter | XS | P1 |
+| PERF-4 | Switch IVM transition tables to ENR (drop temp tables) | M | P1 |
+| PERF-5 | L0 dshash shared-shmem cache (if deferred from v0.30.0) | L | P1 |
+
+**PERF-1 — Adaptive batching.**
+The scheduler currently dispatches each ready stream table independently.
+An adaptive batcher notices when two or more stream tables share the same
+source table and refresh window, and coalesces their change-buffer scans:
+one `SELECT * FROM pgtrickle_changes.changes_<oid>` per source table per
+tick instead of one per downstream stream table. Expected win: 10–30%
+throughput improvement for multi-tenant deployments with shared sources.
+Controlled by `pg_trickle.adaptive_batch_coalescing` GUC (default `true`).
+**Schema change:** No. **Dependencies:** v0.25.0 scheduler snapshot cache.
+
+**PERF-2 — Plan-aware delta routing.**
+Today `merge_strategy` is a per-stream-table setting requiring manual tuning.
+After each differential refresh, inspect the `EXPLAIN (FORMAT JSON)` output
+from the MERGE; if the estimated cost of `delete_insert` is lower than
+`merge` (e.g. because the index cardinality ratio exceeds a heuristic
+threshold), switch for the next cycle. The existing heuristic code in
+`src/refresh/codegen.rs` provides the skeleton. Controlled by
+`pg_trickle.adaptive_merge_strategy` GUC (default `false` initially).
+**Schema change:** No.
+
+**PERF-3 — IVM lock-mode counter.**
+`IvmLockMode::for_query` (src/ivm.rs:48–91) silently falls back to
+`Exclusive` on any parse failure. Add a Prometheus counter
+`pgtrickle_ivm_lock_mode_total{mode="exclusive_due_to_parse_error"}` and
+expose it via `metrics_summary()`. Operators can then audit whether their
+IMMEDIATE-mode queries are taking unnecessarily broad locks.
+**Schema change:** No (new metric only).
+
+**PERF-4 — ENR-based IVM transition tables.**
+The IVM trigger functions use PostgreSQL temporary tables to materialise
+`NEW TABLE` / `OLD TABLE` transition data (comment at `src/ivm.rs:30–37`).
+PostgreSQL 18 supports referencing ephemeral named relations (ENRs) directly
+inside trigger bodies, eliminating the intermediate temp-table overhead.
+Rewrite the trigger function builders to reference the ENR by name.
+**Schema change:** No.
+
+---
+
+### Scalability
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| SCAL-1 | Back-pressure signal when change buffer exceeds threshold | S | P2 |
+| SCAL-2 | Multi-DB singleton refresh broker concept (design only) | S | P2 |
+| SCAL-3 | Shared catalog snapshot for `metrics_summary()` / `cluster_worker_summary()` (if deferred from v0.30.0) | M | P2 |
+
+**SCAL-1** — Expose a `pgtrickle_alert change_buffer_backpressure` event
+when a change buffer grows past `pg_trickle.buffer_alert_threshold` for
+more than N consecutive refresh cycles. This is a signal rather than a
+throttle — actual back-pressure requires application-level cooperation —
+but it gives operators the Prometheus alert hook they need.
+
+**SCAL-2** — Draft a design document for a "refresh broker" that de-duplicates
+expensive source-table scans across databases in the same cluster. A foreign-
+data-wrapper view shared across two databases today causes each scheduler to
+pay the full scan cost independently. The design doc need not ship code; it
+should inform v0.32.0+ or Post-1.0 architecture.
+
+---
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Benchmark regression gate for adaptive batching | S | P1 |
+| TEST-2 | Benchmark regression gate for plan-aware routing | S | P1 |
+| TEST-3 | Integration: ENR trigger vs temp-table parity | S | P1 |
+
+---
+
+### Exit Criteria
+
+- [ ] PERF-1: Adaptive batching reduces change-buffer scan count to 1 per source per tick; benchmark shows ≥ 10% throughput improvement at 50+ STs sharing 5 sources
+- [ ] PERF-2: Plan-aware strategy flip logged; benchmark shows no regression; unit-tested with mock EXPLAIN output
+- [ ] PERF-3: `pgtrickle_ivm_lock_mode_total{mode="exclusive_due_to_parse_error"}` metric emitted; visible in `metrics_summary()`
+- [ ] PERF-4: IVM trigger functions reference ENR by name; temp tables eliminated; E2E parity tests pass
+- [ ] Extension upgrade path tested (`1.6.0 → 0.31.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.32.0 — Reactive Subscriptions & Zero-Downtime Operations
+
+**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.1, §10.8.
+
+> **Release Theme**
+> v0.32.0 delivers two long-requested operational capabilities. Reactive
+> subscriptions expose stream-table changes as PostgreSQL `NOTIFY` events,
+> enabling browser-side reactive UIs and event-driven microservices with
+> nothing but a standard PG connection — no Kafka, no Debezium, no Hasura.
+> Zero-downtime view evolution adds a shadow-ST mode to `ALTER QUERY` that
+> builds the new query's materialisation side-by-side with the live table,
+> then swaps atomically — eliminating the operational risk of running
+> `ALTER QUERY` on a large production stream table.
+
+---
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Reactive subscription: coalesce NOTIFY storms | S | P0 |
+
+**CORR-1** — The subscribe API must coalesce rapid successive changes into a
+single NOTIFY payload (or a "changes pending" signal) when the refresh
+interval is shorter than the LISTEN client's poll loop. Implement a
+`pg_trickle.notify_coalesce_ms` GUC (default 250 ms) and a per-stream-table
+flag that debounces NOTIFY calls.
+
+---
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | `pgtrickle.subscribe(name, channel)` and `unsubscribe()` SQL functions | M | P0 |
+| UX-2 | `pg_trickle.notify_coalesce_ms` GUC | XS | P0 |
+| UX-3 | `ALTER QUERY` shadow-ST mode (`shadow_build := true` parameter) | L | P1 |
+| UX-4 | `pgtrickle.view_evolution_status(name)` monitoring function | S | P1 |
+| UX-5 | Documentation: subscribe() quick-start + shadow-ST runbook | M | P1 |
+
+**UX-1 — Reactive subscription API.**
+`pgtrickle.subscribe(stream_table TEXT, channel TEXT)` registers a per-stream-
+table listener: after every successful differential or full refresh, if the
+delta is non-empty, the refresh path emits `pg_notify(channel, payload_jsonb::text)`
+within the same transaction. The payload carries `{"name": …, "refresh_id": …,
+"inserted_count": N, "deleted_count": N}`. Build on the `pg_notify`
+infrastructure already wired by the v0.28.0 outbox. `pgtrickle.unsubscribe(name, channel)`
+removes the registration; `pgtrickle.list_subscriptions()` returns all active
+registrations. **Schema change:** Yes — new `pgtrickle.pgt_subscriptions`
+catalog table.
+
+**UX-3 — Shadow-ST for zero-downtime `ALTER QUERY`.**
+Today `ALTER QUERY` triggers a full refresh of the stream table. For tables
+with millions of rows, this causes a multi-minute outage during which the
+stream table is locked. A `shadow_build := true` parameter to `alter_query()`
+creates a parallel stream table `__pgt_shadow_<name>` built from the new query,
+refreshes it to convergence in the background without locking the live table,
+then atomically swaps the storage tables and drops the shadow. The live table
+is readable and writable throughout. The new query goes live at the next refresh
+cycle after the swap. **Schema change:** Yes — add `in_shadow_build BOOLEAN` and
+`shadow_table_name TEXT` columns to `pgtrickle.pgt_stream_tables`.
+
+---
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | E2E: subscribe() receives NOTIFY on every non-empty refresh | M | P0 |
+| TEST-2 | E2E: NOTIFY coalescing under high-frequency refresh | S | P1 |
+| TEST-3 | E2E: shadow-ST ALTER QUERY while reads/writes are in flight | L | P1 |
+| TEST-4 | E2E: shadow-ST rollback if new query fails to converge | M | P1 |
+
+---
+
+### Conflicts & Risks
+
+- **UX-3** (shadow-ST) touches the refresh orchestrator and catalog — the
+  highest-change-risk modules. Must ship behind a feature flag, stabilised
+  with the full TPC-H test suite before removing the flag.
+- Shadow-ST competes with the live stream table's change buffer, potentially
+  doubling CDC write overhead during the build window. Add a
+  `shadow_refresh_throttle_ms` GUC to rate-limit background refreshes.
+
+### Exit Criteria
+
+- [ ] UX-1: `subscribe()` / `unsubscribe()` / `list_subscriptions()` registered; NOTIFY emitted on non-empty refresh; `pgt_subscriptions` catalog table in migration script
+- [ ] CORR-1: NOTIFY coalescing tested at 10 Hz refresh; client receives ≤ 1 NOTIFY per `notify_coalesce_ms` window
+- [ ] UX-3: Shadow-ST builds in background; swap is atomic; live table readable throughout; rollback on convergence failure documented
+- [ ] UX-4: `view_evolution_status()` returns `in_progress | converged | failed` with row counts
+- [ ] Extension upgrade path tested (`0.31.0 → 0.32.0`)
+- [ ] `just check-version-sync` passes
+
+---
+
+## v0.33.0 — Temporal IVM & Columnar Materialization
+
+**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.2, §10.7.
+
+> **Release Theme**
+> v0.33.0 unlocks two analytic workload patterns that the current streaming
+> engine cannot serve. Temporal IVM lets a stream table maintain a rolling
+> history of how its rows have changed over time — providing first-class
+> SCD-Type-2 semantics without external ETL or separate audit tables.
+> Columnar materialization lets a stream table store its result set in
+> Citus columnar storage (or pg_mooncake), dramatically reducing storage
+> footprint and query I/O for analytic consumers that scan the materialised
+> result set but never write to it. Together they close the OLTP→OLAP
+> bridging gap and make pg_trickle viable as the materialization layer for
+> dashboards and reporting queries.
+
+---
+
+### Correctness
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| CORR-1 | Temporal IVM: two-dimensional frontier (LSN, timestamp) | L | P0 |
+| CORR-2 | Columnar: verify differential MERGE compatibility with columnar storage | M | P0 |
+
+**CORR-1** — Temporal IVM requires extending the frontier model from a
+one-dimensional LSN cursor to a two-dimensional `(frontier_lsn, valid_from_ts)`
+pair. Each row carries a `__pgt_valid_from TIMESTAMPTZ` and an optional
+`__pgt_valid_to TIMESTAMPTZ`. Rows are never physically deleted; instead a
+"close" delta sets `valid_to`. Queries against the stream table with `AS OF
+TIMESTAMP $1` resolve to the materialised row version valid at that timestamp.
+**Schema change:** Yes — new `temporal_mode BOOLEAN` column on
+`pgtrickle.pgt_stream_tables`; new `__pgt_valid_from`/`__pgt_valid_to`
+columns auto-added to the storage table when `temporal_mode = true`.
+
+**CORR-2** — Citus columnar and pg_mooncake use append-only storage models.
+Verify that the differential MERGE (`MERGE INTO storage USING delta`) is
+compatible with append-only semantics (likely requires `DELETE + INSERT`
+merge strategy for columnar targets). Add a `storage_backend` column to
+`pgtrickle.pgt_stream_tables` and route merge codegen accordingly.
+
+---
+
+### Ease of Use
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| UX-1 | `create_stream_table(…, temporal := true)` parameter | M | P0 |
+| UX-2 | `AS OF TIMESTAMP` query rewrite in DVM parser | L | P1 |
+| UX-3 | `create_stream_table(…, storage_backend := 'columnar')` parameter | M | P1 |
+| UX-4 | Automatic `delete_insert` strategy for columnar backends | S | P1 |
+| UX-5 | Documentation: temporal IVM tutorial + SCD-Type-2 worked example | M | P1 |
+| UX-6 | Documentation: columnar backend setup guide (Citus + pg_mooncake) | S | P1 |
+
+---
+
+### Test Coverage
+
+| ID | Title | Effort | Priority |
+|----|-------|--------|----------|
+| TEST-1 | Integration: temporal stream table `AS OF TIMESTAMP` round-trip | L | P0 |
+| TEST-2 | Integration: SCD-Type-2 dimension pattern end-to-end | M | P1 |
+| TEST-3 | Integration: columnar stream table MERGE parity with heap | M | P0 |
+| TEST-4 | Integration: temporal + columnar combined (temporal columnar ST) | M | P2 |
+
+---
+
+### Conflicts & Risks
+
+- **CORR-1** requires a non-trivial DVM engine extension (two-dimensional
+  frontier). Spike in v0.32.0 first; do not commit to the milestone until
+  the spike proves the approach is sound.
+- **CORR-2** depends on the Citus columnar or pg_mooncake extension being
+  present; CI must add a Testcontainers image with one of these available.
+  Gate columnar support behind `pg_trickle.columnar_backend` GUC (default
+  `none`); the CI matrix should test at least one columnar provider.
+- The combination of temporal mode and columnar storage is a P2 stretch
+  goal; do not block the release on it.
+
+### Exit Criteria
+
+- [ ] CORR-1/UX-1: `create_stream_table(…, temporal := true)` creates storage table with `__pgt_valid_from`/`__pgt_valid_to`; rows never physically deleted
+- [ ] UX-2: `AS OF TIMESTAMP $1` query rewrites resolve against the materialised history
+- [ ] TEST-1: Temporal round-trip test passes: insert → update → delete, query at t₀/t₁/t₂ returns correct historical rows
+- [ ] TEST-2: SCD-Type-2 dimension pattern: slowly-changing customer table materialised with full history, current-version query using `WHERE valid_to IS NULL`
+- [ ] CORR-2/UX-3: Columnar stream table creates; `delete_insert` strategy used automatically; columnar MERGE E2E parity test passes
+- [ ] Extension upgrade path tested (`0.32.0 → 0.33.0`)
 - [ ] `just check-version-sync` passes
 
 ---
@@ -9687,302 +9983,6 @@ TUI/CLI visualization enhancement for the self-monitoring views. Recommended fro
 
 ---
 
-## v1.7.0 — Performance & Scheduler Intelligence
-
-**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §4, §5, §10.3, §10.4.
-
-> **Release Theme**
-> v1.7.0 turns the scheduler from a round-robin dispatcher into an adaptive
-> execution engine. Three orthogonal improvements land together: adaptive
-> batching groups stream tables that share a source so the change-buffer scan
-> is paid once per source per cycle; plan-aware delta routing selects
-> `merge_strategy` per-refresh from `EXPLAIN ANALYZE` output instead of
-> requiring per-stream-table tuning; and the L0 shared-shmem dshash cache
-> (if not completed in v0.28.0) finishes the three-tier caching story by
-> placing hot delta SQL in shared memory, making cold backends
-> indistinguishable from warm ones. Each improvement is independently
-> deployable and hidden behind a GUC, so operators can adopt them
-> incrementally.
-
----
-
-### Performance
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| PERF-1 | Adaptive batching: coalesce STs sharing a source table | L | P1 |
-| PERF-2 | Plan-aware delta routing: auto-select `merge_strategy` | M | P1 |
-| PERF-3 | IVM lock-mode observability counter | XS | P1 |
-| PERF-4 | Switch IVM transition tables to ENR (drop temp tables) | M | P1 |
-| PERF-5 | L0 dshash shared-shmem cache (if deferred from v0.28.0) | L | P1 |
-
-**PERF-1 — Adaptive batching.**
-The scheduler currently dispatches each ready stream table independently.
-An adaptive batcher notices when two or more stream tables share the same
-source table and refresh window, and coalesces their change-buffer scans:
-one `SELECT * FROM pgtrickle_changes.changes_<oid>` per source table per
-tick instead of one per downstream stream table. Expected win: 10–30%
-throughput improvement for multi-tenant deployments with shared sources.
-Controlled by `pg_trickle.adaptive_batch_coalescing` GUC (default `true`).
-**Schema change:** No. **Dependencies:** v0.25.0 scheduler snapshot cache.
-
-**PERF-2 — Plan-aware delta routing.**
-Today `merge_strategy` is a per-stream-table setting requiring manual tuning.
-After each differential refresh, inspect the `EXPLAIN (FORMAT JSON)` output
-from the MERGE; if the estimated cost of `delete_insert` is lower than
-`merge` (e.g. because the index cardinality ratio exceeds a heuristic
-threshold), switch for the next cycle. The existing heuristic code in
-`src/refresh/codegen.rs` provides the skeleton. Controlled by
-`pg_trickle.adaptive_merge_strategy` GUC (default `false` initially).
-**Schema change:** No.
-
-**PERF-3 — IVM lock-mode counter.**
-`IvmLockMode::for_query` (src/ivm.rs:48–91) silently falls back to
-`Exclusive` on any parse failure. Add a Prometheus counter
-`pgtrickle_ivm_lock_mode_total{mode="exclusive_due_to_parse_error"}` and
-expose it via `metrics_summary()`. Operators can then audit whether their
-IMMEDIATE-mode queries are taking unnecessarily broad locks.
-**Schema change:** No (new metric only).
-
-**PERF-4 — ENR-based IVM transition tables.**
-The IVM trigger functions use PostgreSQL temporary tables to materialise
-`NEW TABLE` / `OLD TABLE` transition data (comment at `src/ivm.rs:30–37`).
-PostgreSQL 18 supports referencing ephemeral named relations (ENRs) directly
-inside trigger bodies, eliminating the intermediate temp-table overhead.
-Rewrite the trigger function builders to reference the ENR by name.
-**Schema change:** No.
-
----
-
-### Scalability
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| SCAL-1 | Back-pressure signal when change buffer exceeds threshold | S | P2 |
-| SCAL-2 | Multi-DB singleton refresh broker concept (design only) | S | P2 |
-| SCAL-3 | Shared catalog snapshot for `metrics_summary()` / `cluster_worker_summary()` (if deferred from v0.28.0) | M | P2 |
-
-**SCAL-1** — Expose a `pgtrickle_alert change_buffer_backpressure` event
-when a change buffer grows past `pg_trickle.buffer_alert_threshold` for
-more than N consecutive refresh cycles. This is a signal rather than a
-throttle — actual back-pressure requires application-level cooperation —
-but it gives operators the Prometheus alert hook they need.
-
-**SCAL-2** — Draft a design document for a "refresh broker" that de-duplicates
-expensive source-table scans across databases in the same cluster. A foreign-
-data-wrapper view shared across two databases today causes each scheduler to
-pay the full scan cost independently. The design doc need not ship code; it
-should inform v1.8+ or Post-1.0 architecture.
-
----
-
-### Test Coverage
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| TEST-1 | Benchmark regression gate for adaptive batching | S | P1 |
-| TEST-2 | Benchmark regression gate for plan-aware routing | S | P1 |
-| TEST-3 | Integration: ENR trigger vs temp-table parity | S | P1 |
-
----
-
-### Exit Criteria
-
-- [ ] PERF-1: Adaptive batching reduces change-buffer scan count to 1 per source per tick; benchmark shows ≥ 10% throughput improvement at 50+ STs sharing 5 sources
-- [ ] PERF-2: Plan-aware strategy flip logged; benchmark shows no regression; unit-tested with mock EXPLAIN output
-- [ ] PERF-3: `pgtrickle_ivm_lock_mode_total{mode="exclusive_due_to_parse_error"}` metric emitted; visible in `metrics_summary()`
-- [ ] PERF-4: IVM trigger functions reference ENR by name; temp tables eliminated; E2E parity tests pass
-- [ ] Extension upgrade path tested (`1.6.0 → 1.7.0`)
-- [ ] `just check-version-sync` passes
-
----
-
-## v1.8.0 — Reactive Subscriptions & Zero-Downtime Operations
-
-**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.1, §10.8.
-
-> **Release Theme**
-> v1.8.0 delivers two long-requested operational capabilities. Reactive
-> subscriptions expose stream-table changes as PostgreSQL `NOTIFY` events,
-> enabling browser-side reactive UIs and event-driven microservices with
-> nothing but a standard PG connection — no Kafka, no Debezium, no Hasura.
-> Zero-downtime view evolution adds a shadow-ST mode to `ALTER QUERY` that
-> builds the new query's materialisation side-by-side with the live table,
-> then swaps atomically — eliminating the operational risk of running
-> `ALTER QUERY` on a large production stream table.
-
----
-
-### Correctness
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| CORR-1 | Reactive subscription: coalesce NOTIFY storms | S | P0 |
-
-**CORR-1** — The subscribe API must coalesce rapid successive changes into a
-single NOTIFY payload (or a "changes pending" signal) when the refresh
-interval is shorter than the LISTEN client's poll loop. Implement a
-`pg_trickle.notify_coalesce_ms` GUC (default 250 ms) and a per-stream-table
-flag that debounces NOTIFY calls.
-
----
-
-### Ease of Use
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| UX-1 | `pgtrickle.subscribe(name, channel)` and `unsubscribe()` SQL functions | M | P0 |
-| UX-2 | `pg_trickle.notify_coalesce_ms` GUC | XS | P0 |
-| UX-3 | `ALTER QUERY` shadow-ST mode (`shadow_build := true` parameter) | L | P1 |
-| UX-4 | `pgtrickle.view_evolution_status(name)` monitoring function | S | P1 |
-| UX-5 | Documentation: subscribe() quick-start + shadow-ST runbook | M | P1 |
-
-**UX-1 — Reactive subscription API.**
-`pgtrickle.subscribe(stream_table TEXT, channel TEXT)` registers a per-stream-
-table listener: after every successful differential or full refresh, if the
-delta is non-empty, the refresh path emits `pg_notify(channel, payload_jsonb::text)`
-within the same transaction. The payload carries `{"name": …, "refresh_id": …,
-"inserted_count": N, "deleted_count": N}`. Build on the `pg_notify`
-infrastructure already wired by the v0.29.0 outbox. `pgtrickle.unsubscribe(name, channel)`
-removes the registration; `pgtrickle.list_subscriptions()` returns all active
-registrations. **Schema change:** Yes — new `pgtrickle.pgt_subscriptions`
-catalog table.
-
-**UX-3 — Shadow-ST for zero-downtime `ALTER QUERY`.**
-Today `ALTER QUERY` triggers a full refresh of the stream table. For tables
-with millions of rows, this causes a multi-minute outage during which the
-stream table is locked. A `shadow_build := true` parameter to `alter_query()`
-creates a parallel stream table `__pgt_shadow_<name>` built from the new query,
-refreshes it to convergence in the background without locking the live table,
-then atomically swaps the storage tables and drops the shadow. The live table
-is readable and writable throughout. The new query goes live at the next refresh
-cycle after the swap. **Schema change:** Yes — add `in_shadow_build BOOLEAN` and
-`shadow_table_name TEXT` columns to `pgtrickle.pgt_stream_tables`.
-
----
-
-### Test Coverage
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| TEST-1 | E2E: subscribe() receives NOTIFY on every non-empty refresh | M | P0 |
-| TEST-2 | E2E: NOTIFY coalescing under high-frequency refresh | S | P1 |
-| TEST-3 | E2E: shadow-ST ALTER QUERY while reads/writes are in flight | L | P1 |
-| TEST-4 | E2E: shadow-ST rollback if new query fails to converge | M | P1 |
-
----
-
-### Conflicts & Risks
-
-- **UX-3** (shadow-ST) touches the refresh orchestrator and catalog — the
-  highest-change-risk modules. Must ship behind a feature flag, stabilised
-  with the full TPC-H test suite before removing the flag.
-- Shadow-ST competes with the live stream table's change buffer, potentially
-  doubling CDC write overhead during the build window. Add a
-  `shadow_refresh_throttle_ms` GUC to rate-limit background refreshes.
-
-### Exit Criteria
-
-- [ ] UX-1: `subscribe()` / `unsubscribe()` / `list_subscriptions()` registered; NOTIFY emitted on non-empty refresh; `pgt_subscriptions` catalog table in migration script
-- [ ] CORR-1: NOTIFY coalescing tested at 10 Hz refresh; client receives ≤ 1 NOTIFY per `notify_coalesce_ms` window
-- [ ] UX-3: Shadow-ST builds in background; swap is atomic; live table readable throughout; rollback on convergence failure documented
-- [ ] UX-4: `view_evolution_status()` returns `in_progress | converged | failed` with row counts
-- [ ] Extension upgrade path tested (`1.7.0 → 1.8.0`)
-- [ ] `just check-version-sync` passes
-
----
-
-## v1.9.0 — Temporal IVM & Columnar Materialization
-
-**Status: Planned.** Derived from [plans/PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.2, §10.7.
-
-> **Release Theme**
-> v1.9.0 unlocks two analytic workload patterns that the current streaming
-> engine cannot serve. Temporal IVM lets a stream table maintain a rolling
-> history of how its rows have changed over time — providing first-class
-> SCD-Type-2 semantics without external ETL or separate audit tables.
-> Columnar materialization lets a stream table store its result set in
-> Citus columnar storage (or pg_mooncake), dramatically reducing storage
-> footprint and query I/O for analytic consumers that scan the materialised
-> result set but never write to it. Together they close the OLTP→OLAP
-> bridging gap and make pg_trickle viable as the materialization layer for
-> dashboards and reporting queries.
-
----
-
-### Correctness
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| CORR-1 | Temporal IVM: two-dimensional frontier (LSN, timestamp) | L | P0 |
-| CORR-2 | Columnar: verify differential MERGE compatibility with columnar storage | M | P0 |
-
-**CORR-1** — Temporal IVM requires extending the frontier model from a
-one-dimensional LSN cursor to a two-dimensional `(frontier_lsn, valid_from_ts)`
-pair. Each row carries a `__pgt_valid_from TIMESTAMPTZ` and an optional
-`__pgt_valid_to TIMESTAMPTZ`. Rows are never physically deleted; instead a
-"close" delta sets `valid_to`. Queries against the stream table with `AS OF
-TIMESTAMP $1` resolve to the materialised row version valid at that timestamp.
-**Schema change:** Yes — new `temporal_mode BOOLEAN` column on
-`pgtrickle.pgt_stream_tables`; new `__pgt_valid_from`/`__pgt_valid_to`
-columns auto-added to the storage table when `temporal_mode = true`.
-
-**CORR-2** — Citus columnar and pg_mooncake use append-only storage models.
-Verify that the differential MERGE (`MERGE INTO storage USING delta`) is
-compatible with append-only semantics (likely requires `DELETE + INSERT`
-merge strategy for columnar targets). Add a `storage_backend` column to
-`pgtrickle.pgt_stream_tables` and route merge codegen accordingly.
-
----
-
-### Ease of Use
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| UX-1 | `create_stream_table(…, temporal := true)` parameter | M | P0 |
-| UX-2 | `AS OF TIMESTAMP` query rewrite in DVM parser | L | P1 |
-| UX-3 | `create_stream_table(…, storage_backend := 'columnar')` parameter | M | P1 |
-| UX-4 | Automatic `delete_insert` strategy for columnar backends | S | P1 |
-| UX-5 | Documentation: temporal IVM tutorial + SCD-Type-2 worked example | M | P1 |
-| UX-6 | Documentation: columnar backend setup guide (Citus + pg_mooncake) | S | P1 |
-
----
-
-### Test Coverage
-
-| ID | Title | Effort | Priority |
-|----|-------|--------|----------|
-| TEST-1 | Integration: temporal stream table `AS OF TIMESTAMP` round-trip | L | P0 |
-| TEST-2 | Integration: SCD-Type-2 dimension pattern end-to-end | M | P1 |
-| TEST-3 | Integration: columnar stream table MERGE parity with heap | M | P0 |
-| TEST-4 | Integration: temporal + columnar combined (temporal columnar ST) | M | P2 |
-
----
-
-### Conflicts & Risks
-
-- **CORR-1** requires a non-trivial DVM engine extension (two-dimensional
-  frontier). Spike in v1.8.0 first; do not commit to the milestone until
-  the spike proves the approach is sound.
-- **CORR-2** depends on the Citus columnar or pg_mooncake extension being
-  present; CI must add a Testcontainers image with one of these available.
-  Gate columnar support behind `pg_trickle.columnar_backend` GUC (default
-  `none`); the CI matrix should test at least one columnar provider.
-- The combination of temporal mode and columnar storage is a P2 stretch
-  goal; do not block the release on it.
-
-### Exit Criteria
-
-- [ ] CORR-1/UX-1: `create_stream_table(…, temporal := true)` creates storage table with `__pgt_valid_from`/`__pgt_valid_to`; rows never physically deleted
-- [ ] UX-2: `AS OF TIMESTAMP $1` query rewrites resolve against the materialised history
-- [ ] TEST-1: Temporal round-trip test passes: insert → update → delete, query at t₀/t₁/t₂ returns correct historical rows
-- [ ] TEST-2: SCD-Type-2 dimension pattern: slowly-changing customer table materialised with full history, current-version query using `WHERE valid_to IS NULL`
-- [ ] CORR-2/UX-3: Columnar stream table creates; `delete_insert` strategy used automatically; columnar MERGE E2E parity test passes
-- [ ] Extension upgrade path tested (`1.8.0 → 1.9.0`)
-- [ ] `just check-version-sync` passes
-
----
-
 ## Post-1.0 Addendum — Cross-Cluster & Visual Tooling
 
 The following items from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §7 are explicitly post-1.0 and are tracked here rather than in a numbered milestone:
@@ -9993,7 +9993,7 @@ The following items from [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSES
 | POST-VIS | **GUI workflow designer + visual DAG editor.** Extend `pgtrickle-tui` with a visual DAG editor and an EXPLAIN-DIFF preview that shows the rewritten DVM SQL alongside expected delta size. Lowers on-boarding ramp for SQL developers unfamiliar with IVM semantics. | Medium | [PLAN_OVERALL_ASSESSMENT_2.md](plans/PLAN_OVERALL_ASSESSMENT_2.md) §7 |
 | POST-HELM | **First-party Helm chart.** A `charts/pg-trickle` Helm chart that wraps the CNPG ImageVolume deployment pattern. Publishes to a GitHub Pages chart repository at `grove.github.io/pg-trickle`. Supports multi-database cluster deployments via values. | Medium | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.3 |
 | POST-LLM | **LLM-assisted advisor (`pgtrickle.advise()`).** A SQL function backed by a small open model (e.g. Phi-3 via PL/Python) that takes a query and returns recommendations: refresh mode, schedule, source-table index suggestions, and flagged anti-patterns. Onboarding accelerator for users unfamiliar with IVM tuning. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.9 |
-| POST-GQL | **GraphQL / PostGraphile integration.** A PostGraphile v5 plugin that exposes stream tables as subscription-capable GraphQL types. Clients subscribe to a stream table via GraphQL subscriptions backed by the v1.8.0 `pgtrickle.subscribe()` NOTIFY channel. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.5 |
+| POST-GQL | **GraphQL / PostGraphile integration.** A PostGraphile v5 plugin that exposes stream tables as subscription-capable GraphQL types. Clients subscribe to a stream table via GraphQL subscriptions backed by the v0.32.0 `pgtrickle.subscribe()` NOTIFY channel. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §10.5 |
 | POST-MDSB | **Multi-database singleton refresh broker.** A cluster-level broker that de-duplicates expensive source-table scans when multiple databases in the same cluster share a source table (e.g. via FDW). Each database's scheduler registers intent with the broker; the broker assigns one scheduler as the "owner" of the scan per cycle. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §4.7 |
 | POST-PGXN | **PG Extension Network listing.** Submit `pg_trickle` to the [PG Extension Network](https://pgxn.org/) and the [PostgreSQL Extension Directory](https://ext.pgxn.org/). Update `META.json` for PGXN-compatible distribution. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.12 |
 | POST-POOL | **Pgcat / Odyssey connection pooler compatibility.** Validate and document pg_trickle behaviour under Pgcat (transaction mode) and Odyssey (transaction mode). Fix any incompatibilities. Update `docs/CONFIGURATION.md` pooler matrix. | Low | [PLAN_OVERALL_ASSESSMENT_3.md](plans/PLAN_OVERALL_ASSESSMENT_3.md) §9.9 |
