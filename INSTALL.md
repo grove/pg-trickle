@@ -6,7 +6,7 @@
 |---|---|
 | PostgreSQL | 18.x |
 
-> **Building from source** additionally requires Rust 1.85+ (edition 2024) and pgrx 0.17.x.
+> **Building from source** additionally requires Rust 1.85+ (edition 2024) and pgrx 0.18.x.
 > Pre-built release artifacts only need a running PostgreSQL 18.x instance.
 
 ---
@@ -148,7 +148,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # pgrx build tool
-cargo install --locked cargo-pgrx --version 0.17.0
+cargo install --locked cargo-pgrx --version 0.18.0
 cargo pgrx init --pg18 "$(pg_config --bindir)/pg_config"
 ```
 
@@ -186,7 +186,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### 2. Install pgrx
 
 ```bash
-cargo install --locked cargo-pgrx --version 0.17.0
+cargo install --locked cargo-pgrx --version 0.18.0
 cargo pgrx init --pg18 $(pg_config --bindir)/pg_config
 ```
 
