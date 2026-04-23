@@ -890,6 +890,123 @@ COMMENT ON FUNCTION pgtrickle."canary_promote"(text) IS
     requires = [create_stream_table, drop_stream_table, alter_stream_table],
 );
 
+// ── v0.28.0: Outbox & Inbox catalog tables ─────────────────────────────
+
+extension_sql!(
+    r#"
+-- OUTBOX-1 (v0.28.0): Per-stream-table outbox configuration.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_outbox_config (
+    stream_table_oid   OID         NOT NULL PRIMARY KEY,
+    stream_table_name  TEXT        NOT NULL,
+    outbox_table_name  TEXT        NOT NULL,
+    retention_hours    INT         NOT NULL DEFAULT 24,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_drained_at    TIMESTAMPTZ,
+    last_drained_count BIGINT      NOT NULL DEFAULT 0,
+    CONSTRAINT uq_outbox_table_name UNIQUE (outbox_table_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pgt_outbox_config_name
+    ON pgtrickle.pgt_outbox_config (stream_table_name);
+
+COMMENT ON TABLE pgtrickle.pgt_outbox_config IS
+    'OUTBOX-1 (v0.28.0): Catalog of stream tables with the transactional outbox pattern enabled.';
+
+-- INBOX-1 (v0.28.0): Named inbox configurations.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_inbox_config (
+    inbox_name             TEXT        NOT NULL PRIMARY KEY,
+    inbox_schema           TEXT        NOT NULL DEFAULT 'pgtrickle',
+    max_retries            INT         NOT NULL DEFAULT 3,
+    schedule               TEXT        NOT NULL DEFAULT '1s',
+    with_dead_letter       BOOL        NOT NULL DEFAULT true,
+    with_stats             BOOL        NOT NULL DEFAULT true,
+    retention_hours        INT         NOT NULL DEFAULT 72,
+    id_column              TEXT        NOT NULL DEFAULT 'event_id',
+    processed_at_column    TEXT        NOT NULL DEFAULT 'processed_at',
+    retry_count_column     TEXT        NOT NULL DEFAULT 'retry_count',
+    error_column           TEXT        NOT NULL DEFAULT 'error',
+    received_at_column     TEXT        NOT NULL DEFAULT 'received_at',
+    event_type_column      TEXT        NOT NULL DEFAULT 'event_type',
+    is_managed             BOOL        NOT NULL DEFAULT true,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE pgtrickle.pgt_inbox_config IS
+    'INBOX-1 (v0.28.0): Catalog of named transactional inbox configurations.';
+
+-- OUTBOX-B1 (v0.28.0): Consumer groups for the outbox pattern.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_consumer_groups (
+    group_name         TEXT        NOT NULL PRIMARY KEY,
+    outbox_name        TEXT        NOT NULL,
+    auto_offset_reset  TEXT        NOT NULL DEFAULT 'latest',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_consumer_group_auto_offset_reset
+        CHECK (auto_offset_reset IN ('earliest', 'latest'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pgt_consumer_groups_outbox
+    ON pgtrickle.pgt_consumer_groups (outbox_name);
+
+COMMENT ON TABLE pgtrickle.pgt_consumer_groups IS
+    'OUTBOX-B1 (v0.28.0): Named consumer groups that track consumption progress on an outbox.';
+
+-- OUTBOX-B2 (v0.28.0): Per-consumer committed offsets within a group.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_consumer_offsets (
+    group_name        TEXT        NOT NULL
+                      REFERENCES pgtrickle.pgt_consumer_groups(group_name) ON DELETE CASCADE,
+    consumer_id       TEXT        NOT NULL,
+    committed_offset  BIGINT      NOT NULL DEFAULT 0,
+    last_committed_at TIMESTAMPTZ,
+    last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (group_name, consumer_id)
+);
+
+COMMENT ON TABLE pgtrickle.pgt_consumer_offsets IS
+    'OUTBOX-B2 (v0.28.0): Per-consumer committed offsets and heartbeat tracking.';
+
+-- OUTBOX-B3 (v0.28.0): Visibility leases granted by poll_outbox().
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_consumer_leases (
+    group_name     TEXT        NOT NULL,
+    consumer_id    TEXT        NOT NULL,
+    batch_start    BIGINT      NOT NULL,
+    batch_end      BIGINT      NOT NULL,
+    lease_expires  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (group_name, consumer_id),
+    FOREIGN KEY (group_name, consumer_id)
+        REFERENCES pgtrickle.pgt_consumer_offsets(group_name, consumer_id) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE pgtrickle.pgt_consumer_leases IS
+    'OUTBOX-B3 (v0.28.0): Visibility leases for in-flight outbox message batches.';
+
+-- INBOX-B1 (v0.28.0): Per-inbox ordering configuration.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_inbox_ordering_config (
+    inbox_name        TEXT NOT NULL PRIMARY KEY
+                      REFERENCES pgtrickle.pgt_inbox_config(inbox_name) ON DELETE CASCADE,
+    aggregate_id_col  TEXT NOT NULL,
+    sequence_num_col  TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE pgtrickle.pgt_inbox_ordering_config IS
+    'INBOX-B1 (v0.28.0): Ordering configuration for per-aggregate sequenced inbox processing.';
+
+-- INBOX-B2 (v0.28.0): Per-inbox priority tiers configuration.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_inbox_priority_config (
+    inbox_name    TEXT NOT NULL PRIMARY KEY
+                  REFERENCES pgtrickle.pgt_inbox_config(inbox_name) ON DELETE CASCADE,
+    priority_col  TEXT NOT NULL,
+    tiers         JSONB,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE pgtrickle.pgt_inbox_priority_config IS
+    'INBOX-B2 (v0.28.0): Priority tier configuration for inbox message processing.';
+"#,
+    name = "pg_trickle_outbox_inbox_catalog",
+    requires = [],
+);
+
 // ── Launcher notification (must be last) ──────────────────────────────
 //
 // Signal the launcher background worker to re-probe this database.

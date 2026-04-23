@@ -103,7 +103,7 @@ from the v0.1.x series to 1.0 and beyond.
 | v0.25.0 | Scheduler scalability & pooler performance | ✅ Released |
 | v0.26.0 | Test & concurrency hardening | ✅ Released |
 | v0.27.0 | Operability, observability & DR — snapshot/PITR, schedule planner, cluster metrics | ✅ Released |
-| v0.28.0 | Transactional inbox & outbox patterns | Planned |
+| v0.28.0 | Transactional inbox & outbox patterns | ✅ Released |
 | v0.29.0 | Relay CLI (`pgtrickle-relay`) | Planned |
 | v0.30.0 | Pre-GA correctness & stability sprint — EC-01 fix, snapshot atomicity, SQLSTATE classifier, caches | Planned |
 | v0.31.0 | Performance & scheduler intelligence — adaptive batching, plan-aware routing, L0 dshash cache | Planned |
