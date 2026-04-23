@@ -59,9 +59,8 @@ impl super::Source for SqsSource {
                 serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
 
             let dedup_key = msg
-                .message_deduplication_id
+                .message_id
                 .clone()
-                .or_else(|| msg.message_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
             let event_type = payload

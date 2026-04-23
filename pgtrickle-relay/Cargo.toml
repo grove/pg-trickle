@@ -54,12 +54,12 @@ axum = "0.8"
 prometheus = "0.14"
 
 # Optional sink/source backends
-async-nats = { version = "0.40", optional = true }
+async-nats = { version = "0.47", optional = true }
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false, optional = true }
 rdkafka = { version = "0.37", optional = true }
 redis = { version = "0.28", features = ["tokio-comp", "streams"], optional = true }
-aws-sdk-sqs = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
+aws-sdk-sqs = { version = "1.98", optional = true }
+aws-config = { version = "1.8", optional = true }
 lapin = { version = "2", optional = true }
 
 [dev-dependencies]
