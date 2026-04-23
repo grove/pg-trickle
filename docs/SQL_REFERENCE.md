@@ -101,6 +101,30 @@ Complete reference for all SQL functions, views, and catalog tables provided by 
 - [dbt Integration (v0.13.0)](#dbt-integration-v0130)
   - [partition\_by config](#partition_by-config)
   - [fuse config](#fuse-config)
+- [Stream Table Snapshots (v0.27.0)](#stream-table-snapshots-v0270)
+  - [snapshot\_stream\_table](#pgtricklesnapshotst)
+  - [restore\_from\_snapshot](#pgtricklerestorefromsnapshot)
+  - [list\_snapshots](#pgtricklelistsnapshots)
+  - [drop\_snapshot](#pgtrickledropsnapshot)
+- [Transactional Outbox & Consumer Groups (v0.28.0)](#transactional-outbox--consumer-groups-v0280)
+  - [enable\_outbox](#pgtrickleenableoutbox)
+  - [disable\_outbox](#pgtrickledisableoutbox)
+  - [outbox\_status](#pgtrickleoutboxstatus)
+  - [create\_consumer\_group](#pgtricklecreateconsumergroup)
+  - [poll\_outbox](#pgtricklepolloutbox)
+  - [commit\_offset](#pgtricklecommitoffset)
+  - [consumer\_lag](#pgtrickleconsumerlag)
+- [Transactional Inbox (v0.28.0)](#transactional-inbox-v0280)
+  - [create\_inbox](#pgtricklecreateinbox)
+  - [drop\_inbox](#pgtrickledropinbox)
+  - [inbox\_status](#pgtrickleinboxstatus)
+  - [enable\_inbox\_ordering](#pgtrickleenableinboxordering)
+  - [inbox\_is\_my\_partition](#pgtrickleinboxismypartition)
+- [Relay Pipeline Catalog (v0.29.0)](#relay-pipeline-catalog-v0290)
+  - [set\_relay\_outbox](#pgtricklesetrelayoutbox)
+  - [set\_relay\_inbox](#pgtricklesetrelayinbox)
+  - [enable\_relay / disable\_relay](#pgtrickleenablerelay--pgtrickledisablerelay)
+  - [list\_relay\_configs](#pgtricklelistrelayconfigs)
 
 ---
 
@@ -4179,6 +4203,664 @@ at MEDIUM because no DIFFERENTIAL observations exist for comparison.
 The `sla_headroom_pct` column shows how much faster DIFFERENTIAL is compared
 to FULL as a percentage. A value of 70% means "DIFF is 70% faster than FULL".
 This column is `NULL` when either FULL or DIFF observations are missing.
+
+---
+
+## Stream Table Snapshots (v0.27.0)
+
+> **Added in v0.27.0 (SNAP-1–3).**
+
+Snapshots let you export the current state of a stream table into an archival
+table, then restore from that snapshot on another node or after a PITR
+operation. The main use cases are:
+
+- **Replica bootstrap** — populate a new standby without a full re-scan
+- **PITR alignment** — re-align stream table frontiers after point-in-time
+  recovery so the first refresh is DIFFERENTIAL, not a full re-scan
+- **Archiving** — preserve a historical snapshot for audit or rollback
+
+### `pgtrickle.snapshot_stream_table(name, target)`
+
+Export the current content of a stream table into a new archival table.
+
+```sql
+pgtrickle.snapshot_stream_table(
+    name   TEXT,              -- stream table (schema.name or plain name)
+    target TEXT DEFAULT NULL  -- destination table name; auto-generated if NULL
+) → TEXT                      -- returns the fully-qualified snapshot table name
+```
+
+The snapshot table is created in the `pgtrickle` schema with the naming
+convention `snapshot_<name>_<epoch_ms>` unless you supply `target`. The table
+includes three metadata columns added by pg_trickle: `__pgt_snapshot_version`,
+`__pgt_frontier`, and `__pgt_snapshotted_at`.
+
+```sql
+-- Auto-named snapshot
+SELECT pgtrickle.snapshot_stream_table('public.orders_agg');
+-- → 'pgtrickle.snapshot_orders_agg_1745452800000'
+
+-- Named snapshot (useful when targeting a replica)
+SELECT pgtrickle.snapshot_stream_table(
+    'public.orders_agg',
+    'pgtrickle.orders_agg_replica_init'
+);
+```
+
+### `pgtrickle.restore_from_snapshot(name, source)`
+
+Restore a stream table from an archival snapshot and realign its frontier.
+
+```sql
+pgtrickle.restore_from_snapshot(
+    name   TEXT,  -- stream table to restore into
+    source TEXT   -- fully-qualified snapshot table created by snapshot_stream_table()
+) → void
+```
+
+After `restore_from_snapshot()` completes:
+
+1. The stream table's rows are replaced with the snapshot contents.
+2. The frontier is set to the snapshot's frontier, so the **next refresh cycle
+   is DIFFERENTIAL** — only changes made after the snapshot are fetched.
+
+```sql
+SELECT pgtrickle.restore_from_snapshot(
+    'public.orders_agg',
+    'pgtrickle.orders_agg_replica_init'
+);
+```
+
+### `pgtrickle.list_snapshots(name)`
+
+List all archival snapshots for a stream table.
+
+```sql
+pgtrickle.list_snapshots(
+    name TEXT  -- stream table name
+) → SETOF record(
+    snapshot_table TEXT,
+    created_at     TIMESTAMPTZ,
+    row_count      BIGINT,
+    frontier       JSONB,
+    size_bytes     BIGINT
+)
+```
+
+### `pgtrickle.drop_snapshot(snapshot_table)`
+
+Drop an archival snapshot table and remove it from the catalog.
+
+```sql
+pgtrickle.drop_snapshot(
+    snapshot_table TEXT  -- fully-qualified snapshot table
+) → void
+```
+
+```sql
+SELECT pgtrickle.drop_snapshot('pgtrickle.orders_agg_replica_init');
+```
+
+### Catalog Table
+
+| Table | Description |
+|-------|-------------|
+| `pgtrickle.pgt_snapshots` | One row per snapshot: `pgt_id`, `snapshot_schema`, `snapshot_table`, `snapshot_version`, `frontier`, `created_at` |
+
+---
+
+## Transactional Outbox & Consumer Groups (v0.28.0)
+
+> **Added in v0.28.0 (OUTBOX-1–6, OUTBOX-B1–B6).**
+
+The outbox pattern lets you reliably publish stream table deltas to external
+consumers — even if the consumer is temporarily unavailable. Each refresh
+writes a header row to a dedicated outbox table. Consumers poll for new rows,
+process them, and commit their offset. The pattern provides:
+
+- **At-least-once delivery** with explicit offset commits
+- **Kafka-style consumer groups** for parallel consumption with independent offsets
+- **Visibility leases** to prevent duplicate processing within a group
+- **Claim-check delivery** for large deltas (automatic when delta exceeds a
+  configurable row threshold)
+- **Consumer lag metrics** (`consumer_lag()`) for monitoring
+
+### Quickstart
+
+```sql
+-- 1. Enable the outbox on a stream table
+SELECT pgtrickle.enable_outbox('public.orders_agg');
+
+-- 2. Create a consumer group
+SELECT pgtrickle.create_consumer_group('my_group', 'public.orders_agg');
+
+-- 3. Poll for new messages (returns rows since last committed offset)
+SELECT * FROM pgtrickle.poll_outbox('my_group', 'worker-1');
+
+-- 4. Process the rows, then commit the highest offset you processed
+SELECT pgtrickle.commit_offset('my_group', 'worker-1', 42);
+```
+
+### `pgtrickle.enable_outbox(name, retention_hours)`
+
+Enable the outbox pattern for a stream table.
+
+```sql
+pgtrickle.enable_outbox(
+    name            TEXT,       -- stream table name
+    retention_hours INT DEFAULT 24  -- how long to keep outbox rows
+) → void
+```
+
+Creates an outbox table `pgtrickle.pgt_outbox_<st>` and a convenience view
+`pgtrickle.pgt_outbox_latest_<st>`. Records configuration in
+`pgtrickle.pgt_outbox_config`.
+
+> **Restriction:** Not compatible with `IMMEDIATE` refresh mode — use
+> `SCHEDULED` or `AUTO` instead.
+
+### `pgtrickle.disable_outbox(name, if_exists)`
+
+Disable the outbox pattern and drop the associated outbox table.
+
+```sql
+pgtrickle.disable_outbox(
+    name      TEXT,
+    if_exists BOOLEAN DEFAULT false
+) → void
+```
+
+### `pgtrickle.outbox_status(name)`
+
+Return a JSONB summary of outbox state for a stream table.
+
+```sql
+pgtrickle.outbox_status(name TEXT) → JSONB
+```
+
+Returns: `enabled`, `outbox_table`, `retention_hours`, `pending_rows`,
+`oldest_row_age`, `consumer_groups`.
+
+### `pgtrickle.outbox_rows_consumed(stream_table, outbox_id)`
+
+Mark an outbox row as consumed and release its claim-check rows (if any).
+
+```sql
+pgtrickle.outbox_rows_consumed(
+    stream_table TEXT,
+    outbox_id    BIGINT
+) → void
+```
+
+Use this when consuming outbox rows **without** a consumer group. For
+consumer-group mode, use `commit_offset()` instead.
+
+### Consumer Groups
+
+Consumer groups give independent consumers their own offset pointer into the
+outbox. Multiple consumers in the same group share a single offset (competing
+consumers); multiple groups each get the full message stream.
+
+#### `pgtrickle.create_consumer_group(name, outbox, auto_offset_reset)`
+
+```sql
+pgtrickle.create_consumer_group(
+    name              TEXT,
+    outbox            TEXT,
+    auto_offset_reset TEXT DEFAULT 'latest'  -- 'latest' | 'earliest'
+) → void
+```
+
+`auto_offset_reset = 'latest'` means a new group starts consuming from the
+newest row. Use `'earliest'` to replay from the beginning.
+
+#### `pgtrickle.drop_consumer_group(name, if_exists)`
+
+```sql
+pgtrickle.drop_consumer_group(
+    name      TEXT,
+    if_exists BOOLEAN DEFAULT false
+) → void
+```
+
+Drops the group and all its offsets and leases.
+
+#### `pgtrickle.poll_outbox(group, consumer, batch_size, visibility_seconds)`
+
+Fetch the next batch of unprocessed messages for a consumer.
+
+```sql
+pgtrickle.poll_outbox(
+    group              TEXT,
+    consumer           TEXT,
+    batch_size         INT DEFAULT 100,
+    visibility_seconds INT DEFAULT 30
+) → SETOF record(
+    outbox_id      BIGINT,
+    pgt_id         UUID,
+    created_at     TIMESTAMPTZ,
+    inserted_count BIGINT,
+    deleted_count  BIGINT,
+    is_claim_check BOOLEAN,
+    payload        JSONB
+)
+```
+
+`poll_outbox` grants a **visibility lease** for `visibility_seconds`. The
+consumer must call `commit_offset()` or `extend_lease()` before the lease
+expires, otherwise the rows become visible again to other consumers.
+
+When `is_claim_check = true`, the `payload` is `NULL` and the actual delta
+rows are in a separate table (call `outbox_rows_consumed()` to release them
+after processing).
+
+#### `pgtrickle.commit_offset(group, consumer, last_offset)`
+
+Commit the highest outbox offset the consumer has successfully processed.
+
+```sql
+pgtrickle.commit_offset(
+    group       TEXT,
+    consumer    TEXT,
+    last_offset BIGINT
+) → void
+```
+
+#### `pgtrickle.extend_lease(group, consumer, extension_seconds)`
+
+Extend the visibility lease when processing takes longer than expected.
+
+```sql
+pgtrickle.extend_lease(
+    group             TEXT,
+    consumer          TEXT,
+    extension_seconds INT DEFAULT 30
+) → void
+```
+
+#### `pgtrickle.seek_offset(group, consumer, new_offset)`
+
+Jump to a specific offset for replay or recovery.
+
+```sql
+pgtrickle.seek_offset(
+    group      TEXT,
+    consumer   TEXT,
+    new_offset BIGINT
+) → void
+```
+
+#### `pgtrickle.consumer_heartbeat(group, consumer)`
+
+Signal that a consumer is still alive. Prevents the consumer from being marked
+as dead (controlled by `pg_trickle.consumer_dead_threshold_hours`).
+
+```sql
+pgtrickle.consumer_heartbeat(
+    group    TEXT,
+    consumer TEXT
+) → void
+```
+
+#### `pgtrickle.consumer_lag(group)`
+
+Return per-consumer lag metrics for a consumer group.
+
+```sql
+pgtrickle.consumer_lag(group TEXT) → SETOF record(
+    consumer         TEXT,
+    committed_offset BIGINT,
+    latest_offset    BIGINT,
+    lag              BIGINT,
+    last_seen        TIMESTAMPTZ
+)
+```
+
+### Outbox Catalog Tables
+
+| Table | Description |
+|-------|-------------|
+| `pgtrickle.pgt_outbox_config` | Per-stream-table outbox configuration |
+| `pgtrickle.pgt_consumer_groups` | Named consumer groups |
+| `pgtrickle.pgt_consumer_offsets` | Per-consumer committed offsets and heartbeat timestamps |
+| `pgtrickle.pgt_consumer_leases` | Active visibility leases |
+
+---
+
+## Transactional Inbox (v0.28.0)
+
+> **Added in v0.28.0 (INBOX-1–6, INBOX-B1–B4).**
+
+The inbox pattern provides a reliable, idempotent message receiver inside
+PostgreSQL. Incoming events are written to an inbox table; pg_trickle
+automatically creates stream tables that give you views of pending messages,
+dead-letter messages, and statistics — all updated incrementally.
+
+### What gets created
+
+When you call `create_inbox('orders_inbox', ...)`, pg_trickle creates:
+
+| Table / View | Purpose |
+|---|---|
+| `pgtrickle.orders_inbox` | The raw inbox table (one row per event) |
+| `orders_inbox_pending` stream table | Events with `processed_at IS NULL` and `retry_count < max_retries` |
+| `orders_inbox_dlq` stream table | Dead-letter events (`retry_count >= max_retries`) |
+| `orders_inbox_stats` stream table | Event counts grouped by `event_type` |
+
+### `pgtrickle.create_inbox(name, ...)`
+
+Create a new transactional inbox with its associated stream tables.
+
+```sql
+pgtrickle.create_inbox(
+    name             TEXT,
+    schema           TEXT    DEFAULT 'pgtrickle',
+    max_retries      INT     DEFAULT 3,
+    with_dead_letter BOOLEAN DEFAULT true,
+    with_stats       BOOLEAN DEFAULT true,
+    schedule_seconds INT     DEFAULT 5
+) → void
+```
+
+```sql
+SELECT pgtrickle.create_inbox('orders_inbox');
+-- Creates: pgtrickle.orders_inbox, orders_inbox_pending, orders_inbox_dlq, orders_inbox_stats
+```
+
+### `pgtrickle.drop_inbox(name, if_exists, cascade)`
+
+Drop an inbox and all associated stream tables.
+
+```sql
+pgtrickle.drop_inbox(
+    name      TEXT,
+    if_exists BOOLEAN DEFAULT false,
+    cascade   BOOLEAN DEFAULT false
+) → void
+```
+
+### `pgtrickle.enable_inbox_tracking(name, table_ref, ...)`
+
+Bring-your-own-table (BYOT) mode: register an existing table as an inbox
+without creating a new one.
+
+```sql
+pgtrickle.enable_inbox_tracking(
+    name             TEXT,
+    table_ref        TEXT,            -- fully-qualified existing table
+    max_retries      INT     DEFAULT 3,
+    with_dead_letter BOOLEAN DEFAULT true,
+    with_stats       BOOLEAN DEFAULT true,
+    schedule_seconds INT     DEFAULT 5
+) → void
+```
+
+### `pgtrickle.inbox_health(name)`
+
+Return a JSONB health summary for an inbox.
+
+```sql
+pgtrickle.inbox_health(name TEXT) → JSONB
+```
+
+Returns: `inbox_name`, `pending_count`, `dlq_count`, `processed_24h`,
+`oldest_pending_age`, `stream_table_statuses`.
+
+### `pgtrickle.inbox_status(name)`
+
+Return a tabular status summary for one or all inboxes.
+
+```sql
+pgtrickle.inbox_status(
+    name TEXT DEFAULT NULL  -- NULL = all inboxes
+) → SETOF record(
+    inbox_name   TEXT,
+    pending      BIGINT,
+    dlq          BIGINT,
+    max_retries  INT,
+    created_at   TIMESTAMPTZ
+)
+```
+
+### `pgtrickle.replay_inbox_messages(name, event_ids)`
+
+Reset specific messages back to pending state for re-processing.
+
+```sql
+pgtrickle.replay_inbox_messages(
+    name      TEXT,
+    event_ids TEXT[]  -- list of event_id values to replay
+) → BIGINT            -- number of messages reset
+```
+
+### Per-Aggregate Ordering (INBOX-B1)
+
+By default, multiple workers can process inbox messages concurrently. If
+messages for the same aggregate must be processed in order, enable per-aggregate
+ordering:
+
+#### `pgtrickle.enable_inbox_ordering(inbox, aggregate_id_col, seq_col)`
+
+```sql
+pgtrickle.enable_inbox_ordering(
+    inbox            TEXT,
+    aggregate_id_col TEXT,  -- column that identifies the aggregate (e.g. 'customer_id')
+    seq_col          TEXT   -- monotonic sequence column (e.g. 'event_sequence')
+) → void
+```
+
+Creates a `next_<inbox>` stream table that surfaces only the lowest-sequence
+unprocessed message per aggregate. Workers consume from `next_<inbox>` to
+avoid concurrent processing of the same aggregate.
+
+#### `pgtrickle.disable_inbox_ordering(inbox, if_exists)`
+
+```sql
+pgtrickle.disable_inbox_ordering(inbox TEXT, if_exists BOOLEAN DEFAULT false) → void
+```
+
+### Priority Tiers (INBOX-B2)
+
+#### `pgtrickle.enable_inbox_priority(inbox, priority_col, tiers)`
+
+Register a priority column for cost-model–aware scheduling.
+
+```sql
+pgtrickle.enable_inbox_priority(
+    inbox        TEXT,
+    priority_col TEXT,    -- column name that holds the priority value
+    tiers        INT DEFAULT 3
+) → void
+```
+
+#### `pgtrickle.disable_inbox_priority(inbox, if_exists)`
+
+```sql
+pgtrickle.disable_inbox_priority(inbox TEXT, if_exists BOOLEAN DEFAULT false) → void
+```
+
+### Sequence Gap Detection (INBOX-B3)
+
+#### `pgtrickle.inbox_ordering_gaps(inbox_name)`
+
+Detect gaps in the per-aggregate sequence — useful for identifying lost or
+out-of-order messages.
+
+```sql
+pgtrickle.inbox_ordering_gaps(inbox_name TEXT) → SETOF record(
+    aggregate_id TEXT,
+    expected_seq BIGINT,
+    actual_seq   BIGINT,
+    gap_size     BIGINT
+)
+```
+
+### Consistent-Hash Partitioning (INBOX-B4)
+
+#### `pgtrickle.inbox_is_my_partition(aggregate_id, worker_id, total_workers)`
+
+Distribute inbox processing across multiple workers without external
+coordination. Returns `true` when this worker should process messages for the
+given aggregate.
+
+```sql
+pgtrickle.inbox_is_my_partition(
+    aggregate_id  TEXT,
+    worker_id     INT,   -- 0-based worker index
+    total_workers INT
+) → BOOLEAN
+```
+
+Uses FNV-1a consistent hashing so the same aggregate always routes to the same
+worker, preventing concurrent processing.
+
+```sql
+-- Worker 2 of 4 processes only its assigned aggregates:
+SELECT * FROM orders_inbox_pending
+WHERE pgtrickle.inbox_is_my_partition(customer_id::text, 2, 4);
+```
+
+### Inbox Catalog Tables
+
+| Table | Description |
+|-------|-------------|
+| `pgtrickle.pgt_inbox_config` | Named inbox configurations |
+| `pgtrickle.pgt_inbox_ordering_config` | Per-inbox ordering configurations |
+| `pgtrickle.pgt_inbox_priority_config` | Per-inbox priority-tier configurations |
+
+---
+
+## Relay Pipeline Catalog (v0.29.0)
+
+> **Added in v0.29.0 (RELAY-CAT).**
+
+The Relay SQL API manages the pipeline catalog for `pgtrickle-relay` — the
+standalone Rust binary that bridges stream table outboxes and inboxes with
+external messaging systems (NATS, Kafka, HTTP webhooks, Redis, SQS, RabbitMQ).
+
+Pipeline configuration is SQL-only — no YAML files, no restarts required.
+Changes take effect immediately via `LISTEN/NOTIFY` hot-reload.
+
+See [RELAY.md](RELAY.md) for the full relay architecture and deployment guide.
+
+### `pgtrickle.set_relay_outbox(name, outbox, group, sink, ...)`
+
+Create or update a **forward** pipeline: stream table outbox → external sink.
+
+```sql
+pgtrickle.set_relay_outbox(
+    name            TEXT,
+    outbox          TEXT,           -- stream table name with outbox enabled
+    group           TEXT,           -- consumer group name for the relay
+    sink            JSONB,          -- sink config; must include "type" key
+    retention_hours INT     DEFAULT 24,
+    enabled         BOOLEAN DEFAULT true
+) → void
+```
+
+The `sink` JSONB must include a `"type"` key. Supported types:
+
+| `type` | Backend | Feature flag |
+|--------|---------|-------------|
+| `"nats"` | NATS JetStream | `nats` |
+| `"kafka"` | Apache Kafka | `kafka` |
+| `"http"` | HTTP webhook | `webhook` |
+| `"redis"` | Redis Streams | `redis` |
+| `"sqs"` | AWS SQS | `sqs` |
+| `"rabbitmq"` | RabbitMQ | `rabbitmq` |
+| `"pg-inbox"` | Remote PostgreSQL inbox | `pg-inbox` |
+| `"stdout"` | stdout / JSONL file | `stdout` |
+
+```sql
+-- Stream orders deltas to a NATS subject
+SELECT pgtrickle.set_relay_outbox(
+    'orders-to-nats',
+    'public.orders_agg',
+    'relay_group_1',
+    '{"type": "nats", "subject": "orders.deltas", "url": "nats://nats:4222"}'::jsonb
+);
+```
+
+### `pgtrickle.set_relay_inbox(name, inbox, source, ...)`
+
+Create or update a **reverse** pipeline: external source → pg_trickle inbox.
+
+```sql
+pgtrickle.set_relay_inbox(
+    name             TEXT,
+    inbox            TEXT,           -- inbox name (must already exist)
+    source           JSONB,          -- source config; must include "type" key
+    max_retries      INT     DEFAULT 3,
+    schedule         TEXT    DEFAULT '1s',
+    with_dead_letter BOOLEAN DEFAULT true,
+    retention_hours  INT     DEFAULT 24,
+    enabled          BOOLEAN DEFAULT true
+) → void
+```
+
+```sql
+-- Consume from Kafka into an inbox
+SELECT pgtrickle.set_relay_inbox(
+    'kafka-to-orders',
+    'pgtrickle.orders_inbox',
+    '{"type": "kafka", "brokers": ["kafka:9092"], "topic": "raw-orders", "group_id": "relay"}'::jsonb
+);
+```
+
+### `pgtrickle.enable_relay(name)` / `pgtrickle.disable_relay(name)`
+
+Enable or disable a pipeline by name. Searches both `relay_outbox_config` and
+`relay_inbox_config`.
+
+```sql
+pgtrickle.enable_relay(name TEXT)  → void
+pgtrickle.disable_relay(name TEXT) → void
+```
+
+### `pgtrickle.delete_relay(name, if_exists)`
+
+Permanently delete a pipeline configuration.
+
+```sql
+pgtrickle.delete_relay(
+    name      TEXT,
+    if_exists BOOLEAN DEFAULT false
+) → void
+```
+
+### `pgtrickle.get_relay_config(name)`
+
+Fetch the full configuration for one pipeline as JSONB.
+
+```sql
+pgtrickle.get_relay_config(name TEXT) → JSONB
+```
+
+### `pgtrickle.list_relay_configs()`
+
+List all relay pipelines with their status.
+
+```sql
+pgtrickle.list_relay_configs() → SETOF record(
+    name       TEXT,
+    direction  TEXT,   -- 'forward' | 'reverse'
+    enabled    BOOLEAN,
+    config     JSONB,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
+)
+```
+
+### Relay Catalog Tables
+
+| Table | Description |
+|-------|-------------|
+| `pgtrickle.relay_outbox_config` | Forward pipelines (outbox → external sink) |
+| `pgtrickle.relay_inbox_config` | Reverse pipelines (external source → inbox) |
+| `pgtrickle.relay_consumer_offsets` | Per-pipeline relay consumer offsets |
+
+Changes to these tables trigger a `NOTIFY pgtrickle_relay_config` message so
+running relay instances hot-reload their pipelines without restart.
 
 ---
 

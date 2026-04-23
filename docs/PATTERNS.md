@@ -18,6 +18,10 @@ anti-patterns to avoid, and refresh mode recommendations.
 - [Pattern 5: Real-Time Dashboards](#pattern-5-real-time-dashboards)
 - [Pattern 6: Tiered Refresh Strategy](#pattern-6-tiered-refresh-strategy)
 - [General Guidelines](#general-guidelines)
+- [Replica Bootstrap & PITR Alignment (v0.27.0)](#replica-bootstrap--pitr-alignment-v0270)
+- [Pattern 7: Transactional Outbox (v0.28.0)](#pattern-7-transactional-outbox-v0280)
+- [Pattern 8: Transactional Inbox (v0.28.0)](#pattern-8-transactional-inbox-v0280)
+- [Pattern 9: Bidirectional Event Pipeline with Relay (v0.29.0)](#pattern-9-bidirectional-event-pipeline-with-relay-v0290)
 
 ---
 
@@ -518,3 +522,317 @@ FROM pgtrickle.pgt_stream_tables;
 > **Performance**: Restoring a 1M-row stream table from a snapshot completes
 > in < 5 seconds (bulk INSERT from local table). The frontier alignment ensures
 > the first differential refresh fetches only new changes, not all rows.
+
+---
+
+## Pattern 7: Transactional Outbox (v0.28.0)
+
+> **Requires:** v0.28.0+
+
+The **transactional outbox** pattern reliably publishes stream table deltas to
+external consumers — even if the consumer is temporarily offline. Each time the
+stream table refreshes, pg_trickle writes a header row to a dedicated outbox
+table. Consumers read from the outbox via `poll_outbox()`, process the delta,
+then commit their offset.
+
+**Use this pattern when:**
+- You need to publish stream table changes to a message queue, webhook, or another service
+- Consumers need at-least-once delivery guarantees
+- Multiple independent consumers need to read the same stream independently
+- You want replay / seek-to-offset for recovery
+
+### Architecture
+
+```
+orders (base table)
+  └─→ orders_agg (stream table)
+        └─→ pgt_outbox_orders_agg (outbox table)
+              ├─→ Consumer group A: analytics pipeline
+              └─→ Consumer group B: notification service
+```
+
+### SQL Example
+
+```sql
+-- 1. Create the stream table
+SELECT pgtrickle.create_stream_table(
+    'public.orders_agg',
+    'SELECT customer_id, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY customer_id',
+    schedule_seconds => 5
+);
+
+-- 2. Enable the outbox
+SELECT pgtrickle.enable_outbox('public.orders_agg', retention_hours => 48);
+
+-- 3. Create consumer groups
+SELECT pgtrickle.create_consumer_group('analytics', 'public.orders_agg', auto_offset_reset => 'latest');
+SELECT pgtrickle.create_consumer_group('notifications', 'public.orders_agg', auto_offset_reset => 'latest');
+
+-- 4. Consumer A polls and processes
+DO $$
+DECLARE
+    r RECORD;
+    last_id BIGINT := 0;
+BEGIN
+    FOR r IN
+        SELECT * FROM pgtrickle.poll_outbox('analytics', 'worker-1', batch_size => 50)
+    LOOP
+        -- process r.payload (JSONB with inserted/deleted row arrays)
+        last_id := r.outbox_id;
+    END LOOP;
+
+    IF last_id > 0 THEN
+        PERFORM pgtrickle.commit_offset('analytics', 'worker-1', last_id);
+    END IF;
+END;
+$$;
+
+-- 5. Check consumer lag
+SELECT * FROM pgtrickle.consumer_lag('analytics');
+```
+
+### Consumer Group Tips
+
+| Scenario | Setting |
+|----------|---------|
+| Multiple competing workers sharing one offset | Put all workers in the **same group** |
+| Independent pipelines that each need the full stream | Create a **separate group** per pipeline |
+| Replay from the beginning | `seek_offset('my_group', 'worker-1', 0)` |
+| Resume after a crash without re-processing | Commit offsets frequently; use `extend_lease()` for long processing |
+
+### Recommended Configuration
+
+```ini
+pg_trickle.outbox_enabled = true
+pg_trickle.outbox_retention_hours = 48        # keep 2 days of history
+pg_trickle.outbox_skip_empty_delta = true     # don't write rows for no-op refreshes
+pg_trickle.outbox_force_retention = true      # keep rows until all groups commit
+pg_trickle.consumer_dead_threshold_hours = 24 # mark workers dead after 24h silence
+pg_trickle.consumer_cleanup_enabled = true
+```
+
+### Anti-Patterns
+
+- **Polling without committing:** If `commit_offset()` is never called, the lease
+  expires and the rows are re-delivered. Always commit after successful processing.
+- **One group per worker:** Use one group and multiple named consumers within it
+  for competing-consumer parallelism. Use multiple groups only when pipelines are
+  truly independent.
+- **Long processing without heartbeats:** Call `consumer_heartbeat()` every 10–15
+  seconds for long-running processing to avoid being marked dead.
+
+---
+
+## Pattern 8: Transactional Inbox (v0.28.0)
+
+> **Requires:** v0.28.0+
+
+The **transactional inbox** pattern provides a reliable, idempotent message
+receiver inside PostgreSQL. External producers write events to the inbox table;
+pg_trickle maintains stream tables that give you live views of pending, failed,
+and processed messages — all updated incrementally.
+
+**Use this pattern when:**
+- You receive events from external systems and need to process them exactly-once
+- You want automatic dead-letter handling for failed messages
+- Multiple workers need to process different aggregates without stepping on each other
+- You need per-aggregate ordering guarantees
+
+### Architecture
+
+```
+external producer (Kafka / webhook / pg_trickle relay)
+  └─→ pgtrickle.orders_inbox (raw event table)
+        ├─→ orders_inbox_pending  (stream table: awaiting processing)
+        ├─→ orders_inbox_dlq      (stream table: failed messages)
+        └─→ orders_inbox_stats    (stream table: event counts by type)
+```
+
+### SQL Example
+
+```sql
+-- 1. Create the inbox
+SELECT pgtrickle.create_inbox(
+    'orders_inbox',
+    schema           => 'pgtrickle',
+    max_retries      => 3,
+    with_dead_letter => true,
+    with_stats       => true,
+    schedule_seconds => 5
+);
+
+-- 2. External system inserts a message
+INSERT INTO pgtrickle.orders_inbox (event_id, event_type, aggregate_id, payload)
+VALUES (
+    gen_random_uuid()::text,
+    'order.placed',
+    'customer-123',
+    '{"order_id": 42, "amount": 99.50}'::jsonb
+);
+
+-- 3. Worker polls pending messages and processes
+UPDATE pgtrickle.orders_inbox
+SET processed_at = now()
+WHERE event_id = '<event_id>'
+  AND processed_at IS NULL;
+
+-- 4. Check inbox health
+SELECT pgtrickle.inbox_health('orders_inbox');
+
+-- 5. Replay failed messages
+SELECT pgtrickle.replay_inbox_messages(
+    'orders_inbox',
+    ARRAY['event-id-1', 'event-id-2']
+);
+```
+
+### Per-Aggregate Ordering
+
+When messages for the same customer / entity must be processed in sequence:
+
+```sql
+-- Enable ordering: only surface the next unprocessed message per aggregate
+SELECT pgtrickle.enable_inbox_ordering(
+    'orders_inbox',
+    aggregate_id_col => 'aggregate_id',
+    seq_col          => 'event_sequence'
+);
+
+-- Workers now read from next_orders_inbox (one row per aggregate)
+SELECT * FROM pgtrickle.next_orders_inbox;
+```
+
+### Multi-Worker Partitioning
+
+Scale horizontally without external coordination:
+
+```sql
+-- Worker 0 of 4 handles its share of aggregates
+SELECT * FROM pgtrickle.orders_inbox_pending
+WHERE pgtrickle.inbox_is_my_partition(aggregate_id, 0, 4);
+```
+
+### Recommended Configuration
+
+```ini
+pg_trickle.inbox_enabled = true
+pg_trickle.inbox_processed_retention_hours = 72   # keep 3 days of processed msgs
+pg_trickle.inbox_dlq_retention_hours = 0          # keep DLQ forever for forensics
+pg_trickle.inbox_dlq_alert_max_per_refresh = 10   # alert on DLQ growth
+```
+
+### Anti-Patterns
+
+- **Not marking messages as processed:** The `_pending` stream table will keep
+  growing. Always set `processed_at = now()` after successful processing.
+- **Ignoring the DLQ:** Monitor `orders_inbox_dlq` and replay or investigate
+  failed messages regularly. Use `inbox_health()` in your alerting pipeline.
+- **Skipping idempotency:** The inbox uses `event_id` for deduplication.
+  Producers must supply stable, unique `event_id` values — typically a UUID
+  derived from the source event.
+
+---
+
+## Pattern 9: Bidirectional Event Pipeline with Relay (v0.29.0)
+
+> **Requires:** v0.29.0+ and the `pgtrickle-relay` binary
+
+The **relay** connects pg_trickle outboxes and inboxes to external messaging
+systems (NATS, Kafka, HTTP webhooks, Redis Streams, SQS, RabbitMQ) without
+any custom application code. You configure pipelines in SQL; the relay binary
+handles polling, publishing, and idempotent delivery.
+
+**Use this pattern when:**
+- You want stream table deltas to flow automatically to Kafka / NATS / etc.
+- You receive external events from a message queue and need them in PostgreSQL
+- You need high-availability relay with automatic failover (advisory-lock coordination)
+- You want hot-reload — pipeline config changes apply without restarting the relay
+
+### Architecture
+
+```
+                         ┌──────────────────────┐
+Stream table A ──outbox──→  pgtrickle-relay       ──→  NATS JetStream
+Stream table B ──outbox──→  (forward pipeline)    ──→  Kafka topic
+                         │                        │
+Kafka topic    ──────────→  (reverse pipeline)    ──→  inbox table → stream table
+                         └──────────────────────┘
+```
+
+### SQL Example — Forward Pipeline (outbox → NATS)
+
+```sql
+-- 1. Enable outbox on your stream table
+SELECT pgtrickle.enable_outbox('public.orders_agg');
+
+-- 2. Create a consumer group for the relay
+SELECT pgtrickle.create_consumer_group('relay_group', 'public.orders_agg');
+
+-- 3. Configure the relay pipeline (SQL-only, no YAML)
+SELECT pgtrickle.set_relay_outbox(
+    'orders-to-nats',
+    outbox  => 'public.orders_agg',
+    group   => 'relay_group',
+    sink    => '{"type": "nats", "url": "nats://nats:4222", "subject": "orders.deltas"}'::jsonb,
+    retention_hours => 24
+);
+```
+
+### SQL Example — Reverse Pipeline (Kafka → inbox)
+
+```sql
+-- 1. Create an inbox for incoming events
+SELECT pgtrickle.create_inbox('payment_events');
+
+-- 2. Configure the reverse relay pipeline
+SELECT pgtrickle.set_relay_inbox(
+    'payments-from-kafka',
+    inbox  => 'pgtrickle.payment_events',
+    source => '{"type": "kafka", "brokers": ["kafka:9092"], "topic": "payments", "group_id": "relay"}'::jsonb,
+    max_retries => 3
+);
+```
+
+### Managing Pipelines
+
+```sql
+-- Pause a pipeline
+SELECT pgtrickle.disable_relay('orders-to-nats');
+
+-- Resume it
+SELECT pgtrickle.enable_relay('orders-to-nats');
+
+-- List all pipelines and their status
+SELECT * FROM pgtrickle.list_relay_configs();
+
+-- Delete a pipeline permanently
+SELECT pgtrickle.delete_relay('orders-to-nats');
+```
+
+### Running the Relay
+
+```bash
+# Set the connection string (only config needed)
+export PGTRICKLE_RELAY_POSTGRES_URL=postgres://relay_user:pass@localhost:5432/mydb
+
+# Start the relay — it discovers pipelines from the catalog automatically
+pgtrickle-relay
+
+# With HA (run 2–3 instances; advisory locks prevent duplicate processing)
+pgtrickle-relay --relay-group-id prod
+pgtrickle-relay --relay-group-id prod  # second instance — auto-failover
+```
+
+### Observability
+
+The relay exposes Prometheus metrics at `:9090/metrics` and a health endpoint
+at `:9090/health`.
+
+| Metric | Description |
+|--------|-------------|
+| `pgtrickle_relay_messages_published_total` | Messages successfully published |
+| `pgtrickle_relay_messages_consumed_total` | Messages consumed from sources |
+| `pgtrickle_relay_lag_seconds` | Estimated relay lag per pipeline |
+| `pgtrickle_relay_pipelines_owned` | Pipelines owned by this instance |
+
+See [RELAY.md](RELAY.md) for the full deployment guide.
