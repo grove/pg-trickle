@@ -78,6 +78,36 @@ Complete reference for all pg_trickle GUC (Grand Unified Configuration) variable
   - [Circular Dependencies](#circular-dependencies)
     - [pg\_trickle.allow\_circular](#pg_trickleallow_circular)
     - [pg\_trickle.max\_fixpoint\_iterations](#pg_tricklemax_fixpoint_iterations)
+- [Scheduler Scalability (v0.25.0)](#scheduler-scalability-v0250)
+  - [pg\_trickle.worker\_pool\_size](#pg_trickleworker_pool_size)
+  - [pg\_trickle.template\_cache\_max\_entries](#pg_trickletemplate_cache_max_entries)
+- [Operability, Observability & DR (v0.27.0)](#operability-observability--dr-v0270)
+  - [pg\_trickle.metrics\_port](#pg_tricklemetrics_port)
+  - [pg\_trickle.metrics\_request\_timeout\_ms](#pg_tricklemetrics_request_timeout_ms)
+  - [pg\_trickle.frontier\_holdback\_mode](#pg_tricklefrontier_holdback_mode)
+  - [pg\_trickle.frontier\_holdback\_warn\_seconds](#pg_tricklefrontier_holdback_warn_seconds)
+  - [pg\_trickle.publication\_lag\_warn\_bytes](#pg_tricklepublication_lag_warn_bytes)
+  - [pg\_trickle.schedule\_recommendation\_min\_samples](#pg_trickleschedule_recommendation_min_samples)
+  - [pg\_trickle.schedule\_alert\_cooldown\_seconds](#pg_trickleschedule_alert_cooldown_seconds)
+- [Transactional Outbox (v0.28.0)](#transactional-outbox-v0280)
+  - [pg\_trickle.outbox\_enabled](#pg_trickleoutbox_enabled)
+  - [pg\_trickle.outbox\_retention\_hours](#pg_trickleoutbox_retention_hours)
+  - [pg\_trickle.outbox\_drain\_batch\_size](#pg_trickleoutbox_drain_batch_size)
+  - [pg\_trickle.outbox\_drain\_interval\_seconds](#pg_trickleoutbox_drain_interval_seconds)
+  - [pg\_trickle.outbox\_inline\_threshold\_rows](#pg_trickleoutbox_inline_threshold_rows)
+  - [pg\_trickle.outbox\_skip\_empty\_delta](#pg_trickleoutbox_skip_empty_delta)
+  - [pg\_trickle.outbox\_storage\_critical\_mb](#pg_trickleoutbox_storage_critical_mb)
+  - [pg\_trickle.outbox\_force\_retention](#pg_trickleoutbox_force_retention)
+  - [pg\_trickle.consumer\_dead\_threshold\_hours](#pg_trickleconsumer_dead_threshold_hours)
+  - [pg\_trickle.consumer\_stale\_offset\_threshold\_days](#pg_trickleconsumer_stale_offset_threshold_days)
+  - [pg\_trickle.consumer\_cleanup\_enabled](#pg_trickleconsumer_cleanup_enabled)
+- [Transactional Inbox (v0.28.0)](#transactional-inbox-v0280)
+  - [pg\_trickle.inbox\_enabled](#pg_trickleinbox_enabled)
+  - [pg\_trickle.inbox\_processed\_retention\_hours](#pg_trickleinbox_processed_retention_hours)
+  - [pg\_trickle.inbox\_dlq\_retention\_hours](#pg_trickleinbox_dlq_retention_hours)
+  - [pg\_trickle.inbox\_drain\_batch\_size](#pg_trickleinbox_drain_batch_size)
+  - [pg\_trickle.inbox\_drain\_interval\_seconds](#pg_trickleinbox_drain_interval_seconds)
+  - [pg\_trickle.inbox\_dlq\_alert\_max\_per\_refresh](#pg_trickleinbox_dlq_alert_max_per_refresh)
 - [GUC Interaction Matrix](#guc-interaction-matrix)
 - [Tuning Profiles](#tuning-profiles)
   - [Low-Latency Profile](#low-latency-profile)
@@ -2043,6 +2073,425 @@ threshold values.
 
 ---
 
+## Scheduler Scalability (v0.25.0)
+
+### pg_trickle.worker_pool_size
+
+> **Added in v0.25.0 (SCAL-5).**
+
+Number of persistent background workers kept ready in a pool. When `> 0`,
+the scheduler reuses these workers across refresh cycles instead of spawning
+a new worker for each job, eliminating the ~2 ms per-worker startup cost.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (spawn-per-task) |
+| Range | 0 – 64 |
+| Context | `SUSET` (superuser) |
+| Restart required | Yes |
+
+```sql
+-- Keep 4 persistent workers ready at all times
+ALTER SYSTEM SET pg_trickle.worker_pool_size = 4;
+SELECT pg_reload_conf();
+```
+
+Set to `0` to use the original spawn-per-task model (default, no change from
+pre-v0.25.0 behavior).
+
+### pg_trickle.template_cache_max_entries
+
+> **Added in v0.25.0 (CACHE-2).**
+
+Maximum number of entries in the per-backend L1 delta SQL template cache. When
+the cache reaches this limit, the least-recently-used entry is evicted.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (unbounded) |
+| Range | 0 – 65536 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+```sql
+-- Cap the template cache at 200 entries per backend
+SET pg_trickle.template_cache_max_entries = 200;
+```
+
+---
+
+## Operability, Observability & DR (v0.27.0)
+
+### pg_trickle.metrics_port
+
+> **Added in v0.27.0 (OP-2).**
+
+TCP port for the Prometheus/OpenMetrics endpoint served by the per-database
+background scheduler. When non-zero, `GET /metrics` returns all pg_trickle
+monitoring metrics in Prometheus text format.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Range | 0 – 65535 |
+| Context | `SUSET` (superuser) |
+| Restart required | Yes |
+
+```sql
+-- Expose metrics on port 9188 (per database)
+ALTER DATABASE mydb SET pg_trickle.metrics_port = 9188;
+SELECT pg_reload_conf();
+```
+
+Use `0` (the default) to disable the HTTP endpoint. Each database runs its
+own scheduler, so the port must be unique per database on the same host.
+
+### pg_trickle.metrics_request_timeout_ms
+
+> **Added in v0.27.0 (METR-2).**
+
+Maximum milliseconds the metrics HTTP handler is allowed to run. If a slow
+HTTP client holds the connection open longer, it is dropped. This protects the
+scheduler tick loop from being blocked by unresponsive Prometheus scrapers.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `5000` (5 seconds) |
+| Range | 0 (no timeout) – 600 000 (10 min) |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.frontier_holdback_mode
+
+> **Added in v0.27.0 (issue #536).**
+
+Controls how the scheduler prevents silent data loss from long-running
+transactions. When an uncommitted transaction has written rows to a source
+table, those change-buffer rows must not be included in a refresh until the
+transaction commits (or rolls back).
+
+| Property | Value |
+|---|---|
+| Type | `text` |
+| Default | `'xmin'` |
+| Values | `'xmin'`, `'none'`, `'lsn:<N>'` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+| Value | Behaviour |
+|-------|-----------|
+| `'xmin'` | (Default) Probes `pg_stat_activity` + `pg_prepared_xacts` once per tick; caps the frontier to exclude rows from uncommitted transactions. |
+| `'none'` | No holdback — maximum performance but can skip rows from long-lived transactions. Not recommended for production. |
+| `'lsn:<N>'` | Hold back by exactly N bytes. Debugging use only. |
+
+### pg_trickle.frontier_holdback_warn_seconds
+
+> **Added in v0.27.0 (issue #536).**
+
+Emit a WARNING when a holdback-causing transaction has been blocking frontier
+advancement for longer than this many seconds. The warning fires at most once
+per minute to avoid log spam. Useful for identifying forgotten long-running
+transactions.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `300` (5 minutes) |
+| Range | 0 (disabled) – 3600 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.publication_lag_warn_bytes
+
+> **Added in v0.27.0 (PUB-1).**
+
+Emit a WARNING and defer change-buffer truncation when a downstream logical
+replication subscriber's confirmed WAL position lags behind the current
+change buffer by more than this many bytes.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (disabled) |
+| Range | 0 – 2 147 483 647 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+This prevents data loss for subscribers that rely on the change buffer as
+part of their replication pipeline.
+
+### pg_trickle.schedule_recommendation_min_samples
+
+> **Added in v0.27.0 (PLAN-4).**
+
+Minimum number of refresh-history observations before
+`pgtrickle.recommend_schedule()` returns a recommendation with non-zero
+confidence. Raise this for more reliable recommendations; lower it to get
+early guidance on new stream tables.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `10` |
+| Range | 1 – 1000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.schedule_alert_cooldown_seconds
+
+> **Added in v0.27.0 (PLAN-3).**
+
+Minimum seconds between consecutive `predicted_sla_breach` alerts for the
+same stream table. Prevents log spam when the cost model consistently predicts
+an imminent SLA violation.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `300` (5 minutes) |
+| Range | 0 (no cooldown) – 86 400 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+---
+
+## Transactional Outbox (v0.28.0)
+
+These GUCs control the transactional outbox subsystem. See the SQL Reference
+for the `enable_outbox()`, `poll_outbox()`, and consumer group functions.
+
+### pg_trickle.outbox_enabled
+
+Master enable/disable switch for the outbox subsystem.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `true` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_retention_hours
+
+Default retention period (in hours) for outbox rows. Rows older than this
+threshold are eligible for the background drain sweep. Can be overridden
+per stream table via `enable_outbox(retention_hours => N)`.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `24` |
+| Range | 1 – 87 600 (10 years) |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_drain_batch_size
+
+Number of expired outbox rows deleted in a single background drain pass.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `1000` |
+| Range | 1 – 1 000 000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_drain_interval_seconds
+
+Seconds between background outbox drain sweeps. Set to `0` to disable
+automatic draining (you would then drain manually with `outbox_rows_consumed()`).
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `60` |
+| Range | 0 (disabled) – 86 400 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_inline_threshold_rows
+
+Maximum number of delta rows stored inline in the outbox payload. When a
+refresh delta exceeds this count, pg_trickle switches to **claim-check** mode:
+the payload is stored in a separate table and `poll_outbox()` returns
+`is_claim_check = true` with a `NULL` payload.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `10000` |
+| Range | 0 (always inline) – 10 000 000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_skip_empty_delta
+
+When `true`, no outbox row is written for refreshes that produce zero inserted
+and zero deleted rows. This reduces outbox table growth for frequently-scheduled
+stream tables with sparse updates.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `true` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_storage_critical_mb
+
+Size threshold (in MB) at which the outbox table is considered critically large.
+When exceeded, a WARNING is emitted on each refresh cycle.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `1024` (1 GB) |
+| Range | 1 – 10 000 000 (10 TB) |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.outbox_force_retention
+
+When `true`, outbox rows are kept past their `retention_hours` expiry until
+**all** consumer groups have committed an offset past them. Prevents consumers
+that are temporarily offline from missing messages.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `false` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.consumer_dead_threshold_hours
+
+Hours of silence (no heartbeat) after which a consumer is marked as dead and
+eligible for cleanup (when `consumer_cleanup_enabled = true`).
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `24` |
+| Range | 1 – 87 600 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.consumer_stale_offset_threshold_days
+
+Days of no offset progress after which a consumer's offset record is
+considered stale and eligible for cleanup.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `7` |
+| Range | 1 – 3650 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.consumer_cleanup_enabled
+
+Enable automatic background cleanup of dead and stale consumer offsets
+and leases. When disabled, old records must be removed manually.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `true` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+---
+
+## Transactional Inbox (v0.28.0)
+
+These GUCs control the transactional inbox subsystem. See the SQL Reference
+for `create_inbox()` and related functions.
+
+### pg_trickle.inbox_enabled
+
+Master enable/disable switch for the inbox subsystem.
+
+| Property | Value |
+|---|---|
+| Type | `boolean` |
+| Default | `true` |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.inbox_processed_retention_hours
+
+Retention period (in hours) for successfully processed inbox messages
+(`processed_at IS NOT NULL`). Rows older than this threshold are deleted
+by the background drain sweep.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `72` (3 days) |
+| Range | 1 – 87 600 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.inbox_dlq_retention_hours
+
+Retention period (in hours) for dead-letter queue rows. Set to `0` to
+keep DLQ rows indefinitely (useful for forensics and manual replay).
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `0` (keep forever) |
+| Range | 0 (keep forever) – 87 600 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.inbox_drain_batch_size
+
+Number of expired inbox messages deleted in a single background drain pass.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `1000` |
+| Range | 1 – 1 000 000 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.inbox_drain_interval_seconds
+
+Seconds between inbox background drain sweeps. Set to `0` to disable
+automatic draining.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `60` |
+| Range | 0 (disabled) – 86 400 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+### pg_trickle.inbox_dlq_alert_max_per_refresh
+
+Maximum number of DLQ alert events raised per refresh cycle. Limits log
+volume when many messages are failing simultaneously. Set to `0` to disable
+DLQ alerting.
+
+| Property | Value |
+|---|---|
+| Type | `integer` |
+| Default | `10` |
+| Range | 0 (disabled) – 100 |
+| Context | `SUSET` (superuser) |
+| Restart required | No |
+
+---
+
 ## GUC Interaction Matrix
 
 Some GUC variables interact with or depend on each other. The table below
@@ -2235,6 +2684,31 @@ pg_trickle.delta_enable_nestloop = true         # allow nested-loop joins in del
 pg_trickle.analyze_before_delta = true          # ANALYZE change buffers before delta SQL
 pg_trickle.max_change_buffer_alert_rows = 0     # change buffer overflow alert threshold (0 = off)
 pg_trickle.diff_output_format = 'split'         # 'split' (DI-2 pairs) | 'merged' (compat)
+
+# Scheduler scalability (v0.25.0+)
+pg_trickle.worker_pool_size = 0                 # 0 = spawn-per-task; >0 = persistent pool
+pg_trickle.template_cache_max_entries = 0       # 0 = unbounded
+
+# Operability & observability (v0.27.0+)
+pg_trickle.metrics_port = 0                     # 0 = disabled; set per-database
+pg_trickle.frontier_holdback_mode = 'xmin'      # xmin | none | lsn:<N>
+pg_trickle.frontier_holdback_warn_seconds = 300 # warn after 5 min of blocked frontier
+pg_trickle.publication_lag_warn_bytes = 0       # 0 = disabled
+
+# Transactional outbox (v0.28.0+)
+pg_trickle.outbox_enabled = true
+pg_trickle.outbox_retention_hours = 24
+pg_trickle.outbox_inline_threshold_rows = 10000
+pg_trickle.outbox_skip_empty_delta = true
+pg_trickle.outbox_force_retention = false
+pg_trickle.consumer_dead_threshold_hours = 24
+pg_trickle.consumer_cleanup_enabled = true
+
+# Transactional inbox (v0.28.0+)
+pg_trickle.inbox_enabled = true
+pg_trickle.inbox_processed_retention_hours = 72
+pg_trickle.inbox_dlq_retention_hours = 0       # 0 = keep forever
+pg_trickle.inbox_dlq_alert_max_per_refresh = 10
 
 # Advanced / internal
 pg_trickle.change_buffer_schema = 'pgtrickle_changes'

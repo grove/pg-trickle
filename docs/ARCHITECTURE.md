@@ -55,10 +55,25 @@ For a high-level description of what pg_trickle does and why, read [ESSENCE.md](
 
 ## Component Details
 
-### 1. SQL API Layer (`src/api.rs`)
+### 1. SQL API Layer (`src/api/`)
 
-The public entry point for users. All operations are exposed as `#[pg_extern]` functions in the `pgtrickle` schema:
+The public entry point for users. All operations are exposed as `#[pg_extern]` functions in the `pgtrickle` schema. The API module is split into focused sub-modules:
 
+| File | Responsibility |
+|------|----------------|
+| `src/api/mod.rs` | Core lifecycle: `create_stream_table`, `alter_stream_table`, `drop_stream_table`, `refresh_stream_table`, `bulk_create`, `repair_stream_table`, `pgt_status` |
+| `src/api/diagnostics.rs` | Inspection helpers: `explain_st`, `explain_refresh_mode`, `dependency_tree`, `list_sources` |
+| `src/api/outbox.rs` | Transactional outbox API (v0.28.0): `enable_outbox`, `poll_outbox`, `consumer_lag`, consumer group management |
+| `src/api/inbox.rs` | Transactional inbox API (v0.28.0): `create_inbox`, `enable_inbox_ordering`, `inbox_is_my_partition` |
+| `src/api/snapshot.rs` | Stream table snapshots (v0.27.0): `snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`, `drop_snapshot` |
+| `src/api/self_monitoring.rs` | Self-monitoring setup/teardown and auto-apply policy |
+| `src/api/cluster.rs` | Multi-database cluster overview: `cluster_worker_summary` |
+| `src/api/publication.rs` | Logical publication helpers and predictive cost model utilities |
+| `src/api/metrics_ext.rs` | Extended Prometheus metrics |
+| `src/api/helpers.rs` | Shared utilities (name resolution, table quoting) |
+| `src/api/planner.rs` | Schedule recommendation API |
+
+**Core functions:**
 - **create_stream_table** — Applies a chain of auto-rewrite passes (view inlining → DISTINCT ON → GROUPING SETS → scalar subquery in WHERE → correlated scalar subquery in SELECT → SubLinks in OR → multi-PARTITION BY windows), parses the defining query, builds an operator tree, creates the storage table, registers CDC slots, populates the catalog, and optionally performs an initial full refresh.
 - **alter_stream_table** — Modifies schedule, refresh mode, status (ACTIVE/SUSPENDED), or defining query. Query changes trigger schema migration, dependency updates, and a full refresh within a single transaction.
 - **drop_stream_table** — Removes the storage table, catalog entries, and cleans up CDC slots.
@@ -612,7 +627,41 @@ The policy is set on the convergence (fan-in) node. When multiple convergence no
 
 The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operational visibility. See [SQL_REFERENCE.md](SQL_REFERENCE.md) for details.
 
-### 14. Configuration (`src/config.rs`)
+### 14. Transactional Outbox & Inbox (`src/api/outbox.rs`, `src/api/inbox.rs`)
+
+> **Added in v0.28.0.**
+
+The outbox and inbox subsystems enable reliable, at-least-once event delivery between stream tables and external systems.
+
+#### Outbox
+
+When `enable_outbox(name)` is called on a stream table, the refresh engine writes a summary row to `pgtrickle.pgt_outbox_<st>` after every successful refresh. Each row records `inserted_count`, `deleted_count`, and optionally a JSON payload. For large deltas, pg_trickle switches to **claim-check mode** — the payload is stored separately and consumers get a pointer.
+
+Consumers read via `poll_outbox(group, consumer, ...)` which grants a **visibility lease**. Consumers must call `commit_offset()` before the lease expires, or the rows become visible again. Multiple independent **consumer groups** each maintain their own offset into the outbox.
+
+#### Inbox
+
+`create_inbox(name)` provisions an inbox table plus three stream tables on top of it:
+
+- `<name>_pending` — messages awaiting processing
+- `<name>_dlq` — dead-letter messages (exceeded `max_retries`)
+- `<name>_stats` — message counts grouped by `event_type`
+
+Optionally, `enable_inbox_ordering()` adds a `next_<name>` stream table that surfaces only the lowest-sequence unprocessed message per aggregate, ensuring per-aggregate ordering without application-side coordination.
+
+`inbox_is_my_partition(aggregate_id, worker_id, total_workers)` uses FNV-1a consistent hashing to route aggregates to specific workers, enabling horizontal scaling without a central coordinator.
+
+### 15. Stream Table Snapshots (`src/api/snapshot.rs`)
+
+> **Added in v0.27.0.**
+
+`snapshot_stream_table(name)` exports the current content of a stream table into an archival table, capturing the extension version and current frontier in metadata columns (`__pgt_snapshot_version`, `__pgt_frontier`, `__pgt_snapshotted_at`).
+
+`restore_from_snapshot(name, source)` truncates the stream table and reloads it from the snapshot, then restores the saved frontier. This ensures the **next refresh cycle is DIFFERENTIAL** — skipping the expensive full re-scan that would otherwise follow a blank stream table.
+
+Primary use cases: replica bootstrap, PITR alignment, and historical archiving.
+
+### 16. Configuration (`src/config.rs`)
 
 Runtime behavior is controlled by a growing set of GUC (Grand Unified Configuration) variables. See [CONFIGURATION.md](CONFIGURATION.md) for the complete, current list.
 
@@ -694,7 +743,18 @@ src/
 ├── lib.rs           # Extension entry, module declarations, _PG_init
 ├── bin/
 │   └── pgrx_embed.rs# pgrx SQL entity embedding (generated)
-├── api.rs           # SQL API functions (create/alter/drop/refresh/status)
+├── api/
+│   ├── mod.rs       # Core lifecycle functions (create/alter/drop/refresh/status)
+│   ├── diagnostics.rs   # explain_st, explain_refresh_mode, dependency_tree
+│   ├── outbox.rs    # Transactional outbox API (v0.28.0)
+│   ├── inbox.rs     # Transactional inbox API (v0.28.0)
+│   ├── snapshot.rs  # Stream table snapshots (v0.27.0)
+│   ├── self_monitoring.rs  # Self-monitoring setup/teardown
+│   ├── cluster.rs   # cluster_worker_summary
+│   ├── publication.rs   # Logical publication helpers
+│   ├── metrics_ext.rs   # Extended Prometheus metrics
+│   ├── planner.rs   # Schedule recommendation API
+│   └── helpers.rs   # Shared utilities
 ├── catalog.rs       # Catalog CRUD operations
 ├── cdc.rs           # Change data capture (triggers + WAL transition)
 ├── config.rs        # GUC variable registration
@@ -749,3 +809,61 @@ file when `CREATE EXTENSION pg_trickle;` is executed.
 During packaging (`cargo pgrx package`), pgrx replaces the `@CARGO_VERSION@`
 placeholder with the version from `Cargo.toml` and copies the file into the
 target's `share/extension/` directory alongside the SQL migration scripts.
+
+---
+
+## pgtrickle-relay (v0.29.0)
+
+`pgtrickle-relay` is a standalone Rust binary (a separate Cargo workspace member
+at `pgtrickle-relay/`) that bridges pg_trickle outbox and inbox tables with
+external messaging systems. It is distributed and deployed independently from
+the PostgreSQL extension.
+
+### Design Goals
+
+- **SQL-only configuration**: all pipeline config lives in PostgreSQL catalog
+  tables (`relay_outbox_config`, `relay_inbox_config`). No YAML, no config files.
+- **Hot-reload**: config changes trigger `NOTIFY pgtrickle_relay_config`; running
+  relay instances reload their pipelines without restart.
+- **Advisory-lock HA**: multiple relay instances distribute pipelines via
+  `pg_try_advisory_lock`. Each pipeline runs on exactly one instance; if an
+  instance dies, others claim its locks on the next poll cycle.
+- **Idempotent delivery**: every backend uses source-specific dedup keys to
+  provide at-least-once delivery with server-side deduplication where supported.
+
+### Architecture
+
+```
+PostgreSQL (pg_trickle extension)
+  ├─ outbox tables ──→ [OutboxPollerSource] ──→ Sink (NATS / Kafka / webhook / …)
+  └─ inbox tables  ←── [InboxSink]         ←── Source (NATS / Kafka / webhook / …)
+```
+
+### Key Modules (`pgtrickle-relay/src/`)
+
+| Module | Purpose |
+|--------|---------|
+| `main.rs` | CLI entry point, tracing init, coordinator startup |
+| `cli.rs` | clap argument definitions |
+| `config.rs` | `RelayConfig` (global) and `PipelineConfig` (per-pipeline) |
+| `coordinator.rs` | Advisory lock acquisition, hot-reload via LISTEN/NOTIFY |
+| `envelope.rs` | `RelayMessage` envelope and `AckToken` |
+| `metrics.rs` | Prometheus metrics and `/health` axum server |
+| `source/` | Source trait + implementations (outbox, NATS, Kafka, Redis, SQS, RabbitMQ, webhook, stdin) |
+| `sink/` | Sink trait + implementations (inbox, NATS, Kafka, Redis, SQS, RabbitMQ, webhook, stdout, pg-inbox) |
+
+### Supported Backends
+
+| Backend | Direction | Feature flag |
+|---------|-----------|-------------|
+| pg_trickle outbox | source (forward) | always |
+| pg_trickle inbox | sink (reverse) | always |
+| NATS JetStream | both | `nats` |
+| Apache Kafka | both | `kafka` |
+| HTTP webhook | both | `webhook` |
+| Redis Streams | both | `redis` |
+| AWS SQS | both | `sqs` |
+| RabbitMQ | both | `rabbitmq` |
+| stdout / JSONL | sink | `stdout` |
+
+See [RELAY.md](RELAY.md) for the full operations guide and deployment examples.
