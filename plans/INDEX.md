@@ -12,7 +12,6 @@ new entries when creating documents.
 | File | Type | Status | Summary |
 |------|------|--------|---------|
 | [PLAN.md](PLAN.md) | PLAN | — | Master implementation plan (Phases 0–12) |
-| [PLAN_0_12_0.md](PLAN_0_12_0.md) | PLAN | In progress | v0.12.0 implementation order (Phases 1–7) |
 | [PLAN_EDGE_CASES.md](PLAN_EDGE_CASES.md) | PLAN | Proposed | Edge case catalogue with workarounds & prioritised remediation |
 | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) | PLAN | Proposed | Combined implementation order for PLAN_EDGE_CASES + PLAN_TRANSACTIONAL_IVM_PART_2 |
 | [PLAN_FEATURE_CLEANUP.md](PLAN_FEATURE_CLEANUP.md) | PLAN | In progress | Remove low-value surface before public release |
@@ -41,12 +40,13 @@ new entries when creating documents.
 | [REPORT_READYSET.md](ecosystem/REPORT_READYSET.md) | REPORT | Reference | pg_trickle vs ReadySet comparison & layered deployment guidance |
 | [REPORT_TIMESCALEDB.md](ecosystem/REPORT_TIMESCALEDB.md) | REPORT | Research | TimescaleDB synergy — IVM over hypertables & design lessons |
 | [GAP_PG_IVM_COMPARISON.md](ecosystem/GAP_PG_IVM_COMPARISON.md) | GAP | Reference | pg_trickle vs pg_ivm comparison & gap analysis |
+| [PLAN_CITUS.md](ecosystem/PLAN_CITUS.md) | PLAN | Proposed | Citus distributed table compatibility — v0.34.0 (naming) + v0.35.0 (CDC) |
+| [PLAN_XATA.md](ecosystem/PLAN_XATA.md) | PLAN | Research | pg_trickle on Xata managed Postgres |
 
 ## infra/
 
 | File | Type | Status | Summary |
 |------|------|--------|---------|
-| [PLAN_CITUS.md](ecosystem/PLAN_CITUS.md) | PLAN | — | Citus distributed table compatibility |
 | [PLAN_CODECOV.md](infra/PLAN_CODECOV.md) | PLAN | Implementing | Codecov integration for coverage reporting |
 | [PLAN_GITHUB_ACTIONS_COST.md](infra/PLAN_GITHUB_ACTIONS_COST.md) | PLAN | — | Reduce GitHub Actions resource consumption |
 | [PLAN_DOCKER_IMAGE.md](infra/PLAN_DOCKER_IMAGE.md) | PLAN | Draft | Official Docker image |
