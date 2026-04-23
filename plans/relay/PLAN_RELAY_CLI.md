@@ -4,6 +4,7 @@
 > **Created:** 2026-04-18
 > **Category:** Tooling — Bidirectional Relay
 > **Related:** [PLAN_TRANSACTIONAL_OUTBOX_HELPER.md](../patterns/PLAN_TRANSACTIONAL_OUTBOX_HELPER.md) ·
+> [PLAN_WEBUI.md](../webui/PLAN_WEBUI.md) ·
 > [ROADMAP v0.25.0](../../ROADMAP.md#v0250--relay-cli-pgtrickle-relay)
 
 ---
@@ -30,6 +31,7 @@
   - [A.14 Catalog Schema (Config Tables)](#a14-catalog-schema-config-tables)
   - [A.15 Horizontal Scaling & Work Distribution](#a15-horizontal-scaling--work-distribution)
   - [A.16 Secret Reference Interpolation](#a16-secret-reference-interpolation)
+  - [A.17 WebUI Readiness (Cross-Reference)](#a17-webui-readiness-cross-reference)
 - [Part B — Sink Backends (Forward Mode)](#part-b--sink-backends-forward-mode)
   - [B.1 NATS JetStream](#b1-nats-jetstream)
   - [B.2 HTTP Webhook](#b2-http-webhook)
@@ -942,11 +944,25 @@ lifecycle:
 | Source connection lost | Reconnect with exponential backoff. Pause relay until reconnected. |
 | Sink connection lost | Reconnect with exponential backoff. Pause relay until reconnected. |
 | Sink publish failure (transient) | Retry the batch up to 3 times with backoff. Do not acknowledge. |
-| Sink publish failure (permanent, e.g. 400) | Log error, skip the message, emit `relay_errors_total{kind="sink_permanent"}`. Advance offset to avoid poison-pill blocking. |
-| Payload decode error | Log error, skip the message. Emit `relay_errors_total{kind="decode"}`. |
-| Claim-check fetch failure | Retry up to 3 times. If permanent, log + skip + emit error metric. |
+| Sink publish failure (permanent, e.g. 400) | Write to `pgtrickle.relay_dead_letters` (`error_type = 'sink_permanent'`). Advance offset. Emit `relay_errors_total{kind="sink_permanent"}`. |
+| Payload decode error | Write to `pgtrickle.relay_dead_letters` (`error_type = 'decode'`). Advance offset. Emit `relay_errors_total{kind="decode"}`. |
+| Claim-check fetch failure | Retry up to 3 times. If permanent, write to DLQ (`error_type = 'claim_check'`). |
 | Inbox write failure (transient) | Retry with backoff. Do not ack source message. |
-| Inbox write failure (permanent) | Log error, skip message, emit `relay_errors_total{kind="inbox_permanent"}`. |
+| Inbox write failure (permanent) | Write to `pgtrickle.relay_dead_letters` (`error_type = 'inbox_permanent'`). Advance offset. Emit `relay_errors_total{kind="inbox_permanent"}`. |
+
+**No silent message loss.** Every permanently-failed message is written
+to `pgtrickle.relay_dead_letters` before advancing the offset.
+Silent discard (log + skip) is not acceptable — see AGENTS.md:
+"Data loss is unacceptable."
+
+`raw_payload` is captured best-effort (may be NULL if the message was
+undecipherable before any fields could be extracted) and is **immutable
+after write** — neither the relay nor the WebUI may modify it, as it is
+the forensic record of exactly what the upstream system sent.
+`pipeline_name`, `error_type`, `error_message`, and `failed_at` are
+always recorded. `operator_notes` is a free-text field that operators
+may fill in via the WebUI before retrying, to document root cause and
+remediation steps.
 
 All retries use jittered exponential backoff to avoid thundering herds.
 
@@ -1441,6 +1457,102 @@ ERROR pipeline=orders-to-kafka error="secret not found: env var KAFKA_SASL_PASSW
       via the `get_relay_config()` / `list_relay_configs()` functions which
       return the raw (unreferenced) JSONB; the relay resolves references
       locally. Document the role setup in SQL_REFERENCE.md.
+
+---
+
+### A.17 WebUI Readiness (Cross-Reference)
+
+> **See:** [PLAN_WEBUI.md](../webui/PLAN_WEBUI.md) for the full WebUI
+> analysis and implementation plan.
+
+The relay binary will host the pg-trickle WebUI — a browser-based
+dashboard and management console served as static assets via `rust-embed`.
+This decision affects the relay's core architecture from day one. The
+following requirements must be met in the initial scaffold (RELAY-1)
+to avoid a costly refactor when the WebUI is added:
+
+#### AppState Design
+
+All shared state must be centralized in a single `Arc<AppState>` struct
+that is shared between relay worker tasks and Axum HTTP handlers:
+
+```rust
+pub struct AppState {
+    /// PostgreSQL connection pool
+    pub pg_pool: PgPool,
+
+    /// Pipeline registry (active forward/reverse pipelines with status)
+    pub pipelines: Arc<RwLock<PipelineRegistry>>,
+
+    /// Prometheus metrics handle (shared with relay workers)
+    pub metrics: Arc<RelayMetrics>,
+
+    /// Shutdown token (coordinates relay workers + HTTP server)
+    pub shutdown: CancellationToken,
+
+    /// WebSocket broadcast channel (NOTIFY alerts, pipeline state changes)
+    pub ws_broadcast: broadcast::Sender<WsEvent>,
+
+    /// Configuration (auth mode, log level, feature flags)
+    pub config: Arc<RelayConfig>,
+}
+```
+
+This structure is passed as Axum state to all route handlers and as a
+reference to all relay worker tasks. The coordinator, workers, and HTTP
+handlers all read from and write to the same `PipelineRegistry`.
+
+#### Single Axum Instance
+
+All HTTP functionality must run on a single Axum `Router`:
+
+```
+:9090/metrics          Prometheus scrape (existing)
+:9090/health           Health check (existing)
+:9090/health/drained   Drain check (existing)
+:9090/webhook/...      Webhook receiver (existing, reverse mode)
+:9090/api/v1/...       JSON API (WebUI backend — stubbed initially)
+:9090/api/v1/ws        WebSocket (live alerts — stubbed initially)
+:9090/ui/...           Static frontend assets (stubbed initially)
+```
+
+The `/api/v1/` and `/ui/` route groups are feature-gated behind
+`--features webui`. The minimal relay binary (sidecar image) does not
+include them.
+
+#### WebSocket Broadcast Channel
+
+The `ws_broadcast` channel in `AppState` must be initialized from day one
+and fed by:
+
+- The `LISTEN pg_trickle_alert` NOTIFY listener (already planned for
+  config hot-reload)
+- Pipeline state changes (connected/disconnected, lag updates)
+- Fuse state changes
+
+Even without WebUI consumers, the channel is zero-cost (no subscribers =
+no allocation). This avoids retrofitting broadcast into the coordinator
+later.
+
+#### Implications for RELAY-1
+
+The crate structure gains:
+
+```
+pgtrickle-relay/src/
+  ├── state.rs            # AppState struct + builder
+  └── api/                # (stubbed, behind --features webui)
+      ├── mod.rs          # Router construction
+      └── health.rs       # /api/v1/health (mirrors /health with richer JSON)
+```
+
+And a `dashboard/` directory for the Next.js frontend (empty initially):
+
+```
+pgtrickle-relay/dashboard/
+  ├── package.json        # (created when frontend work begins)
+  └── README.md           # "WebUI frontend — see PLAN_WEBUI.md"
+```
 
 ---
 
