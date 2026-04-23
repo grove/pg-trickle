@@ -8,7 +8,8 @@ use crate::error::RelayError;
 
 #[cfg(feature = "nats")]
 pub struct NatsSource {
-    messages: async_nats::jetstream::consumer::Consumer<async_nats::jetstream::consumer::pull::Config>,
+    messages:
+        async_nats::jetstream::consumer::Consumer<async_nats::jetstream::consumer::pull::Config>,
     stream_name: String,
     consumer_name: String,
     subject: String,
@@ -29,9 +30,9 @@ impl NatsSource {
         let consumer_name = consumer_name.into();
         let subject = subject.into();
         let event_type = event_type.into();
-        let client = async_nats::connect(url).await.map_err(|e| {
-            RelayError::source_poll("nats", e)
-        })?;
+        let client = async_nats::connect(url)
+            .await
+            .map_err(|e| RelayError::source_poll("nats", e))?;
         let js = jetstream::new(client);
 
         // Get or create the stream.
@@ -107,8 +108,7 @@ impl super::Source for NatsSource {
                         .unwrap_or(&self.event_type)
                         .to_string();
 
-                    let mut relay_msg =
-                        RelayMessage::new_reverse(dedup_key, event_type, payload);
+                    let mut relay_msg = RelayMessage::new_reverse(dedup_key, event_type, payload);
                     relay_msg.ack_token = AckToken::None; // ack handled per-message
                     raw_msgs.push(msg);
                     messages.push(relay_msg);

@@ -5,8 +5,8 @@ use crate::error::RelayError;
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
-    consumer::{Consumer, StreamConsumer},
     ClientConfig, Message,
+    consumer::{Consumer, StreamConsumer},
 };
 
 #[cfg(feature = "kafka")]
@@ -62,11 +62,8 @@ impl super::Source for KafkaSource {
             let mut msgs = Vec::new();
             let mut pinned = std::pin::pin!(stream);
             while msgs.len() < batch_size as usize {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(50),
-                    pinned.next(),
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_millis(50), pinned.next())
+                    .await
                 {
                     Ok(Some(Ok(msg))) => msgs.push(msg),
                     _ => break,
@@ -85,9 +82,7 @@ impl super::Source for KafkaSource {
             let dedup_key = msg
                 .key()
                 .map(|k| String::from_utf8_lossy(k).to_string())
-                .unwrap_or_else(|| {
-                    format!("{}:{}", msg.partition(), msg.offset())
-                });
+                .unwrap_or_else(|| format!("{}:{}", msg.partition(), msg.offset()));
 
             let event_type = payload
                 .get("event_type")
@@ -109,12 +104,8 @@ impl super::Source for KafkaSource {
         if let AckToken::KafkaOffset { partition, offset } = last_message.ack_token {
             use rdkafka::TopicPartitionList;
             let mut tpl = TopicPartitionList::new();
-            tpl.add_partition_offset(
-                &self.topic,
-                partition,
-                rdkafka::Offset::Offset(offset + 1),
-            )
-            .map_err(|e| RelayError::source_poll("kafka", e))?;
+            tpl.add_partition_offset(&self.topic, partition, rdkafka::Offset::Offset(offset + 1))
+                .map_err(|e| RelayError::source_poll("kafka", e))?;
             self.consumer
                 .commit(&tpl, rdkafka::consumer::CommitMode::Async)
                 .map_err(|e| RelayError::source_poll("kafka", e))?;

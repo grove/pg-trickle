@@ -18,10 +18,7 @@ pub async fn decode_payload(
     stream_table_name: &str,
     outbox_id: i64,
 ) -> Result<OutboxBatch, RelayError> {
-    let v = payload
-        .get("v")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let v = payload.get("v").and_then(|v| v.as_i64()).unwrap_or(0);
     if v != 1 {
         return Err(RelayError::UnsupportedPayloadVersion(v));
     }
@@ -43,8 +40,7 @@ pub async fn decode_payload(
     if is_claim_check {
         // Cursor-fetch from companion claim-check delta table.
         let outbox_name = format!("outbox_{stream_table_name}");
-        let (inserted, deleted) =
-            fetch_claim_check_rows(db, &outbox_name, outbox_id).await?;
+        let (inserted, deleted) = fetch_claim_check_rows(db, &outbox_name, outbox_id).await?;
 
         // Signal consumption complete so extension can drain old rows.
         db.execute(
@@ -83,10 +79,7 @@ async fn fetch_claim_check_rows(
     outbox_name: &str,
     outbox_id: i64,
 ) -> Result<(Vec<serde_json::Value>, Vec<serde_json::Value>), RelayError> {
-    let cursor_name = format!(
-        "relay_cc_{outbox_id}_{}",
-        Uuid::new_v4().simple()
-    );
+    let cursor_name = format!("relay_cc_{outbox_id}_{}", Uuid::new_v4().simple());
     let delta_table = format!("pgtrickle.outbox_delta_rows_{outbox_name}");
 
     // Open cursor — embed outbox_id literal (it's an i64 from DB, not user input).
@@ -210,6 +203,7 @@ impl OutboxPollerSource {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_consumer_group(
         db: Arc<Client>,
         stream_table_name: impl Into<String>,
@@ -279,32 +273,29 @@ impl super::Source for OutboxPollerSource {
     }
 
     async fn acknowledge(&mut self, last_message: &RelayMessage) -> Result<(), RelayError> {
-        match &last_message.ack_token {
-            AckToken::OutboxOffset(offset) => {
-                if self.consumer_group.is_some() {
-                    if let Some(cg) = &self.consumer_group {
-                        let offset_i64 = *offset;
-                        self.db
-                            .execute(
-                                "SELECT pgtrickle.commit_offset($1, $2, $3)",
-                                &[&cg.group_name, &cg.consumer_id, &offset_i64],
-                            )
-                            .await?;
-                    }
-                } else {
+        if let AckToken::OutboxOffset(offset) = &last_message.ack_token {
+            if self.consumer_group.is_some() {
+                if let Some(cg) = &self.consumer_group {
                     let offset_i64 = *offset;
-                    update_simple_offset(
-                        &self.db,
-                        &self.relay_group_id,
-                        &self.pipeline_id,
-                        offset_i64,
-                        &self.worker_id,
-                    )
-                    .await?;
-                    self.last_offset = offset_i64;
+                    self.db
+                        .execute(
+                            "SELECT pgtrickle.commit_offset($1, $2, $3)",
+                            &[&cg.group_name, &cg.consumer_id, &offset_i64],
+                        )
+                        .await?;
                 }
+            } else {
+                let offset_i64 = *offset;
+                update_simple_offset(
+                    &self.db,
+                    &self.relay_group_id,
+                    &self.pipeline_id,
+                    offset_i64,
+                    &self.worker_id,
+                )
+                .await?;
+                self.last_offset = offset_i64;
             }
-            _ => {}
         }
         Ok(())
     }

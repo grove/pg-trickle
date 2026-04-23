@@ -37,8 +37,7 @@ impl super::Sink for StdoutSink {
                     writeln!(handle, "{line}").map_err(RelayError::Io)?;
                 }
                 StdoutFormat::JsonPretty => {
-                    let line =
-                        serde_json::to_string_pretty(msg).map_err(RelayError::Json)?;
+                    let line = serde_json::to_string_pretty(msg).map_err(RelayError::Json)?;
                     writeln!(handle, "{line}").map_err(RelayError::Io)?;
                 }
             }
@@ -63,10 +62,7 @@ pub struct FileSink {
 }
 
 impl FileSink {
-    pub async fn new(
-        path: impl Into<String>,
-        format: StdoutFormat,
-    ) -> Result<Self, RelayError> {
+    pub async fn new(path: impl Into<String>, format: StdoutFormat) -> Result<Self, RelayError> {
         let path = path.into();
         let file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -177,7 +173,9 @@ mod tests {
     async fn test_file_sink_pretty_format() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap().to_string();
-        let mut sink = FileSink::new(&path, StdoutFormat::JsonPretty).await.unwrap();
+        let mut sink = FileSink::new(&path, StdoutFormat::JsonPretty)
+            .await
+            .unwrap();
         let msg = RelayMessage::new_reverse("key1", "order.created", serde_json::json!({"id": 42}));
         sink.publish(&[msg]).await.unwrap();
         sink.close().await.unwrap();

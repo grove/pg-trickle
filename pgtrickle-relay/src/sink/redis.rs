@@ -20,8 +20,7 @@ impl RedisSink {
         stream_key_template: impl Into<String>,
         max_len: Option<usize>,
     ) -> Result<Self, RelayError> {
-        let client =
-            redis::Client::open(url).map_err(|e| RelayError::sink("redis", e))?;
+        let client = redis::Client::open(url).map_err(|e| RelayError::sink("redis", e))?;
         let conn = client
             .get_multiplexed_async_connection()
             .await

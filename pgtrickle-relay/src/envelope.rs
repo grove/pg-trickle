@@ -48,6 +48,7 @@ pub enum AckToken {
 }
 
 impl RelayMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_forward(
         outbox_table: &str,
         outbox_id: i64,
@@ -206,8 +207,7 @@ mod tests {
 
     #[test]
     fn test_relay_message_reverse() {
-        let msg =
-            RelayMessage::new_reverse("kafka:0:100", "order.created", serde_json::json!({}));
+        let msg = RelayMessage::new_reverse("kafka:0:100", "order.created", serde_json::json!({}));
         assert_eq!(msg.op, "event");
         assert_eq!(msg.dedup_key, "kafka:0:100");
     }
@@ -244,7 +244,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: RelayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.dedup_key, msg.dedup_key);
-        assert_eq!(decoded.is_full_refresh, true);
+        assert!(decoded.is_full_refresh);
         assert_eq!(decoded.outbox_id, Some(7));
         // ack_token is skipped in serialization
         assert!(matches!(decoded.ack_token, AckToken::None));

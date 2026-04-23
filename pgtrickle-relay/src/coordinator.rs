@@ -2,7 +2,7 @@
 /// Implements RELAY-2 (coordinator loop) and RELAY-15 (hot-reload via LISTEN/NOTIFY).
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use tokio_postgres::Client;
 
 use crate::config::{PipelineConfig, PipelineDirection};

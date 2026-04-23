@@ -15,10 +15,7 @@ pub struct SqsSink {
 
 #[cfg(feature = "sqs")]
 impl SqsSink {
-    pub async fn new(
-        queue_url: impl Into<String>,
-        is_fifo: bool,
-    ) -> Result<Self, RelayError> {
+    pub async fn new(queue_url: impl Into<String>, is_fifo: bool) -> Result<Self, RelayError> {
         let config = aws_config::load_from_env().await;
         let client = SqsClient::new(&config);
         Ok(Self {
@@ -74,7 +71,12 @@ impl super::Sink for SqsSink {
                 let first = &result.failed[0];
                 return Err(RelayError::SinkPublish {
                     sink: "sqs".to_string(),
-                    source: format!("SQS batch failure: {} — {}", first.code, first.message.as_deref().unwrap_or("")).into(),
+                    source: format!(
+                        "SQS batch failure: {} — {}",
+                        first.code,
+                        first.message.as_deref().unwrap_or("")
+                    )
+                    .into(),
                 });
             }
         }

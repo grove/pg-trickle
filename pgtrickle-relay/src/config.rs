@@ -1,7 +1,6 @@
 /// Configuration types for the relay binary.
 /// All pipeline definitions live in the PostgreSQL catalog tables.
 /// This module only handles CLI/env/TOML configuration for the relay process itself.
-
 use serde::{Deserialize, Serialize};
 
 /// Top-level relay process configuration (not pipeline config — that lives in PG).
@@ -73,10 +72,7 @@ pub enum PipelineDirection {
 
 impl PipelineConfig {
     /// Extract a required string value from the pipeline config.
-    pub fn require_str<'a>(
-        &'a self,
-        path: &[&str],
-    ) -> Result<&'a str, crate::error::RelayError> {
+    pub fn require_str<'a>(&'a self, path: &[&str]) -> Result<&'a str, crate::error::RelayError> {
         let mut v = &self.config;
         for key in path {
             v = v
@@ -144,7 +140,10 @@ mod tests {
             "sink": { "type": "nats", "url": "nats://localhost:4222" }
         }));
         assert_eq!(cfg.require_str(&["source", "outbox"]).unwrap(), "orders");
-        assert_eq!(cfg.require_str(&["sink", "url"]).unwrap(), "nats://localhost:4222");
+        assert_eq!(
+            cfg.require_str(&["sink", "url"]).unwrap(),
+            "nats://localhost:4222"
+        );
     }
 
     #[test]

@@ -1,4 +1,8 @@
-/// pgtrickle-relay — entry point (RELAY-1).
+// pgtrickle-relay — entry point (RELAY-1).
+// The relay backends and traits are public API used by external consumers.
+// Dead code warnings are suppressed because many types are feature-gated or
+// used only at runtime via trait objects rather than direct construction.
+#![allow(dead_code, unused_imports)]
 mod cli;
 mod config;
 mod coordinator;
@@ -9,8 +13,8 @@ mod sink;
 mod source;
 mod transforms;
 
-use std::sync::Arc;
 use clap::Parser;
+use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -47,9 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing(&cfg);
 
     if cfg.postgres_url.is_empty() {
-        eprintln!(
-            "error: --postgres-url is required (or set PGTRICKLE_RELAY_POSTGRES_URL)"
-        );
+        eprintln!("error: --postgres-url is required (or set PGTRICKLE_RELAY_POSTGRES_URL)");
         std::process::exit(1);
     }
 
@@ -75,7 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay_metrics = metrics::RelayMetrics::new()?;
     let health_state = Arc::new(RwLock::new(metrics::HealthState::default()));
 
-    metrics::start_metrics_server(&cfg.metrics_addr, Arc::clone(&relay_metrics), Arc::clone(&health_state)).await?;
+    metrics::start_metrics_server(
+        &cfg.metrics_addr,
+        Arc::clone(&relay_metrics),
+        Arc::clone(&health_state),
+    )
+    .await?;
 
     // Build coordinator.
     let coordinator = coordinator::Coordinator::new(
@@ -105,8 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_tracing(cfg: &RelayConfig) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
 
     match cfg.log_format {
         LogFormat::Json => {
@@ -116,9 +123,7 @@ fn init_tracing(cfg: &RelayConfig) {
                 .init();
         }
         LogFormat::Text => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 }

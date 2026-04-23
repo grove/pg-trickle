@@ -5,8 +5,8 @@ use crate::error::RelayError;
 
 #[cfg(feature = "rabbitmq")]
 use lapin::{
-    options::*, types::FieldTable, Channel, Connection, ConnectionProperties,
-    consumer::Consumer as LapinConsumer,
+    Channel, Connection, ConnectionProperties, consumer::Consumer as LapinConsumer, options::*,
+    types::FieldTable,
 };
 
 #[cfg(feature = "rabbitmq")]
@@ -80,16 +80,12 @@ impl super::Source for RabbitMqSource {
 
         let mut messages = Vec::new();
         for _ in 0..batch_size {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                self.consumer.next(),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_millis(100), self.consumer.next())
+                .await
             {
                 Ok(Some(Ok(delivery))) => {
                     let payload: serde_json::Value =
-                        serde_json::from_slice(&delivery.data)
-                            .unwrap_or(serde_json::Value::Null);
+                        serde_json::from_slice(&delivery.data).unwrap_or(serde_json::Value::Null);
 
                     let dedup_key = delivery
                         .properties

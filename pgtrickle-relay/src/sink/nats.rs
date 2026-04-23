@@ -14,10 +14,7 @@ pub struct NatsSink {
 
 #[cfg(feature = "nats")]
 impl NatsSink {
-    pub async fn new(
-        url: &str,
-        subject_template: impl Into<String>,
-    ) -> Result<Self, RelayError> {
+    pub async fn new(url: &str, subject_template: impl Into<String>) -> Result<Self, RelayError> {
         let client = async_nats::connect(url)
             .await
             .map_err(|e| RelayError::sink("nats", e))?;
@@ -40,24 +37,16 @@ impl super::Sink for NatsSink {
         use async_nats::HeaderMap;
 
         for msg in messages {
-            let payload =
-                serde_json::to_vec(msg).map_err(RelayError::Json)?;
+            let payload = serde_json::to_vec(msg).map_err(RelayError::Json)?;
 
             let mut headers = HeaderMap::new();
-            headers.insert(
-                "Nats-Msg-Id",
-                msg.dedup_key.as_str(),
-            );
+            headers.insert("Nats-Msg-Id", msg.dedup_key.as_str());
             if msg.is_full_refresh {
                 headers.insert("Pgtrickle-Full-Refresh", "true");
             }
 
             self.js
-                .publish_with_headers(
-                    msg.subject.clone(),
-                    headers,
-                    payload.into(),
-                )
+                .publish_with_headers(msg.subject.clone(), headers, payload.into())
                 .await
                 .map_err(|e| RelayError::sink("nats", e))?
                 .await

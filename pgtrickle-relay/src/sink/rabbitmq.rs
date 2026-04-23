@@ -5,11 +5,7 @@ use crate::error::RelayError;
 
 #[cfg(feature = "rabbitmq")]
 use lapin::{
-    options::BasicPublishOptions,
-    BasicProperties,
-    Channel,
-    Connection,
-    ConnectionProperties,
+    BasicProperties, Channel, Connection, ConnectionProperties, options::BasicPublishOptions,
 };
 
 #[cfg(feature = "rabbitmq")]
@@ -58,8 +54,7 @@ impl super::Sink for RabbitMqSink {
                 msg.outbox_id.unwrap_or(0),
                 msg.refresh_id,
             );
-            let payload =
-                serde_json::to_vec(msg).map_err(RelayError::Json)?;
+            let payload = serde_json::to_vec(msg).map_err(RelayError::Json)?;
 
             let props = BasicProperties::default()
                 .with_message_id(msg.dedup_key.as_str().into())

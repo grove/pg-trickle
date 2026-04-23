@@ -1,8 +1,8 @@
+pub mod inbox;
+pub mod pg_outbox;
 /// Sink trait and implementations.
 /// A Sink consumes RelayMessages published by a Source.
 pub mod stdout;
-pub mod inbox;
-pub mod pg_outbox;
 
 #[cfg(feature = "nats")]
 pub mod nats;

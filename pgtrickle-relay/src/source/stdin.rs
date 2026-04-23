@@ -85,7 +85,9 @@ impl FileSource {
         event_type: impl Into<String>,
     ) -> Result<Self, RelayError> {
         let path = path.into();
-        let content = tokio::fs::read_to_string(&path).await.map_err(RelayError::Io)?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(RelayError::Io)?;
         let lines = content
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -140,21 +142,23 @@ impl super::Source for FileSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::Source;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use crate::source::Source;
 
     #[tokio::test]
     async fn test_file_source_jsonl() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"{{"event_type":"order.created","id":1,"dedup_key":"k1"}}"#)
-            .unwrap();
+        writeln!(
+            tmp,
+            r#"{{"event_type":"order.created","id":1,"dedup_key":"k1"}}"#
+        )
+        .unwrap();
         writeln!(tmp, r#"{{"event_type":"order.updated","id":2}}"#).unwrap();
 
-        let mut src =
-            FileSource::new(tmp.path().to_str().unwrap(), "default.event")
-                .await
-                .unwrap();
+        let mut src = FileSource::new(tmp.path().to_str().unwrap(), "default.event")
+            .await
+            .unwrap();
 
         let msgs = src.poll(10).await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -171,10 +175,9 @@ mod tests {
         for i in 0..5 {
             writeln!(tmp, r#"{{"id":{i}}}"#).unwrap();
         }
-        let mut src =
-            FileSource::new(tmp.path().to_str().unwrap(), "test")
-                .await
-                .unwrap();
+        let mut src = FileSource::new(tmp.path().to_str().unwrap(), "test")
+            .await
+            .unwrap();
         let msgs = src.poll(3).await.unwrap();
         assert_eq!(msgs.len(), 3);
         let msgs2 = src.poll(3).await.unwrap();
@@ -186,10 +189,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_source_empty_file() {
         let tmp = NamedTempFile::new().unwrap();
-        let mut src =
-            FileSource::new(tmp.path().to_str().unwrap(), "test")
-                .await
-                .unwrap();
+        let mut src = FileSource::new(tmp.path().to_str().unwrap(), "test")
+            .await
+            .unwrap();
         let msgs = src.poll(10).await.unwrap();
         assert!(msgs.is_empty());
     }

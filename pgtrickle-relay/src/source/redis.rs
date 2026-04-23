@@ -28,8 +28,7 @@ impl RedisSource {
         let group = group.into();
         let consumer = consumer.into();
 
-        let client = redis::Client::open(url)
-            .map_err(|e| RelayError::source_poll("redis", e))?;
+        let client = redis::Client::open(url).map_err(|e| RelayError::source_poll("redis", e))?;
         let mut conn = client
             .get_multiplexed_async_connection()
             .await

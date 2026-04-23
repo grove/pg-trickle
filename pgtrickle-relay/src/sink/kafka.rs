@@ -5,8 +5,8 @@ use crate::error::RelayError;
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
-    producer::{FutureProducer, FutureRecord},
     ClientConfig,
+    producer::{FutureProducer, FutureRecord},
 };
 
 #[cfg(feature = "kafka")]
@@ -17,10 +17,7 @@ pub struct KafkaSink {
 
 #[cfg(feature = "kafka")]
 impl KafkaSink {
-    pub fn new(
-        brokers: &str,
-        topic_template: impl Into<String>,
-    ) -> Result<Self, RelayError> {
+    pub fn new(brokers: &str, topic_template: impl Into<String>) -> Result<Self, RelayError> {
         let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
             .set("message.timeout.ms", "5000")
@@ -46,8 +43,7 @@ impl super::Sink for KafkaSink {
         use std::time::Duration;
 
         for msg in messages {
-            let payload =
-                serde_json::to_string(msg).map_err(RelayError::Json)?;
+            let payload = serde_json::to_string(msg).map_err(RelayError::Json)?;
             let key = msg.dedup_key.as_str();
 
             self.producer
@@ -68,7 +64,8 @@ impl super::Sink for KafkaSink {
     }
 
     async fn close(&mut self) -> Result<(), RelayError> {
-        self.producer.flush(std::time::Duration::from_secs(5))
+        self.producer
+            .flush(std::time::Duration::from_secs(5))
             .map_err(|e| RelayError::sink("kafka", e))?;
         Ok(())
     }

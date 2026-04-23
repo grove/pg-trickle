@@ -42,10 +42,7 @@ pub trait Source: Send {
 
     /// Acknowledge successful processing of a batch.
     /// The Source should advance its committed offset to `last_message.ack_token`.
-    async fn acknowledge(
-        &mut self,
-        last_message: &RelayMessage,
-    ) -> Result<(), RelayError>;
+    async fn acknowledge(&mut self, last_message: &RelayMessage) -> Result<(), RelayError>;
 
     /// Gracefully close the source (release resources, stop background tasks).
     async fn close(&mut self) -> Result<(), RelayError>;
