@@ -9,6 +9,71 @@
 
 ## Versions
 
+### Foundation (v0.1.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.1.0](v0.1.0.md) | The complete foundation — differential engine, CDC, scheduling, monitoring | ✅ Released | Very Large |
+| [v0.1.1](v0.1.1.md) | Change capture correctness fixes (WAL decoder, UPDATE handling) | ✅ Released | Patch |
+| [v0.1.2](v0.1.2.md) | DDL tracking improvements and PgBouncer compatibility | ✅ Released | Patch |
+| [v0.1.3](v0.1.3.md) | SQL coverage completion, WAL hardening, TPC-H 22/22 | ✅ Released | Patch |
+
+### Early Feature Development (v0.2.x – v0.5.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.2.0](v0.2.0.md) | Top-N views, IMMEDIATE refresh mode, diamond dependency safety | ✅ Released | Medium |
+| [v0.2.1](v0.2.1.md) | Upgrade infrastructure and documentation expansion | ✅ Released | Small |
+| [v0.2.2](v0.2.2.md) | Paginated top-N, AUTO mode default, ALTER QUERY | ✅ Released | Medium |
+| [v0.2.3](v0.2.3.md) | Non-determinism detection and operational polish | ✅ Released | Small |
+| [v0.3.0](v0.3.0.md) | Correctness for HAVING, FULL OUTER JOIN, and correlated subqueries | ✅ Released | Medium |
+| [v0.4.0](v0.4.0.md) | Parallel refresh, statement-level CDC triggers, cross-source consistency | ✅ Released | Medium |
+| [v0.5.0](v0.5.0.md) | Row-level security, ETL bootstrap gating, API polish | ✅ Released | Medium |
+
+### Scalability and Robustness (v0.6.x – v0.9.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.6.0](v0.6.0.md) | Partitioned source tables, idempotent DDL, circular dependency foundation | ✅ Released | Medium |
+| [v0.7.0](v0.7.0.md) | Circular DAG execution, watermarks, Prometheus/Grafana observability | ✅ Released | Large |
+| [v0.8.0](v0.8.0.md) | pg_dump backup support and multiset invariant testing | ✅ Released | Small |
+| [v0.9.0](v0.9.0.md) | Algebraic aggregate maintenance — AVG, STDDEV, COUNT(DISTINCT) | ✅ Released | Medium |
+
+### Production Readiness (v0.10.x – v0.14.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.10.0](v0.10.0.md) | DVM hardening, PgBouncer compatibility, "No Surprises" UX | ✅ Released | Medium |
+| [v0.11.0](v0.11.0.md) | Partitioned stream tables, event-driven scheduler (34× latency), circuit breaker | ✅ Released | Large |
+| [v0.12.0](v0.12.0.md) | Three-table join fix (EC-01), developer tools, SQLancer fuzzing | ✅ Released | Medium |
+| [v0.13.0](v0.13.0.md) | Columnar change tracking, shared buffers, TPC-H 22/22 DIFFERENTIAL | ✅ Released | Large |
+| [v0.14.0](v0.14.0.md) | Tiered scheduling, UNLOGGED buffers, TUI dashboard | ✅ Released | Medium |
+
+### Performance and Integration (v0.15.x – v0.19.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.15.0](v0.15.0.md) | Nexmark benchmark, bulk create API, watermark hold-back, dbt Hub | ✅ Released | Medium |
+| [v0.16.0](v0.16.0.md) | Append-only fast path, algebraic aggregates, auto-indexing, benchmark CI | ✅ Released | Medium |
+| [v0.17.0](v0.17.0.md) | Cost-based refresh strategy, incremental DAG rebuild, pg_ivm migration guide | ✅ Released | Large |
+| [v0.18.0](v0.18.0.md) | Z-set delta engine, consistency enforcement, safety hardening | ✅ Released | Large |
+| [v0.19.0](v0.19.0.md) | Security hardening, packaging (PGXN, Docker Hub, apt/rpm) | ✅ Released | Medium |
+
+### Self-Monitoring and Deep Correctness (v0.20.x – v0.27.x)
+
+| Version | Theme | Status | Scope |
+|---------|-------|--------|-------|
+| [v0.20.0](v0.20.0.md) | pg_trickle monitors itself using its own stream tables | ✅ Released | Large |
+| [v0.21.0](v0.21.0.md) | Correctness hardening, zero-crash guarantee, shadow/canary mode | ✅ Released | Large |
+| [v0.22.0](v0.22.0.md) | Downstream CDC publication, parallel refresh pool, SLA tier auto-assignment | ✅ Released | Large |
+| [v0.23.0](v0.23.0.md) | TPC-H DVM scaling performance — all 22 queries at O(Δ) | ✅ Released | Large |
+| [v0.24.0](v0.24.0.md) | Join correctness complete fix, two-phase frontier, TOAST-aware CDC | ✅ Released | Large |
+| [v0.25.0](v0.25.0.md) | Thousands of stream tables, pooler cold-start fix, predictive model | ✅ Released | Large |
+| [v0.26.0](v0.26.0.md) | Concurrency testing, fuzz targets, refresh engine modularisation | ✅ Released | Large |
+| [v0.27.0](v0.27.0.md) | Snapshot/PITR, schedule recommendations, cluster observability | Planned | Medium |
+
+### Toward Stable (v0.28.x – v1.0)
+
 | Version | Theme | Status | Scope |
 |---------|-------|--------|-------|
 | [v0.28.0](v0.28.0.md) | Reliable event messaging built into PostgreSQL | ✅ Released | Large |
@@ -21,26 +86,34 @@
 ## How these versions fit together
 
 ```
-v0.28.0  ─── Reliable event messaging (outbox + inbox)
+v0.1.0   ─── Foundation: differential engine, CDC, scheduling, 1300+ tests
     │
-v0.29.0  ─── Relay CLI connecting that messaging to Kafka, NATS, etc.
+v0.2–0.5 ─── TopK, IMMEDIATE mode, RLS, partitioned sources, parallel refresh
     │
-v0.30.0  ─── Quality gate: correctness, stability, docs (required for 1.0)
+v0.6–0.9 ─── Circular DAGs, watermarks, Prometheus, algebraic aggregates
     │
-v0.31.0  ─── Scheduler intelligence and hot-path performance
+v0.10–14 ─── PgBouncer compat, 34× latency, partitioned outputs, tiered scheduling
     │
-v0.32.0  ─── Live push notifications + zero-downtime schema changes
+v0.15–19 ─── Nexmark, append-only fast path, cost model, security, packaging
     │
-v0.33.0  ─── Time-travel history + analytic columnar storage
+v0.20–23 ─── Self-monitoring, zero-crash guarantee, downstream CDC, TPC-H at scale
+    │
+v0.24–27 ─── Join correctness complete, thousands of STs, snapshot/PITR
+    │
+v0.28–29 ─── Reliable event messaging (outbox + inbox) + relay CLI
+    │
+v0.30    ─── Quality gate: correctness, stability, docs (required for 1.0)
+    │
+v0.31–33 ─── Scheduler intelligence, push notifications, time-travel
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries
 ```
 
-v0.28.0 and v0.29.0 together deliver the event-driven integration story.
-v0.30.0 is a mandatory correctness and polish gate before 1.0. v0.31.0
-through v0.33.0 each add a distinct new capability — improved efficiency,
-reactive UIs, and analytic workloads respectively — while the core IVM
-engine underneath remains stable.
+v0.1.0 through v0.27.0 build the complete core engine and harden it for
+production use. v0.28.0 and v0.29.0 deliver the event-driven integration
+story. v0.30.0 is a mandatory correctness and polish gate before 1.0.
+v0.31.0 through v0.33.0 each add a distinct new capability while the core
+IVM engine remains stable.
 
 ---
 
