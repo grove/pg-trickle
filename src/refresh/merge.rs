@@ -3316,6 +3316,13 @@ pub fn execute_differential_refresh(
         );
     }
 
+    // CORR-1 (v0.30.0): cross-cycle phantom cleanup is deferred — the
+    // cleanup_cross_cycle_phantoms() helper referenced cf.__pgt_row_id from
+    // the user's defining query CTE which never contains that column, causing
+    // a PostgreSQL error for all non-join query shapes (DISTINCT ON, EXCEPT,
+    // non-recursive CTE, FULL JOIN).  A proper key-based comparison is
+    // required; this will be addressed in a follow-up.
+
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("DIFFERENTIAL");
 

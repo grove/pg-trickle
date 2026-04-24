@@ -396,12 +396,15 @@ COMMENT ON FUNCTION pgtrickle.list_relay_configs() IS
 
 -- ── Access control ────────────────────────────────────────────────────────
 
--- Create the relay role if it does not exist (idempotent).
+-- Create the relay role if it does not exist (idempotent, race-condition-safe).
+-- Catches both duplicate_object (42710) and unique_violation (23505) to handle
+-- concurrent CREATE EXTENSION calls from parallel test workers.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgtrickle_relay') THEN
-        CREATE ROLE pgtrickle_relay NOLOGIN;
-    END IF;
+    CREATE ROLE pgtrickle_relay NOLOGIN;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;  -- role already exists
+    WHEN unique_violation THEN NULL;  -- concurrent CREATE ROLE race
 END;
 $$;
 

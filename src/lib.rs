@@ -1229,11 +1229,16 @@ END;
 $$;
 
 -- Create the relay role if it does not exist.
+-- Use EXCEPTION to handle both race conditions:
+--   * duplicate_object (42710): role created between our check and our CREATE
+--   * unique_violation (23505): two concurrent CREATE EXTENSION calls hit the
+--     pg_authid unique index simultaneously (parallel test workers)
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgtrickle_relay') THEN
-        CREATE ROLE pgtrickle_relay NOLOGIN;
-    END IF;
+    CREATE ROLE pgtrickle_relay NOLOGIN;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;  -- role already exists
+    WHEN unique_violation THEN NULL;  -- concurrent CREATE ROLE race
 END;
 $$;
 "#,
