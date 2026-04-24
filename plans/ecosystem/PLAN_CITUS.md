@@ -1,7 +1,7 @@
 # PLAN_CITUS.md — Citus Compatibility for pg_trickle
 
 > **Date:** 2026-04-24
-> **Status:** PROPOSED
+> **Status:** PROPOSED — user-validated (#619, 2026-04-24)
 > **Targets:** Citus 13.x on PostgreSQL 18.x
 > **Supersedes:** previous draft of this file (pre-WAL-decoder, pre-relay)
 
@@ -352,20 +352,22 @@ already at [src/wal_decoder.rs](src/wal_decoder.rs#L1509) needs to run
 **on each worker** (run_command_on_workers) for distributed sources.
 
 - `NOTHING` — reject with a clear error; change capture is impossible.
-- `DEFAULT` (PK-only) — accepted **only if** no PK column can be updated.
-  Pre-flight must either detect this via `pg_attribute` constraints (immutable
-  generated columns, NOT NULL + no UPDATE path) or require the user to
-  explicitly acknowledge the risk with `allow_pk_updates => false`. **If a
-  PK column is updated, `pgoutput` with DEFAULT emits only the new row;
-  the coordinator cannot match it to the old `__pgt_row_id`, producing
-  silent data loss in the ST.** This is not a recoverable error — it
-  corrupts the materialization silently.
-- `FULL` — accepted always. WAL amplification is proportional to row width:
-  negligible on narrow tables, potentially severe (10× or more) on very wide
-  tables with high UPDATE rates. Log a sizing advisory at setup time.
+- `DEFAULT` (PK-only) — accepted only when the user explicitly opts in
+  with `immutable_pk => true` on `create_stream_table()`. This is an
+  assertion by the user that no PK column is ever updated. pg_trickle cannot
+  verify this statically (application-level UPDATE patterns are invisible
+  to `pg_attribute`). **If a PK column is updated, `pgoutput` with DEFAULT
+  emits only the new row; the coordinator cannot match it to the old
+  `__pgt_row_id`, producing silent data loss in the ST.** This is not a
+  recoverable error — it corrupts the materialisation silently. Emit a
+  prominent warning at setup time when `immutable_pk => true` is used.
+- `FULL` — accepted always; **this is the default**. WAL amplification is
+  proportional to row width: negligible on narrow tables, potentially severe
+  (10× or more) on very wide tables with high UPDATE rates. Log a sizing
+  advisory at setup time.
 
-Default guidance: use `FULL` unless the user explicitly confirms PKs are
-immutable, in which case `DEFAULT` avoids WAL overhead.
+Default guidance: require `FULL` unless the user passes `immutable_pk =>
+  true`, in which case `DEFAULT` is used and a warning is emitted.
 
 **P3.4 — Slot polling.** Scheduler tick iterates over
 `pgt_remote_slots` for the source and pulls from each worker, writing
@@ -400,18 +402,19 @@ sources:
 |---|---|
 | All `Local` | `local` |
 | Includes `Reference`, no `Distributed` | `local` |
-| Includes `Distributed`, projected ST < 1M rows | `reference` |
-| Includes `Distributed`, projected ST ≥ 1M rows | `distributed` |
+| All sources `Distributed` | `distributed` |
+| Mixed `Distributed` + `Reference`/`Local`, projected ST < 1M rows | `reference` |
+| Mixed `Distributed` + `Reference`/`Local`, projected ST ≥ 1M rows | `distributed` |
 
 Persisted in `pgtrickle.pgt_stream_tables.st_placement`. Threshold
-GUC: `pg_trickle.citus_reference_st_max_rows` (default `1_000_000`).
+GUC: `pg_trickle.citus_reference_st_max_rows` (default `1_000_000`); only
+applied in the mixed-topology case. When all sources are `Distributed` the
+threshold is bypassed and `distributed` is always the default.
 
-> **Note (from #619 feedback):** The confirmed use case has all-distributed
-> sources and lower-layer STs expected to reach billions of rows. The 1M
-> default likely places most STs in the `reference` bucket incorrectly for
-> this pattern. The P6.3 benchmark must validate the threshold; consider
-> lowering the default or making `distributed` the default when the source
-> topology is all-distributed.
+> **Rationale:** An all-distributed source topology with billion-row lower-layer
+> STs (confirmed in #619) makes `reference` placement untenable regardless of
+> projected ST size. The 1M threshold is only meaningful when the user has
+> a mix of source placements and genuinely small aggregation outputs.
 
 **P4.2 — Apply for `distributed` STs.** The DELETE + INSERT…ON CONFLICT
 pair replaces MERGE. Distribution column is `__pgt_row_id`. Codegen
@@ -588,21 +591,30 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
 1. **`dblink` vs streaming libpq.** Bench result determines P3.1 default.
    Streaming gives push-based wake-ups (no polling latency) but adds a
    long-running connection per worker.
-2. **Reference vs distributed ST default for medium-sized outputs.** The
-   1M-row threshold in P4.1 is a guess — instrument and tune in P6.3.
-   Discussion #619 confirms a scenario with billions of rows in lower-layer
-   STs across an all-distributed source topology; the 1M threshold may
-   produce `reference` placements that would be immediately untenable.
-   Consider making `distributed` the default when all declared sources are
-   `Distributed` and/or when DAG depth > 1.
-3. **Multi-database Citus.** Citus 13 supports multiple databases per
+2. **Reference vs distributed ST default (mixed topology only).** The 1M-row
+   threshold in P4.1 now only applies when sources are mixed
+   (`Distributed` + `Reference`/`Local`). Instrument and tune in P6.3 for
+   that case.
+3. **Source table count for slot budget (unanswered from #619).** erikmata
+   confirmed billions of rows but did not give a source table count. The
+   coordinator opens `N_sources × N_workers` simultaneous connections for
+   slot polling. We need a rough upper bound to size `max_connections` and
+   connection-pool guidance in the docs. Follow up in the discussion.
+4. **Dynamic query construction compatibility.** erikmata's system
+   "dynamically constructs quite complex queries." If this means the query
+   SQL varies per-execution, that is incompatible with pg_trickle (STs are
+   defined once at creation). If it means the user dynamically decides
+   *which* ST chain to deploy but each ST is fixed once created, that is
+   fine. Clarify before the Citus integration ships — ideally in the same
+   discussion thread.
+5. **Multi-database Citus.** Citus 13 supports multiple databases per
    cluster; each pg_trickle scheduler is per-database. No change
    expected, but verify in P6.2.
-4. **Interaction with `pgtrickle-relay`.** A distributed ST exposed via
+6. **Interaction with `pgtrickle-relay`.** A distributed ST exposed via
    `stream_table_to_publication()` already streams over logical
    replication from the coordinator's storage table — works today
    regardless of placement. No new code; document the pattern.
-5. **CitusData vs Microsoft fork divergence.** Track the upstream
+7. **CitusData vs Microsoft fork divergence.** Track the upstream
    (microsoft/citus) repo; pin tested versions in CI.
 
 ---
@@ -617,11 +629,10 @@ PKs deterministic and never modified.
 **Pattern:** Chain of SQL-WITH expressions replaced with a chain of STs;
 lower-layer STs expected to reach billions of rows.
 
-**Configuration target:** `REPLICA IDENTITY DEFAULT` (PK-only, safe here
-because PKs never change) + `placement => 'distributed'` for all
-lower-layer STs. The P4.1 1M-row threshold should be overridden or the
-threshold lowered — at billion-row scale a `reference` ST is a
-non-starter.
+**Configuration target:** `REPLICA IDENTITY FULL` (safe default) or
+`REPLICA IDENTITY DEFAULT` + `immutable_pk => true` (opt-in, saves WAL
+overhead when PKs genuinely never change) + `placement => 'distributed'`
+automatically selected by the all-distributed rule in P4.1.
 
 **Known limitations that apply to this topology:**
 
