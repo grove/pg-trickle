@@ -1,7 +1,7 @@
 # PLAN_CITUS.md — Citus Compatibility for pg_trickle
 
-> **Date:** 2026-04-23
-> **Status:** PROPOSED
+> **Date:** 2026-04-24
+> **Status:** PROPOSED — user-validated (#619, 2026-04-24)
 > **Targets:** Citus 13.x on PostgreSQL 18.x
 > **Supersedes:** previous draft of this file (pre-WAL-decoder, pre-relay)
 
@@ -44,6 +44,13 @@ storage-table placement decision**, not a wholesale rearchitecture.
 (no automatic shard rebalancing, no failover during refresh — both
 explicit constraints from the discussion thread). Rebalance support is a
 follow-up release.
+
+**Confirmed use case (discussion #619 follow-up, 2026-04-24):** all sources
+are hash-distributed (no reference tables), PKs are deterministic and
+never change, lower-layer STs in a SQL-WITH-replacement chain expected to
+reach billions of rows. This is one topology among many; design decisions
+below are scoped to what is broadly correct, not to this use case alone.
+See §11 for per-topology implications.
 
 ---
 
@@ -169,10 +176,12 @@ predictive-cost code paths.
 | **MERGE replacement (distributed STs)** | `DELETE … WHERE __pgt_row_id IN (...)` + `INSERT … ON CONFLICT (__pgt_row_id) DO UPDATE` | Citus-supported; same semantics |
 | **Worker→coordinator transport** | Logical replication (publications + slots) — **no triggers on workers** | Matches WAL-decoder model already in tree; zero new write-path overhead |
 | **Reference-table sources** | Keep trigger CDC path | Already works; no reason to change |
+| **REPLICA IDENTITY** | `FULL` required when PKs can change; `DEFAULT` (PK-only) sufficient when PKs are immutable — and strongly preferred at large scale | PK-only decoding works only when UPDATE never touches a PK column; if it does, `pgoutput` with DEFAULT cannot reconstruct the old identity, causing silent loss in the ST. `FULL` amplifies WAL proportionally to row width (negligible on narrow tables, severe on wide ones at scale). Pre-flight must verify the PK-immutability assumption or require FULL. |
 | **Locking** | Catalog table for cross-node locks; advisory locks remain the local fast path | Advisory locks are node-local |
 | **Wake signalling** | `LISTEN/NOTIFY` on coordinator only; workers don't run a scheduler | Single scheduler per database (today's model) is fine for Citus |
 | **Detection** | Auto-detect Citus at extension load + per-source at create time | No new GUC required for the common case |
 | **Rebalance** | Out of scope for v1 (matches user's constraint in #619) | Slot location follows shard placement; rebalance would invalidate slots |
+| **Chained distributed STs** | Attempt to distribute all STs in the same DAG subgraph on the same column; error out when this is structurally impossible | Co-location is required for shard-local delta apply. Auto-co-location cannot be resolved when the chain includes aggregations (GROUP BY changes cardinality), JOINs on a non-source-distribution key, or projections that drop the distribution column — in those cases the user must choose placement explicitly. Note also that `__pgt_row_id`-distributed STs do **not** co-locate with their source tables; JOINs between an ST and its source remain cross-shard. |
 
 ---
 
@@ -342,6 +351,24 @@ sees `placement == Distributed`:
 already at [src/wal_decoder.rs](src/wal_decoder.rs#L1509) needs to run
 **on each worker** (run_command_on_workers) for distributed sources.
 
+- `NOTHING` — reject with a clear error; change capture is impossible.
+- `DEFAULT` (PK-only) — accepted only when the user explicitly opts in
+  with `immutable_pk => true` on `create_stream_table()`. This is an
+  assertion by the user that no PK column is ever updated. pg_trickle cannot
+  verify this statically (application-level UPDATE patterns are invisible
+  to `pg_attribute`). **If a PK column is updated, `pgoutput` with DEFAULT
+  emits only the new row; the coordinator cannot match it to the old
+  `__pgt_row_id`, producing silent data loss in the ST.** This is not a
+  recoverable error — it corrupts the materialisation silently. Emit a
+  prominent warning at setup time when `immutable_pk => true` is used.
+- `FULL` — accepted always; **this is the default**. WAL amplification is
+  proportional to row width: negligible on narrow tables, potentially severe
+  (10× or more) on very wide tables with high UPDATE rates. Log a sizing
+  advisory at setup time.
+
+Default guidance: require `FULL` unless the user passes `immutable_pk =>
+  true`, in which case `DEFAULT` is used and a warning is emitted.
+
 **P3.4 — Slot polling.** Scheduler tick iterates over
 `pgt_remote_slots` for the source and pulls from each worker, writing
 into the coordinator's `changes_<stable_name>` buffer with
@@ -375,11 +402,19 @@ sources:
 |---|---|
 | All `Local` | `local` |
 | Includes `Reference`, no `Distributed` | `local` |
-| Includes `Distributed`, projected ST < 1M rows | `reference` |
-| Includes `Distributed`, projected ST ≥ 1M rows | `distributed` |
+| All sources `Distributed` | `distributed` |
+| Mixed `Distributed` + `Reference`/`Local`, projected ST < 1M rows | `reference` |
+| Mixed `Distributed` + `Reference`/`Local`, projected ST ≥ 1M rows | `distributed` |
 
 Persisted in `pgtrickle.pgt_stream_tables.st_placement`. Threshold
-GUC: `pg_trickle.citus_reference_st_max_rows` (default `1_000_000`).
+GUC: `pg_trickle.citus_reference_st_max_rows` (default `1_000_000`); only
+applied in the mixed-topology case. When all sources are `Distributed` the
+threshold is bypassed and `distributed` is always the default.
+
+> **Rationale:** An all-distributed source topology with billion-row lower-layer
+> STs (confirmed in #619) makes `reference` placement untenable regardless of
+> projected ST size. The 1M threshold is only meaningful when the user has
+> a mix of source placements and genuinely small aggregation outputs.
 
 **P4.2 — Apply for `distributed` STs.** The DELETE + INSERT…ON CONFLICT
 pair replaces MERGE. Distribution column is `__pgt_row_id`. Codegen
@@ -409,6 +444,14 @@ it as the distribution column at `create_distributed_table` time.
 Validation: refuse `distributed` placement if the user supplied an
 ORDER BY / GROUP BY shape that would produce skew on row id (rare —
 row id is a monotonically increasing surrogate).
+
+> **Limitation:** Distributing an ST by `__pgt_row_id` (a synthetic
+> surrogate) does **not** align shards with the source table's distribution
+> column. Any query that JOINs the ST back to its source produces cross-shard
+> joins, which Citus executes correctly but at higher cost (re-partition join
+> or broadcast). Document this and recommend denormalising the source
+> distribution key into the ST projection if frequent ST-source joins are
+> expected.
 
 **P4.5 — `reltuples` fix.** `src/dag.rs` and the predictive cost
 model (`src/api/planner.rs`) sum `pg_dist_shard` row counts when the
@@ -497,9 +540,10 @@ when `pg_dist_partition` is empty.
 
 **P6.5 — Docs.** New page `docs/integrations/citus.md` covering
 prerequisites (`wal_level=logical` on every worker, `max_replication_slots`
-sized appropriately, `REPLICA IDENTITY FULL` on distributed sources,
-matching extension version on coordinator and workers, stable shard
-placement). Update [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) with
+sized appropriately, `REPLICA IDENTITY DEFAULT` (minimum; `FULL` is also
+supported but not recommended at large scale due to WAL amplification) on
+distributed sources, matching extension version on coordinator and workers,
+stable shard placement). Update [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) with
 the multi-node diagram from §5. Update [INSTALL.md](INSTALL.md) with
 "installing on a Citus cluster".
 
@@ -547,21 +591,65 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
 1. **`dblink` vs streaming libpq.** Bench result determines P3.1 default.
    Streaming gives push-based wake-ups (no polling latency) but adds a
    long-running connection per worker.
-2. **Reference vs distributed ST default for medium-sized outputs.** The
-   1M-row threshold in P4.1 is a guess — instrument and tune in P6.3.
-3. **Multi-database Citus.** Citus 13 supports multiple databases per
+2. **Reference vs distributed ST default (mixed topology only).** The 1M-row
+   threshold in P4.1 now only applies when sources are mixed
+   (`Distributed` + `Reference`/`Local`). Instrument and tune in P6.3 for
+   that case.
+3. **Source table count for slot budget (unanswered from #619).** erikmata
+   confirmed billions of rows but did not give a source table count. The
+   coordinator opens `N_sources × N_workers` simultaneous connections for
+   slot polling. We need a rough upper bound to size `max_connections` and
+   connection-pool guidance in the docs. Follow up in the discussion.
+4. **Dynamic query construction compatibility.** erikmata's system
+   "dynamically constructs quite complex queries." If this means the query
+   SQL varies per-execution, that is incompatible with pg_trickle (STs are
+   defined once at creation). If it means the user dynamically decides
+   *which* ST chain to deploy but each ST is fixed once created, that is
+   fine. Clarify before the Citus integration ships — ideally in the same
+   discussion thread.
+5. **Multi-database Citus.** Citus 13 supports multiple databases per
    cluster; each pg_trickle scheduler is per-database. No change
    expected, but verify in P6.2.
-4. **Interaction with `pgtrickle-relay`.** A distributed ST exposed via
+6. **Interaction with `pgtrickle-relay`.** A distributed ST exposed via
    `stream_table_to_publication()` already streams over logical
    replication from the coordinator's storage table — works today
    regardless of placement. No new code; document the pattern.
-5. **CitusData vs Microsoft fork divergence.** Track the upstream
+7. **CitusData vs Microsoft fork divergence.** Track the upstream
    (microsoft/citus) repo; pin tested versions in CI.
 
 ---
 
-## 10. Cross-References
+## 11. Known Use Cases
+
+### 11.1 — All-distributed ELT chain (discussion #619)
+
+**Source topology:** All sources hash-distributed; no reference tables;
+PKs deterministic and never modified.
+
+**Pattern:** Chain of SQL-WITH expressions replaced with a chain of STs;
+lower-layer STs expected to reach billions of rows.
+
+**Configuration target:** `REPLICA IDENTITY FULL` (safe default) or
+`REPLICA IDENTITY DEFAULT` + `immutable_pk => true` (opt-in, saves WAL
+overhead when PKs genuinely never change) + `placement => 'distributed'`
+automatically selected by the all-distributed rule in P4.1.
+
+**Known limitations that apply to this topology:**
+
+- **Cross-shard ST↔source JOINs** (see P4.4): `__pgt_row_id`-distributed
+  STs don't co-locate with source tables. Denormalise the source
+  distribution key into the ST if frequent back-joins are needed.
+- **Co-location breaks at aggregation boundaries**: if a mid-chain ST
+  aggregates (GROUP BY) or joins on a different key, automatic co-location
+  with the next ST in the chain is impossible; that ST boundary requires
+  explicit placement choice.
+- **PK immutability is a pre-condition, not verified automatically**:
+  using `DEFAULT` with mutable PKs causes silent data loss (see P3.3).
+  The confirmed use case meets this pre-condition; other users may not.
+
+---
+
+## 12. Cross-References
 
 - [src/wal_decoder.rs](src/wal_decoder.rs) — already-implemented
   WAL-based CDC; foundation of Phase 3.
@@ -574,4 +662,6 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
 - [plans/infra/PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md)
   — multi-database scheduler.
 - [discussion #619](https://github.com/grove/pg-trickle/discussions/619)
-  — original user request that motivated the rewrite.
+  — original user request that motivated the rewrite; follow-up comments
+  confirmed all-distributed topology, billion-row ST chains, and PK-only
+  REPLICA IDENTITY preference (2026-04-24).
