@@ -75,6 +75,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("scc_id", "integer"),
         ("schedule", "text"),
         ("st_partition_key", "text"),
+        ("st_placement", "text"), // CITUS-3: v0.32.0
         ("status", "text"),
         ("topk_limit", "integer"),
         ("topk_offset", "integer"),
@@ -253,6 +254,8 @@ async fn test_upgrade_dependencies_schema_stability() {
         "slot_name",
         "decoder_confirmed_lsn",
         "transition_started_at",
+        "source_stable_name", // CITUS-4: v0.32.0
+        "source_placement",   // CITUS-3: v0.32.0
     ];
 
     for col_name in &expected_dep_columns {

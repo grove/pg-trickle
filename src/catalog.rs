@@ -169,8 +169,6 @@ pub struct StDependency {
     pub source_type: String,
     pub columns_used: Option<Vec<String>>,
     /// JSONB snapshot of source columns at creation time.
-    /// Array of `{"name":"col","type_oid":23,"ordinal":1}` objects.
-    /// Stored as `serde_json::Value` since `pgrx::JsonB` does not implement `Clone`.
     pub column_snapshot: Option<serde_json::Value>,
     /// SHA-256 fingerprint of the serialized column snapshot for fast equality checks.
     pub schema_fingerprint: Option<String>,
@@ -182,6 +180,10 @@ pub struct StDependency {
     pub decoder_confirmed_lsn: Option<String>,
     /// When the transition from triggers to WAL started (for timeout detection).
     pub transition_started_at: Option<String>,
+    /// CITUS-4: Stable name (hash of schema+table) for this source.
+    pub source_stable_name: Option<String>,
+    /// CITUS-4: Citus placement type: 'local', 'distributed', or 'reference'.
+    pub source_placement: String,
 }
 
 /// A refresh history record.
@@ -1512,7 +1514,8 @@ impl StDependency {
                     "SELECT pgt_id, source_relid, source_type, columns_used, \
                             cdc_mode, slot_name, decoder_confirmed_lsn::text, \
                             transition_started_at::text, column_snapshot, \
-                            schema_fingerprint \
+                            schema_fingerprint, source_stable_name, \
+                            COALESCE(source_placement, 'local') AS source_placement \
                      FROM pgtrickle.pgt_dependencies WHERE pgt_id = $1",
                     None,
                     &[pgt_id.into()],
@@ -1535,6 +1538,11 @@ impl StDependency {
                 let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
                 let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
                 let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let source_placement = row
+                    .get::<String>(12)
+                    .map_err(map_spi)?
+                    .unwrap_or_else(|| "local".to_string());
                 result.push(StDependency {
                     pgt_id,
                     source_relid,
@@ -1546,6 +1554,8 @@ impl StDependency {
                     slot_name,
                     decoder_confirmed_lsn,
                     transition_started_at,
+                    source_stable_name,
+                    source_placement,
                 });
             }
             Ok(result)
@@ -1560,7 +1570,8 @@ impl StDependency {
                     "SELECT pgt_id, source_relid, source_type, columns_used, \
                             cdc_mode, slot_name, decoder_confirmed_lsn::text, \
                             transition_started_at::text, column_snapshot, \
-                            schema_fingerprint \
+                            schema_fingerprint, source_stable_name, \
+                            COALESCE(source_placement, 'local') AS source_placement \
                      FROM pgtrickle.pgt_dependencies",
                     None,
                     &[],
@@ -1583,6 +1594,11 @@ impl StDependency {
                 let transition_started_at = row.get::<String>(8).map_err(map_spi)?;
                 let column_snapshot = row.get::<pgrx::JsonB>(9).map_err(map_spi)?.map(|jb| jb.0);
                 let schema_fingerprint = row.get::<String>(10).map_err(map_spi)?;
+                let source_stable_name = row.get::<String>(11).map_err(map_spi)?;
+                let source_placement = row
+                    .get::<String>(12)
+                    .map_err(map_spi)?
+                    .unwrap_or_else(|| "local".to_string());
                 result.push(StDependency {
                     pgt_id,
                     source_relid,
@@ -1594,6 +1610,8 @@ impl StDependency {
                     slot_name,
                     decoder_confirmed_lsn,
                     transition_started_at,
+                    source_stable_name,
+                    source_placement,
                 });
             }
             Ok(result)

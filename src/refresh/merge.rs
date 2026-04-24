@@ -1132,7 +1132,8 @@ pub fn execute_differential_refresh(
     // Also uses to_regclass() as a secondary check that resolves the
     // schema-qualified name the same way a FROM clause would.
     for &oid in &catalog_source_oids {
-        let qualified = format!("{change_schema}.changes_{oid}");
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
+        let qualified = format!("{change_schema}.{buf_name}");
         let reg_exists =
             Spi::get_one::<bool>(&format!("SELECT to_regclass('{qualified}') IS NOT NULL",))
                 .unwrap_or(Some(false))
@@ -1141,7 +1142,7 @@ pub fn execute_differential_refresh(
         if !reg_exists {
             pgrx::warning!(
                 "[pg_trickle] PREFLIGHT FAIL: change buffer table \
-                 \"{change_schema}\".changes_{oid} not found via to_regclass \
+                 \"{change_schema}\".{buf_name} not found via to_regclass \
                  for ST {schema}.{name} (pgt_id={}, catalog_source_oids={:?}). \
                  Skipping differential refresh.",
                 st.pgt_id,
@@ -1170,7 +1171,8 @@ pub fn execute_differential_refresh(
         let total_changes: i64 = catalog_source_oids
             .iter()
             .map(|&oid| {
-                let q = format!("SELECT count(*)::bigint FROM \"{change_schema}\".changes_{oid}");
+                let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
+                let q = format!("SELECT count(*)::bigint FROM \"{change_schema}\".{buf_name}");
                 Spi::get_one::<i64>(&q).unwrap_or(Some(0)).unwrap_or(0)
             })
             .sum();
@@ -1316,9 +1318,10 @@ pub fn execute_differential_refresh(
         let oid = catalog_source_oids[0];
         let prev_lsn = prev_frontier.get_lsn(oid);
         let new_lsn = new_frontier.get_lsn(oid);
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
         Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
-               SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+               SELECT 1 FROM \"{change_schema}\".{buf_name} \
                WHERE lsn > '{prev_lsn}'::pg_lsn \
                AND lsn <= '{new_lsn}'::pg_lsn \
                LIMIT 1\
@@ -1328,18 +1331,14 @@ pub fn execute_differential_refresh(
         .unwrap_or(false)
     } else {
         // Multiple sources — UNION ALL wrapped in EXISTS.
-        // Note: LIMIT 1 is omitted from individual branches because
-        // `SELECT ... LIMIT 1 UNION ALL SELECT ...` is a syntax error
-        // in PostgreSQL (LIMIT binds at the top level, not per-branch).
-        // EXISTS already short-circuits on the first row found, so
-        // LIMIT is unnecessary here.
         let union_parts: Vec<String> = catalog_source_oids
             .iter()
             .map(|oid| {
                 let prev_lsn = prev_frontier.get_lsn(*oid);
                 let new_lsn = new_frontier.get_lsn(*oid);
+                let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
                 format!(
-                    "SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                    "SELECT 1 FROM \"{change_schema}\".{buf_name} \
                      WHERE lsn > '{prev_lsn}'::pg_lsn \
                      AND lsn <= '{new_lsn}'::pg_lsn",
                 )
@@ -1398,9 +1397,10 @@ pub fn execute_differential_refresh(
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
             let new_lsn = new_frontier.get_lsn(*oid);
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
             match Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(\
-                   SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                   SELECT 1 FROM \"{change_schema}\".{buf_name} \
                    WHERE lsn > '{prev_lsn}'::pg_lsn \
                    AND lsn <= '{new_lsn}'::pg_lsn \
                    AND action IN ('D', 'U') \
@@ -1411,12 +1411,10 @@ pub fn execute_differential_refresh(
                 Ok(None) => false,
                 Err(e) => {
                     // SPI failure: treat as "found non-insert" (safe default).
-                    // Falling through to the MERGE path is always correct;
-                    // defaulting to "no deletes" risks silent data corruption.
                     pgrx::warning!(
                         "[pg_trickle] Append-only DELETE/UPDATE check failed for \
-                         changes_{} — falling back to MERGE path: {}",
-                        oid,
+                         {} — falling back to MERGE path: {}",
+                        buf_name,
                         e,
                     );
                     true
@@ -1522,9 +1520,10 @@ pub fn execute_differential_refresh(
         let has_non_insert = catalog_source_oids.iter().any(|oid| {
             let prev_lsn = prev_frontier.get_lsn(*oid);
             let new_lsn = new_frontier.get_lsn(*oid);
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
             match Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(\
-                   SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                   SELECT 1 FROM \"{change_schema}\".{buf_name} \
                    WHERE lsn > '{prev_lsn}'::pg_lsn \
                    AND lsn <= '{new_lsn}'::pg_lsn \
                    AND action IN ('D', 'U') \
@@ -1600,9 +1599,10 @@ pub fn execute_differential_refresh(
     let has_truncate = catalog_source_oids.iter().any(|oid| {
         let prev_lsn = prev_frontier.get_lsn(*oid);
         let new_lsn = new_frontier.get_lsn(*oid);
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
         Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
-               SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+               SELECT 1 FROM \"{change_schema}\".{buf_name} \
                WHERE lsn > '{prev_lsn}'::pg_lsn \
                AND lsn <= '{new_lsn}'::pg_lsn \
                AND action = 'T' \
@@ -1614,18 +1614,15 @@ pub fn execute_differential_refresh(
     });
 
     if has_truncate {
-        // Task 3.2: Fast path for single-source STs where the current window
-        // contains a TRUNCATE marker but no subsequent INSERT/UPDATE/DELETE rows.
-        // In that case the post-TRUNCATE result is always empty, so we can DELETE
-        // all ST rows directly instead of re-running the full defining query.
         let is_single_source = catalog_source_oids.len() == 1;
         let is_pure_truncate = is_single_source && {
             let oid = catalog_source_oids[0];
             let prev_lsn = prev_frontier.get_lsn(oid);
             let new_lsn = new_frontier.get_lsn(oid);
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
             !Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(\
-                   SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                   SELECT 1 FROM \"{change_schema}\".{buf_name} \
                    WHERE lsn > '{prev_lsn}'::pg_lsn \
                    AND lsn <= '{new_lsn}'::pg_lsn \
                    AND action != 'T' \
@@ -1677,6 +1674,7 @@ pub fn execute_differential_refresh(
     for oid in &catalog_source_oids {
         let prev_lsn = prev_frontier.get_lsn(*oid);
         let new_lsn = new_frontier.get_lsn(*oid);
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
 
         let max_ratio_lit = if max_ratio > 0.0 {
             format!("{max_ratio}")
@@ -1689,7 +1687,7 @@ pub fn execute_differential_refresh(
              FROM (SELECT GREATEST(reltuples::bigint, 1000) AS table_size \
                    FROM pg_class WHERE oid = {oid}::oid) sz, \
              LATERAL (SELECT count(*)::bigint AS change_count FROM (\
-                SELECT 1 FROM \"{change_schema}\".changes_{oid} \
+                SELECT 1 FROM \"{change_schema}\".{buf_name} \
                 WHERE lsn > '{prev_lsn}'::pg_lsn \
                 AND lsn <= '{new_lsn}'::pg_lsn \
                 LIMIT CASE WHEN {max_ratio_lit} > 0 \
@@ -1714,8 +1712,8 @@ pub fn execute_differential_refresh(
             Ok(pair) => pair,
             Err(e) => {
                 pgrx::debug1!(
-                    "[pg_trickle] Threshold check for changes_{} failed (table dropped?): {}",
-                    oid,
+                    "[pg_trickle] Threshold check for {} failed (table dropped?): {}",
+                    buf_name,
                     e,
                 );
                 (1000, 0)
@@ -2079,8 +2077,10 @@ pub fn execute_differential_refresh(
         let cleanup_stmts: Vec<String> = source_oids
             .iter()
             .map(|oid| {
+                // CITUS-4: Use stable buffer name for DELETE; keep OID-keyed LSN tokens.
+                let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
                 format!(
-                    "DELETE FROM \"{cleanup_schema}\".changes_{oid} \
+                    "DELETE FROM \"{cleanup_schema}\".{buf_name} \
                      WHERE lsn > '__PGS_PREV_LSN_{oid}__'::pg_lsn \
                      AND lsn <= '__PGS_NEW_LSN_{oid}__'::pg_lsn",
                 )
@@ -2308,7 +2308,7 @@ pub fn execute_differential_refresh(
     if crate::config::pg_trickle_analyze_before_delta() {
         let cb_schema = crate::config::pg_trickle_change_buffer_schema();
         for &oid in &catalog_source_oids {
-            let buf_name = format!("changes_{oid}");
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
             let analyze_sql = format!(
                 "ANALYZE \"{}\".\"{}\"",
                 cb_schema.replace('"', "\"\""),

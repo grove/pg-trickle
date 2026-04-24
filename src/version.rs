@@ -241,6 +241,28 @@ pub fn compute_initial_frontier(slot_positions: &HashMap<u32, String>, data_ts: 
     compute_new_frontier(slot_positions, data_ts)
 }
 
+/// Capture a frontier snapshot from the current WAL position.
+///
+/// Queries `pg_current_wal_lsn()` and returns a frontier with a single
+/// synthetic source entry keyed by `"current"`.  Used in pg_test code to
+/// obtain the upper-bound frontier after making test changes.
+///
+/// Returns an error if the SPI call fails.
+#[cfg(feature = "pg_test")]
+pub fn capture_current_frontier() -> Result<Frontier, crate::error::PgTrickleError> {
+    use pgrx::prelude::*;
+    let lsn = Spi::get_one::<String>("SELECT pg_current_wal_lsn()::text")
+        .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or_else(|| "0/0".to_string());
+    let ts = Spi::get_one::<String>("SELECT now()::text")
+        .map_err(|e| crate::error::PgTrickleError::SpiError(e.to_string()))?
+        .unwrap_or_else(|| "epoch".to_string());
+    let mut frontier = Frontier::new();
+    frontier.set_source(0, lsn, ts.clone());
+    frontier.set_data_timestamp(ts);
+    Ok(frontier)
+}
+
 // ── DVS Target Timestamp ───────────────────────────────────────────────────
 
 /// Select the target data timestamp for a ST refresh.

@@ -49,6 +49,44 @@ use std::collections::HashMap;
 use crate::config;
 use crate::error::PgTrickleError;
 
+// ── CITUS-4: Stable buffer naming helpers ──────────────────────────────────
+
+/// Return the base name (without schema) for the change buffer table of a source.
+///
+/// Checks `pgt_change_tracking.source_stable_name` first; falls back to the
+/// OID-based name `changes_{oid}` for rows created before v0.32.0 (STAB-1).
+pub fn buffer_base_name_for_oid(source_oid: pg_sys::Oid) -> String {
+    let stable = Spi::get_one_with_args::<String>(
+        "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
+        &[source_oid.into()],
+    )
+    .unwrap_or(None);
+
+    match stable {
+        Some(name) => format!("changes_{name}"),
+        None => format!("changes_{}", source_oid.to_u32()),
+    }
+}
+
+/// Return the schema-qualified change buffer table path for a source OID.
+pub fn buffer_qualified_name_for_oid(change_schema: &str, source_oid: pg_sys::Oid) -> String {
+    let base = buffer_base_name_for_oid(source_oid);
+    format!("{change_schema}.{base}")
+}
+
+/// CITUS-4: Get the CDC object name suffix (stable_name or OID fallback) for a source.
+///
+/// Used by rebuild functions to name trigger functions and buffer tables consistently
+/// with however the source was originally set up.
+pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
+    Spi::get_one_with_args::<String>(
+        "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
+        &[source_oid.into()],
+    )
+    .unwrap_or(None)
+    .unwrap_or_else(|| source_oid.to_u32().to_string())
+}
+
 fn resolve_relation_name(source_oid: pg_sys::Oid) -> Result<Option<String>, PgTrickleError> {
     Spi::get_one_with_args::<String>(
         "SELECT format('%I.%I', n.nspname, c.relname) \
@@ -96,9 +134,11 @@ pub fn create_change_trigger(
     change_schema: &str,
     pk_columns: &[String],
     columns: &[(String, String)],
+    stable_name: &str,
 ) -> Result<String, PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
-    let trigger_name = format!("pg_trickle_cdc_{}", oid_u32);
+    // CITUS-4: Use stable_name for all trigger/function names.
+    let trigger_name = format!("pg_trickle_cdc_{}", stable_name);
 
     // Get the fully-qualified source table name
     let source_table = resolve_relation_name(source_oid)?
@@ -124,7 +164,7 @@ pub fn create_change_trigger(
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) =
-                build_stmt_trigger_fn_sql(change_schema, oid_u32, pk_columns, columns);
+                build_stmt_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
             Spi::run(&ins_fn).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to create CDC INSERT trigger function: {}",
@@ -146,11 +186,11 @@ pub fn create_change_trigger(
                 })?;
             }
             Spi::run(&format!(
-                "CREATE TRIGGER pg_trickle_cdc_ins_{oid} \
+                "CREATE TRIGGER pg_trickle_cdc_ins_{name} \
                  AFTER INSERT ON {table} \
                  REFERENCING NEW TABLE AS __pgt_new \
-                 FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{oid}()",
-                oid = oid_u32,
+                 FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()",
+                name = stable_name,
                 table = source_table,
                 cs = change_schema,
             ))
@@ -162,11 +202,11 @@ pub fn create_change_trigger(
             })?;
             if !insert_only {
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_upd_{oid} \
+                    "CREATE TRIGGER pg_trickle_cdc_upd_{name} \
                      AFTER UPDATE ON {table} \
                      REFERENCING NEW TABLE AS __pgt_new OLD TABLE AS __pgt_old \
-                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{oid}()",
-                    oid = oid_u32,
+                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()",
+                    name = stable_name,
                     table = source_table,
                     cs = change_schema,
                 ))
@@ -177,11 +217,11 @@ pub fn create_change_trigger(
                     ))
                 })?;
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_del_{oid} \
+                    "CREATE TRIGGER pg_trickle_cdc_del_{name} \
                      AFTER DELETE ON {table} \
                      REFERENCING OLD TABLE AS __pgt_old \
-                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_del_fn_{oid}()",
-                    oid = oid_u32,
+                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()",
+                    name = stable_name,
                     table = source_table,
                     cs = change_schema,
                 ))
@@ -194,7 +234,7 @@ pub fn create_change_trigger(
             }
         }
         config::CdcTriggerMode::Row => {
-            let fn_sql = build_row_trigger_fn_sql(change_schema, oid_u32, pk_columns, columns);
+            let fn_sql = build_row_trigger_fn_sql(change_schema, stable_name, pk_columns, columns);
             Spi::run(&fn_sql).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to create CDC trigger function: {}", e))
             })?;
@@ -206,12 +246,12 @@ pub fn create_change_trigger(
             Spi::run(&format!(
                 "CREATE TRIGGER {trigger} \
                  AFTER {events} ON {table} \
-                 FOR EACH ROW EXECUTE FUNCTION {cs}.pg_trickle_cdc_fn_{oid}()",
+                 FOR EACH ROW EXECUTE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()",
                 trigger = trigger_name,
                 events = dml_events,
                 table = source_table,
                 cs = change_schema,
-                oid = oid_u32,
+                name = stable_name,
             ))
             .map_err(|e| {
                 PgTrickleError::SpiError(format!(
@@ -223,18 +263,13 @@ pub fn create_change_trigger(
     }
 
     // ── TRUNCATE capture (statement-level trigger) ──────────────────
-    // TRUNCATE bypasses row-level triggers entirely. A separate
-    // statement-level AFTER TRUNCATE trigger writes a single marker row
-    // with action='T' into the change buffer. The refresh engine
-    // detects this marker and falls back to a full refresh.
-    // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let truncate_fn_sql = format!(
-        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{oid}()
+        "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
-             INSERT INTO {change_schema}.changes_{oid}
+             INSERT INTO {change_schema}.changes_{name}
                  (lsn, action)
              VALUES (pg_current_wal_lsn(), 'T');
              PERFORM pg_notify('pgtrickle_wake', '');
@@ -242,7 +277,7 @@ pub fn create_change_trigger(
          END;
          $$",
         change_schema = change_schema,
-        oid = oid_u32,
+        name = stable_name,
     );
 
     Spi::run(&truncate_fn_sql).map_err(|e| {
@@ -252,15 +287,15 @@ pub fn create_change_trigger(
         ))
     })?;
 
-    let truncate_trigger_name = format!("pg_trickle_cdc_truncate_{}", oid_u32);
+    let truncate_trigger_name = format!("pg_trickle_cdc_truncate_{}", stable_name);
     let create_truncate_trigger_sql = format!(
         "CREATE TRIGGER {trigger}
          AFTER TRUNCATE ON {table}
-         FOR EACH STATEMENT EXECUTE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{oid}()",
+         FOR EACH STATEMENT EXECUTE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()",
         trigger = truncate_trigger_name,
         table = source_table,
         change_schema = change_schema,
-        oid = oid_u32,
+        name = stable_name,
     );
 
     Spi::run(&create_truncate_trigger_sql).map_err(|e| {
@@ -272,7 +307,7 @@ pub fn create_change_trigger(
 
     // Return the representative trigger name (used for logging only).
     let primary_trig = match mode {
-        config::CdcTriggerMode::Statement => format!("pg_trickle_cdc_ins_{}", oid_u32),
+        config::CdcTriggerMode::Statement => format!("pg_trickle_cdc_ins_{}", stable_name),
         config::CdcTriggerMode::Row => trigger_name,
     };
     Ok(primary_trig)
@@ -284,6 +319,9 @@ pub fn drop_change_trigger(
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
+    // CITUS-4/STAB-1: Try stable_name first; fall back to OID-based names for
+    // backward compat with objects created before v0.32.0.
+    let stable_name = get_cdc_name_for_source(source_oid);
 
     // Get the source table name for the trigger drop.
     let source_table = resolve_relation_name(source_oid).unwrap_or(None);
@@ -291,25 +329,38 @@ pub fn drop_change_trigger(
     // Drop all trigger variants using IF EXISTS — handles both row-level
     // (combined) and statement-level (per-event) triggers safely.
     if let Some(ref table) = source_table {
-        for trig in &[
-            format!("pg_trickle_cdc_{}", oid_u32),     // row-level combined
-            format!("pg_trickle_cdc_ins_{}", oid_u32), // statement INSERT
-            format!("pg_trickle_cdc_upd_{}", oid_u32), // statement UPDATE
-            format!("pg_trickle_cdc_del_{}", oid_u32), // statement DELETE
-            format!("pg_trickle_cdc_truncate_{}", oid_u32), // TRUNCATE (both modes)
-        ] {
+        // Drop stable-name triggers first, then legacy OID-based triggers.
+        let all_triggers: Vec<String> = vec![
+            format!("pg_trickle_cdc_{}", stable_name), // row-level combined (stable)
+            format!("pg_trickle_cdc_ins_{}", stable_name), // statement INSERT (stable)
+            format!("pg_trickle_cdc_upd_{}", stable_name), // statement UPDATE (stable)
+            format!("pg_trickle_cdc_del_{}", stable_name), // statement DELETE (stable)
+            format!("pg_trickle_cdc_truncate_{}", stable_name), // TRUNCATE (stable)
+            format!("pg_trickle_cdc_{}", oid_u32),     // row-level combined (legacy)
+            format!("pg_trickle_cdc_ins_{}", oid_u32), // statement INSERT (legacy)
+            format!("pg_trickle_cdc_upd_{}", oid_u32), // statement UPDATE (legacy)
+            format!("pg_trickle_cdc_del_{}", oid_u32), // statement DELETE (legacy)
+            format!("pg_trickle_cdc_truncate_{}", oid_u32), // TRUNCATE (legacy)
+        ];
+        for trig in &all_triggers {
             let _ = Spi::run(&format!("DROP TRIGGER IF EXISTS {trig} ON {table}")); // nosemgrep: rust.spi.run.dynamic-format — DDL cannot be parameterized; trig is an oid_u32 integer, table is a regclass-quoted identifier.
         }
     }
 
-    // Drop all function variants.
-    for fn_suffix in &[
-        format!("pg_trickle_cdc_fn_{}", oid_u32), // row-level combined
-        format!("pg_trickle_cdc_ins_fn_{}", oid_u32), // statement INSERT
-        format!("pg_trickle_cdc_upd_fn_{}", oid_u32), // statement UPDATE
-        format!("pg_trickle_cdc_del_fn_{}", oid_u32), // statement DELETE
-        format!("pg_trickle_cdc_truncate_fn_{}", oid_u32), // TRUNCATE (both modes)
-    ] {
+    // Drop all function variants — stable-name variants first, then legacy.
+    let all_fn_suffixes: Vec<String> = vec![
+        format!("pg_trickle_cdc_fn_{}", stable_name), // row-level combined (stable)
+        format!("pg_trickle_cdc_ins_fn_{}", stable_name), // statement INSERT (stable)
+        format!("pg_trickle_cdc_upd_fn_{}", stable_name), // statement UPDATE (stable)
+        format!("pg_trickle_cdc_del_fn_{}", stable_name), // statement DELETE (stable)
+        format!("pg_trickle_cdc_truncate_fn_{}", stable_name), // TRUNCATE (stable)
+        format!("pg_trickle_cdc_fn_{}", oid_u32),     // row-level combined (legacy)
+        format!("pg_trickle_cdc_ins_fn_{}", oid_u32), // statement INSERT (legacy)
+        format!("pg_trickle_cdc_upd_fn_{}", oid_u32), // statement UPDATE (legacy)
+        format!("pg_trickle_cdc_del_fn_{}", oid_u32), // statement DELETE (legacy)
+        format!("pg_trickle_cdc_truncate_fn_{}", oid_u32), // TRUNCATE (legacy)
+    ];
+    for fn_suffix in &all_fn_suffixes {
         let _ = Spi::run(&format!(
             "DROP FUNCTION IF EXISTS {cs}.{fn_s}() CASCADE",
             cs = change_schema,
@@ -542,6 +593,7 @@ pub fn create_change_buffer_table(
     source_oid: pg_sys::Oid,
     change_schema: &str,
     columns: &[(String, String)],
+    stable_name: &str,
 ) -> Result<(), PgTrickleError> {
     // pk_hash is always present (PK hash or all-column content hash).
     // changed_cols is a VARBIT bitmask for UPDATE rows — bit i (leftmost=0)
@@ -587,8 +639,11 @@ pub fn create_change_buffer_table(
     //
     // The WAL/logical-decoding CDC backend is immune (uses commit-LSN
     // ordering). See: https://github.com/grove/pg-trickle/issues/536
+    //
+    // CITUS-4: Use stable_name instead of OID for all object names so that
+    // names survive pg_dump/restore and are identical across Citus nodes.
     let sql = format!(
-        "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_{oid} (\
+        "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_{name} (\
             change_id   BIGSERIAL,\
             lsn         PG_LSN NOT NULL,\
             action      CHAR(1) NOT NULL\
@@ -596,7 +651,7 @@ pub fn create_change_buffer_table(
             {typed_col_defs}\
         ){partition_clause}",
         schema = change_schema,
-        oid = source_oid.to_u32(),
+        name = stable_name,
     );
 
     Spi::run(&sql).map_err(|e| {
@@ -606,9 +661,9 @@ pub fn create_change_buffer_table(
     // R2: Explicitly disable RLS on change buffer tables so CDC trigger
     // inserts always succeed, regardless of any schema-level RLS settings.
     let disable_rls_sql = format!(
-        "ALTER TABLE {schema}.changes_{oid} DISABLE ROW LEVEL SECURITY",
+        "ALTER TABLE {schema}.changes_{name} DISABLE ROW LEVEL SECURITY",
         schema = change_schema,
-        oid = source_oid.to_u32(),
+        name = stable_name,
     );
     Spi::run(&disable_rls_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to disable RLS on change buffer: {}", e))
@@ -618,39 +673,23 @@ pub fn create_change_buffer_table(
     // values until the first refresh cycle creates a range partition.
     if use_partitioning {
         let default_part_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {schema}.changes_{oid}_default \
-             PARTITION OF {schema}.changes_{oid} DEFAULT",
+            "CREATE TABLE IF NOT EXISTS {schema}.changes_{name}_default \
+             PARTITION OF {schema}.changes_{name} DEFAULT",
             schema = change_schema,
-            oid = source_oid.to_u32(),
+            name = stable_name,
         );
         Spi::run(&default_part_sql).map_err(|e| {
             PgTrickleError::SpiError(format!("Failed to create default partition: {}", e))
         })?;
     }
 
-    // AA1: Single covering index replaces the previous dual-index setup.
-    //
-    // Old indexes:
-    //   idx_changes_<oid>_lsn_action   (lsn, action)
-    //   idx_changes_<oid>_pk_hash_cid  (pk_hash, change_id)
-    //
-    // New index:
-    //   idx_changes_<oid>_lsn_pk_cid   (lsn, pk_hash, change_id) INCLUDE (action)
-    //
-    // This supports:
-    //   - LSN range filter: WHERE lsn > prev AND lsn <= new  → index prefix scan
-    //   - pk_stats CTE:    WHERE lsn_range GROUP BY pk_hash  → sorted by pk_hash within range
-    //   - Window functions: PARTITION BY pk_hash ORDER BY change_id → index-ordered within range
-    //   - Action filter:   from the INCLUDE column (index-only scan)
-    //
-    // Reduces from 2 B-tree updates per trigger INSERT to 1, giving ~20%
-    // trigger overhead reduction.
-    // pk_hash is always present (PK hash or all-column content hash for keyless tables).
+    // AA1: Single covering index (lsn, pk_hash, change_id) INCLUDE (action).
+    // CITUS-4: Index name uses stable_name.
     let idx_sql = format!(
-        "CREATE INDEX IF NOT EXISTS idx_changes_{oid}_lsn_pk_cid \
-         ON {schema}.changes_{oid} (lsn, pk_hash, change_id) INCLUDE (action)",
+        "CREATE INDEX IF NOT EXISTS idx_changes_{name}_lsn_pk_cid \
+         ON {schema}.changes_{name} (lsn, pk_hash, change_id) INCLUDE (action)",
         schema = change_schema,
-        oid = source_oid.to_u32(),
+        name = stable_name,
     );
     Spi::run(&idx_sql).map_err(|e| {
         PgTrickleError::SpiError(format!("Failed to create change buffer index: {}", e))
@@ -1115,13 +1154,14 @@ fn should_auto_partition(source_oid: pg_sys::Oid) -> bool {
 
 /// Task 3.3: Check if a change buffer table is partitioned.
 pub fn is_buffer_partitioned(change_schema: &str, source_oid: u32) -> bool {
+    let buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
     Spi::get_one::<bool>(&format!(
         "SELECT c.relkind = 'p' \
          FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = '{schema}' AND c.relname = 'changes_{oid}'",
+         WHERE n.nspname = '{schema}' AND c.relname = '{buf_name}'",
         schema = change_schema,
-        oid = source_oid,
+        buf_name = buf_name,
     ))
     .unwrap_or(Some(false))
     .unwrap_or(false)
@@ -1153,11 +1193,11 @@ pub fn detach_consumed_partitions(
              FROM pg_inherits i \
              JOIN pg_class c ON c.oid = i.inhrelid \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE i.inhparent = ('{schema}.changes_{oid}')::regclass \
+             WHERE i.inhparent = ('{schema}.{buf_name}')::regclass \
                AND n.nspname = '{schema}' \
-               AND c.relname != 'changes_{oid}_default'",
+               AND c.relname != '{buf_name}_default'",
             schema = change_schema,
-            oid = source_oid,
+            buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid)),
         );
         let result = client
             .select(&sql, None, &[])
@@ -1189,9 +1229,9 @@ pub fn detach_consumed_partitions(
             // CONCURRENTLY is not available inside a transaction, so use
             // plain DETACH + DROP.
             let detach_sql = format!(
-                "ALTER TABLE \"{schema}\".changes_{oid} DETACH PARTITION \"{schema}\".\"{part}\"",
+                "ALTER TABLE \"{schema}\".\"{buf_name}\" DETACH PARTITION \"{schema}\".\"{part}\"",
                 schema = change_schema,
-                oid = source_oid,
+                buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid)),
                 part = part_name,
             );
             if let Err(e) = Spi::run(&detach_sql) {
@@ -1633,7 +1673,7 @@ fn build_pk_hash_trigger_exprs(
 /// Produces one change-buffer INSERT per affected row.
 fn build_row_trigger_fn_sql(
     change_schema: &str,
-    oid_u32: u32,
+    name: &str,
     pk_columns: &[String],
     columns: &[(String, String)],
 ) -> String {
@@ -1679,13 +1719,13 @@ fn build_row_trigger_fn_sql(
     // PostgreSQL — only one notification per transaction regardless of
     // how many rows are affected. Cost is negligible (~0.5 µs).
     format!(
-        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_fn_{oid}()
+        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
              IF TG_OP = 'INSERT' THEN
-                 INSERT INTO {cs}.changes_{oid}
+                 INSERT INTO {cs}.changes_{name}
                      (lsn, action, pk_hash{ncn})
                  VALUES (pg_current_wal_insert_lsn(), 'I'
                          {ip}{nv});
@@ -1693,14 +1733,14 @@ fn build_row_trigger_fn_sql(
                  RETURN NEW;
              ELSIF TG_OP = 'UPDATE' THEN
                  -- changed_cols IS NULL for INSERT/DELETE (all columns populated).
-                 INSERT INTO {cs}.changes_{oid}
+                 INSERT INTO {cs}.changes_{name}
                      (lsn, action, pk_hash{uccd}{ncn}{ocn})
                  VALUES (pg_current_wal_insert_lsn(), 'U'
                          {up}{ucv}{nv}{ov});
                  PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
-                 INSERT INTO {cs}.changes_{oid}
+                 INSERT INTO {cs}.changes_{name}
                      (lsn, action, pk_hash{ocn})
                  VALUES (pg_current_wal_insert_lsn(), 'D'
                          {dp}{ov});
@@ -1711,7 +1751,7 @@ fn build_row_trigger_fn_sql(
          END;
          $$",
         cs = change_schema,
-        oid = oid_u32,
+        name = name,
         ip = ins_pk,
         up = upd_pk,
         uccd = upd_cc_decl,
@@ -1735,7 +1775,7 @@ fn build_row_trigger_fn_sql(
 ///   DVM semantics the downstream engine expects.
 fn build_stmt_trigger_fn_sql(
     change_schema: &str,
-    oid_u32: u32,
+    name: &str,
     pk_columns: &[String],
     columns: &[(String, String)],
 ) -> (String, String, String) {
@@ -1766,12 +1806,12 @@ fn build_stmt_trigger_fn_sql(
     // INSERT trigger function — only accesses __pgt_new transition table.
     // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let ins_fn = format!(
-        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{oid}()
+        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ncn})
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
              FROM __pgt_new n;
@@ -1780,7 +1820,7 @@ fn build_stmt_trigger_fn_sql(
          END;
          $$",
         cs = change_schema,
-        oid = oid_u32,
+        name = name,
     );
 
     // UPDATE trigger function — accesses both __pgt_new and __pgt_old.
@@ -1788,16 +1828,16 @@ fn build_stmt_trigger_fn_sql(
     let upd_fn = if pk_columns.is_empty() {
         // Keyless table: no PK join possible — model UPDATE as DELETE+INSERT.
         format!(
-            "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{oid}()
+            "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ocn})
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
              FROM __pgt_old o;
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ncn})
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
              FROM __pgt_new n;
@@ -1806,7 +1846,7 @@ fn build_stmt_trigger_fn_sql(
          END;
          $$",
             cs = change_schema,
-            oid = oid_u32,
+            name = name,
         )
     } else {
         let join = build_pk_join_condition(pk_columns);
@@ -1826,21 +1866,21 @@ fn build_stmt_trigger_fn_sql(
         // whose new PK has no match in __pgt_old (INSERT).
         let not_exists_join = build_pk_join_condition(pk_columns);
         format!(
-            "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{oid}()
+            "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{uccd}{ncn}{ocn})
              SELECT pg_current_wal_insert_lsn(), 'U', {pkn}{ucv}{ncr}{ocr}
              FROM __pgt_new n JOIN __pgt_old o ON {join};
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ocn})
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
              FROM __pgt_old o
              WHERE NOT EXISTS (SELECT 1 FROM __pgt_new n WHERE {not_exists_join});
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ncn})
              SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
              FROM __pgt_new n
@@ -1850,19 +1890,19 @@ fn build_stmt_trigger_fn_sql(
          END;
          $$",
             cs = change_schema,
-            oid = oid_u32,
+            name = name,
         )
     };
 
     // DELETE trigger function — only accesses __pgt_old transition table.
     // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
     let del_fn = format!(
-        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{oid}()
+        "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
          SECURITY DEFINER
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
          BEGIN
-             INSERT INTO {cs}.changes_{oid}
+             INSERT INTO {cs}.changes_{name}
                  (lsn, action, pk_hash{ocn})
              SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
              FROM __pgt_old o;
@@ -1871,7 +1911,7 @@ fn build_stmt_trigger_fn_sql(
          END;
          $$",
         cs = change_schema,
-        oid = oid_u32,
+        name = name,
     );
 
     (ins_fn, upd_fn, del_fn)
@@ -2089,16 +2129,15 @@ pub fn rebuild_cdc_trigger_function(
     }
 
     let oid_u32 = source_oid.to_u32();
+    // CITUS-4: Use stable_name for all trigger/function names.
+    let cdc_name = get_cdc_name_for_source(source_oid);
 
     // Rebuild the function body(ies) for the current CDC trigger mode GUC.
-    // The trigger DDL itself (FOR EACH ROW vs FOR EACH STATEMENT) is NOT
-    // changed here — only the function bodies. To also migrate the trigger type
-    // use `rebuild_cdc_trigger()` instead.
     let mode = config::pg_trickle_cdc_trigger_mode();
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) =
-                build_stmt_trigger_fn_sql(change_schema, oid_u32, &pk_columns, &columns);
+                build_stmt_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
             Spi::run(&ins_fn).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC INSERT trigger function: {}",
@@ -2119,12 +2158,14 @@ pub fn rebuild_cdc_trigger_function(
             })?;
         }
         config::CdcTriggerMode::Row => {
-            let fn_sql = build_row_trigger_fn_sql(change_schema, oid_u32, &pk_columns, &columns);
+            let fn_sql = build_row_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
             Spi::run(&fn_sql).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to rebuild CDC trigger function: {}", e))
             })?;
         }
     }
+    // suppress unused warning when name == oid string
+    let _ = oid_u32;
 
     // Sync change buffer table schema: add any columns that are present in
     // the current source but missing from the buffer (e.g. after ADD COLUMN).
@@ -2158,6 +2199,8 @@ pub fn rebuild_cdc_trigger(
     }
 
     let oid_u32 = source_oid.to_u32();
+    // CITUS-4: Use stable_name for all trigger/function names.
+    let cdc_name = get_cdc_name_for_source(source_oid);
 
     // Resolve source table name; skip gracefully if the table no longer exists.
     let source_table = match resolve_relation_name(source_oid)? {
@@ -2171,7 +2214,7 @@ pub fn rebuild_cdc_trigger(
     match mode {
         config::CdcTriggerMode::Statement => {
             let (ins_fn, upd_fn, del_fn) =
-                build_stmt_trigger_fn_sql(change_schema, oid_u32, &pk_columns, &columns);
+                build_stmt_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
             Spi::run(&ins_fn).map_err(|e| {
                 PgTrickleError::SpiError(format!(
                     "Failed to rebuild CDC INSERT trigger function: {}",
@@ -2192,7 +2235,7 @@ pub fn rebuild_cdc_trigger(
             })?;
         }
         config::CdcTriggerMode::Row => {
-            let fn_sql = build_row_trigger_fn_sql(change_schema, oid_u32, &pk_columns, &columns);
+            let fn_sql = build_row_trigger_fn_sql(change_schema, &cdc_name, &pk_columns, &columns);
             Spi::run(&fn_sql).map_err(|e| {
                 PgTrickleError::SpiError(format!("Failed to rebuild CDC trigger function: {}", e))
             })?;
@@ -2201,7 +2244,12 @@ pub fn rebuild_cdc_trigger(
 
     // 2. Drop ALL existing trigger variants (handles both row-level and
     //    statement-level triggers — whichever mode was active before).
+    //    Drop both stable-name and legacy OID-based variants for backward compat.
     for trig in &[
+        format!("pg_trickle_cdc_{}", cdc_name),
+        format!("pg_trickle_cdc_ins_{}", cdc_name),
+        format!("pg_trickle_cdc_upd_{}", cdc_name),
+        format!("pg_trickle_cdc_del_{}", cdc_name),
         format!("pg_trickle_cdc_{}", oid_u32),
         format!("pg_trickle_cdc_ins_{}", oid_u32),
         format!("pg_trickle_cdc_upd_{}", oid_u32),
@@ -2217,11 +2265,11 @@ pub fn rebuild_cdc_trigger(
     match mode {
         config::CdcTriggerMode::Statement => {
             Spi::run(&format!(
-                "CREATE TRIGGER pg_trickle_cdc_ins_{oid} \
+                "CREATE TRIGGER pg_trickle_cdc_ins_{name} \
                  AFTER INSERT ON {table} \
                  REFERENCING NEW TABLE AS __pgt_new \
-                 FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{oid}()",
-                oid = oid_u32,
+                 FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()",
+                name = cdc_name,
                 table = source_table,
                 cs = change_schema,
             ))
@@ -2233,11 +2281,11 @@ pub fn rebuild_cdc_trigger(
             })?;
             if !insert_only {
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_upd_{oid} \
+                    "CREATE TRIGGER pg_trickle_cdc_upd_{name} \
                      AFTER UPDATE ON {table} \
                      REFERENCING NEW TABLE AS __pgt_new OLD TABLE AS __pgt_old \
-                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{oid}()",
-                    oid = oid_u32,
+                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()",
+                    name = cdc_name,
                     table = source_table,
                     cs = change_schema,
                 ))
@@ -2248,11 +2296,11 @@ pub fn rebuild_cdc_trigger(
                     ))
                 })?;
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_del_{oid} \
+                    "CREATE TRIGGER pg_trickle_cdc_del_{name} \
                      AFTER DELETE ON {table} \
                      REFERENCING OLD TABLE AS __pgt_old \
-                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_del_fn_{oid}()",
-                    oid = oid_u32,
+                     FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()",
+                    name = cdc_name,
                     table = source_table,
                     cs = change_schema,
                 ))
@@ -2271,10 +2319,10 @@ pub fn rebuild_cdc_trigger(
                 "INSERT OR UPDATE OR DELETE"
             };
             Spi::run(&format!(
-                "CREATE TRIGGER pg_trickle_cdc_{oid} \
+                "CREATE TRIGGER pg_trickle_cdc_{name} \
                  AFTER {events} ON {table} \
-                 FOR EACH ROW EXECUTE FUNCTION {cs}.pg_trickle_cdc_fn_{oid}()",
-                oid = oid_u32,
+                 FOR EACH ROW EXECUTE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()",
+                name = cdc_name,
                 events = dml_events,
                 table = source_table,
                 cs = change_schema,
@@ -2287,13 +2335,12 @@ pub fn rebuild_cdc_trigger(
             })?;
         }
     }
-
     // 4. Sync the change buffer column schema.
     sync_change_buffer_columns(source_oid, change_schema, &columns)?;
 
     let primary_trig = match mode {
-        config::CdcTriggerMode::Statement => format!("pg_trickle_cdc_ins_{}", oid_u32),
-        config::CdcTriggerMode::Row => format!("pg_trickle_cdc_{}", oid_u32),
+        config::CdcTriggerMode::Statement => format!("pg_trickle_cdc_ins_{}", cdc_name),
+        config::CdcTriggerMode::Row => format!("pg_trickle_cdc_{}", cdc_name),
     };
     Ok(primary_trig)
 }
@@ -2314,8 +2361,7 @@ fn sync_change_buffer_columns(
     change_schema: &str,
     columns: &[(String, String)],
 ) -> Result<(), PgTrickleError> {
-    let oid_u32 = source_oid.to_u32();
-    let buffer_table = format!("{}.changes_{}", change_schema, oid_u32);
+    let buffer_table = buffer_qualified_name_for_oid(change_schema, source_oid);
 
     // Fetch existing column names and types from the change buffer table.
     let existing_sql = format!(
@@ -2663,6 +2709,9 @@ pub fn setup_foreign_table_polling(
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
+    // CITUS-4: Compute stable_name for buffer/snapshot naming.
+    let stable_name =
+        crate::citus::stable_name_for_oid(source_oid).unwrap_or_else(|_| oid_u32.to_string());
 
     // Check if already tracked
     let already_tracked = Spi::get_one_with_args::<bool>(
@@ -2676,11 +2725,11 @@ pub fn setup_foreign_table_polling(
         let col_defs = resolve_source_column_defs(source_oid)?;
 
         // Create the change buffer table (same as trigger-based CDC).
-        create_change_buffer_table(source_oid, change_schema, &col_defs)?;
+        create_change_buffer_table(source_oid, change_schema, &col_defs, &stable_name)?;
 
         // Create a snapshot table: stores the previous contents of the
         // foreign table so we can compute EXCEPT-based deltas on each poll.
-        let snapshot_table = format!("\"{change_schema}\".snapshot_{oid_u32}");
+        let snapshot_table = format!("\"{change_schema}\".snapshot_{stable_name}");
         let source_table = Spi::get_one_with_args::<String>(
             "SELECT $1::oid::regclass::text",
             &[source_oid.into()],
@@ -2705,11 +2754,12 @@ pub fn setup_foreign_table_polling(
         // Record tracking with synthetic slot_name indicating polling CDC.
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_change_tracking \
-             (source_relid, slot_name, tracked_by_pgt_ids) \
-             VALUES ($1, $2, ARRAY[$3])",
+             (source_relid, slot_name, source_stable_name, tracked_by_pgt_ids) \
+             VALUES ($1, $2, $3, ARRAY[$4])",
             &[
                 source_oid.into(),
-                format!("foreign_poll_{oid_u32}").as_str().into(),
+                format!("foreign_poll_{stable_name}").as_str().into(),
+                stable_name.as_str().into(),
                 pgt_id.into(),
             ],
         )
@@ -2742,8 +2792,11 @@ pub fn poll_foreign_table_changes(
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
-    let change_table = format!("\"{change_schema}\".changes_{oid_u32}");
-    let snapshot_table = format!("\"{change_schema}\".snapshot_{oid_u32}");
+    // CITUS-4: Use stable names for change buffer and snapshot tables.
+    let stable_name =
+        crate::citus::stable_name_for_oid(source_oid).unwrap_or_else(|_| oid_u32.to_string());
+    let change_table = format!("\"{change_schema}\".changes_{stable_name}");
+    let snapshot_table = format!("\"{change_schema}\".snapshot_{stable_name}");
 
     let source_table =
         Spi::get_one_with_args::<String>("SELECT $1::oid::regclass::text", &[source_oid.into()])
@@ -2851,6 +2904,9 @@ pub fn setup_matview_polling(
     change_schema: &str,
 ) -> Result<(), PgTrickleError> {
     let oid_u32 = source_oid.to_u32();
+    // CITUS-4: Compute stable_name for buffer/snapshot naming.
+    let stable_name =
+        crate::citus::stable_name_for_oid(source_oid).unwrap_or_else(|_| oid_u32.to_string());
 
     let already_tracked = Spi::get_one_with_args::<bool>(
         "SELECT EXISTS(SELECT 1 FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1)",
@@ -2862,9 +2918,9 @@ pub fn setup_matview_polling(
     if !already_tracked {
         let col_defs = resolve_source_column_defs(source_oid)?;
 
-        create_change_buffer_table(source_oid, change_schema, &col_defs)?;
+        create_change_buffer_table(source_oid, change_schema, &col_defs, &stable_name)?;
 
-        let snapshot_table = format!("\"{change_schema}\".snapshot_{oid_u32}");
+        let snapshot_table = format!("\"{change_schema}\".snapshot_{stable_name}");
         let source_table = Spi::get_one_with_args::<String>(
             "SELECT $1::oid::regclass::text",
             &[source_oid.into()],
@@ -2874,7 +2930,7 @@ pub fn setup_matview_polling(
             PgTrickleError::NotFound(format!("Materialized view with OID {oid_u32} not found"))
         })?;
 
-        // DDL cannot be parameterized; snapshot_table is from a PG OID, source_table is oid::regclass::text, both extension-controlled.
+        // DDL cannot be parameterized; snapshot_table is from a stable_name, source_table is oid::regclass::text, both extension-controlled.
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS {snapshot_table} (LIKE {source_table} INCLUDING ALL)"
         );
@@ -2885,11 +2941,12 @@ pub fn setup_matview_polling(
 
         Spi::run_with_args(
             "INSERT INTO pgtrickle.pgt_change_tracking \
-             (source_relid, slot_name, tracked_by_pgt_ids) \
-             VALUES ($1, $2, ARRAY[$3])",
+             (source_relid, slot_name, source_stable_name, tracked_by_pgt_ids) \
+             VALUES ($1, $2, $3, ARRAY[$4])",
             &[
                 source_oid.into(),
-                format!("matview_poll_{oid_u32}").as_str().into(),
+                format!("matview_poll_{stable_name}").as_str().into(),
+                stable_name.as_str().into(),
                 pgt_id.into(),
             ],
         )

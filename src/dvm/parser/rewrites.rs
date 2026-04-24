@@ -5717,6 +5717,7 @@ mod pg_tests {
             OpTree::ScalarSubquery {
                 subquery, child, ..
             } => tree_contains(subquery, predicate) || tree_contains(child, predicate),
+            OpTree::ConstantSelect { .. } => false,
         }
     }
 

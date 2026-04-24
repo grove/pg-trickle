@@ -239,18 +239,17 @@ pub(crate) fn drain_pending_cleanups() {
     let use_truncate = crate::config::pg_trickle_cleanup_use_truncate();
 
     for oid in all_oids {
+        // CITUS-4: Compute stable buffer name for this source OID.
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
         // Check that the change buffer table still exists before
-        // attempting any DML.  When a ST is dropped between refresh
-        // cycles, cleanup_cdc_for_source removes the buffer table but
-        // the thread-local pending queue may still reference it.
-        // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds
-        // because auto-promotion converts buffers to partitioned at runtime.
+        // attempting any DML.
+        // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds.
         let table_exists = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
                SELECT 1 FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname = '{schema}' \
-                 AND c.relname = 'changes_{oid}' \
+                 AND c.relname = '{buf_name}' \
                  AND c.relkind IN ('r', 'p')\
              )",
             schema = change_schema,
@@ -260,8 +259,8 @@ pub(crate) fn drain_pending_cleanups() {
 
         if !table_exists {
             pgrx::debug1!(
-                "[pg_trickle] Deferred cleanup: skipping changes_{} (table dropped)",
-                oid,
+                "[pg_trickle] Deferred cleanup: skipping {} (table dropped)",
+                buf_name,
             );
             continue;
         }
@@ -290,8 +289,8 @@ pub(crate) fn drain_pending_cleanups() {
             _ => {
                 // No consumers with a frontier, or all at 0/0 — nothing to clean.
                 pgrx::debug1!(
-                    "[pg_trickle] Deferred cleanup: no safe threshold for changes_{}, skipping",
-                    oid,
+                    "[pg_trickle] Deferred cleanup: no safe threshold for {}, skipping",
+                    buf_name,
                 );
                 continue;
             }
@@ -301,7 +300,7 @@ pub(crate) fn drain_pending_cleanups() {
             // Safe to TRUNCATE only if ALL entries are at or below the safe LSN.
             Spi::get_one::<bool>(&format!(
                 "SELECT NOT EXISTS(\
-                   SELECT 1 FROM \"{schema}\".changes_{oid} \
+                   SELECT 1 FROM \"{schema}\".{buf_name} \
                    WHERE lsn > '{safe_lsn}'::pg_lsn \
                    LIMIT 1\
                  )",
@@ -318,9 +317,9 @@ pub(crate) fn drain_pending_cleanups() {
             match crate::cdc::detach_consumed_partitions(&change_schema, oid, &safe_lsn) {
                 Ok(n) if n > 0 => {
                     pgrx::debug1!(
-                        "[pg_trickle] Deferred cleanup: detached {} partition(s) from changes_{}",
+                        "[pg_trickle] Deferred cleanup: detached {} partition(s) from {}",
                         n,
-                        oid,
+                        buf_name,
                     );
                 }
                 Err(e) => {
@@ -343,19 +342,18 @@ pub(crate) fn drain_pending_cleanups() {
                 if *count >= 3 {
                     pgrx::warning!(
                         "[pg_trickle] Deferred cleanup {} failed {} consecutive times for \
-                         changes_{}: {}",
+                         {}: {}",
                         operation,
                         count,
-                        oid,
+                        buf_name,
                         msg
                     );
                     // Emit NOTIFY alert on 3rd and every subsequent 10th failure
-                    // so operators know cleanup is persistently broken.
                     if *count == 3 || *count % 10 == 0 {
                         crate::monitor::emit_alert(
                             crate::monitor::AlertEvent::CleanupFailure,
                             "",
-                            &format!("changes_{}", oid),
+                            &buf_name,
                             &format!(
                                 r#""source_oid":{},"consecutive_failures":{},"operation":"{}","error":"{}""#,
                                 oid,
@@ -379,7 +377,7 @@ pub(crate) fn drain_pending_cleanups() {
 
         if can_truncate {
             match Spi::run(&format!(
-                "TRUNCATE \"{schema}\".changes_{oid}",
+                "TRUNCATE \"{schema}\".{buf_name}",
                 schema = change_schema,
             )) {
                 Ok(()) => {
@@ -391,7 +389,7 @@ pub(crate) fn drain_pending_cleanups() {
             }
         } else {
             let delete_sql = format!(
-                "DELETE FROM \"{schema}\".changes_{oid} \
+                "DELETE FROM \"{schema}\".{buf_name} \
                  WHERE lsn <= '{safe_lsn}'::pg_lsn",
                 schema = change_schema,
             );
@@ -427,6 +425,8 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
     let use_truncate = crate::config::pg_trickle_cleanup_use_truncate();
 
     for &oid in source_oids {
+        // CITUS-4: Compute stable buffer name.
+        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
         // Check that the change buffer table exists
         // PERF-2: Accept both 'r' (regular) and 'p' (partitioned) relkinds.
         let table_exists = Spi::get_one::<bool>(&format!(
@@ -434,7 +434,7 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
                SELECT 1 FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname = '{schema}' \
-                 AND c.relname = 'changes_{oid}' \
+                 AND c.relname = '{buf_name}' \
                  AND c.relkind IN ('r', 'p')\
              )",
             schema = change_schema,
@@ -447,9 +447,7 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
         }
 
         // Compute the minimum frontier LSN across ALL stream tables that
-        // depend on this source OID.  TABLE, FOREIGN_TABLE, and MATVIEW sources
-        // are included: FT/matview change buffers are written by polling and must
-        // be cleaned up once all consumers have advanced their frontier past them.
+        // depend on this source OID.
         let min_lsn: Option<String> = Spi::get_one::<String>(&format!(
             "SELECT MIN((st.frontier->'sources'->'{oid}'->>'lsn')::pg_lsn)::TEXT \
              FROM pgtrickle.pgt_stream_tables st \
@@ -469,7 +467,7 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
         // Quick check: are there any entries to clean up?
         let has_stale = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS(\
-               SELECT 1 FROM \"{schema}\".changes_{oid} \
+               SELECT 1 FROM \"{schema}\".{buf_name} \
                WHERE lsn <= '{safe_lsn}'::pg_lsn \
                LIMIT 1\
              )",
@@ -487,9 +485,9 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
             match crate::cdc::detach_consumed_partitions(change_schema, oid, &safe_lsn) {
                 Ok(n) if n > 0 => {
                     pgrx::debug1!(
-                        "[pg_trickle] Frontier cleanup: detached {} partition(s) from changes_{}",
+                        "[pg_trickle] Frontier cleanup: detached {} partition(s) from {}",
                         n,
-                        oid,
+                        buf_name,
                     );
                 }
                 Err(e) => {
@@ -506,7 +504,7 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
         let can_truncate = if use_truncate {
             Spi::get_one::<bool>(&format!(
                 "SELECT NOT EXISTS(\
-                   SELECT 1 FROM \"{schema}\".changes_{oid} \
+                   SELECT 1 FROM \"{schema}\".{buf_name} \
                    WHERE lsn > '{safe_lsn}'::pg_lsn \
                    LIMIT 1\
                  )",
@@ -520,14 +518,14 @@ pub(crate) fn cleanup_change_buffers_by_frontier(change_schema: &str, source_oid
 
         if can_truncate {
             if let Err(e) = Spi::run(&format!(
-                "TRUNCATE \"{schema}\".changes_{oid}",
+                "TRUNCATE \"{schema}\".{buf_name}",
                 schema = change_schema,
             )) {
                 pgrx::debug1!("[pg_trickle] Frontier-based cleanup TRUNCATE failed: {}", e);
             }
         } else {
             let delete_sql = format!(
-                "DELETE FROM \"{schema}\".changes_{oid} \
+                "DELETE FROM \"{schema}\".{buf_name} \
                  WHERE lsn <= '{safe_lsn}'::pg_lsn",
                 schema = change_schema,
             );
@@ -2312,8 +2310,10 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     let cleanup_stmts: Vec<String> = source_oids
         .iter()
         .map(|oid| {
+            // CITUS-4: Use stable buffer name for DELETE; keep OID-keyed LSN tokens.
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(*oid));
             format!(
-                "DELETE FROM \"{cleanup_schema}\".changes_{oid} \
+                "DELETE FROM \"{cleanup_schema}\".{buf_name} \
                  WHERE lsn > '__PGS_PREV_LSN_{oid}__'::pg_lsn \
                  AND lsn <= '__PGS_NEW_LSN_{oid}__'::pg_lsn",
             )
