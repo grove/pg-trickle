@@ -1229,11 +1229,14 @@ END;
 $$;
 
 -- Create the relay role if it does not exist.
+-- Use EXCEPTION rather than IF NOT EXISTS to avoid a TOCTOU race condition
+-- when multiple concurrent transactions (parallel test workers) all try to
+-- CREATE EXTENSION simultaneously on the same PostgreSQL instance.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgtrickle_relay') THEN
-        CREATE ROLE pgtrickle_relay NOLOGIN;
-    END IF;
+    CREATE ROLE pgtrickle_relay NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN
+    NULL; -- role already exists, nothing to do
 END;
 $$;
 "#,
