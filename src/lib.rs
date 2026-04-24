@@ -1237,8 +1237,8 @@ DO $$
 BEGIN
     CREATE ROLE pgtrickle_relay NOLOGIN;
 EXCEPTION
-    WHEN duplicate_object THEN NULL   -- role already exists
-    WHEN unique_violation THEN NULL   -- concurrent CREATE ROLE race
+    WHEN duplicate_object THEN NULL;  -- role already exists
+    WHEN unique_violation THEN NULL;  -- concurrent CREATE ROLE race
 END;
 $$;
 "#,
