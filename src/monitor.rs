@@ -3308,6 +3308,7 @@ pub fn check_change_buffer_sizes() -> Vec<(u32, i64)> {
     let mut over_threshold = Vec::new();
     for relid in sources {
         let oid_u32 = relid as u32;
+        // nosemgrep: semgrep.rust.spi.query.dynamic-format — change_schema is an internal constant; oid_u32 is a u32 PostgreSQL OID
         let pending = Spi::get_one::<i64>(&format!(
             "SELECT count(*)::bigint FROM {}.changes_{}",
             change_schema, oid_u32

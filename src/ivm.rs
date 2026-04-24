@@ -433,7 +433,7 @@ pub fn setup_ivm_triggers(
         format!(
             "CREATE OR REPLACE FUNCTION {fn}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
+         SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public
          AS $$
          BEGIN
@@ -489,7 +489,7 @@ pub fn setup_ivm_triggers(
         format!(
             "CREATE OR REPLACE FUNCTION {fn}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
+         SECURITY DEFINER -- nosemgrep: semgrep.sql.security-definer.present
          SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public
          AS $$
          BEGIN
@@ -783,7 +783,7 @@ fn pgt_ivm_apply_delta_enr(
         PgTrickleError::SpiError(format!("Failed to materialize IVM delta (ENR): {e}"))
     })?;
 
-    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}"))
+    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}")) // nosemgrep: semgrep.rust.spi.query.dynamic-format — delta_table is a fixed prefix + i64, not user input
         .unwrap_or(Some(0))
         .unwrap_or(0);
 
@@ -802,7 +802,7 @@ fn pgt_ivm_apply_delta_enr(
             .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT (ENR) failed: {e}")))?;
     }
 
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table}"));
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table}")); // nosemgrep: semgrep.rust.spi.run.dynamic-format — delta_table is a fixed prefix + i64, not user input
 
     if delta_count > 0 {
         let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()")
