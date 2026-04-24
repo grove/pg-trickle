@@ -26,7 +26,20 @@
 -- name already matches the object name, the rename is skipped.
 
 -- ─────────────────────────────────────────────────────────────────────────
--- STEP 1: Add new columns to pgt_stream_tables
+-- STEP 1: Register new SQL functions
+-- ─────────────────────────────────────────────────────────────────────────
+
+-- CITUS-4: Stable name computation helper.
+-- Registered by the updated .so — needed before the backfill steps below.
+CREATE OR REPLACE FUNCTION pgtrickle."source_stable_name"(
+    "source_oid" oid /* pg_sys::Oid */
+) RETURNS TEXT /* Option<String> */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'sql_stable_name_for_oid_wrapper';
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- STEP 2: Add new columns to pgt_stream_tables
 -- ─────────────────────────────────────────────────────────────────────────
 
 -- CITUS-3: Placement of this stream table's storage in a Citus cluster.
