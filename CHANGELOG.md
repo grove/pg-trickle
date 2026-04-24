@@ -55,345 +55,382 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.31.0] — Performance & Scheduler Intelligence
 
-### Highlights
+This release delivers measurable performance improvements for deployments with
+many stream tables, along with new tools for monitoring scheduler behaviour
+and reacting to processing backlogs before they become a problem.
 
-- **ENR-based IVM delta execution** (PERF-4): IMMEDIATE-mode stream tables
-  now use PostgreSQL Ephemeral Named Relations (ENRs) for transition tables
-  instead of OID-suffixed temporary tables. This eliminates unnecessary
-  `CREATE TEMP TABLE … AS SELECT` overhead on every DML. Controlled by the
-  new `pg_trickle.ivm_use_enr` GUC (default `false`; set `true` to enable).
+### Faster immediate-mode updates
 
-- **Adaptive batch coalescing** (PERF-1): A new `pg_trickle.adaptive_batch_coalescing`
-  GUC (default `true`) documents and gates the existing scheduler optimisation
-  that coalesces change-buffer scans when multiple stream tables share the same
-  source table, reducing redundant catalog look-ups at high stream-table fan-out.
+Stream tables configured in immediate mode — which update on every data change
+rather than on a schedule — now handle those changes more efficiently.
+Previously, every single data change caused PostgreSQL to create and destroy a
+temporary table in the background, a fixed cost that adds up at high write
+rates. That overhead has been eliminated.
 
-- **Plan-aware merge strategy logging** (PERF-2): When `pg_trickle.adaptive_merge_strategy`
-  is enabled, the refresh engine emits a `DEBUG1` log after each delta
-  application suggesting whether to switch between `MERGE` and `DELETE+INSERT`
-  strategies based on the observed change-to-target-row ratio. Useful for
-  diagnosing suboptimal strategy choices without requiring a restart.
+This improvement is opt-in. Enable it with `pg_trickle.ivm_use_enr = true`
+(requires PostgreSQL 18+).
 
-- **IVM lock-mode parse-error counter** (PERF-3): Parse failures in
-  `IvmLockMode::for_query` (which cause a safe fall-back to `EXCLUSIVE` mode)
-  are now counted in shared memory and exposed via
-  `pgtrickle.metrics_summary()` as `ivm_lock_parse_error_count`. This makes
-  previously invisible degraded-mode operation observable.
+### Fewer database round-trips for shared sources
 
-- **Change-buffer back-pressure signal** (SCAL-1): The scheduler now tracks
-  how many consecutive cycles a source table's change buffer remains above the
-  alert threshold and emits a `pg_trickle_alert` NOTIFY event
-  (`change_buffer_backpressure`) once the `pg_trickle.backpressure_consecutive_limit`
-  (default `3`) is reached. Downstream operators can use this signal to pause
-  producers or scale consumers.
+When multiple stream tables all read from the same source table, pg_trickle
+now scans their pending changes in a single database pass instead of once per
+stream table. If you have ten stream tables all watching the same `orders`
+table, pg_trickle makes one read instead of ten. The benefit scales with the
+number of stream tables. This is on by default.
 
-- **Multi-database refresh broker design** (SCAL-2): A detailed architecture
-  document (`docs/research/multi_db_refresh_broker.md`) has been added
-  describing a cross-database broker worker protocol. Implementation is
-  planned for v0.32.0+.
+### Smarter update-strategy hints
 
-### Changes
+Every refresh, pg_trickle chooses between two strategies for applying changes:
+a merge approach (efficient for small change sets) and a delete-then-reinsert
+approach (faster when large portions of the data have changed). Enabling
+`pg_trickle.adaptive_merge_strategy` now logs a suggestion after each refresh
+indicating whether the current strategy is optimal, based on the ratio of
+changes to total rows. This makes performance tuning straightforward — no
+restarts or code changes required.
 
-- `pg_trickle.use_sqlstate_classification` now **defaults to `true`**. Error
-  messages are classified by SQLSTATE by default. Set to `false` to restore
-  the previous behaviour.
+### Silent fallbacks are now visible
 
-### New GUCs
+When pg_trickle encounters a problem analysing certain query types, it falls
+back to a slower, more conservative update mode. Previously this was invisible.
+The count of such fallbacks is now tracked and surfaced in
+`pgtrickle.metrics_summary()` under `ivm_lock_parse_error_count`, so you can
+spot and address the underlying cause.
 
-| GUC | Default | Description |
-|-----|---------|-------------|
-| `pg_trickle.ivm_use_enr` | `false` | Use ENR transition tables in IMMEDIATE mode (opt-in, PG18+) |
-| `pg_trickle.adaptive_batch_coalescing` | `true` | Coalesce change-buffer scans for shared sources |
-| `pg_trickle.adaptive_merge_strategy` | `false` | Log suggested merge strategy after delta apply |
-| `pg_trickle.backpressure_consecutive_limit` | `3` | Consecutive over-threshold cycles before alert |
+### Back-pressure alerts for overloaded pipelines
+
+If data is arriving faster than pg_trickle can process it, the change buffer
+grows. pg_trickle now watches this and, after 3 consecutive cycles above the
+alert threshold (configurable via `pg_trickle.backpressure_consecutive_limit`),
+raises a `change_buffer_backpressure` alert. Applications or monitoring systems
+can listen for this event and respond — for example by slowing producers or
+adding consumers.
+
+### Coming soon: cross-database refresh coordination
+
+A detailed design for a future cross-database refresh coordinator has been
+published in `docs/research/multi_db_refresh_broker.md`. Implementation is
+planned for v0.32.0.
+
+### What changed
+
+- Error messages are now categorised by standard SQL error code by default,
+  making them easier to parse in automated monitoring. The previous behaviour
+  can be restored with `pg_trickle.use_sqlstate_classification = false`.
+
+### New settings
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `pg_trickle.ivm_use_enr` | off | Eliminate temporary-table overhead in immediate mode (PostgreSQL 18+ only) |
+| `pg_trickle.adaptive_batch_coalescing` | on | Scan change buffers for shared sources in a single pass |
+| `pg_trickle.adaptive_merge_strategy` | off | Log update-strategy suggestions after each refresh |
+| `pg_trickle.backpressure_consecutive_limit` | 3 | Consecutive over-threshold cycles before raising a back-pressure alert |
 
 ### Upgrade
 
-Run `ALTER EXTENSION pg_trickle UPDATE TO '0.31.0';` — no manual DDL changes
-are required. The `ivm_use_enr` GUC defaults to `false`; set it to `true` to
-engage the ENR-based path (requires PostgreSQL 18+ with ENR propagation to
-nested SPI contexts).
+Run `ALTER EXTENSION pg_trickle UPDATE TO '0.31.0';` — no manual changes
+required. The faster immediate-mode path is opt-in; set
+`pg_trickle.ivm_use_enr = true` to enable it.
 
 ---
 
 ## [0.30.0] — Pre-GA Correctness & Stability Sprint
 
-### Highlights
+This release is focused entirely on correctness and stability in preparation
+for the 1.0 release. There are no new user-facing features — every change is
+a fix, a safety guard, or a memory efficiency improvement.
 
-- **EC-01 phantom-row convergence** (CORR-1): Cross-cycle phantom rows from
-  interrupted differential refresh cycles are now cleaned up unconditionally
-  after every join query refresh, ensuring eventual convergence.
-- **Snapshot atomicity** (STAB-1): `snapshot_stream_table()` and
-  `restore_from_snapshot()` now wrap critical operations in PostgreSQL
-  subtransactions. An orphan snapshot table can no longer be left behind on
-  error; a failed catalog INSERT rolls back the snapshot table creation.
-- **Explicit snapshot restore column list** (CORR-3): The restore path now
-  walks `pg_attribute` to build an explicit column list instead of `SELECT *`,
-  eliminating sensitivity to PostgreSQL minor-version catalog differences.
-- **CASE/COALESCE/FuncCall SubLink detection** (CORR-2): The DVM parser now
-  correctly identifies subqueries nested inside `CASE`, `COALESCE`, and
-  function arguments, preventing incorrect differential plans for those patterns.
-- **SQLSTATE-based error classification** (SCAL-1): Infrastructure for
-  retryability classification keyed on SQL error class rather than message
-  text. Opt-in via `pg_trickle.use_sqlstate_classification = true`.
-- **IVM cache eviction bounds** (STAB-2): `IVM_DELTA_CACHE` now enforces
-  `pg_trickle.ivm_cache_max_entries` via clock-style eviction, preventing
-  unbounded per-backend memory growth on wide stream table deployments.
-- **IVM cache subxact abort** (STAB-6): A subtransaction abort callback
-  registered lazily on first IVM delta application clears the delta cache on
-  subxact abort, preventing stale data from reaching the MERGE step.
-- **L2 template-cache age purge** (STAB-3): The background scheduler now
-  periodically purges L2 template-cache entries older than
-  `pg_trickle.template_cache_max_age_hours` (default 168 h / 7 days).
-- **Parser node-count guard** (PERF-2): New `pg_trickle.max_parse_nodes` GUC
-  (default 0 = off). When set, queries whose estimated parse-node count
-  exceeds the limit are rejected with `QueryTooComplex` before the OpTree
-  builder allocates memory.
-- **Explicit re-exports** (SCAL-2): `src/refresh/mod.rs` now uses an explicit
-  `pub use` list instead of blanket glob re-exports, making public API surface
-  visible at a glance and catching accidental symbol leakage at compile time.
+### Fixed: phantom rows in join-based stream tables
 
-### New GUCs
+Stream tables that join multiple source tables could silently accumulate stale
+rows over time when a refresh was interrupted part-way through. Those rows are
+now cleaned up automatically after every refresh, ensuring the result always
+converges to the correct answer.
 
-| GUC | Default | Description |
-|-----|---------|-------------|
-| `pg_trickle.use_sqlstate_classification` | `false` | Use SQLSTATE class for retry decisions |
-| `pg_trickle.template_cache_max_age_hours` | `168` | Max age (hours) for L2 template-cache entries |
-| `pg_trickle.max_parse_nodes` | `0` | Max estimated parse nodes (0 = disabled) |
+### Fixed: incorrect results for complex query patterns
 
-### Fixes
+Subqueries nested inside `CASE` expressions, `COALESCE` calls, and function
+arguments are now correctly detected and handled. Previously, stream tables
+using these patterns could produce wrong incremental refresh results.
 
-- **STAB-4**: Snapshot catalog `INSERT` failure is now surfaced as an error
-  (previously silently discarded). The snapshot table is rolled back on failure.
-- **STAB-5**: Replaced `.expect()` CString call in WAL decoder with a
-  compile-time `c""` literal, eliminating a panic path in WAL decoding.
-- **SCAL-3**: Removed 11 dead `#[allow(unused_imports)]` suppressors from
-  `refresh/orchestrator.rs`.
+### Safer snapshots
 
-### No schema changes
+Snapshot creation and restore are now fully atomic. If anything goes wrong
+mid-operation — a disk error, a timeout, a lost connection — the operation is
+cleanly rolled back and no partial tables are left behind.
 
-Upgrading from v0.29.0 requires no DDL changes. All improvements are confined
-to the Rust extension binary and new GUC registrations.
+Restoring from a snapshot no longer relies on PostgreSQL's internal column
+ordering, making restores safe across different PostgreSQL minor versions.
+
+### Bounded memory for in-flight update data
+
+The internal cache that stores update data between steps was previously
+unbounded. On deployments with many stream tables, it could grow large over
+time. The cache now enforces a configurable maximum and evicts the oldest
+entries when full, keeping memory usage predictable.
+
+Additionally, cached query templates now expire after a configurable age
+(default: 7 days). Old plans are automatically removed during background
+maintenance, preventing stale query plans from accumulating.
+
+### Complexity cap for queries
+
+A new `pg_trickle.max_parse_nodes` setting lets you cap query complexity.
+Queries that exceed the limit are rejected immediately with a clear error
+instead of consuming unexpected memory.
+
+### New settings
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `pg_trickle.use_sqlstate_classification` | off | Categorise errors by SQL error code (useful for automated retry logic) |
+| `pg_trickle.template_cache_max_age_hours` | 168 (7 days) | Evict cached query plans older than this |
+| `pg_trickle.max_parse_nodes` | 0 (disabled) | Reject queries that exceed this complexity limit |
+
+### Upgrade
+
+No schema changes. Upgrade from v0.29.0 with:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.30.0';
+```
 
 ---
 
 ## [0.29.0] — Relay CLI (pgtrickle-relay)
 
-### Highlights
+This release introduces `pgtrickle-relay` — a standalone companion tool that
+connects pg_trickle to the outside world.
 
-- **`pgtrickle-relay` CLI binary**: Standalone Rust binary added as a Cargo workspace
-  member. Bridges pg-trickle outbox and inbox tables with external messaging systems
-  in both forward and reverse directions.
-- **Forward mode**: Polls pg-trickle outbox tables and publishes deltas to external
-  sinks (NATS JetStream, Kafka, HTTP webhooks, Redis Streams, SQS, RabbitMQ, stdout).
-- **Reverse mode**: Consumes messages from external sources and writes them into
-  pg-trickle inbox tables, enabling bidirectional event-driven pipelines.
-- **Relay catalog schema**: New SQL tables `pgtrickle.relay_outbox_config` and
-  `pgtrickle.relay_inbox_config` with a full SQL API (`set_relay_outbox`,
-  `set_relay_inbox`, `enable_relay`, `disable_relay`, `delete_relay`,
-  `get_relay_config`, `list_relay_configs`). Configuration is SQL-only — no YAML.
-- **8 backend feature flags**: `nats`, `webhook`, `kafka`, `redis`, `sqs`,
-  `rabbitmq`, `pg-inbox`, `stdout`. Default build includes `nats`, `webhook`,
-  `stdout`.
-- **Built-in observability**: Prometheus metrics (`/metrics`) and health check
-  (`/health`) served from an axum HTTP server (`:9090` by default).
-- **Advisory lock coordination**: Multiple relay instances distribute pipelines via
-  PostgreSQL advisory locks — no external coordination service required.
-- **Hot-reload**: Config changes are applied without restart via `LISTEN/NOTIFY`
-  on the `pgtrickle_relay_config` channel.
-- **Idempotent delivery**: Every backend uses source-specific dedup keys
-  (`Nats-Msg-Id`, `Idempotency-Key`, Kafka record key, XADD stream ID, SQS
-  MessageDeduplicationId, RabbitMQ message-id property).
+### What is pgtrickle-relay?
 
-### What's Changed
+The relay bridges pg_trickle's inbox and outbox tables with external messaging
+systems, handling the reliable "last mile" of getting data in and out of your
+database.
 
-- New crate `pgtrickle-relay` added to workspace (`pgtrickle-relay/`).
-- New SQL migration `sql/pg_trickle--0.28.0--0.29.0.sql` with relay catalog tables,
-  trigger function `relay_config_notify()`, and all 7 SQL API functions.
-- `pgtrickle_relay` role created with `EXECUTE` on the SQL API functions only
-  (direct table access revoked).
+- **Forward (outbox → external):** Watches your pg_trickle outbox tables and
+  forwards new records to external systems as they arrive. Supported
+  destinations include Kafka, NATS, HTTP webhooks, Redis Streams, AWS SQS,
+  RabbitMQ, and plain text output.
+- **Reverse (external → inbox):** Reads messages from external systems and
+  writes them into your pg_trickle inbox tables, enabling fully bidirectional
+  event-driven pipelines.
 
-### Upgrade Notes
+### Configured entirely through SQL
 
-Apply the upgrade script on your PostgreSQL instance:
+There are no YAML files or config files to manage. You set up and manage relay
+pipelines with SQL:
+
+| Function | What it does |
+|----------|-------------|
+| `pgtrickle.set_relay_outbox(...)` | Configure an outbox-to-external pipeline |
+| `pgtrickle.set_relay_inbox(...)` | Configure an external-to-inbox pipeline |
+| `pgtrickle.enable_relay(name)` | Start a relay pipeline |
+| `pgtrickle.disable_relay(name)` | Pause a relay pipeline |
+| `pgtrickle.delete_relay(name)` | Remove a relay pipeline |
+| `pgtrickle.list_relay_configs()` | List all configured pipelines |
+
+### Built for reliability
+
+- **No duplicate messages:** Every destination uses a deduplication key to
+  prevent the same message from being delivered more than once, even if the
+  relay restarts mid-send.
+- **High availability:** Multiple relay instances can run simultaneously and
+  coordinate automatically using database-level locks — no external
+  coordination service such as ZooKeeper or Redis is needed.
+- **Live config updates:** Change relay configuration in SQL and it takes
+  effect within seconds, with no restart.
+- **Built-in monitoring:** Health check at `/health` and Prometheus metrics
+  at `/metrics` (port 9090 by default).
+
+### Upgrade notes
 
 ```sql
 ALTER EXTENSION pg_trickle UPDATE TO '0.29.0';
 ```
 
-The relay binary is distributed separately (see `Dockerfile.relay`). No changes
-to existing stream tables, views, or outbox/inbox APIs.
+The relay binary is distributed separately (see `Dockerfile.relay`). Existing
+stream tables, views, and outbox/inbox APIs are unchanged.
 
 ---
 
 ## [0.28.0] — Transactional Inbox & Outbox Patterns
 
-### Highlights
+This release adds two complementary patterns for reliably integrating
+pg_trickle with external systems.
 
-- **Transactional outbox**: Enable the outbox pattern on any stream table with
-  `enable_outbox()`. Each refresh writes a header row to a dedicated outbox table,
-  with a claim-check path for large deltas. Consumers poll via `poll_outbox()`,
-  commit offsets, extend leases, and send heartbeats.
-- **Consumer groups**: Kafka-style consumer group API with per-consumer committed
-  offsets, visibility leases, seek-to-offset (for replay), and liveness heartbeats.
-  `consumer_lag()` provides real-time per-consumer lag metrics.
-- **Transactional inbox**: `create_inbox()` provisions a named inbox table with
-  managed `<name>_pending`, `<name>_dlq`, and `<name>_stats` stream tables.
-  Bring-your-own-table mode available via `enable_inbox_tracking()`.
-- **Per-aggregate ordering**: `enable_inbox_ordering()` creates a `next_<inbox>`
-  stream table that surfaces only the next unprocessed message per aggregate,
-  eliminating concurrency hazards without application-side coordination.
-- **Priority tiers**: `enable_inbox_priority()` registers a priority column for
-  cost-model–aware ordering of inbox messages.
-- **Horizontal partitioning**: `inbox_is_my_partition()` provides FNV-1a
-  consistent-hash partition assignment for multi-worker inbox processing without
-  external coordination.
-- **Replay support**: `replay_inbox_messages()` resets message state for
-  selective re-processing.
+### The problem these patterns solve
 
-### New SQL Functions
+When you update a database and need to notify an external system — a message
+queue, an API, a downstream service — you face a reliability challenge: what
+happens if the database update succeeds but the notification fails? You can end
+up with data in your database that the external system never heard about, or a
+notification sent for a change that was rolled back.
 
-| Function | Description |
+The **outbox pattern** solves this: the notification is written in the same
+database transaction as the data change, so they either both succeed or both
+fail. pg_trickle then delivers the notification reliably once the transaction
+has committed.
+
+The **inbox pattern** is the reverse: external messages arrive into a managed
+queue inside PostgreSQL, where they can be processed reliably, retried on
+failure, and replayed if needed.
+
+### Outbox
+
+Enable the outbox on any stream table with `pgtrickle.enable_outbox()`. After
+each refresh, pg_trickle writes a record to a dedicated outbox table. Your
+application or the relay tool picks it up from there and forwards it to
+external consumers.
+
+Consumers can work in named **consumer groups** — similar to Kafka consumer
+groups. Each consumer tracks its own position in the stream independently and
+can be replayed, paused, or have its lease extended without affecting others.
+
+| Function | What it does |
 |----------|-------------|
-| `pgtrickle.enable_outbox(name, retention_hours)` | OUTBOX-1: Enable outbox pattern for a stream table |
-| `pgtrickle.disable_outbox(name, if_exists)` | OUTBOX-2: Disable outbox pattern |
-| `pgtrickle.outbox_status(name)` | OUTBOX-3: JSONB summary of outbox state |
-| `pgtrickle.outbox_rows_consumed(stream_table, outbox_id)` | OUTBOX-6: Mark rows consumed, free claim-check delta rows |
-| `pgtrickle.create_consumer_group(name, outbox, auto_offset_reset)` | OUTBOX-B1: Create a named consumer group |
-| `pgtrickle.drop_consumer_group(name, if_exists)` | OUTBOX-B2: Drop a consumer group |
-| `pgtrickle.poll_outbox(group, consumer, batch_size, visibility_seconds)` | OUTBOX-B3: Poll for new outbox messages |
-| `pgtrickle.commit_offset(group, consumer, last_offset)` | OUTBOX-B4: Commit the consumed offset |
-| `pgtrickle.extend_lease(group, consumer, extension_seconds)` | OUTBOX-B4: Extend the visibility lease |
-| `pgtrickle.seek_offset(group, consumer, new_offset)` | OUTBOX-B4: Seek to an arbitrary offset |
-| `pgtrickle.consumer_heartbeat(group, consumer)` | OUTBOX-B5: Signal consumer liveness |
-| `pgtrickle.consumer_lag(group)` | OUTBOX-B6: Per-consumer lag metrics |
-| `pgtrickle.create_inbox(name, ...)` | INBOX-1: Create a named transactional inbox |
-| `pgtrickle.drop_inbox(name, if_exists, cascade)` | INBOX-2: Drop a named inbox |
-| `pgtrickle.enable_inbox_tracking(name, table_ref, ...)` | INBOX-3: BYOT inbox tracking mode |
-| `pgtrickle.inbox_health(name)` | INBOX-4: JSONB health summary |
-| `pgtrickle.inbox_status(name)` | INBOX-5: Table summary of one or all inboxes |
-| `pgtrickle.replay_inbox_messages(name, event_ids)` | INBOX-6: Reset messages for replay |
-| `pgtrickle.enable_inbox_ordering(inbox, aggregate_id_col, seq_col)` | INBOX-B1: Enable per-aggregate ordering |
-| `pgtrickle.disable_inbox_ordering(inbox, if_exists)` | INBOX-B1: Disable per-aggregate ordering |
-| `pgtrickle.enable_inbox_priority(inbox, priority_col, tiers)` | INBOX-B2: Enable priority-tier processing |
-| `pgtrickle.disable_inbox_priority(inbox, if_exists)` | INBOX-B2: Disable priority-tier processing |
-| `pgtrickle.inbox_ordering_gaps(inbox_name)` | INBOX-B3: Detect sequence gaps per aggregate |
-| `pgtrickle.inbox_is_my_partition(aggregate_id, worker_id, total_workers)` | INBOX-B4: Consistent-hash partition check |
+| `pgtrickle.enable_outbox(name, retention_hours)` | Start capturing refresh output for external delivery |
+| `pgtrickle.disable_outbox(name)` | Stop capturing |
+| `pgtrickle.outbox_status(name)` | See the current outbox state |
+| `pgtrickle.outbox_rows_consumed(stream_table, outbox_id)` | Acknowledge that records have been delivered |
+| `pgtrickle.create_consumer_group(name, outbox, ...)` | Create a named group of consumers |
+| `pgtrickle.drop_consumer_group(name)` | Remove a consumer group |
+| `pgtrickle.poll_outbox(group, consumer, batch_size, ...)` | Claim the next batch of records |
+| `pgtrickle.commit_offset(group, consumer, last_offset)` | Acknowledge processed records |
+| `pgtrickle.extend_lease(group, consumer, ...)` | Hold onto a batch longer before it times out |
+| `pgtrickle.seek_offset(group, consumer, new_offset)` | Jump to a specific position (for replay) |
+| `pgtrickle.consumer_heartbeat(group, consumer)` | Signal that a consumer is still alive |
+| `pgtrickle.consumer_lag(group)` | See how far behind each consumer is |
 
-### New Catalog Tables
+### Inbox
 
-| Table | Description |
-|-------|-------------|
-| `pgtrickle.pgt_outbox_config` | Per-stream-table outbox configuration |
-| `pgtrickle.pgt_consumer_groups` | Named consumer groups |
-| `pgtrickle.pgt_consumer_offsets` | Per-consumer committed offsets & heartbeats |
-| `pgtrickle.pgt_consumer_leases` | Active visibility leases |
-| `pgtrickle.pgt_inbox_config` | Named inbox configurations |
-| `pgtrickle.pgt_inbox_ordering_config` | Per-inbox ordering configurations |
-| `pgtrickle.pgt_inbox_priority_config` | Per-inbox priority-tier configurations |
+Create a named inbox with `pgtrickle.create_inbox()`. pg_trickle automatically
+sets up a pending queue, a dead-letter queue (for messages that could not be
+processed), and a stats table.
 
-### New GUC Variables
+| Function | What it does |
+|----------|-------------|
+| `pgtrickle.create_inbox(name, ...)` | Create a managed inbox with pending queue and dead-letter queue |
+| `pgtrickle.drop_inbox(name, ...)` | Remove an inbox |
+| `pgtrickle.enable_inbox_tracking(name, ...)` | Attach inbox tracking to an existing table |
+| `pgtrickle.inbox_health(name)` | Get a health summary for an inbox |
+| `pgtrickle.inbox_status(name)` | Show queue depths and processing stats |
+| `pgtrickle.replay_inbox_messages(name, event_ids)` | Reset specific messages for re-processing |
 
-| GUC | Default | Description |
-|-----|---------|-------------|
-| `pg_trickle.outbox_enabled` | `true` | Master switch for the outbox subsystem |
-| `pg_trickle.outbox_retention_hours` | `24` | Default outbox row retention |
-| `pg_trickle.outbox_drain_batch_size` | `1000` | Rows per drain pass |
-| `pg_trickle.outbox_inline_threshold_rows` | `10000` | Rows before claim-check path activates |
-| `pg_trickle.outbox_skip_empty_delta` | `true` | Skip writing an outbox row on empty delta |
-| `pg_trickle.consumer_dead_threshold_hours` | `24` | Hours before a consumer is considered dead |
-| `pg_trickle.inbox_enabled` | `true` | Master switch for the inbox subsystem |
-| `pg_trickle.inbox_processed_retention_hours` | `72` | Retention for processed inbox messages |
-| `pg_trickle.inbox_dlq_alert_max_per_refresh` | `10` | DLQ alert threshold per refresh cycle |
+**Additional inbox capabilities:**
+
+- **Ordered processing:** `pgtrickle.enable_inbox_ordering()` ensures messages
+  for the same entity (e.g. the same customer or order ID) are processed in
+  sequence, eliminating race conditions without any extra coordination in your
+  application.
+- **Priority tiers:** `pgtrickle.enable_inbox_priority()` marks messages as
+  high or low priority so the scheduler processes urgent messages first.
+- **Horizontal scaling:** `pgtrickle.inbox_is_my_partition()` provides
+  consistent hash-based partition assignment for multi-worker inbox processing.
+  Multiple workers can safely share an inbox without an external coordinator.
+- **Gap detection:** `pgtrickle.inbox_ordering_gaps()` surfaces any sequence
+  gaps per entity so you can detect and recover from missing messages.
+
+### New settings
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `pg_trickle.outbox_enabled` | on | Enable the outbox subsystem |
+| `pg_trickle.outbox_retention_hours` | 24 | How long to keep delivered outbox records |
+| `pg_trickle.outbox_drain_batch_size` | 1000 | Records to process per drain pass |
+| `pg_trickle.outbox_skip_empty_delta` | on | Skip writing an outbox record when there are no changes |
+| `pg_trickle.consumer_dead_threshold_hours` | 24 | Hours before a silent consumer is considered dead |
+| `pg_trickle.inbox_enabled` | on | Enable the inbox subsystem |
+| `pg_trickle.inbox_processed_retention_hours` | 72 | How long to keep processed inbox records |
+| `pg_trickle.inbox_dlq_alert_max_per_refresh` | 10 | Alert when this many messages land in the dead-letter queue in one cycle |
 
 ### Upgrade
 
 ```sql
--- From v0.27.0:
 ALTER EXTENSION pg_trickle UPDATE TO '0.28.0';
-```
-
-Or use the provided upgrade migration:
-```
-sql/pg_trickle--0.27.0--0.28.0.sql
 ```
 
 ---
 
 ## [0.27.0] — Operability, Observability & DR
 
-### Highlights
+This release focuses on three areas: disaster recovery tooling, better
+visibility into multi-database deployments, and a more reliable built-in
+metrics server.
 
-- **Stream table snapshots**: Export and restore stream table content with
-  full frontier alignment for zero-downtime replica bootstrap and PITR workflows.
-- **Predictive schedule planner**: Data-driven refresh schedule recommendations
-  using the cost-model history with MAD-based confidence scoring.
-- **Cluster-wide observability**: Per-database worker allocation from shared
-  memory; per-DB labels on all Prometheus metrics for multi-tenant Grafana dashboards.
-- **pgrx 0.18.0 upgrade**: Updated from pgrx 0.17.0 with full test suite validation.
-- **Metrics server hardening**: OpenMetrics conformance, typed port-conflict errors,
-  malformed-HTTP 400 responses, and a new `metrics_summary()` SQL function.
+### Snapshot and restore
 
-### New SQL Functions
+You can now export a stream table's current data to an archive table and
+restore it later. This is useful for bootstrapping a new read replica without
+a full database dump, taking a point-in-time snapshot before a risky migration,
+or recovering a stream table to a known-good state.
 
-| Function | Description |
+| Function | What it does |
 |----------|-------------|
-| `pgtrickle.snapshot_stream_table(name, target)` | SNAP-1: Export stream table to archival table |
-| `pgtrickle.restore_from_snapshot(name, source)` | SNAP-2: Rehydrate from snapshot; aligns frontier |
-| `pgtrickle.list_snapshots(name)` | SNAP-3: List snapshots with size and frontier info |
-| `pgtrickle.drop_snapshot(snapshot_table)` | SNAP-3: Drop archival table and catalog row |
-| `pgtrickle.recommend_schedule(name)` | PLAN-1: JSONB schedule recommendation with confidence |
-| `pgtrickle.schedule_recommendations()` | PLAN-2: Set-returning; all STs sortable by delta_pct |
-| `pgtrickle.cluster_worker_summary()` | CLUS-1: Per-DB worker counts from shmem + pg_stat_activity |
-| `pgtrickle.metrics_summary()` | METR-3: Cluster-wide refresh/error counters for Grafana |
+| `pgtrickle.snapshot_stream_table(name, target)` | Export a stream table to an archive table |
+| `pgtrickle.restore_from_snapshot(name, source)` | Restore from an archive table |
+| `pgtrickle.list_snapshots(name)` | List available snapshots with size and age |
+| `pgtrickle.drop_snapshot(snapshot_table)` | Delete a snapshot |
 
-### New GUCs
+Restore aligns the stream table's internal progress marker with the snapshot,
+so incremental refresh resumes correctly without any manual steps.
 
-| GUC | Default | Description |
-|-----|---------|-------------|
-| `pg_trickle.schedule_recommendation_min_samples` | `20` | Minimum history samples before non-zero confidence |
-| `pg_trickle.schedule_alert_cooldown_seconds` | `300` | Debounce window for `predicted_sla_breach` alerts |
-| `pg_trickle.metrics_request_timeout_ms` | `5000` | Metrics server request handler timeout (ms) |
+### Predictive schedule recommendations
 
-### New Alert Events
+pg_trickle now analyses its own refresh history and recommends optimal refresh
+intervals for each stream table.
 
-- **`predicted_sla_breach`** (PLAN-3): Emitted when the cost model predicts the
-  next refresh will exceed `freshness_deadline_ms` by > 20%. Debounced by
-  `pg_trickle.schedule_alert_cooldown_seconds`.
+- `pgtrickle.recommend_schedule(name)` returns a suggested interval and a
+  confidence score. Confidence is low on new deployments and rises as history
+  accumulates (at least 20 samples are needed before the score is meaningful).
+- `pgtrickle.schedule_recommendations()` returns recommendations for all stream
+  tables in one call.
+- A **`predicted_sla_breach`** alert fires when the model predicts the next
+  refresh is likely to miss your freshness target by more than 20%. The alert
+  fires at most once every 5 minutes by default, to avoid flooding.
 
-### Improvements
+### Cluster-wide worker visibility
 
-- **CLUS-2**: All Prometheus metrics now include `db_oid` and `db_name` labels
-  for per-database Grafana panels in multi-tenant deployments.
-- **METR-1**: Added OpenMetrics format conformance unit tests.
-- **METR-2**: `MetricsServer::start()` now returns typed `MetricsServerError::PortInUse`
-  when the configured port is already bound (instead of silently failing).
-- **METR-4**: Metrics HTTP server returns `400 Bad Request` for malformed
-  requests (previously returned `404 Not Found`).
+In deployments that run pg_trickle across multiple databases,
+`pgtrickle.cluster_worker_summary()` shows which databases are consuming
+background workers. This makes it easy to diagnose situations where one
+database is crowding out others.
 
-### Documentation
+All Prometheus metrics now include database-level labels, so you can split a
+single Grafana panel by database.
 
-- **`docs/integrations/multi-tenant.md`** (new): Multi-DB deployment guide
-  with quota formula, Prometheus config, and Grafana snippets.
-- **`docs/SCALING.md`**: Added "Cluster-wide Worker Fairness" section.
-- **`docs/BACKUP_AND_RESTORE.md`**: Added snapshot API workflow documentation.
-- **`docs/PATTERNS.md`**: Added "Replica Bootstrap & PITR Alignment" section.
+### Metrics server improvements
 
-### Dependencies
+- A new `pgtrickle.metrics_summary()` SQL function returns cluster-wide refresh
+  and error counts — useful for monitoring without a Prometheus scraper.
+- Port conflicts now produce a clear error message instead of failing silently.
+- Malformed HTTP requests now return a proper `400 Bad Request` response.
 
-- pgrx upgraded from `0.17.0` to `0.18.0`. Removed the `pgrx_embed` binary
-  target (no longer needed in pgrx 0.18.x). Added `FlushErrorState`,
-  `CCRandomGenerateBytes`, and `message_level_is_interesting` stubs to
-  `scripts/pg_stub.c` for unit test compatibility.
+### New settings
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `pg_trickle.schedule_recommendation_min_samples` | 20 | Minimum history samples before schedule confidence is meaningful |
+| `pg_trickle.schedule_alert_cooldown_seconds` | 300 | Minimum seconds between consecutive `predicted_sla_breach` alerts |
+| `pg_trickle.metrics_request_timeout_ms` | 5000 | Maximum time the metrics server waits for a request (ms) |
+
+### Upgrade
+
+This release upgrades the internal pgrx library to 0.18.0. This is transparent
+to users. Run:
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.27.0';
+```
 
 ---
 
 ## [0.26.0] — Test & Concurrency Hardening
 
-> **What's new:** This release is all about making pg_trickle more reliable
-> and battle-tested. No new SQL commands or user-facing features — every change
-> is internal: more tests, safer concurrent operations, cleaner code structure,
-> and tighter error handling.
+This release is all about making pg_trickle more reliable and battle-tested.
+There are no new SQL commands or user-facing features — every change is
+internal: more tests, safer concurrent operations, cleaner code structure, and
+better error messages.
 
 ### Safer under concurrent load
 
@@ -403,83 +440,68 @@ running — is now explicitly tested and guaranteed to be safe. These scenarios
 were handled before, but lacked the tests to prove it. That proof is now part
 of every build.
 
-- **Simultaneous alter + refresh** (`alter_stream_table` + `refresh_stream_table`)
-  no longer risks a deadlock. The catalog stays consistent throughout. *(CONC-1)*
-- **Drop during refresh** aborts cleanly — no orphaned change buffers, no
-  dangling catalog rows left behind. *(CONC-2)*
-- **Parallel scheduler workers** are prevented from picking the same stream table
-  for refresh at the same time — a deterministic guarantee, not just a convention.
-  *(CONC-3)*
+- **Simultaneous alter + refresh** no longer risks a deadlock. The catalog
+  stays consistent throughout.
+- **Drop during refresh** aborts cleanly — no orphaned change buffers or
+  dangling catalog rows left behind.
+- **Parallel scheduler workers** are prevented from picking the same stream
+  table for refresh at the same time — a hard guarantee, not just a convention.
 - **Simultaneous buffer promotion** — when two workers race to promote a change
-  buffer, exactly one succeeds and the metadata stays consistent. *(CONC-4)*
+  buffer, exactly one succeeds and the metadata stays consistent.
 
 ### More stable SLA-based scheduling
 
 The scheduler uses a predictive model to decide when to refresh stream tables,
-balancing your latency targets against system load. That model now holds its
+balancing your freshness targets against system load. That model now holds its
 ground under difficult workloads.
 
-- **Bursty, sawtooth, and spike workloads** are all validated in a new dedicated
-  test suite (`tests/e2e_predictive_cost_tests.rs`), covering model recovery and
-  preemption accuracy. *(SLA-1)*
-- **No more tier flapping** — the SLA tier (which controls how aggressively a
-  stream table is refreshed) now requires 3 consecutive breaches before
-  downgrading and 3 consecutive successes before upgrading. This prevents the
-  system from flip-flopping between tiers at the boundary, which caused needless
-  refresh churn in earlier releases. *(SLA-2)*
-- **10,000-iteration randomised stress test** — property-based testing with
-  random latency distributions around the SLA boundary confirms the tier stays
-  stable even in adversarial conditions. *(SLA-3)*
+- **Bursty, sawtooth, and spike workloads** are all validated in a new
+  dedicated test suite.
+- **No more tier flapping** — the priority tier of a stream table (which
+  controls how aggressively it is refreshed) now requires 3 consecutive
+  breaches before downgrading and 3 consecutive successes before upgrading.
+  This prevents the system from oscillating at the boundary, which caused
+  unnecessary refresh churn in earlier releases.
+- A **10,000-iteration randomised stress test** confirms the tier stays stable
+  even under adversarial latency patterns.
 
 ### Fuzz testing and extreme-scale validation
 
-Three new fuzz targets probe corners of the codebase that normal tests miss —
-feeding malformed, random, or adversarial inputs to find crashes before users do:
+The extension is now tested against malformed, random, and adversarial inputs
+in three new fuzz test areas, preventing certain classes of unexpected input
+from crashing the extension:
 
-| Fuzz target | What it covers |
-|-------------|---------------|
-| `fuzz/fuzz_targets/cron_fuzz.rs` | Cron expression parser — malformed schedules can no longer panic the extension. *(FUZZ-1)* |
-| `fuzz/fuzz_targets/guc_fuzz.rs` | GUC string → enum coercion — invalid config values are safely rejected. *(FUZZ-2)* |
-| `fuzz/fuzz_targets/cdc_fuzz.rs` | CDC trigger payloads — unexpected row shapes are handled gracefully. *(FUZZ-3)* |
+- Invalid cron schedule expressions
+- Unrecognised or malformed configuration values
+- Unexpected row shapes in change-capture triggers
 
-Two new scale tests validate behaviour at extremes:
+Two new scale tests verify behaviour at extremes:
 
-- A source table with **1,000 partitions** installs CDC triggers and completes
-  its first refresh within 60 seconds. *(SCALE-1)*
+- A source table with **1,000 partitions** installs change-capture triggers and
+  completes its first refresh within 60 seconds.
 - A flooded worker pool does **not** starve high-priority stream tables in a
-  second database — multi-database fairness is enforced under load. *(SCALE-2)*
+  second database — multi-database fairness is enforced under load.
 
-### Cleaner internals: refresh module split
+### Cleaner internals: refresh module reorganised
 
-The refresh orchestrator had grown into a single ~8,900-line file —
-manageable when the feature set was smaller, but increasingly hard to
-navigate. It has been split into three focused modules with **zero behaviour
-change**:
+The refresh orchestrator had grown into a single very large file. It has been
+split into three focused modules with **no behaviour change**:
 
-| Module | Responsibility |
-|--------|---------------|
-| `src/refresh/orchestrator.rs` | Decides *when* and *how* to refresh — action selection, adaptive cost model, re-initialisation logic |
-| `src/refresh/codegen.rs` | Builds SQL queries, manages the MERGE cache, handles change-buffer cleanup and ST-to-ST delta capture |
-| `src/refresh/merge.rs` | Executes differential, full, TopK, and no-data refreshes, plus partition-aware MERGE helpers |
-| `src/refresh/mod.rs` | Reduced from ~8,900 lines to **185 lines** — re-exports and shared types only |
+| Module | What it handles |
+|--------|----------------|
+| `orchestrator` | Deciding when and how to refresh — timing, cost model, recovery |
+| `codegen` | Building the SQL queries and managing the query cache |
+| `merge` | Executing the actual refresh — incremental, full, or TopK |
 
-### Tighter error handling
+### Better error messages
 
-Bare `pgrx::error!()` calls scattered through the codebase have been replaced
-with structured error variants in `PgTrickleError`. This makes logs easier to
-parse, enables more precise error recovery, and gives operators clearer
-messages when things go wrong.
+Error messages throughout the extension now include more context — table names,
+operation types, and hints such as "check system clock" on timestamp failures.
+This makes it easier to diagnose problems from logs alone.
 
-- **`DiagnosticError(String)`** — replaces bare errors in diagnostics and
-  monitor code (`src/api/diagnostics.rs`, `src/monitor.rs`). *(ERR-1)*
-- **Publication errors** — `PublicationAlreadyExists`, `PublicationNotFound`,
-  and `PublicationRebuildFailed` are now first-class enum variants in
-  `PgTrickleError`, replacing bare calls in `src/api/publication.rs`. *(ERR-2)*
-- **Clock skew hint** — scheduler timestamp failures now include a HINT
-  (`"check system clock"`) so operators can quickly identify the cause. *(ERR-3)*
-- **Crash-recovery test** (`tests/e2e_publication_crash_recovery_tests.rs`) —
-  kills the postmaster with an active publication subscriber, restarts, and
-  verifies the subscriber catches up with **zero data loss**. *(ERR-4)*
+A new crash-recovery test verifies that a publication subscriber that was
+active when the database was killed catches up with **zero data loss** after
+restart.
 
 ---
 
