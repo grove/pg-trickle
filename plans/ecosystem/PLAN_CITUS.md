@@ -47,10 +47,10 @@ follow-up release.
 
 **Confirmed use case (discussion #619 follow-up, 2026-04-24):** all sources
 are hash-distributed (no reference tables), PKs are deterministic and
-stable, lower-layer STs in a SQL-WITH-replacement chain expected to reach
-billions of rows. `REPLICA IDENTITY DEFAULT` (PK-only) is the preferred
-setting; `FULL` is supported but unnecessary. Distributed ST storage is
-load-bearing for this pattern — see §11.
+never change, lower-layer STs in a SQL-WITH-replacement chain expected to
+reach billions of rows. This is one topology among many; design decisions
+below are scoped to what is broadly correct, not to this use case alone.
+See §11 for per-topology implications.
 
 ---
 
@@ -176,12 +176,12 @@ predictive-cost code paths.
 | **MERGE replacement (distributed STs)** | `DELETE … WHERE __pgt_row_id IN (...)` + `INSERT … ON CONFLICT (__pgt_row_id) DO UPDATE` | Citus-supported; same semantics |
 | **Worker→coordinator transport** | Logical replication (publications + slots) — **no triggers on workers** | Matches WAL-decoder model already in tree; zero new write-path overhead |
 | **Reference-table sources** | Keep trigger CDC path | Already works; no reason to change |
-| **REPLICA IDENTITY** | `DEFAULT` (PK-only) required for v1; `FULL` is supported but not required | Stable, deterministic PKs (confirmed in #619) mean PK-only decoding is sufficient; `FULL` causes significant WAL amplification on wide tables at billion-row scale |
+| **REPLICA IDENTITY** | `FULL` required when PKs can change; `DEFAULT` (PK-only) sufficient when PKs are immutable — and strongly preferred at large scale | PK-only decoding works only when UPDATE never touches a PK column; if it does, `pgoutput` with DEFAULT cannot reconstruct the old identity, causing silent loss in the ST. `FULL` amplifies WAL proportionally to row width (negligible on narrow tables, severe on wide ones at scale). Pre-flight must verify the PK-immutability assumption or require FULL. |
 | **Locking** | Catalog table for cross-node locks; advisory locks remain the local fast path | Advisory locks are node-local |
 | **Wake signalling** | `LISTEN/NOTIFY` on coordinator only; workers don't run a scheduler | Single scheduler per database (today's model) is fine for Citus |
 | **Detection** | Auto-detect Citus at extension load + per-source at create time | No new GUC required for the common case |
 | **Rebalance** | Out of scope for v1 (matches user's constraint in #619) | Slot location follows shard placement; rebalance would invalidate slots |
-| **Chained distributed STs** | All STs in the same DAG chain distributed on the same column by default | Downstream MERGE/apply requires co-location; auto-co-locate avoids user error |
+| **Chained distributed STs** | Attempt to distribute all STs in the same DAG subgraph on the same column; error out when this is structurally impossible | Co-location is required for shard-local delta apply. Auto-co-location cannot be resolved when the chain includes aggregations (GROUP BY changes cardinality), JOINs on a non-source-distribution key, or projections that drop the distribution column — in those cases the user must choose placement explicitly. Note also that `__pgt_row_id`-distributed STs do **not** co-locate with their source tables; JOINs between an ST and its source remain cross-shard. |
 
 ---
 
@@ -350,10 +350,22 @@ sees `placement == Distributed`:
 **P3.3 — REPLICA IDENTITY enforcement on workers.** The pre-flight check
 already at [src/wal_decoder.rs](src/wal_decoder.rs#L1509) needs to run
 **on each worker** (run_command_on_workers) for distributed sources.
-`REPLICA IDENTITY DEFAULT` (PK-only) is the v1 baseline and is strongly
-preferred at large scale — FULL doubles or more the WAL volume for every
-UPDATE on a wide table. Emit a warning (not an error) if the user sets FULL;
-do not override it. Reject `NOTHING` with a clear error.
+
+- `NOTHING` — reject with a clear error; change capture is impossible.
+- `DEFAULT` (PK-only) — accepted **only if** no PK column can be updated.
+  Pre-flight must either detect this via `pg_attribute` constraints (immutable
+  generated columns, NOT NULL + no UPDATE path) or require the user to
+  explicitly acknowledge the risk with `allow_pk_updates => false`. **If a
+  PK column is updated, `pgoutput` with DEFAULT emits only the new row;
+  the coordinator cannot match it to the old `__pgt_row_id`, producing
+  silent data loss in the ST.** This is not a recoverable error — it
+  corrupts the materialization silently.
+- `FULL` — accepted always. WAL amplification is proportional to row width:
+  negligible on narrow tables, potentially severe (10× or more) on very wide
+  tables with high UPDATE rates. Log a sizing advisory at setup time.
+
+Default guidance: use `FULL` unless the user explicitly confirms PKs are
+immutable, in which case `DEFAULT` avoids WAL overhead.
 
 **P3.4 — Slot polling.** Scheduler tick iterates over
 `pgt_remote_slots` for the source and pulls from each worker, writing
@@ -429,6 +441,14 @@ it as the distribution column at `create_distributed_table` time.
 Validation: refuse `distributed` placement if the user supplied an
 ORDER BY / GROUP BY shape that would produce skew on row id (rare —
 row id is a monotonically increasing surrogate).
+
+> **Limitation:** Distributing an ST by `__pgt_row_id` (a synthetic
+> surrogate) does **not** align shards with the source table's distribution
+> column. Any query that JOINs the ST back to its source produces cross-shard
+> joins, which Citus executes correctly but at higher cost (re-partition join
+> or broadcast). Document this and recommend denormalising the source
+> distribution key into the ST projection if frequent ST-source joins are
+> expected.
 
 **P4.5 — `reltuples` fix.** `src/dag.rs` and the predictive cost
 model (`src/api/planner.rs`) sum `pg_dist_shard` row counts when the
@@ -591,33 +611,30 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
 
 ### 11.1 — All-distributed ELT chain (discussion #619)
 
-**Source topology:** All source tables are hash-distributed; no reference
-tables.
+**Source topology:** All sources hash-distributed; no reference tables;
+PKs deterministic and never modified.
 
-**Query pattern:** Dynamically constructed ELT/analytics queries built as a
-chain of SQL-WITH expressions, directly replaceable with a chain of stream
-tables in pg_trickle.
+**Pattern:** Chain of SQL-WITH expressions replaced with a chain of STs;
+lower-layer STs expected to reach billions of rows.
 
-**Scale:** Lower-layer STs (earlier in the chain, close to raw sources)
-expected to reach **billions of rows**.
+**Configuration target:** `REPLICA IDENTITY DEFAULT` (PK-only, safe here
+because PKs never change) + `placement => 'distributed'` for all
+lower-layer STs. The P4.1 1M-row threshold should be overridden or the
+threshold lowered — at billion-row scale a `reference` ST is a
+non-starter.
 
-**REPLICA IDENTITY:** `DEFAULT` (PK-only). PKs are deterministic and never
-change, so PK-only decoding is sufficient for all UPDATE/DELETE semantics.
+**Known limitations that apply to this topology:**
 
-**Implications for the design:**
-
-- Distributed ST storage is **mandatory**, not optional, for lower-layer
-  STs. A coordinator-local plain table at billion-row scale is a
-  non-starter.
-- The P4.1 auto-placement threshold (1M rows) should default to
-  `distributed` when the source topology is all-distributed, regardless of
-  projected ST size. This avoids an off-by-default footgun.
-- Chained STs must be **co-located** on the same distribution column so
-  that the downstream delta apply is a shard-local operation. The default
-  should be to distribute all STs in the same DAG subgraph on the same
-  column.
-- FULL REPLICA IDENTITY should be documented as **not recommended** at this
-  scale due to WAL amplification, with DEFAULT as the guidance.
+- **Cross-shard ST↔source JOINs** (see P4.4): `__pgt_row_id`-distributed
+  STs don't co-locate with source tables. Denormalise the source
+  distribution key into the ST if frequent back-joins are needed.
+- **Co-location breaks at aggregation boundaries**: if a mid-chain ST
+  aggregates (GROUP BY) or joins on a different key, automatic co-location
+  with the next ST in the chain is impossible; that ST boundary requires
+  explicit placement choice.
+- **PK immutability is a pre-condition, not verified automatically**:
+  using `DEFAULT` with mutable PKs causes silent data loss (see P3.3).
+  The confirmed use case meets this pre-condition; other users may not.
 
 ---
 
