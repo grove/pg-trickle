@@ -61,7 +61,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
   now use PostgreSQL Ephemeral Named Relations (ENRs) for transition tables
   instead of OID-suffixed temporary tables. This eliminates unnecessary
   `CREATE TEMP TABLE … AS SELECT` overhead on every DML. Controlled by the
-  new `pg_trickle.ivm_use_enr` GUC (default `true`).
+  new `pg_trickle.ivm_use_enr` GUC (default `false`; set `true` to enable).
 
 - **Adaptive batch coalescing** (PERF-1): A new `pg_trickle.adaptive_batch_coalescing`
   GUC (default `true`) documents and gates the existing scheduler optimisation
@@ -102,7 +102,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 | GUC | Default | Description |
 |-----|---------|-------------|
-| `pg_trickle.ivm_use_enr` | `true` | Use ENR transition tables in IMMEDIATE mode |
+| `pg_trickle.ivm_use_enr` | `false` | Use ENR transition tables in IMMEDIATE mode (opt-in, PG18+) |
 | `pg_trickle.adaptive_batch_coalescing` | `true` | Coalesce change-buffer scans for shared sources |
 | `pg_trickle.adaptive_merge_strategy` | `false` | Log suggested merge strategy after delta apply |
 | `pg_trickle.backpressure_consecutive_limit` | `3` | Consecutive over-threshold cycles before alert |
@@ -110,8 +110,9 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ### Upgrade
 
 Run `ALTER EXTENSION pg_trickle UPDATE TO '0.31.0';` — no manual DDL changes
-are required. The `ivm_use_enr` GUC defaults to `true`; set it to `false` if
-you observe issues with ENR propagation in nested SPI contexts.
+are required. The `ivm_use_enr` GUC defaults to `false`; set it to `true` to
+engage the ENR-based path (requires PostgreSQL 18+ with ENR propagation to
+nested SPI contexts).
 
 ---
 

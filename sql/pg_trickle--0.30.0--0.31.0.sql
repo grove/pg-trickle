@@ -12,7 +12,7 @@
 --   - Default pg_trickle.use_sqlstate_classification changed from false to true
 --
 -- New GUCs (set in postgresql.conf or ALTER SYSTEM):
---   pg_trickle.ivm_use_enr                    — ENR-based IVM triggers (default true, PG18+)
+--   pg_trickle.ivm_use_enr                    — ENR-based IVM triggers (default false, PG18+)
 --   pg_trickle.adaptive_batch_coalescing      — coalesce source scans (default true)
 --   pg_trickle.adaptive_merge_strategy        — plan-aware strategy selection (default false)
 --   pg_trickle.backpressure_consecutive_limit — cycles before backpressure alert (default 3)

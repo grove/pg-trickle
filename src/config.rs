@@ -1084,7 +1084,7 @@ pub static PGS_MAX_PARSE_NODES: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// When false, the legacy temp-table copy behaviour is used.
 /// Requires PostgreSQL 18+ (ENRs are only available in PG 18 trigger
 /// contexts).
-pub static PGS_IVM_USE_ENR: GucSetting<bool> = GucSetting::<bool>::new(true);
+pub static PGS_IVM_USE_ENR: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// PERF-1 (v0.31.0): Coalesce change-buffer scans across stream tables that
 /// share the same source table within a single scheduler tick.
@@ -2324,10 +2324,10 @@ pub fn register_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_trickle.ivm_use_enr",
         c"PERF-4: Use ENR-based transition tables in IVM trigger bodies (PG18+).",
-        c"When true (default), IMMEDIATE-mode trigger functions reference ENRs directly \
-           instead of copying transition data to temp tables. Eliminates per-statement \
-           heap allocation for INSERT/UPDATE/DELETE on IMMEDIATE-mode stream tables. \
-           Requires PostgreSQL 18+. Set to false to use the legacy temp-table approach.",
+        c"When true, IMMEDIATE-mode trigger functions reference ENRs directly \
+           instead of copying transition data to temp tables. \
+           Requires PostgreSQL 18+ with ENR propagation to nested SPI calls. \
+           Defaults to false (legacy temp-table approach) for compatibility.",
         &PGS_IVM_USE_ENR,
         GucContext::Suset,
         GucFlags::default(),
