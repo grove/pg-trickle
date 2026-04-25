@@ -880,15 +880,21 @@ async fn dump_timeout_diagnostics(db: &E2eDb, since_ts: &str, all_sts: &[String]
         }
     }
 
-    // 3. Source table change buffer row count
+    // 3. Source table change buffer row count (v0.32.0+: stable hash name)
     let source_oid = db
         .query_scalar::<i64>(&format!(
             "SELECT oid::bigint FROM pg_class WHERE relname = '{source}'"
         ))
         .await;
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            source_oid
+        ))
+        .await;
     let cb_count = db
         .query_scalar_opt::<i64>(&format!(
-            "SELECT COUNT(*)::bigint FROM pgtrickle_changes.changes_{source_oid}"
+            "SELECT COUNT(*)::bigint FROM pgtrickle_changes.changes_{stable_name}"
         ))
         .await;
     eprintln!(

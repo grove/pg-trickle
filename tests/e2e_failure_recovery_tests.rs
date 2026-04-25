@@ -538,14 +538,20 @@ async fn test_no_resource_leak_after_timeout() {
         "No __pgt_delta_* temp tables should remain after failed refresh; found {orphaned_temps}"
     );
 
-    // Verify the change buffer table still exists and is accessible
+    // Verify the change buffer table still exists and is accessible.
+    // v0.32.0+: buffer is named changes_{stable_name}, not changes_{oid}.
+    let stable_name: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            src_oid
+        ))
+        .await;
     let buffer_exists: bool = db
         .query_scalar(&format!(
             "SELECT EXISTS(SELECT 1 FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = 'pgtrickle_changes' \
-             AND c.relname = 'changes_{}')",
-            src_oid
+             AND c.relname = 'changes_{stable_name}')"
         ))
         .await;
     assert!(

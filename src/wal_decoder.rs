@@ -773,9 +773,10 @@ fn write_decoded_change(
     }
 
     let sql = format!(
-        "INSERT INTO {schema}.changes_{oid} ({cols}) VALUES ({vals})",
+        // nosemgrep: rust.spi.query.dynamic-format
+        "INSERT INTO {schema}.{buf_name} ({cols}) VALUES ({vals})",
         schema = change_schema,
-        oid = source_oid,
+        buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(source_oid)),
         cols = col_names.join(", "),
         vals = col_values.join(", "),
     );

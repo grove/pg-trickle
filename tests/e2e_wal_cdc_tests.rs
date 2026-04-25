@@ -30,7 +30,13 @@ async fn get_cdc_mode(db: &E2eDb, source_table: &str) -> String {
 /// Helper: check if a replication slot exists for a source table.
 async fn slot_exists(db: &E2eDb, source_table: &str) -> bool {
     let oid = db.table_oid(source_table).await;
-    let slot_name = format!("pgtrickle_{}", oid);
+    let stable: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let slot_name = format!("pgtrickle_{stable}");
     db.query_scalar::<bool>(&format!(
         "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{slot_name}')"
     ))
@@ -40,7 +46,13 @@ async fn slot_exists(db: &E2eDb, source_table: &str) -> bool {
 /// Helper: check if a publication exists for a source table.
 async fn publication_exists(db: &E2eDb, source_table: &str) -> bool {
     let oid = db.table_oid(source_table).await;
-    let pub_name = format!("pgtrickle_cdc_{}", oid);
+    let stable: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let pub_name = format!("pgtrickle_cdc_{stable}");
     db.query_scalar::<bool>(&format!(
         "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = '{pub_name}')"
     ))
@@ -427,7 +439,13 @@ async fn test_wal_fallback_on_missing_slot() {
 
     // Externally drop the replication slot to simulate infrastructure failure
     let oid = db.table_oid("wal_fb").await;
-    let slot_name = format!("pgtrickle_{}", oid);
+    let stable: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let slot_name = format!("pgtrickle_{stable}");
     db.execute(&format!("SELECT pg_drop_replication_slot('{slot_name}')"))
         .await;
 
@@ -483,8 +501,14 @@ async fn test_wal_cleanup_on_drop() {
     wait_for_cdc_mode(&db, "wal_drop", "WAL", Duration::from_secs(60)).await;
 
     let oid = db.table_oid("wal_drop").await;
-    let slot_name = format!("pgtrickle_{}", oid);
-    let pub_name = format!("pgtrickle_cdc_{}", oid);
+    let stable: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let slot_name = format!("pgtrickle_{stable}");
+    let pub_name = format!("pgtrickle_cdc_{stable}");
 
     // Verify slot + publication exist before drop
     assert!(slot_exists(&db, "wal_drop").await);
@@ -648,7 +672,13 @@ async fn test_ec34_check_cdc_health_detects_missing_slot() {
 
     // Drop the replication slot externally to simulate backup/restore
     let oid = db.table_oid("ec34_src").await;
-    let slot_name = format!("pgtrickle_{}", oid);
+    let stable: String = db
+        .query_scalar(&format!(
+            "SELECT pgtrickle.source_stable_name({}::oid)",
+            oid
+        ))
+        .await;
+    let slot_name = format!("pgtrickle_{stable}");
     db.execute(&format!("SELECT pg_drop_replication_slot('{slot_name}')"))
         .await;
 

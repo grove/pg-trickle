@@ -2148,8 +2148,11 @@ fn change_buffer_sizes() -> TableIterator<
                 JOIN pgtrickle.pgt_stream_tables st ON st.pgt_id = d.pgt_id
                 JOIN pg_class c                     ON c.oid = d.source_relid
                 JOIN pg_namespace n                 ON n.oid = c.relnamespace
+                -- v0.32.0+: join via pgt_change_tracking to get stable buffer name
+                LEFT JOIN pgtrickle.pgt_change_tracking ct
+                    ON  ct.source_relid = d.source_relid
                 LEFT JOIN pg_class cb
-                    ON  cb.relname = 'changes_' || d.source_relid::text
+                    ON  cb.relname = 'changes_' || ct.source_stable_name
                     AND cb.relnamespace = (
                             SELECT oid FROM pg_namespace
                             WHERE  nspname = COALESCE(

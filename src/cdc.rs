@@ -1276,27 +1276,26 @@ pub fn create_cycle_partition(
     new_lsn: &str,
 ) -> Result<String, PgTrickleError> {
     // Sequence number: count existing range partitions (excluding default).
+    let buf_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
     let seq: i64 = Spi::get_one::<i64>(&format!(
         "SELECT COUNT(*)::BIGINT \
          FROM pg_inherits i \
          JOIN pg_class c ON c.oid = i.inhrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE i.inhparent = ('{schema}.changes_{oid}')::regclass \
+         WHERE i.inhparent = ('{schema}.{buf_name}')::regclass \
            AND n.nspname = '{schema}' \
-           AND c.relname != 'changes_{oid}_default'",
+           AND c.relname != '{buf_name}_default'",
         schema = change_schema,
-        oid = source_oid,
     ))
     .unwrap_or(Some(0))
     .unwrap_or(0);
 
-    let part_name = format!("changes_{}_p{}", source_oid, seq);
+    let part_name = format!("{buf_name}_p{seq}");
     let sql = format!(
         "CREATE TABLE \"{schema}\".\"{part}\" \
-         PARTITION OF \"{schema}\".changes_{oid} \
+         PARTITION OF \"{schema}\".\"{buf_name}\" \
          FOR VALUES FROM ('{prev_lsn}'::pg_lsn) TO ('{new_lsn}'::pg_lsn)",
         schema = change_schema,
-        oid = source_oid,
         part = part_name,
         prev_lsn = prev_lsn,
         new_lsn = new_lsn,
@@ -3037,8 +3036,8 @@ pub fn convert_buffer_to_partitioned(
     change_schema: &str,
     source_oid: u32,
 ) -> Result<i64, PgTrickleError> {
-    let table_name = format!("changes_{source_oid}");
-    let migrated_name = format!("changes_{source_oid}_pre_part");
+    let table_name = buffer_base_name_for_oid(pg_sys::Oid::from(source_oid));
+    let migrated_name = format!("{table_name}_pre_part");
 
     // Step 1: Rename the existing unpartitioned table.
     let rename_sql = format!(
@@ -3126,10 +3125,9 @@ pub fn convert_buffer_to_partitioned(
 
     // Step 3: Create default partition.
     let default_sql = format!(
-        "CREATE TABLE \"{schema}\".\"changes_{oid}_default\" \
+        "CREATE TABLE \"{schema}\".\"{table}_default\" \
          PARTITION OF \"{schema}\".\"{table}\" DEFAULT",
         schema = change_schema,
-        oid = source_oid,
         table = table_name,
     );
     Spi::run(&default_sql).map_err(|e| {
@@ -3160,10 +3158,10 @@ pub fn convert_buffer_to_partitioned(
 
     // Step 5: Recreate the covering index.
     let idx_sql = format!(
-        "CREATE INDEX IF NOT EXISTS idx_changes_{oid}_lsn_pk_cid \
-         ON \"{schema}\".changes_{oid} (lsn, pk_hash, change_id) INCLUDE (action)",
+        "CREATE INDEX IF NOT EXISTS \"idx_{table}_lsn_pk_cid\" \
+         ON \"{schema}\".\"{table}\" (lsn, pk_hash, change_id) INCLUDE (action)",
         schema = change_schema,
-        oid = source_oid,
+        table = table_name,
     );
     Spi::run(&idx_sql).map_err(|e| {
         PgTrickleError::SpiError(format!(
@@ -3182,8 +3180,8 @@ pub fn convert_buffer_to_partitioned(
     })?;
 
     pgrx::log!(
-        "pg_trickle PERF-2: promoted changes_{} to RANGE(lsn) partitioned mode ({} rows migrated)",
-        source_oid,
+        "pg_trickle PERF-2: promoted {} to RANGE(lsn) partitioned mode ({} rows migrated)",
+        table_name,
         migrated_count,
     );
 
@@ -3243,10 +3241,14 @@ pub fn estimate_pending_changes(pgt_id: i64) -> Option<i64> {
     Spi::connect(|client| {
         client
             .select(
+                // v0.32.0+: join via pgt_change_tracking to get stable buffer name.
                 "SELECT COALESCE(SUM(c.reltuples::bigint), 0)::bigint \
                  FROM pgtrickle.pgt_dependencies d \
-                 JOIN pg_catalog.pg_class c ON c.relname = 'changes_' || d.source_relid::text \
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = $1 \
+                 JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = d.source_relid \
+                 JOIN pg_catalog.pg_class c \
+                   ON c.relname = 'changes_' || ct.source_stable_name \
+                 JOIN pg_catalog.pg_namespace n \
+                   ON n.oid = c.relnamespace AND n.nspname = $1 \
                  WHERE d.pgt_id = $2 AND d.source_type = 'TABLE'",
                 None,
                 &[change_schema.into(), pgt_id.into()],

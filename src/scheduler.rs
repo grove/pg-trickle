@@ -4168,13 +4168,11 @@ fn count_pending_changes(st: &StreamTableMeta) -> i64 {
 
     let mut total: i64 = 0;
     for oid in &source_oids {
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM {}.changes_{}",
-            change_schema,
-            oid.to_u32(),
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // v0.32.0+: buffer table uses stable hash name; fall back to OID if untracked.
+        let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
+        let count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         total = total.saturating_add(count);
     }
     total
@@ -4840,13 +4838,12 @@ pub(crate) fn batched_has_source_changes(
         }
 
         // Build the inner UNION ALL for this ST's sources.
+        // v0.32.0+: buffer table uses stable hash name; fall back to OID if untracked.
         let inner: Vec<String> = source_oids
             .iter()
             .map(|oid| {
-                format!(
-                    "SELECT 1 FROM {change_schema}.changes_{oid}",
-                    oid = oid.to_u32(),
-                )
+                let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
+                format!("SELECT 1 FROM {buf}")
             })
             .collect();
 
@@ -4906,13 +4903,17 @@ fn has_table_source_changes(st: &StreamTableMeta) -> bool {
     // `SELECT ... LIMIT 1 UNION ALL SELECT ...` is a syntax error in
     // PostgreSQL (LIMIT binds at the top level, not per-branch).
     // EXISTS already short-circuits on the first row found.
+    // v0.32.0+: buffer table uses stable hash name; fall back to OID if untracked.
     let union_arms: Vec<String> = source_oids
         .iter()
-        .map(|oid| format!("SELECT 1 FROM {}.changes_{}", change_schema, oid.to_u32(),))
+        .map(|oid| {
+            let buf = crate::cdc::buffer_qualified_name_for_oid(&change_schema, *oid);
+            format!("SELECT 1 FROM {buf}")
+        })
         .collect();
     let batched_sql = format!("SELECT EXISTS({})", union_arms.join(" UNION ALL "));
 
-    Spi::get_one::<bool>(&batched_sql) // nosemgrep: rust.spi.get-one.dynamic-format — change_schema is config-derived, OIDs are system values
+    Spi::get_one::<bool>(&batched_sql) // nosemgrep: rust.spi.query.dynamic-format
         .unwrap_or(Some(false))
         .unwrap_or(false)
 }
@@ -6328,22 +6329,22 @@ fn check_unlogged_buffer_crash_recovery(st: &StreamTableMeta) -> bool {
 
     let change_schema = config::pg_trickle_change_buffer_schema();
 
-    // Check base-table source buffers (changes_{oid})
+    // Check base-table source buffers (v0.32.0+: stable hash name)
     let source_oids = get_source_oids_for_st(st.pgt_id);
     for oid in &source_oids {
+        let buf_base = crate::cdc::buffer_base_name_for_oid(*oid);
+        let buf_fq = format!("{change_schema}.{buf_base}");
         let lost = Spi::get_one::<bool>(&format!(
             "SELECT c.relpersistence = 'u' \
-               AND NOT EXISTS(SELECT 1 FROM {schema}.changes_{oid} LIMIT 1) \
+               AND NOT EXISTS(SELECT 1 FROM {buf_fq} LIMIT 1) \
                AND pg_postmaster_start_time() > \
                    COALESCE((SELECT last_refresh_at FROM pgtrickle.pgt_stream_tables \
                              WHERE pgt_id = {pgt_id}), '-infinity'::timestamptz) \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = '{schema}' AND c.relname = 'changes_{oid}'",
-            schema = change_schema,
-            oid = oid.to_u32(),
+             WHERE n.nspname = '{change_schema}' AND c.relname = '{buf_base}'",
             pgt_id = st.pgt_id,
-        ))
+        )) // nosemgrep: rust.spi.query.dynamic-format
         .unwrap_or(Some(false))
         .unwrap_or(false);
 
