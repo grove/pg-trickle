@@ -67,7 +67,7 @@
 | [v0.24.0](roadmap/v0.24.0.md) | Join correctness complete fix, two-phase frontier, TOAST-aware CDC | ✅ Released | Large | [Full details](roadmap/v0.24.0.md-full.md) |
 | [v0.25.0](roadmap/v0.25.0.md) | Thousands of stream tables, pooler cold-start fix, predictive model | ✅ Released | Large | [Full details](roadmap/v0.25.0.md-full.md) |
 | [v0.26.0](roadmap/v0.26.0.md) | Concurrency testing, fuzz targets, refresh engine modularisation | ✅ Released | Large | [Full details](roadmap/v0.26.0.md-full.md) |
-| [v0.27.0](roadmap/v0.27.0.md) | Snapshot/PITR, schedule recommendations, cluster observability | Planned | Medium | [Full details](roadmap/v0.27.0.md-full.md) |
+| [v0.27.0](roadmap/v0.27.0.md) | Snapshot/PITR, schedule recommendations, cluster observability | ✅ Released | Medium | [Full details](roadmap/v0.27.0.md-full.md) |
 
 ### Toward Stable (v0.28.x – v1.0)
 
