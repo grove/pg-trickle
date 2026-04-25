@@ -607,10 +607,14 @@ pub(super) fn shared_buffer_stats_impl()
                 .unwrap_or(None)
                 .unwrap_or_default();
 
+                // v0.32.0+: buffer tables use stable (xxh64-derived) names.
+                let buf_base =
+                    crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(source_oid as u32));
+
                 let columns_tracked: i32 = Spi::get_one::<i64>(&format!(
                     "SELECT count(*)::bigint FROM information_schema.columns \
                      WHERE table_schema = '{change_schema}' \
-                       AND table_name = 'changes_{source_oid}' \
+                       AND table_name = '{buf_base}' \
                        AND column_name LIKE 'new\\_%'",
                 ))
                 .unwrap_or(None)
@@ -627,7 +631,8 @@ pub(super) fn shared_buffer_stats_impl()
                 .unwrap_or(None);
 
                 let buffer_rows: i64 = Spi::get_one::<i64>(&format!(
-                    "SELECT count(*)::bigint FROM \"{change_schema}\".changes_{source_oid}",
+                    // nosemgrep: rust.spi.query.dynamic-format
+                    "SELECT count(*)::bigint FROM \"{change_schema}\".{buf_base}",
                 ))
                 .unwrap_or(None)
                 .unwrap_or(0);
@@ -701,11 +706,9 @@ pub(super) fn reset_fuse_impl(name: &str, action: &str) -> Result<(), PgTrickleE
             let deps = crate::catalog::StDependency::get_for_st(st.pgt_id)?;
             for dep in &deps {
                 if dep.source_type == "TABLE" || dep.source_type == "FOREIGN_TABLE" {
-                    let drain_sql = format!(
-                        "TRUNCATE {}.changes_{}",
-                        change_schema,
-                        dep.source_relid.to_u32(),
-                    );
+                    let buf =
+                        crate::cdc::buffer_qualified_name_for_oid(&change_schema, dep.source_relid);
+                    let drain_sql = format!("TRUNCATE {buf}");
                     if let Err(e) = Spi::run(&drain_sql) {
                         pgrx::warning!(
                             "reset_fuse: failed to drain change buffer for source OID {}: {}",

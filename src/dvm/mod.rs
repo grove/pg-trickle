@@ -381,6 +381,10 @@ pub fn generate_delta_query(
     // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
     ctx.st_source_pgt_ids = resolve_st_source_pgt_ids(&source_oids);
 
+    // CITUS-4: Pre-resolve stable buffer names so the scan generator
+    // does not need to call SPI during SQL generation.
+    ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
+
     // DAG-4: Apply any active bypass table mappings from fused-chain execution.
     ctx.st_bypass_tables = crate::refresh::get_st_bypass_tables();
 
@@ -581,6 +585,10 @@ pub fn generate_delta_query_cached(
     // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
     ctx.st_source_pgt_ids = resolve_st_source_pgt_ids(&source_oids);
 
+    // CITUS-4: Pre-resolve stable buffer names so the scan generator
+    // does not need to call SPI during SQL generation.
+    ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
+
     let (template_sql, output_columns, diff_dedup, diff_has_key_changed) =
         ctx.differentiate_with_columns(&result.tree)?;
 
@@ -665,6 +673,20 @@ fn resolve_st_source_pgt_ids(source_oids: &[u32]) -> HashMap<u32, i64> {
         {
             map.insert(oid, pgt_id);
         }
+    }
+    map
+}
+
+/// CITUS-4: Resolve the change buffer base name for each source OID.
+///
+/// For base tables (not ST sources), the buffer is named
+/// `changes_{stable_name}` in v0.32.0+.  This avoids calling SPI from
+/// inside the SQL generator, which would panic in unit-test contexts.
+fn resolve_buffer_names_for_sources(source_oids: &[u32]) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    for &oid in source_oids {
+        let name = crate::cdc::buffer_base_name_for_oid(pgrx::pg_sys::Oid::from(oid));
+        map.insert(oid, name);
     }
     map
 }

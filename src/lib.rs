@@ -26,6 +26,7 @@ use pgrx::prelude::*;
 mod api;
 mod catalog;
 mod cdc;
+pub mod citus;
 mod config;
 pub mod dag;
 mod diagnostics;
@@ -285,6 +286,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     downstream_publication_name TEXT,
     freshness_deadline_ms BIGINT,
     st_partition_key TEXT,
+    -- CITUS-3: Placement of this stream table's storage in a Citus cluster.
+    st_placement    TEXT NOT NULL DEFAULT 'local',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -307,6 +310,10 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
+    -- CITUS-3: Stable name for the source table (v0.32.0+). NULL = pre-upgrade row.
+    source_stable_name   TEXT,
+    -- CITUS-3: Source placement in a Citus cluster: 'local', 'reference', 'distributed'.
+    source_placement     TEXT NOT NULL DEFAULT 'local',
     PRIMARY KEY (pgt_id, source_relid)
 );
 
@@ -348,7 +355,14 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_change_tracking (
     source_relid        OID PRIMARY KEY,
     slot_name           TEXT NOT NULL,
     last_consumed_lsn   PG_LSN,
-    tracked_by_pgt_ids   BIGINT[]
+    tracked_by_pgt_ids   BIGINT[],
+    -- CITUS-3: Stable hash name used for all pg_trickle-managed objects (v0.32.0+).
+    -- NULL = pre-upgrade row using OID-based object names (STAB-1 fallback).
+    source_stable_name  TEXT,
+    -- CITUS-3: How the source is placed in a Citus cluster.
+    source_placement    TEXT NOT NULL DEFAULT 'local',
+    -- CITUS-7: Per-node WAL frontier for distributed sources. NULL for local sources.
+    frontier_per_node   JSONB
 );
 
 -- Scheduler job table for parallel refresh dispatch

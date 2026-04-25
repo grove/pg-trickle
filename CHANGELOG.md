@@ -8,6 +8,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 <!-- TOC start -->
 - [Unreleased](#unreleased)
+- [0.32.0 — Citus: Stable Naming & Per-Source Frontier Foundation](#0320--citus-stable-naming--per-source-frontier-foundation)
 - [0.31.0 — Performance & Scheduler Intelligence](#0310--performance--scheduler-intelligence)
 - [0.30.0 — Pre-GA Correctness & Stability Sprint](#0300--pre-ga-correctness--stability-sprint)
 - [0.29.0 — Relay CLI (pgtrickle-relay)](#0290--relay-cli-pgtrickle-relay)
@@ -50,6 +51,61 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.32.0] — Citus: Stable Naming & Per-Source Frontier Foundation
+
+This release lays the foundation for world-class Citus support by replacing
+OID-based internal object names with stable hash-derived names and adding
+Citus cluster detection helpers.
+
+### Stable internal object naming
+
+pg_trickle now names every internal object (change buffer tables, trigger
+functions, WAL replication slots, publication names) using a short 16-character
+hex string derived from the schema-qualified source table name:
+
+```
+changes_a3f7b2c1d0e5f9a8       -- was: changes_12345
+pgt_cdc_fn_a3f7b2c1d0e5f9a8    -- was: pgt_cdc_fn_12345
+pgtrickle_a3f7b2c1d0e5f9a8     -- was: pgtrickle_12345
+```
+
+This name is identical on every Citus node, survives `pg_dump`/restore cycles,
+and survives OID reassignment after a major-version upgrade. Existing
+installations are upgraded automatically by the migration script — all existing
+objects are renamed in a single transaction with no downtime.
+
+The change is invisible to end users: no SQL API changes, no configuration
+changes, no behaviour changes on single-node PostgreSQL.
+
+### Citus cluster detection
+
+A new internal module (`src/citus.rs`) provides helpers to detect whether Citus
+is loaded and how a given source table is distributed (local, reference, or
+distributed). This information is stored in the catalog and will drive per-node
+CDC and apply strategies in v0.35.0.
+
+### New catalog columns
+
+Three catalog tables gain new columns:
+
+- `pgtrickle.pgt_stream_tables`: `st_placement TEXT DEFAULT 'local'`
+- `pgtrickle.pgt_dependencies`: `source_stable_name TEXT`, `source_placement TEXT DEFAULT 'local'`
+- `pgtrickle.pgt_change_tracking`: `source_stable_name TEXT`, `source_placement TEXT DEFAULT 'local'`, `frontier_per_node JSONB`
+
+### New SQL function
+
+`pgtrickle.source_stable_name(oid) → TEXT` — returns the 16-character stable
+hash for any source relation by OID. Useful for diagnostics.
+
+### Upgrade notes
+
+The `0.31.0 → 0.32.0` migration script handles all object renames
+automatically. Replication slots are renamed if the PostgreSQL version is 15+;
+on older versions a manual rename step is logged as a NOTICE. Existing change
+buffer data is preserved — only the table and function names change.
 
 ---
 

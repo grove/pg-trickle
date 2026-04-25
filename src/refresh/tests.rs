@@ -1605,7 +1605,7 @@ mod pg_tests {
 
         let prev_frontier = st.frontier.clone();
         assert!(
-            !prev_frontier.is_empty(),
+            prev_frontier.as_ref().map_or(false, |f| !f.is_empty()),
             "Frontier should not be empty after FULL refresh"
         );
 
@@ -1615,9 +1615,11 @@ mod pg_tests {
         Spi::run("DELETE FROM public.test_refresh_src WHERE id = 2");
 
         let new_frontier = crate::version::capture_current_frontier().expect("new frontier");
+        let prev_frontier_ref = prev_frontier.as_ref().expect("prev_frontier must be Some");
 
-        let (inserted, deleted) = execute_differential_refresh(&st, &prev_frontier, &new_frontier)
-            .expect("differential refresh should succeed");
+        let (inserted, deleted) =
+            execute_differential_refresh(&st, prev_frontier_ref, &new_frontier)
+                .expect("differential refresh should succeed");
 
         assert!(inserted > 0, "should have inserted rows");
         assert!(deleted > 0, "should have deleted rows");

@@ -245,7 +245,12 @@ fn check_for_delete_changes(
 
     // ── DIFFERENTIAL mode: query change buffer tables via LSN ─────────
     for &oid in source_oids {
-        let change_table = format!("{}.changes_{}", quote_ident(&ctx.change_buffer_schema), oid,);
+        let buf_name = ctx
+            .source_buffer_names
+            .get(&oid)
+            .cloned()
+            .unwrap_or_else(|| format!("changes_{oid}"));
+        let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
         let prev_lsn = ctx.prev_frontier.get_lsn(oid);
 
         let check_sql = format!(
@@ -1854,11 +1859,12 @@ fn generate_change_buffer_from(
             }
 
             // ── DIFFERENTIAL mode: read INSERT + UPDATE NEW rows ─────────
-            let change_table = format!(
-                "{}.changes_{}",
-                quote_ident(&ctx.change_buffer_schema),
-                table_oid,
-            );
+            let buf_name = ctx
+                .source_buffer_names
+                .get(table_oid)
+                .cloned()
+                .unwrap_or_else(|| format!("changes_{table_oid}"));
+            let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
 
             // Use typed columns from the change buffer (new_* for INSERT
@@ -1977,11 +1983,12 @@ fn generate_old_change_buffer_from(
                 ));
             }
 
-            let change_table = format!(
-                "{}.changes_{}",
-                quote_ident(&ctx.change_buffer_schema),
-                table_oid,
-            );
+            let buf_name = ctx
+                .source_buffer_names
+                .get(table_oid)
+                .cloned()
+                .unwrap_or_else(|| format!("changes_{table_oid}"));
+            let change_table = format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name);
             let prev_lsn = ctx.get_prev_lsn(*table_oid);
 
             let col_refs: Vec<String> = columns

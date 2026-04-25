@@ -1455,20 +1455,22 @@ pub fn gather_change_ratio(st: &StreamTableMeta) -> Option<f64> {
         }
         let oid = dep.source_relid.to_u32();
 
-        // Count pending change buffer rows
-        let changes = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM {}.changes_{}",
-            change_schema, oid,
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // Count pending change buffer rows (v0.32.0+: stable buffer name)
+        let buf =
+            crate::cdc::buffer_qualified_name_for_oid(&change_schema, pgrx::pg_sys::Oid::from(oid));
+        // SAFETY: `buf` is constructed by buffer_qualified_name_for_oid from a
+        // PostgreSQL OID — it is never user input. PostgreSQL does not allow bind
+        // parameters as FROM-clause table references, so format! is required here.
+        let changes = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         total_changes += changes;
 
         // Get source table reltuples estimate
-        let tuples = Spi::get_one::<f64>(&format!(
-            "SELECT GREATEST(reltuples, 1) FROM pg_class WHERE oid = {}",
-            oid,
-        ))
+        let tuples = Spi::get_one_with_args::<f64>(
+            "SELECT GREATEST(reltuples, 1) FROM pg_class WHERE oid = $1::oid",
+            &[(oid as i64).into()],
+        )
         .unwrap_or(Some(1.0))
         .unwrap_or(1.0);
         total_reltuples += tuples;

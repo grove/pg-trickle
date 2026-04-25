@@ -147,25 +147,32 @@ pub(super) fn setup_cdc_for_source(
         }
 
         // F15: Resolve the minimal set of columns needed for CDC capture.
-        // Uses the union of `columns_used` across all downstream STs for this
-        // source, always including PK columns. Falls back to full column capture
-        // when any ST uses `SELECT *` (columns_used = NULL) or on first-time setup.
         let col_defs = cdc::resolve_referenced_column_defs(source_oid)?;
 
+        // CITUS-4: Compute stable_name for this source.
+        let src_id = crate::citus::SourceIdentifier::from_oid(source_oid)?;
+
         // Create the change buffer table (with typed columns + pk_hash always)
-        cdc::create_change_buffer_table(source_oid, change_schema, &col_defs)?;
+        cdc::create_change_buffer_table(source_oid, change_schema, &col_defs, &src_id.stable_name)?;
 
         // Create the CDC trigger on the source table (typed per-column INSERTs)
-        let trigger_name =
-            cdc::create_change_trigger(source_oid, change_schema, &pk_columns, &col_defs)?;
+        let trigger_name = cdc::create_change_trigger(
+            source_oid,
+            change_schema,
+            &pk_columns,
+            &col_defs,
+            &src_id.stable_name,
+        )?;
 
         // Insert tracking record
         Spi::run_with_args(
-            "INSERT INTO pgtrickle.pgt_change_tracking (source_relid, slot_name, tracked_by_pgt_ids) \
-             VALUES ($1, $2, ARRAY[$3])",
+            "INSERT INTO pgtrickle.pgt_change_tracking \
+             (source_relid, slot_name, source_stable_name, tracked_by_pgt_ids) \
+             VALUES ($1, $2, $3, ARRAY[$4])",
             &[
                 source_oid.into(),
                 trigger_name.as_str().into(),
+                src_id.stable_name.as_str().into(),
                 pgt_id.into(),
             ],
         )

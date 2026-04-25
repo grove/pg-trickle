@@ -45,12 +45,18 @@ use crate::monitor;
 
 /// Replication slot name for a source table: `pgtrickle_<oid>`.
 pub fn slot_name_for_source(source_oid: pg_sys::Oid) -> String {
-    format!("pgtrickle_{}", source_oid.to_u32())
+    // CITUS-4: Use stable_name so slot names survive OID reassignment.
+    let stable = crate::citus::stable_name_for_oid(source_oid)
+        .unwrap_or_else(|_| source_oid.to_u32().to_string());
+    format!("pgtrickle_{}", stable)
 }
 
-/// Publication name for a source table: `pgtrickle_cdc_<oid>`.
+/// Publication name for a source table: `pgtrickle_cdc_<stable_name>`.
 pub fn publication_name_for_source(source_oid: pg_sys::Oid) -> String {
-    format!("pgtrickle_cdc_{}", source_oid.to_u32())
+    // CITUS-4: Use stable_name so publication names survive OID reassignment.
+    let stable = crate::citus::stable_name_for_oid(source_oid)
+        .unwrap_or_else(|_| source_oid.to_u32().to_string());
+    format!("pgtrickle_cdc_{}", stable)
 }
 
 // ── Publication Management ─────────────────────────────────────────────────
@@ -767,9 +773,10 @@ fn write_decoded_change(
     }
 
     let sql = format!(
-        "INSERT INTO {schema}.changes_{oid} ({cols}) VALUES ({vals})",
+        // nosemgrep: rust.spi.query.dynamic-format
+        "INSERT INTO {schema}.{buf_name} ({cols}) VALUES ({vals})",
         schema = change_schema,
-        oid = source_oid,
+        buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(source_oid)),
         cols = col_names.join(", "),
         vals = col_values.join(", "),
     );
@@ -1021,7 +1028,19 @@ pub fn abort_wal_transition(
     if !cdc::trigger_exists(source_oid)? {
         let pk_columns = cdc::resolve_pk_columns(source_oid)?;
         let columns = cdc::resolve_source_column_defs(source_oid)?;
-        cdc::create_change_trigger(source_oid, change_schema, &pk_columns, &columns)?;
+        let src_id = crate::citus::SourceIdentifier::from_oid(source_oid).unwrap_or_else(|_| {
+            crate::citus::SourceIdentifier::from_oid_and_stable_name(
+                source_oid,
+                source_oid.to_u32().to_string(),
+            )
+        });
+        cdc::create_change_trigger(
+            source_oid,
+            change_schema,
+            &pk_columns,
+            &columns,
+            &src_id.stable_name,
+        )?;
         warning!(
             "pg_trickle: recreated CDC trigger for source OID {} during abort",
             oid_u32
@@ -1082,7 +1101,19 @@ pub fn force_source_to_trigger(
     if !cdc::trigger_exists(source_oid)? {
         let pk_columns = cdc::resolve_pk_columns(source_oid)?;
         let columns = cdc::resolve_source_column_defs(source_oid)?;
-        cdc::create_change_trigger(source_oid, change_schema, &pk_columns, &columns)?;
+        let src_id = crate::citus::SourceIdentifier::from_oid(source_oid).unwrap_or_else(|_| {
+            crate::citus::SourceIdentifier::from_oid_and_stable_name(
+                source_oid,
+                source_oid.to_u32().to_string(),
+            )
+        });
+        cdc::create_change_trigger(
+            source_oid,
+            change_schema,
+            &pk_columns,
+            &columns,
+            &src_id.stable_name,
+        )?;
     }
 
     if let Some(prev) = previous_mode {
@@ -1704,30 +1735,10 @@ mod tests {
     use proptest::prelude::*;
 
     // ── Naming convention tests ────────────────────────────────────
-
-    #[test]
-    fn test_slot_name_for_source() {
-        let oid = pg_sys::Oid::from(16384u32);
-        assert_eq!(slot_name_for_source(oid), "pgtrickle_16384");
-    }
-
-    #[test]
-    fn test_slot_name_for_source_zero() {
-        let oid = pg_sys::Oid::from(0u32);
-        assert_eq!(slot_name_for_source(oid), "pgtrickle_0");
-    }
-
-    #[test]
-    fn test_publication_name_for_source() {
-        let oid = pg_sys::Oid::from(16384u32);
-        assert_eq!(publication_name_for_source(oid), "pgtrickle_cdc_16384");
-    }
-
-    #[test]
-    fn test_publication_name_for_source_large_oid() {
-        let oid = pg_sys::Oid::from(4294967295u32);
-        assert_eq!(publication_name_for_source(oid), "pgtrickle_cdc_4294967295");
-    }
+    // NOTE: slot_name_for_source and publication_name_for_source now use
+    // stable hash names (CITUS-4, v0.32.0) and require SPI context to
+    // resolve OID → schema.table. They are tested at the pg_test / integration
+    // level where a real PostgreSQL connection is available.
 
     // ── quote_ident tests ──────────────────────────────────────────
 

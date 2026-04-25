@@ -204,6 +204,15 @@ pub struct DiffContext {
     /// for small deltas; EXCEPT ALL (hash-based) is more efficient when
     /// the delta approaches a significant fraction of the base table.
     pub fallback_leaf_oids: HashSet<u32>,
+    /// CITUS-4: Pre-resolved change buffer base names per source OID.
+    ///
+    /// Maps `table_oid` → base name of the change buffer table (e.g.
+    /// `changes_a3f7b2c1...` for v0.32.0+ stable naming).  Populated by
+    /// `dvm/mod.rs` using a SPI lookup before calling `differentiate()`.
+    /// When absent for a given OID, `diff_scan_change_buffer` falls back
+    /// to `changes_{oid}` (pre-v0.32.0 rows or unit-test contexts where
+    /// no SPI connection is available).
+    pub source_buffer_names: HashMap<u32, String>,
 }
 
 /// Build a unique cache key for an OpTree's pre-change snapshot CTE.
@@ -275,6 +284,7 @@ impl DiffContext {
             scan_delta_ctes: HashMap::new(),
             snapshot_cte_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
+            source_buffer_names: HashMap::new(),
         }
     }
 
@@ -310,6 +320,7 @@ impl DiffContext {
             scan_delta_ctes: HashMap::new(),
             snapshot_cte_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
+            source_buffer_names: HashMap::new(),
         }
     }
 
