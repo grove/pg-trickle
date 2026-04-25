@@ -186,7 +186,7 @@ pub fn create_change_trigger(
                 })?;
             }
             Spi::run(&format!(
-                "CREATE TRIGGER pg_trickle_cdc_ins_{name} \
+                "CREATE OR REPLACE TRIGGER pg_trickle_cdc_ins_{name} \
                  AFTER INSERT ON {table} \
                  REFERENCING NEW TABLE AS __pgt_new \
                  FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()",
@@ -202,7 +202,7 @@ pub fn create_change_trigger(
             })?;
             if !insert_only {
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_upd_{name} \
+                    "CREATE OR REPLACE TRIGGER pg_trickle_cdc_upd_{name} \
                      AFTER UPDATE ON {table} \
                      REFERENCING NEW TABLE AS __pgt_new OLD TABLE AS __pgt_old \
                      FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()",
@@ -217,7 +217,7 @@ pub fn create_change_trigger(
                     ))
                 })?;
                 Spi::run(&format!(
-                    "CREATE TRIGGER pg_trickle_cdc_del_{name} \
+                    "CREATE OR REPLACE TRIGGER pg_trickle_cdc_del_{name} \
                      AFTER DELETE ON {table} \
                      REFERENCING OLD TABLE AS __pgt_old \
                      FOR EACH STATEMENT EXECUTE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()",
@@ -244,7 +244,7 @@ pub fn create_change_trigger(
                 "INSERT OR UPDATE OR DELETE"
             };
             Spi::run(&format!(
-                "CREATE TRIGGER {trigger} \
+                "CREATE OR REPLACE TRIGGER {trigger} \
                  AFTER {events} ON {table} \
                  FOR EACH ROW EXECUTE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()",
                 trigger = trigger_name,
@@ -289,7 +289,7 @@ pub fn create_change_trigger(
 
     let truncate_trigger_name = format!("pg_trickle_cdc_truncate_{}", stable_name);
     let create_truncate_trigger_sql = format!(
-        "CREATE TRIGGER {trigger}
+        "CREATE OR REPLACE TRIGGER {trigger}
          AFTER TRUNCATE ON {table}
          FOR EACH STATEMENT EXECUTE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()",
         trigger = truncate_trigger_name,
