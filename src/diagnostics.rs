@@ -1458,12 +1458,12 @@ pub fn gather_change_ratio(st: &StreamTableMeta) -> Option<f64> {
         // Count pending change buffer rows (v0.32.0+: stable buffer name)
         let buf =
             crate::cdc::buffer_qualified_name_for_oid(&change_schema, pgrx::pg_sys::Oid::from(oid));
-        let changes = Spi::get_one_with_args::<i64>(
-            "SELECT count(*)::bigint FROM $1::regclass",
-            &[buf.as_str().into()],
-        )
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // SAFETY: `buf` is constructed by buffer_qualified_name_for_oid from a
+        // PostgreSQL OID — it is never user input. PostgreSQL does not allow bind
+        // parameters as FROM-clause table references, so format! is required here.
+        let changes = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         total_changes += changes;
 
         // Get source table reltuples estimate

@@ -1909,12 +1909,12 @@ pub fn check_slot_health_and_alert() {
             &change_schema,
             pgrx::pg_sys::Oid::from(relid as u32),
         );
-        let pending = Spi::get_one_with_args::<i64>(
-            "SELECT count(*)::bigint FROM $1::regclass",
-            &[buf.as_str().into()],
-        )
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // SAFETY: `buf` is constructed by buffer_qualified_name_for_oid from a
+        // PostgreSQL OID — it is never user input. PostgreSQL does not allow bind
+        // parameters as FROM-clause table references, so format! is required here.
+        let pending = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
 
         // F46 (G9.3): Alert if more than the configured threshold of pending changes
         let threshold = config::pg_trickle_buffer_alert_threshold();
@@ -3318,12 +3318,12 @@ pub fn check_change_buffer_sizes() -> Vec<(u32, i64)> {
             &change_schema,
             pgrx::pg_sys::Oid::from(oid_u32),
         );
-        let pending = Spi::get_one_with_args::<i64>(
-            "SELECT count(*)::bigint FROM $1::regclass",
-            &[buf.as_str().into()],
-        )
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // SAFETY: `buf` is constructed by buffer_qualified_name_for_oid from a
+        // PostgreSQL OID — it is never user input. PostgreSQL does not allow bind
+        // parameters as FROM-clause table references, so format! is required here.
+        let pending = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         if pending > threshold {
             over_threshold.push((oid_u32, pending));
         }
