@@ -751,16 +751,17 @@ async fn test_getting_started_step7_drop_in_order() {
     );
 
     // CDC triggers removed from base tables
-    // v0.32.0+: trigger names use stable hash suffix
+    // v0.32.0+: trigger names use stable hash suffix. Use pgtrickle.source_stable_name()
+    // which resolves via pg_class (survives pgt_change_tracking cleanup after all STs dropped).
     let dept_stable: String = db
         .query_scalar(&format!(
-            "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = {}",
+            "SELECT pgtrickle.source_stable_name({}::oid)",
             dept_oid
         ))
         .await;
     let empl_stable: String = db
         .query_scalar(&format!(
-            "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = {}",
+            "SELECT pgtrickle.source_stable_name({}::oid)",
             empl_oid
         ))
         .await;

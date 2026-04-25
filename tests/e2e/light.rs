@@ -657,9 +657,7 @@ impl E2eDb {
     pub async fn cdc_trigger_name(&self, source_oid: i64) -> String {
         let stable_name: String = self
             .query_scalar(&format!(
-                "SELECT source_stable_name \
-                 FROM pgtrickle.pgt_change_tracking \
-                 WHERE source_relid = {}",
+                "SELECT pgtrickle.source_stable_name({}::oid)",
                 source_oid
             ))
             .await;

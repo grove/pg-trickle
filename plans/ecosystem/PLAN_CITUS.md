@@ -595,18 +595,35 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
    threshold in P4.1 now only applies when sources are mixed
    (`Distributed` + `Reference`/`Local`). Instrument and tune in P6.3 for
    that case.
-3. **Source table count for slot budget (unanswered from #619).** erikmata
-   confirmed billions of rows but did not give a source table count. The
-   coordinator opens `N_sources × N_workers` simultaneous connections for
-   slot polling. We need a rough upper bound to size `max_connections` and
-   connection-pool guidance in the docs. Follow up in the discussion.
-4. **Dynamic query construction compatibility.** erikmata's system
-   "dynamically constructs quite complex queries." If this means the query
-   SQL varies per-execution, that is incompatible with pg_trickle (STs are
-   defined once at creation). If it means the user dynamically decides
-   *which* ST chain to deploy but each ST is fixed once created, that is
-   fine. Clarify before the Citus integration ships — ideally in the same
-   discussion thread.
+3. **Source table count and slot budget (resolved, 2026-04-25).** erikmata
+   confirmed "several hundreds, growing over time" of sources on a cluster of
+   1 coordinator + 9 worker nodes (144 shards, 16 per worker; shard count may
+   be adjusted after benchmarking — see ambiguity note below).
+
+   **Connection model correction:** the coordinator opens **`N_workers`
+   long-lived polling connections** (one per worker, batching all slot polls
+   for that worker in sequence), **not** `N_sources × N_workers`. Connection
+   pressure is a function of worker count only; adding more sources does not
+   add connections.
+
+   **Shard count does not affect slot count.** One logical replication slot is
+   created per source per worker regardless of how many shards the worker holds
+   for that table. A publication covers all local shards under one slot.
+   Slot formula: `max_replication_slots ≥ peak_source_count` per worker
+   (suggested: `peak_source_count × 1.5 + other_replication_consumers`).
+
+   **Still open — rebalancing ambiguity.** erikmata noted the shard count "will
+   be adapted depending on benchmarking". This is either (A) changing
+   `citus.shard_count` for newly created tables — fully fine, slots unaffected
+   — or (B) rebalancing existing shard placements across workers, which is the
+   deferred case: v0.33.0 detects a topology hash change and raises a hard error
+   rather than silently producing wrong results. Confirm with erikmata which case
+   is intended before v0.33.0 ships (follow up in discussion #619).
+4. **Dynamic query construction compatibility (resolved, 2026-04-25).**
+   Confirmed compatible. erikmata's system translates a conceptual model into
+   `create_stream_table()` calls at **design time** — the SQL is fixed at
+   creation; the "dynamic" part is choosing which ST chain to deploy, not
+   varying the SQL per execution. No action required.
 5. **Multi-database Citus.** Citus 13 supports multiple databases per
    cluster; each pg_trickle scheduler is per-database. No change
    expected, but verify in P6.2.
@@ -625,6 +642,13 @@ LSN tracking). P3–P5 are the Citus-specific deliverable.
 
 **Source topology:** All sources hash-distributed; no reference tables;
 PKs deterministic and never modified.
+
+**Confirmed cluster details (2026-04-25):** 1 coordinator + 9 worker nodes,
+144 shards / 16 per worker. Source table count: several hundreds, growing
+incrementally over time via design-time `create_stream_table()` calls generated
+by a conceptual-model translator (not runtime SQL generation — confirmed
+compatible in discussion #619, 2026-04-25). Shard count may be adjusted after
+benchmarking — see §9 OQ #3 for the open rebalancing ambiguity.
 
 **Pattern:** Chain of SQL-WITH expressions replaced with a chain of STs;
 lower-layer STs expected to reach billions of rows.
@@ -646,6 +670,14 @@ automatically selected by the all-distributed rule in P4.1.
 - **PK immutability is a pre-condition, not verified automatically**:
   using `DEFAULT` with mutable PKs causes silent data loss (see P3.3).
   The confirmed use case meets this pre-condition; other users may not.
+- **Frontend/background workload ratio**: the apply phase
+  (`DELETE + INSERT ON CONFLICT`) runs as background work and fans out
+  across worker nodes, competing with frontend queries for CPU and I/O on
+  each worker. Tune `pg_trickle.max_concurrent_refreshes`,
+  `pg_trickle.max_dynamic_refresh_workers`, and
+  `pg_trickle.max_parallel_workers` to reserve headroom. A dedicated
+  "tuning for mixed frontend/background workloads" section is planned for
+  `docs/integrations/citus.md`.
 
 ---
 

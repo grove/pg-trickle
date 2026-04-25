@@ -1344,8 +1344,11 @@ pub fn alter_change_buffer_add_columns(
     // Resolve current source columns.
     let source_cols = resolve_source_column_defs(source_oid)?;
 
+    // Resolve the buffer base name (stable name or OID fallback).
+    let buf_base = buffer_base_name_for_oid(source_oid);
+
     // Query existing columns in the change buffer.
-    let buffer_table = format!("{}.changes_{}", change_schema, source_oid.to_u32());
+    let buffer_table = format!("{}.{}", change_schema, buf_base);
     let existing_sql = format!(
         "SELECT attname::text FROM pg_attribute \
          WHERE attrelid = '{}'::regclass AND attnum > 0 AND NOT attisdropped",
@@ -1370,9 +1373,9 @@ pub fn alter_change_buffer_add_columns(
     // Ensure changed_cols VARBIT column exists (WB-1: migrated from BIGINT).
     if !existing_set.contains("changed_cols") {
         let add_sql = format!(
-            "ALTER TABLE {schema}.changes_{oid} ADD COLUMN IF NOT EXISTS changed_cols VARBIT",
+            "ALTER TABLE {schema}.{buf} ADD COLUMN IF NOT EXISTS changed_cols VARBIT",
             schema = change_schema,
-            oid = source_oid.to_u32(),
+            buf = buf_base,
         );
         if let Err(e) = Spi::run(&add_sql) {
             pgrx::debug1!(
@@ -1388,19 +1391,19 @@ pub fn alter_change_buffer_add_columns(
              FROM pg_attribute a \
              JOIN pg_class c ON c.oid = a.attrelid \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = '{schema}' AND c.relname = 'changes_{oid}' \
+             WHERE n.nspname = '{schema}' AND c.relname = '{buf}' \
              AND a.attname = 'changed_cols' AND a.attnum > 0 AND NOT a.attisdropped",
             schema = change_schema,
-            oid = source_oid.to_u32(),
+            buf = buf_base,
         ))
         .unwrap_or(Some(false))
         .unwrap_or(false);
         if is_bigint {
             let migrate_sql = format!(
-                "ALTER TABLE {schema}.changes_{oid} \
+                "ALTER TABLE {schema}.{buf} \
                  ALTER COLUMN changed_cols TYPE VARBIT USING NULL",
                 schema = change_schema,
-                oid = source_oid.to_u32(),
+                buf = buf_base,
             );
             if let Err(e) = Spi::run(&migrate_sql) {
                 pgrx::debug1!(
@@ -1417,16 +1420,16 @@ pub fn alter_change_buffer_add_columns(
             let qcol = col_name.replace('"', "\"\"");
             let qtype = col_type.as_str();
             let add_new = format!(
-                "ALTER TABLE {schema}.changes_{oid} \
+                "ALTER TABLE {schema}.{buf} \
                  ADD COLUMN IF NOT EXISTS \"new_{qcol}\" {qtype}",
                 schema = change_schema,
-                oid = source_oid.to_u32(),
+                buf = buf_base,
             );
             let add_old = format!(
-                "ALTER TABLE {schema}.changes_{oid} \
+                "ALTER TABLE {schema}.{buf} \
                  ADD COLUMN IF NOT EXISTS \"old_{qcol}\" {qtype}",
                 schema = change_schema,
-                oid = source_oid.to_u32(),
+                buf = buf_base,
             );
             Spi::run(&add_new).map_err(|e| {
                 PgTrickleError::SpiError(format!(
