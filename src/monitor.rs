@@ -1904,12 +1904,14 @@ pub fn check_slot_health_and_alert() {
 
     for (trigger_name, relid) in sources {
         // Check buffer table row count as a proxy for staleness
-        let pending = Spi::get_one::<i64>(&format!(
-            "SELECT count(*)::bigint FROM {}.changes_{}",
-            change_schema, relid
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // v0.32.0+: buffer table uses stable hash name
+        let buf = crate::cdc::buffer_qualified_name_for_oid(
+            &change_schema,
+            pgrx::pg_sys::Oid::from(relid as u32),
+        );
+        let pending = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {buf}"))
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
 
         // F46 (G9.3): Alert if more than the configured threshold of pending changes
         let threshold = config::pg_trickle_buffer_alert_threshold();
@@ -3308,13 +3310,14 @@ pub fn check_change_buffer_sizes() -> Vec<(u32, i64)> {
     let mut over_threshold = Vec::new();
     for relid in sources {
         let oid_u32 = relid as u32;
-        // nosemgrep: semgrep.rust.spi.query.dynamic-format — change_schema is an internal constant; oid_u32 is a u32 PostgreSQL OID
-        let pending = Spi::get_one::<i64>(&format!(
-            "SELECT count(*)::bigint FROM {}.changes_{}",
-            change_schema, oid_u32
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // v0.32.0+: buffer table uses stable hash name
+        let buf = crate::cdc::buffer_qualified_name_for_oid(
+            &change_schema,
+            pgrx::pg_sys::Oid::from(oid_u32),
+        );
+        let pending = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {buf}"))
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         if pending > threshold {
             over_threshold.push((oid_u32, pending));
         }

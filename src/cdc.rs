@@ -58,7 +58,7 @@ use crate::error::PgTrickleError;
 pub fn buffer_base_name_for_oid(source_oid: pg_sys::Oid) -> String {
     let stable = Spi::get_one_with_args::<String>(
         "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
-        &[source_oid.into()],
+        &[(source_oid.to_u32() as i64).into()],
     )
     .unwrap_or(None);
 
@@ -81,7 +81,7 @@ pub fn buffer_qualified_name_for_oid(change_schema: &str, source_oid: pg_sys::Oi
 pub fn get_cdc_name_for_source(source_oid: pg_sys::Oid) -> String {
     Spi::get_one_with_args::<String>(
         "SELECT source_stable_name FROM pgtrickle.pgt_change_tracking WHERE source_relid = $1",
-        &[source_oid.into()],
+        &[(source_oid.to_u32() as i64).into()],
     )
     .unwrap_or(None)
     .unwrap_or_else(|| source_oid.to_u32().to_string())

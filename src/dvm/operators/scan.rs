@@ -218,8 +218,14 @@ fn diff_scan_change_buffer(
     } else {
         // CITUS-4: Use stable_name (from pgt_change_tracking) so the generated delta SQL
         // references the correct change buffer table (created as changes_{stable_name}).
-        let buf_name =
-            crate::cdc::buffer_base_name_for_oid(pgrx::pg_sys::Oid::from(table_oid));
+        // The name is pre-resolved by the caller (dvm/mod.rs) via SPI and stored in
+        // ctx.source_buffer_names.  In unit-test contexts (no SPI), the map is empty
+        // and we fall back to the OID-based name.
+        let buf_name = ctx
+            .source_buffer_names
+            .get(&table_oid)
+            .cloned()
+            .unwrap_or_else(|| format!("changes_{table_oid}"));
         format!("{}.{}", quote_ident(&ctx.change_buffer_schema), buf_name)
     };
 

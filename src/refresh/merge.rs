@@ -2251,25 +2251,32 @@ pub fn execute_differential_refresh(
     // Note: ST-on-ST queries use `changes_pgt_*` buffers (handled by
     // resolve_delta_template), so `changes_NNNNN` patterns should only
     // reference TABLE/FT/MV sources.
+    // CITUS-4: v0.32.0+ stable names look like `changes_7ccce342f79debe9`
+    // (16 hex chars). We must skip these — only extract purely decimal tokens
+    // as OID references; any token that contains a hex letter (a-f) is a
+    // stable hash name, not an OID.
     {
-        let re_pattern = "changes_(\\d+)";
         let mut sql_oids: Vec<u32> = Vec::new();
         let merge_sql_ref = &resolved.merge_sql;
         let mut search_from = 0usize;
         while let Some(pos) = merge_sql_ref[search_from..].find("changes_") {
             let start = search_from + pos + 8; // skip "changes_"
-            let end = merge_sql_ref[start..]
-                .find(|c: char| !c.is_ascii_digit())
+            // Scan the full token (alphanumeric after "changes_")
+            let token_end = merge_sql_ref[start..]
+                .find(|c: char| !c.is_ascii_alphanumeric())
                 .map(|p| start + p)
                 .unwrap_or(merge_sql_ref.len());
-            if let Ok(oid) = merge_sql_ref[start..end].parse::<u32>()
+            let token = &merge_sql_ref[start..token_end];
+            // Only treat as an OID reference if the token is purely decimal.
+            // Tokens containing hex letters (a-f) are stable hash names.
+            if token.chars().all(|c| c.is_ascii_digit())
+                && let Ok(oid) = token.parse::<u32>()
                 && !sql_oids.contains(&oid)
             {
                 sql_oids.push(oid);
             }
-            search_from = end;
+            search_from = token_end;
         }
-        let _ = re_pattern; // suppress unused warning
         let missing_in_sql: Vec<&u32> = sql_oids
             .iter()
             .filter(|oid| !all_dep_oids.contains(oid))

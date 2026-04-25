@@ -1455,13 +1455,12 @@ pub fn gather_change_ratio(st: &StreamTableMeta) -> Option<f64> {
         }
         let oid = dep.source_relid.to_u32();
 
-        // Count pending change buffer rows
-        let changes = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM {}.changes_{}",
-            change_schema, oid,
-        ))
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
+        // Count pending change buffer rows (v0.32.0+: stable buffer name)
+        let buf =
+            crate::cdc::buffer_qualified_name_for_oid(&change_schema, pgrx::pg_sys::Oid::from(oid));
+        let changes = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {buf}"))
+            .unwrap_or(Some(0))
+            .unwrap_or(0);
         total_changes += changes;
 
         // Get source table reltuples estimate

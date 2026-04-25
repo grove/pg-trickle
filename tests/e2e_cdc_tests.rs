@@ -416,12 +416,8 @@ async fn test_multiple_sources_independent_buffers() {
     // Extract the table name from the qualified name for table_exists
     let buf_a_name = buf_a.trim_start_matches("pgtrickle_changes.").to_string();
     let buf_b_name = buf_b.trim_start_matches("pgtrickle_changes.").to_string();
-    let buf_a_exists = db
-        .table_exists("pgtrickle_changes", &buf_a_name)
-        .await;
-    let buf_b_exists = db
-        .table_exists("pgtrickle_changes", &buf_b_name)
-        .await;
+    let buf_a_exists = db.table_exists("pgtrickle_changes", &buf_a_name).await;
+    let buf_b_exists = db.table_exists("pgtrickle_changes", &buf_b_name).await;
 
     assert!(buf_a_exists, "src_a should have its own change buffer");
     assert!(buf_b_exists, "src_b should have its own change buffer");
