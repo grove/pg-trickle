@@ -273,7 +273,7 @@ coordination.  Set the `pgt_st_locks` lease expiry **≥**
 SET pg_ripple.merge_fence_timeout_ms = 30000;   -- 30 seconds
 
 -- pg_trickle side:
-SET pg_trickle.st_lock_lease_ms = 45000;        -- 45 seconds ≥ 30 s fence
+SET pg_trickle.citus_st_lock_lease_ms = 45000;  -- 45 seconds (≥ 30s fence)
 ```
 
 Monitor both together:
