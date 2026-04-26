@@ -75,7 +75,16 @@ WHERE ct.source_placement = 'distributed';
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- STEP 4: Replace create_stream_table with new signature (output_distribution_column)
+-- Drop the old signature first — PostgreSQL cannot replace a function whose
+-- argument list has changed, so CREATE OR REPLACE would silently create a
+-- second overload rather than replacing the original.
 -- ─────────────────────────────────────────────────────────────────────────
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(
+        TEXT, TEXT,
+        TEXT, TEXT,
+        bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT, double precision
+);
 
 CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
         "name" TEXT,
@@ -98,7 +107,14 @@ AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- STEP 5: Replace create_stream_table_if_not_exists with new signature
+-- Drop old signature first (see STEP 4 comment).
 -- ─────────────────────────────────────────────────────────────────────────
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(
+        TEXT, TEXT,
+        TEXT, TEXT,
+        bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT, double precision
+);
 
 CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
         "name" TEXT,
@@ -121,7 +137,14 @@ AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- STEP 6: Replace create_or_replace_stream_table with new signature
+-- Drop old signature first (see STEP 4 comment).
 -- ─────────────────────────────────────────────────────────────────────────
+
+DROP FUNCTION IF EXISTS pgtrickle."create_or_replace_stream_table"(
+        TEXT, TEXT,
+        TEXT, TEXT,
+        bool, TEXT, TEXT, TEXT, bool, bool, TEXT, INT, double precision
+);
 
 CREATE OR REPLACE FUNCTION pgtrickle."create_or_replace_stream_table"(
         "name" TEXT,
