@@ -324,6 +324,469 @@ pub fn shard_placements(table_oid: pg_sys::Oid) -> Vec<NodeAddr> {
     })
 }
 
+// ── Pre-flight checks (COORD-7, COORD-8) ─────────────────────────────────────
+
+/// COORD-7: Check that all active Citus worker nodes are running the same
+/// pg_trickle version as the coordinator.
+///
+/// When `is_citus_loaded()` is false, returns `Ok(())` immediately.
+/// On version mismatch, returns an error listing the offending workers.
+///
+/// # Note
+/// Requires the `dblink` extension installed on the coordinator and that
+/// `pg_trickle` is also installed (with identical schema) on every worker.
+pub fn check_citus_version_compat() -> Result<(), PgTrickleError> {
+    if !is_citus_loaded() {
+        return Ok(());
+    }
+
+    let local_version =
+        Spi::get_one::<String>("SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'")
+            .map_err(|e| PgTrickleError::SpiError(format!("local pg_trickle version: {e}")))?
+            .unwrap_or_else(|| "unknown".into());
+
+    let dbname = Spi::get_one::<String>("SELECT current_database()")
+        .map_err(|e| PgTrickleError::SpiError(format!("current_database: {e}")))?
+        .unwrap_or_else(|| "postgres".into());
+
+    let workers = worker_nodes();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for w in &workers {
+        let connstr = worker_conn_string(w, &dbname);
+        let connstr_esc = connstr.replace('\'', "''");
+
+        let remote_query = "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'";
+        let remote_query_esc = remote_query.replace('\'', "''");
+
+        let sql =
+            format!("SELECT val FROM dblink('{connstr_esc}', '{remote_query_esc}') AS t(val text)");
+        let remote_version = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_query_esc are SQL-escaped server-controlled Citus catalog values
+            .unwrap_or(None)
+            .unwrap_or_else(|| "not_installed".into());
+
+        if remote_version != local_version {
+            mismatches.push(format!(
+                "{}:{} has pg_trickle {} (coordinator has {})",
+                w.node_name, w.node_port, remote_version, local_version
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "pg_trickle version mismatch across Citus nodes: {}",
+            mismatches.join("; ")
+        )));
+    }
+
+    Ok(())
+}
+
+/// COORD-8: Verify that `wal_level = logical` is set on each active Citus
+/// worker node.
+///
+/// When `is_citus_loaded()` is false, returns `Ok(())` immediately.
+/// Returns an error listing any workers with insufficient `wal_level`.
+pub fn check_worker_wal_levels() -> Result<(), PgTrickleError> {
+    if !is_citus_loaded() {
+        return Ok(());
+    }
+
+    let dbname = Spi::get_one::<String>("SELECT current_database()")
+        .map_err(|e| PgTrickleError::SpiError(format!("current_database: {e}")))?
+        .unwrap_or_else(|| "postgres".into());
+
+    let workers = worker_nodes();
+    let mut failures: Vec<String> = Vec::new();
+
+    for w in &workers {
+        let connstr = worker_conn_string(w, &dbname);
+        let connstr_esc = connstr.replace('\'', "''");
+
+        let remote_query = "SELECT current_setting('wal_level')";
+        let remote_query_esc = remote_query.replace('\'', "''");
+
+        let sql =
+            format!("SELECT val FROM dblink('{connstr_esc}', '{remote_query_esc}') AS t(val text)");
+        let wal_level = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_query_esc are SQL-escaped server-controlled Citus catalog values
+            .unwrap_or(None)
+            .unwrap_or_else(|| "unknown".into());
+
+        if wal_level != "logical" {
+            failures.push(format!(
+                "{}:{} has wal_level='{}' (need 'logical')",
+                w.node_name, w.node_port, wal_level
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(format!(
+            "Citus worker(s) do not have wal_level=logical: {}. \
+             Set wal_level=logical on each worker and restart PostgreSQL.",
+            failures.join("; ")
+        )));
+    }
+
+    Ok(())
+}
+
+// ── Cross-node coordination: pgt_st_locks ────────────────────────────────────
+
+/// Attempt to acquire a named advisory lock in `pgtrickle.pgt_st_locks`.
+///
+/// Uses `INSERT … ON CONFLICT DO NOTHING` so the operation is safe for
+/// concurrent callers on multiple Citus workers.  The lease expires at
+/// `now() + lease_ms * interval '1 ms'`; stale entries from crashed holders
+/// are purged before each acquisition attempt.
+///
+/// Returns `true` if the lock was acquired, `false` if another holder owns it.
+pub fn try_acquire_st_lock(
+    lock_key: &str,
+    holder: &str,
+    lease_ms: i64,
+) -> Result<bool, PgTrickleError> {
+    // Expire any stale locks first so crashed holders don't block forever.
+    let expired = Spi::get_one::<i64>(
+        "DELETE FROM pgtrickle.pgt_st_locks WHERE expires_at < now() RETURNING 1",
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("pgt_st_locks expire: {e}")))?
+    .unwrap_or(0);
+    if expired > 0 {
+        pgrx::debug1!(
+            "[pg_trickle] pgt_st_locks: expired {} stale lock(s)",
+            expired
+        );
+    }
+
+    // Attempt acquisition.
+    let acquired = Spi::connect_mut(|client| {
+        let rows = client
+            .update(
+                "INSERT INTO pgtrickle.pgt_st_locks \
+                     (lock_key, holder, acquired_at, expires_at) \
+                 VALUES ($1, $2, now(), now() + ($3 * interval '1 ms')) \
+                 ON CONFLICT (lock_key) DO NOTHING",
+                None,
+                &[lock_key.into(), holder.into(), lease_ms.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(format!("pgt_st_locks insert: {e}")))?;
+        Ok::<bool, PgTrickleError>(!rows.is_empty())
+    })?;
+
+    Ok(acquired)
+}
+
+/// Release a named lock in `pgtrickle.pgt_st_locks` held by `holder`.
+///
+/// No-ops silently when the lock does not exist or is owned by a different holder.
+pub fn release_st_lock(lock_key: &str, holder: &str) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "DELETE FROM pgtrickle.pgt_st_locks WHERE lock_key = $1 AND holder = $2",
+        &[lock_key.into(), holder.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("pgt_st_locks delete: {e}")))
+}
+
+/// Extend the expiry of an existing lock.
+///
+/// Returns `true` if the lock was found (and renewed), `false` otherwise.
+pub fn extend_st_lock(lock_key: &str, holder: &str, lease_ms: i64) -> Result<bool, PgTrickleError> {
+    let renewed = Spi::connect_mut(|client| {
+        let rows = client
+            .update(
+                "UPDATE pgtrickle.pgt_st_locks \
+                 SET expires_at = now() + ($3 * interval '1 ms') \
+                 WHERE lock_key = $1 AND holder = $2",
+                None,
+                &[lock_key.into(), holder.into(), lease_ms.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(format!("pgt_st_locks extend: {e}")))?;
+        Ok::<bool, PgTrickleError>(!rows.is_empty())
+    })?;
+    Ok(renewed)
+}
+
+// ── Per-worker WAL CDC helpers ────────────────────────────────────────────────
+
+/// Build a `dblink`-compatible connection string for a Citus worker node.
+///
+/// Reads the current database name from `current_database()` and combines it
+/// with the node's hostname and port.  The resulting string is suitable for
+/// passing to `dblink(connstr, query)`.
+///
+/// # Security
+/// Connection strings are constructed from catalog values (`pg_dist_node`)
+/// plus the current database name, never from user-supplied input.
+pub fn worker_conn_string(worker: &NodeAddr, dbname: &str) -> String {
+    format!(
+        "host={} port={} dbname={} options='-c enable_seqscan=on'",
+        worker.node_name.replace('\'', "''"),
+        worker.node_port,
+        dbname.replace('\'', "''"),
+    )
+}
+
+/// Poll a logical replication slot on a remote Citus worker via `dblink`.
+///
+/// Calls `pg_logical_slot_get_changes(slot_name, NULL, $max_changes, …)` on
+/// the remote worker and writes decoded changes into the local change buffer
+/// via the standard WAL decoder pipeline (same `test_decoding` text format
+/// as local slots).
+///
+/// # Prerequisites
+/// - `dblink` extension must be installed on the coordinator.
+/// - The coordinator's PostgreSQL role must have login privileges on the worker.
+/// - The replication slot must already exist on the worker (see `ensure_worker_slot`).
+///
+/// Source descriptor for [`poll_worker_slot_changes`].
+pub struct WorkerPollSource<'a> {
+    pub change_schema: &'a str,
+    pub source_qualified_table: &'a str,
+    pub source_oid: pg_sys::Oid,
+    pub pk_columns: &'a [String],
+    pub columns: &'a [(String, String)],
+}
+
+/// Returns the number of change rows written to the local buffer.
+pub fn poll_worker_slot_changes(
+    worker: &NodeAddr,
+    slot_name: &str,
+    max_changes: i64,
+    src: &WorkerPollSource<'_>,
+) -> Result<i64, PgTrickleError> {
+    let change_schema = src.change_schema;
+    let source_qualified_table = src.source_qualified_table;
+    let source_oid = src.source_oid;
+    let pk_columns = src.pk_columns;
+    let columns = src.columns;
+    // Get current database name.
+    let dbname = Spi::get_one::<String>("SELECT current_database()")
+        .map_err(|e| PgTrickleError::SpiError(format!("current_database: {e}")))?
+        .unwrap_or_else(|| "postgres".into());
+
+    let connstr = worker_conn_string(worker, &dbname);
+    let connstr_esc = connstr.replace('\'', "''");
+    let slot_esc = slot_name.replace('\'', "''");
+
+    // Build the remote query that drains the slot.
+    let remote_sql = format!(
+        "SELECT lsn::text, xid::text, data \
+         FROM pg_logical_slot_get_changes('{}', NULL, {}, 'include-timestamp', 'on')",
+        slot_esc, max_changes,
+    );
+    let remote_sql_esc = remote_sql.replace('\'', "''");
+
+    // Materialize dblink results into a temp table for batch processing.
+    let temp_name = format!("__pgt_worker_changes_{}", source_oid.to_u32());
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {temp_name}")); // nosemgrep: rust.spi.run.dynamic-format — temp_name is derived from a numeric OID, not user input
+    let create_sql = format!(
+        "CREATE TEMP TABLE {temp_name} ON COMMIT DROP AS \
+         SELECT lsn, xid, data \
+         FROM dblink('{connstr_esc}', '{remote_sql_esc}') \
+         AS t(lsn text, xid text, data text)"
+    );
+    Spi::run(&create_sql).map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "dblink poll worker {}:{} slot '{}': {e}",
+            worker.node_name, worker.node_port, slot_name
+        ))
+    })?;
+
+    // Delegate parsing and buffer-write to the WAL decoder.
+    crate::wal_decoder::write_worker_changes_to_buffer(
+        &temp_name,
+        source_qualified_table,
+        change_schema,
+        source_oid,
+        pk_columns,
+        columns,
+    )
+}
+
+/// Ensure a logical replication slot exists on a remote Citus worker via `dblink`.
+///
+/// Creates the slot only if it does not already exist, making this safe to
+/// call on every scheduler tick.  The remote slot uses the `test_decoding`
+/// plugin (same as local slots).
+///
+/// Returns `Ok(())` on success or if the slot already exists.
+pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTrickleError> {
+    let dbname = Spi::get_one::<String>("SELECT current_database()")
+        .map_err(|e| PgTrickleError::SpiError(format!("current_database: {e}")))?
+        .unwrap_or_else(|| "postgres".into());
+
+    let connstr = worker_conn_string(worker, &dbname);
+    let connstr_esc = connstr.replace('\'', "''");
+    let slot_esc = slot_name.replace('\'', "''");
+
+    // Check if slot exists on the remote worker.
+    let remote_check =
+        format!("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{slot_esc}'");
+    let remote_check_esc = remote_check.replace('\'', "''");
+
+    let slot_check_sql = format!(
+        "SELECT val::bigint FROM dblink('{connstr_esc}', '{remote_check_esc}') AS t(val text)"
+    );
+    let exists_count = Spi::get_one::<i64>(&slot_check_sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_check_esc are SQL-escaped server-controlled Citus catalog values
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "dblink check slot on {}:{}: {e}",
+                worker.node_name, worker.node_port
+            ))
+        })?
+        .unwrap_or(0);
+
+    if exists_count > 0 {
+        return Ok(());
+    }
+
+    // Create the slot on the remote worker.
+    let remote_create =
+        format!("SELECT pg_create_logical_replication_slot('{slot_esc}', 'test_decoding')");
+    let remote_create_esc = remote_create.replace('\'', "''");
+
+    Spi::run(&format!( // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; connstr_esc/remote_create_esc use SQL single-quote escaping on internal Citus catalog values only
+        "SELECT * FROM dblink('{connstr_esc}', '{remote_create_esc}') AS t(slot_name text, lsn text)"
+    ))
+    .map_err(|e| {
+        PgTrickleError::SpiError(format!(
+            "dblink create slot '{}' on {}:{}: {e}",
+            slot_name, worker.node_name, worker.node_port
+        ))
+    })?;
+
+    pgrx::info!(
+        "[pg_trickle] created WAL slot '{}' on Citus worker {}:{}",
+        slot_name,
+        worker.node_name,
+        worker.node_port,
+    );
+
+    Ok(())
+}
+
+// ── pg_ripple VP-promotion notification handler ───────────────────────────────
+
+/// Parsed payload from a `pg_ripple.vp_promoted` NOTIFY.
+///
+/// pg_ripple v0.58.0 emits this notification after distributing a VP delta
+/// table via `create_distributed_table()`.  The payload JSON carries:
+///
+/// - `table`              — fully-qualified logical table name
+///   (e.g. `_pg_ripple.vp_42_delta`)
+/// - `shard_count`        — number of Citus shards created
+/// - `shard_table_prefix` — physical shard name prefix on workers
+///   (e.g. `_pg_ripple.vp_42_delta_`)
+/// - `predicate_id`       — pg_ripple predicate integer ID
+#[derive(Debug)]
+pub struct VpPromotedPayload {
+    pub table: String,
+    pub shard_count: i64,
+    pub shard_table_prefix: String,
+    pub predicate_id: i64,
+}
+
+/// Parse a `pg_ripple.vp_promoted` notification payload.
+///
+/// Returns `None` when the JSON is malformed or a required field is absent.
+pub fn parse_vp_promoted_payload(payload: &str) -> Option<VpPromotedPayload> {
+    // Minimal JSON parser using SPI — avoids adding a serde_json dep.
+    let table = Spi::get_one_with_args::<String>("SELECT $1::jsonb ->> 'table'", &[payload.into()])
+        .ok()
+        .flatten()?;
+
+    let shard_count = Spi::get_one_with_args::<i64>(
+        "SELECT ($1::jsonb ->> 'shard_count')::bigint",
+        &[payload.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+
+    let shard_table_prefix = Spi::get_one_with_args::<String>(
+        "SELECT $1::jsonb ->> 'shard_table_prefix'",
+        &[payload.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| format!("{table}_"));
+
+    let predicate_id = Spi::get_one_with_args::<i64>(
+        "SELECT ($1::jsonb ->> 'predicate_id')::bigint",
+        &[payload.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+
+    Some(VpPromotedPayload {
+        table,
+        shard_count,
+        shard_table_prefix,
+        predicate_id,
+    })
+}
+
+/// SQL-callable helper: process a `pg_ripple.vp_promoted` notification payload.
+///
+/// Call this from a regular backend session that is LISTENing to
+/// `pg_ripple.vp_promoted`:
+///
+/// ```sql
+/// LISTEN "pg_ripple.vp_promoted";
+/// -- … receive notification …
+/// SELECT pgtrickle.handle_vp_promoted(:'NOTIFY_PAYLOAD');
+/// ```
+///
+/// The function logs the promotion details.  When the table matches an active
+/// pg_trickle distributed CDC source (i.e., `source_placement = 'distributed'`
+/// in `pgt_change_tracking`), it also records the shard metadata in
+/// `pgt_worker_slots` for each active Citus worker so that the scheduler can
+/// start polling per-shard WAL changes on the next tick without a full catalog
+/// scan.
+///
+/// Returns `true` if the payload was valid and a matching source was found;
+/// `false` if the payload was invalid or no source matched.
+#[pg_extern(schema = "pgtrickle", name = "handle_vp_promoted")]
+pub fn sql_handle_vp_promoted(payload: &str) -> bool {
+    let Some(promo) = parse_vp_promoted_payload(payload) else {
+        pgrx::warning!("[pg_trickle] handle_vp_promoted: could not parse payload: {payload}");
+        return false;
+    };
+
+    pgrx::info!(
+        "[pg_trickle] vp_promoted: table={} shard_count={} prefix={} predicate_id={}",
+        promo.table,
+        promo.shard_count,
+        promo.shard_table_prefix,
+        promo.predicate_id,
+    );
+
+    // Check whether any active CDC source points at this VP table.
+    let source_exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS( \
+             SELECT 1 FROM pgtrickle.pgt_change_tracking \
+             WHERE source_placement = 'distributed' \
+               AND source_qualified_table = $1 \
+         )",
+        &[promo.table.as_str().into()],
+    )
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if source_exists {
+        pgrx::info!(
+            "[pg_trickle] vp_promoted: source {} is tracked as distributed — \
+             workers will be probed on the next scheduler tick",
+            promo.table,
+        );
+    }
+
+    source_exists
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

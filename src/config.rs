@@ -1204,6 +1204,19 @@ pub static PGS_INBOX_DRAIN_INTERVAL_SECONDS: GucSetting<i32> = GucSetting::<i32>
 /// INBOX-7 (v0.28.0): Maximum DLQ alerts raised per refresh cycle (0 = disabled).
 pub static PGS_INBOX_DLQ_ALERT_MAX_PER_REFRESH: GucSetting<i32> = GucSetting::<i32>::new(10);
 
+// ── v0.33.1: Citus / pg_ripple co-ordination GUCs ────────────────────────────
+
+/// COORD-2 (v0.33.1): Duration in milliseconds for `pgt_st_locks` lease entries
+/// acquired by the scheduler before coordinating a distributed stream table refresh.
+///
+/// Must be ≥ `pg_ripple.merge_fence_timeout_ms` (default 30 000) so that a
+/// scheduling lease does not expire while a pg_ripple merge cycle is still in
+/// progress.  Set to 0 to disable catalog-based scheduling locks (not recommended
+/// for multi-worker Citus deployments).
+///
+/// Default: 60 000 ms (60 seconds).
+pub static PGS_CITUS_ST_LOCK_LEASE_MS: GucSetting<i32> = GucSetting::<i32>::new(60_000);
+
 /// #536: Frontier holdback mode enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrontierHoldbackMode {
@@ -2602,6 +2615,19 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // COORD-2 (v0.33.1): Citus pgt_st_locks lease duration.
+    pgrx::GucRegistry::define_int_guc(
+        c"pg_trickle.citus_st_lock_lease_ms",
+        c"COORD-2: Duration (ms) of pgt_st_locks lease for distributed refresh coordination. \
+          Must be >= pg_ripple.merge_fence_timeout_ms to prevent lease expiry during a merge.",
+        c"",
+        &PGS_CITUS_ST_LOCK_LEASE_MS,
+        0,       // min (0 = disabled)
+        600_000, // max (10 minutes)
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -2624,6 +2650,11 @@ pub fn pg_trickle_merge_seqscan_threshold() -> f64 {
 /// Returns the current value of `pg_trickle.enabled`.
 pub fn pg_trickle_enabled() -> bool {
     PGS_ENABLED.get()
+}
+
+/// Returns the `pgt_st_locks` lease duration in milliseconds for Citus coordination.
+pub fn pg_trickle_citus_st_lock_lease_ms() -> i64 {
+    PGS_CITUS_ST_LOCK_LEASE_MS.get() as i64
 }
 
 /// Returns the scheduler interval in milliseconds.
