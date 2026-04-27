@@ -38,6 +38,7 @@ mod ivm;
 pub mod logging;
 pub(crate) mod metrics_server;
 mod monitor;
+pub mod otel;
 mod refresh;
 pub mod scheduler;
 mod shmem;
