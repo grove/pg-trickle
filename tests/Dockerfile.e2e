@@ -83,6 +83,12 @@ FROM postgres:18.3
 LABEL org.opencontainers.image.title="pg_trickle E2E test image"
 LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle extension for integration testing"
 
+# F4 (v0.37.0): Install pgvector for vector aggregate E2E tests.
+# pgvector is available from the official PostgreSQL APT repository.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-18-pgvector \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy extension artifacts from the builder stage
 COPY --from=builder \
     /artefacts/pg_trickle-pg18/usr/share/postgresql/18/extension/ \

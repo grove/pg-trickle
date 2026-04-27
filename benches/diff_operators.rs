@@ -1477,12 +1477,144 @@ fn bench_diff_join_chain(c: &mut Criterion) {
     group.finish();
 }
 
+// ── F4 (v0.37.0): vector_avg aggregate reducer benchmark ────────────────────
+//
+// Measures the cost of differentiating an Aggregate node that uses VectorAvg
+// and VectorSum (group-rescan strategy) vs the standard algebraic strategies.
+// This establishes a microsecond baseline for the v0.38–v0.40 regression gate.
+fn bench_diff_vector_avg(c: &mut Criterion) {
+    let mut group = c.benchmark_group("diff_vector_avg");
+    group.measurement_time(std::time::Duration::from_secs(5));
+
+    // VectorAvg (group-rescan): avg(embedding) per user
+    let vec_avg = OpTree::Aggregate {
+        group_by: vec![Expr::ColumnRef {
+            table_alias: None,
+            column_name: "user_id".to_string(),
+        }],
+        aggregates: vec![AggExpr {
+            function: AggFunc::VectorAvg,
+            argument: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: "embedding".to_string(),
+            }),
+            alias: "centroid".to_string(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+        }],
+        child: Box::new(make_scan(
+            "user_embeddings",
+            16384,
+            &["id", "user_id", "embedding"],
+        )),
+    };
+
+    // VectorSum (group-rescan): sum(embedding) per cluster
+    let vec_sum = OpTree::Aggregate {
+        group_by: vec![Expr::ColumnRef {
+            table_alias: None,
+            column_name: "cluster_id".to_string(),
+        }],
+        aggregates: vec![AggExpr {
+            function: AggFunc::VectorSum,
+            argument: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: "embedding".to_string(),
+            }),
+            alias: "vec_sum".to_string(),
+            is_distinct: false,
+            filter: None,
+            second_arg: None,
+            order_within_group: None,
+        }],
+        child: Box::new(make_scan(
+            "cluster_embeddings",
+            16385,
+            &["id", "cluster_id", "embedding"],
+        )),
+    };
+
+    // Mixed: VectorAvg + COUNT(*) + VectorSum in a single aggregate node
+    let mixed = OpTree::Aggregate {
+        group_by: vec![Expr::ColumnRef {
+            table_alias: None,
+            column_name: "user_id".to_string(),
+        }],
+        aggregates: vec![
+            AggExpr {
+                function: AggFunc::VectorAvg,
+                argument: Some(Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: "embedding".to_string(),
+                }),
+                alias: "centroid".to_string(),
+                is_distinct: false,
+                filter: None,
+                second_arg: None,
+                order_within_group: None,
+            },
+            AggExpr {
+                function: AggFunc::CountStar,
+                argument: None,
+                alias: "doc_count".to_string(),
+                is_distinct: false,
+                filter: None,
+                second_arg: None,
+                order_within_group: None,
+            },
+            AggExpr {
+                function: AggFunc::VectorSum,
+                argument: Some(Expr::ColumnRef {
+                    table_alias: None,
+                    column_name: "embedding".to_string(),
+                }),
+                alias: "vec_sum".to_string(),
+                is_distinct: false,
+                filter: None,
+                second_arg: None,
+                order_within_group: None,
+            },
+        ],
+        child: Box::new(make_scan(
+            "user_embeddings",
+            16386,
+            &["id", "user_id", "embedding"],
+        )),
+    };
+
+    group.bench_function("vector_avg_1group", |b| {
+        b.iter(|| {
+            let mut ctx = test_ctx();
+            ctx.diff_node(black_box(&vec_avg)).unwrap()
+        });
+    });
+
+    group.bench_function("vector_sum_1group", |b| {
+        b.iter(|| {
+            let mut ctx = test_ctx();
+            ctx.diff_node(black_box(&vec_sum)).unwrap()
+        });
+    });
+
+    group.bench_function("vector_avg_sum_count_mixed", |b| {
+        b.iter(|| {
+            let mut ctx = test_ctx();
+            ctx.diff_node(black_box(&mixed)).unwrap()
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_diff_scan,
     bench_diff_filter,
     bench_diff_project,
     bench_diff_aggregate,
+    bench_diff_vector_avg,
     bench_diff_inner_join,
     bench_diff_left_join,
     bench_diff_distinct,
