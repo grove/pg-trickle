@@ -27,149 +27,20 @@ use std::time::Instant;
 #[allow(unused_imports)]
 use super::*;
 
-pub fn execute_topk_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
-    // G12-ERM-1: Record the effective mode for this execution path.
-    set_effective_mode("TOP_K");
+pub mod columns;
+pub mod conflict;
+pub mod delete;
+pub mod insert;
+pub mod update;
 
-    // EC-25/EC-26: Ensure the internal_refresh flag is set so DML guard
-    // triggers allow the refresh executor to modify the storage table.
-    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+// Re-export sub-module items into merge namespace so callers don't need
+// to know which sub-module a function lives in.
+pub(crate) use columns::*;
+pub(crate) use conflict::*;
+pub(crate) use delete::*;
+pub use insert::execute_topk_refresh;
+pub(crate) use update::*;
 
-    let schema = &st.pgt_schema;
-    let name = &st.pgt_name;
-
-    let topk_limit = st.topk_limit.ok_or_else(|| {
-        PgTrickleError::InternalError("execute_topk_refresh called on non-TopK stream table".into())
-    })?;
-    let topk_order_by = st.topk_order_by.as_deref().ok_or_else(|| {
-        PgTrickleError::InternalError("TopK stream table missing order_by metadata".into())
-    })?;
-
-    // G12-2: TopK runtime validation — re-parse the reconstructed full query
-    // and verify the detected TopK pattern matches stored catalog metadata.
-    // On mismatch, fall back to FULL refresh to prevent silent correctness issues.
-    if let Err(reason) = validate_topk_metadata(
-        &st.defining_query,
-        topk_limit,
-        topk_order_by,
-        st.topk_offset,
-    ) {
-        pgrx::warning!(
-            "pg_trickle: TopK metadata inconsistency for {}.{}: {}. \
-             Falling back to FULL refresh.",
-            schema,
-            name,
-            reason,
-        );
-        set_effective_mode("FULL");
-        return execute_full_refresh(st);
-    }
-
-    let quoted_table = format!(
-        "\"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        name.replace('"', "\"\""),
-    );
-
-    // Reconstruct the full TopK query from base query + ORDER BY + LIMIT [+ OFFSET].
-    let topk_query = if let Some(offset) = st.topk_offset {
-        format!(
-            "{} ORDER BY {} LIMIT {} OFFSET {}",
-            st.defining_query, topk_order_by, topk_limit, offset
-        )
-    } else {
-        format!(
-            "{} ORDER BY {} LIMIT {}",
-            st.defining_query, topk_order_by, topk_limit
-        )
-    };
-
-    // Compute row_id using the same hash formula as normal refresh.
-    let row_id_expr = crate::dvm::row_id_expr_for_query(&st.defining_query);
-
-    // Build the source subquery with row IDs.
-    // Use alias `sub` to match what row_id_expr_for_query() generates.
-    let source_sql = format!("SELECT {row_id_expr} AS __pgt_row_id, sub.* FROM ({topk_query}) sub");
-
-    // Get column names from the storage table (excluding __pgt_row_id).
-    let columns = crate::dvm::get_defining_query_columns(&st.defining_query)?;
-
-    // Build the MERGE statement.
-    let col_list: Vec<String> = columns
-        .iter()
-        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-        .collect();
-
-    let update_set: Vec<String> = col_list
-        .iter()
-        .map(|c| format!("{c} = __pgt_topk_src.{c}"))
-        .collect();
-
-    let insert_cols: String = std::iter::once("__pgt_row_id".to_string())
-        .chain(col_list.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let insert_vals: String = std::iter::once("__pgt_topk_src.__pgt_row_id".to_string())
-        .chain(col_list.iter().map(|c| format!("__pgt_topk_src.{c}")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // Build an IS DISTINCT FROM check for change detection in WHEN MATCHED.
-    let is_distinct_check = if col_list.is_empty() {
-        "TRUE".to_string()
-    } else {
-        col_list
-            .iter()
-            .map(|c| format!("{quoted_table}.{c}::text IS DISTINCT FROM __pgt_topk_src.{c}::text"))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    };
-
-    let merge_sql = format!(
-        "MERGE INTO {quoted_table} \
-         USING ({source_sql}) AS __pgt_topk_src \
-         ON {quoted_table}.__pgt_row_id = __pgt_topk_src.__pgt_row_id \
-         WHEN MATCHED AND ({is_distinct_check}) THEN \
-           UPDATE SET {update_set} \
-         WHEN NOT MATCHED THEN \
-           INSERT ({insert_cols}) VALUES ({insert_vals}) \
-         WHEN NOT MATCHED BY SOURCE THEN \
-           DELETE",
-        update_set = update_set.join(", "),
-    );
-
-    let (rows_inserted, rows_deleted) = Spi::connect_mut(|client| {
-        let result = client
-            .update(&merge_sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        // MERGE returns total rows processed. We don't get separate insert/delete
-        // counts from SPI, so return the total as "inserted" and 0 as "deleted".
-        // The actual bookkeeping is approximate here.
-        Ok::<(i64, i64), PgTrickleError>((result.len() as i64, 0))
-    })?;
-
-    pgrx::debug1!(
-        "[pg_trickle] TopK refresh of {}.{}: MERGE processed {} rows",
-        schema,
-        name,
-        rows_inserted,
-    );
-
-    Ok((rows_inserted, rows_deleted))
-}
-
-/// Execute a full refresh: TRUNCATE + INSERT from defining query.
-///
-/// When user triggers are detected (and the GUC is not `"off"`), they are
-/// suppressed during the TRUNCATE + INSERT via `DISABLE TRIGGER USER` /
-/// `ENABLE TRIGGER USER`. A `NOTIFY pg_trickle_refresh` is emitted so
-/// listeners know a FULL refresh occurred.
-///
-/// **Note:** Row-level user triggers do NOT fire correctly for FULL refresh.
-/// Users who need per-row trigger semantics should use `REFRESH MODE
-/// DIFFERENTIAL`. See PLAN_USER_TRIGGERS_EXPLICIT_DML.md §2.
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("FULL");
@@ -523,528 +394,6 @@ pub fn execute_no_data_refresh(st: &StreamTableMeta) -> Result<(), PgTrickleErro
 ///
 /// Errors during SPI queries are logged and treated as "no change" to avoid
 /// cascading failures from a transient catalog problem.
-pub(crate) fn check_proc_hashes_changed(st: &StreamTableMeta) -> bool {
-    let funcs = match &st.functions_used {
-        Some(f) if !f.is_empty() => f,
-        _ => return false,
-    };
-
-    // Build current hash map: { func_name → md5(prosrc concatenated) }
-    let mut current_map: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    for func_name in funcs {
-        let hash_opt = Spi::get_one_with_args::<String>(
-            "SELECT md5(string_agg(prosrc || coalesce(probin::text, ''), ',' ORDER BY oid)) \
-             FROM pg_catalog.pg_proc \
-             WHERE proname = $1",
-            &[func_name.as_str().into()],
-        )
-        .unwrap_or(None);
-
-        if let Some(h) = hash_opt {
-            current_map.insert(func_name.to_lowercase(), h);
-        }
-    }
-
-    // Serialize current map to JSON text.
-    let current_json = match serde_json::to_string(&current_map) {
-        Ok(j) => j,
-        Err(e) => {
-            pgrx::debug1!("[pg_trickle] EC-16: failed to serialize function hashes: {e}");
-            return false;
-        }
-    };
-
-    // Compare against stored hashes.
-    match &st.function_hashes {
-        None => {
-            // First-time baseline: store and report no change.
-            if let Err(e) = crate::catalog::StreamTableMeta::update_function_hashes(
-                st.pgt_id,
-                Some(&current_json),
-            ) {
-                pgrx::debug1!("[pg_trickle] EC-16: failed to store initial function hashes: {e}");
-            }
-            false
-        }
-        Some(stored) => {
-            if *stored == current_json {
-                false
-            } else {
-                // Hash changed — persist new hashes before returning.
-                if let Err(e) = crate::catalog::StreamTableMeta::update_function_hashes(
-                    st.pgt_id,
-                    Some(&current_json),
-                ) {
-                    pgrx::debug1!("[pg_trickle] EC-16: failed to update function hashes: {e}");
-                }
-                true
-            }
-        }
-    }
-}
-
-/// Task 3.2: Fast-path DELETE for a single-source ST whose window contains a
-/// TRUNCATE marker with no subsequent INSERT/UPDATE/DELETE rows in scope.
-///
-/// Instead of running the full defining query, we simply DELETE all rows from
-/// the stream table.  This is O(ST rows) rather than O(source rows) and avoids
-/// re-executing an arbitrarily-expensive query when the result is always empty.
-pub(crate) fn execute_incremental_truncate_delete(
-    st: &StreamTableMeta,
-) -> Result<(i64, i64), PgTrickleError> {
-    // Suppress the CDC trigger on the ST itself during the operation.
-    Spi::run("SET LOCAL pg_trickle.internal_refresh = 'true'")
-        .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-    let schema = &st.pgt_schema;
-    let name = &st.pgt_name;
-    let quoted_table = format!(
-        "\"{}\".\"{}\"",
-        schema.replace('"', "\"\""),
-        name.replace('"', "\"\"")
-    );
-
-    let rows_deleted = Spi::connect_mut(|client| {
-        let result = client
-            .update(&format!("DELETE FROM {quoted_table}"), None, &[])
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<i64, PgTrickleError>(result.len() as i64)
-    })?;
-
-    pgrx::notice!(
-        "[pg_trickle] Incremental TRUNCATE: deleted {} row(s) from {}.{} \
-         (pure TRUNCATE window — skipping full query re-execution)",
-        rows_deleted,
-        schema,
-        name,
-    );
-    Ok((0, rows_deleted))
-}
-
-// ── A1-2: Partition key range extraction ────────────────────────────────────
-
-/// Safely quote a SQL string literal (standard SQL single-quote escaping).
-/// Used to embed partition key range values in MERGE ON-clause predicates.
-pub(crate) fn pg_quote_literal(val: &str) -> String {
-    format!("'{}'", val.replace('\'', "''"))
-}
-
-/// A1-2/A1-1b/A1-1d: Per-column bounds for partition pruning predicates.
-///
-/// **Range** — min/max vectors (one entry per partition key column).
-/// **List**  — distinct values for the single LIST column.
-pub(crate) enum PartitionBounds {
-    Range {
-        mins: Vec<String>,
-        maxs: Vec<String>,
-    },
-    List(Vec<String>),
-}
-
-/// A1-2/A1-1b/A1-1d: Extract the partition bounds from the resolved delta SQL.
-/// Returns `None` when the delta is empty.
-///
-/// * **RANGE** keys → `MIN/MAX` per column.
-/// * **LIST** keys  → `SELECT DISTINCT col::text` (single column).
-pub(crate) fn extract_partition_bounds(
-    resolved_delta_sql: &str,
-    partition_key: &str,
-) -> Result<Option<PartitionBounds>, PgTrickleError> {
-    let method = crate::api::parse_partition_method(partition_key);
-    let cols = crate::api::parse_partition_key_columns(partition_key);
-
-    match method {
-        crate::api::PartitionMethod::Hash => {
-            // HASH partitions use per-partition MERGE loop — this function
-            // should never be called for HASH. The orchestration dispatches
-            // HASH before reaching extract_partition_bounds.
-            Err(PgTrickleError::SpiError(
-                "extract_partition_bounds called for HASH partition (should use per-partition MERGE)".to_string(),
-            ))
-        }
-        crate::api::PartitionMethod::List => {
-            // LIST: single column — collect distinct values.
-            let qcol = crate::api::quote_identifier(&cols[0]);
-            let sql = format!(
-                "SELECT DISTINCT {qcol}::text FROM ({resolved_delta_sql}) AS __pgt_part_probe ORDER BY 1"
-            );
-            let result = Spi::connect(|client| {
-                let rows = client
-                    .select(&sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("partition list: {e}")))?;
-                let mut values = Vec::new();
-                for row in rows {
-                    if let Some(v) = row
-                        .get::<String>(1)
-                        .map_err(|e| PgTrickleError::SpiError(format!("partition list col: {e}")))?
-                    {
-                        values.push(v);
-                    }
-                }
-                if values.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(PartitionBounds::List(values)))
-                }
-            })?;
-            Ok(result)
-        }
-        crate::api::PartitionMethod::Range => {
-            // RANGE: min/max per column.
-            let min_exprs: Vec<String> = cols
-                .iter()
-                .map(|c| format!("MIN({})::text", crate::api::quote_identifier(c)))
-                .collect();
-            let max_exprs: Vec<String> = cols
-                .iter()
-                .map(|c| format!("MAX({})::text", crate::api::quote_identifier(c)))
-                .collect();
-            let select_clause = min_exprs
-                .iter()
-                .chain(max_exprs.iter())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql =
-                format!("SELECT {select_clause} FROM ({resolved_delta_sql}) AS __pgt_part_probe");
-            let result = Spi::connect(|client| {
-                let row = client
-                    .select(&sql, None, &[])
-                    .map_err(|e| PgTrickleError::SpiError(format!("partition range: {e}")))?
-                    .first();
-                let n = cols.len();
-                let mut mins = Vec::with_capacity(n);
-                let mut maxs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let map_spi = |e: pgrx::spi::SpiError| {
-                        PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
-                    };
-                    match row.get::<String>(i + 1).map_err(map_spi)? {
-                        Some(v) => mins.push(v),
-                        None => return Ok(None), // delta is empty
-                    }
-                }
-                for i in 0..n {
-                    let map_spi = |e: pgrx::spi::SpiError| {
-                        PgTrickleError::SpiError(format!("partition range col {i}: {e}"))
-                    };
-                    match row.get::<String>(n + i + 1).map_err(map_spi)? {
-                        Some(v) => maxs.push(v),
-                        None => return Ok(None),
-                    }
-                }
-                Ok(Some(PartitionBounds::Range { mins, maxs }))
-            })?;
-            Ok(result)
-        }
-    }
-}
-
-/// A1-3/A1-1b/A1-1d: Replace the `__PGT_PART_PRED__` placeholder in the MERGE
-/// SQL with a partition-pruning predicate for the current delta.
-///
-/// * **Single-column RANGE**: `AND st."col" BETWEEN '<min>' AND '<max>'`
-/// * **Multi-column RANGE**: `AND ROW(st."a", st."b") >= ROW(...) AND ROW(...) <= ROW(...)`
-/// * **LIST**: `AND st."col" IN ('v1', 'v2', ...)`
-pub(crate) fn inject_partition_predicate(
-    merge_sql: &str,
-    partition_key: &str,
-    bounds: &PartitionBounds,
-) -> String {
-    let cols = crate::api::parse_partition_key_columns(partition_key);
-    let pred = match bounds {
-        PartitionBounds::List(values) => {
-            let qk = crate::api::quote_identifier(&cols[0]);
-            let literals: Vec<String> = values.iter().map(|v| pg_quote_literal(v)).collect();
-            format!(" AND st.{qk} IN ({})", literals.join(", "))
-        }
-        PartitionBounds::Range { mins, maxs } => {
-            if cols.len() == 1 {
-                // Single-column: simple BETWEEN (backward compatible)
-                let qk = crate::api::quote_identifier(&cols[0]);
-                format!(
-                    " AND st.{qk} BETWEEN {} AND {}",
-                    pg_quote_literal(&mins[0]),
-                    pg_quote_literal(&maxs[0]),
-                )
-            } else {
-                // Multi-column: ROW comparison
-                let st_cols: Vec<String> = cols
-                    .iter()
-                    .map(|c| format!("st.{}", crate::api::quote_identifier(c)))
-                    .collect();
-                let min_literals: Vec<String> = mins.iter().map(|v| pg_quote_literal(v)).collect();
-                let max_literals: Vec<String> = maxs.iter().map(|v| pg_quote_literal(v)).collect();
-                format!(
-                    " AND ROW({}) >= ROW({}) AND ROW({}) <= ROW({})",
-                    st_cols.join(", "),
-                    min_literals.join(", "),
-                    st_cols.join(", "),
-                    max_literals.join(", "),
-                )
-            }
-        }
-    };
-    merge_sql.replace("__PGT_PART_PRED__", &pred)
-}
-
-// ── A1-3b: Per-partition MERGE for HASH partitioned stream tables ───
-
-/// Metadata for a HASH child partition.
-pub(crate) struct HashChild {
-    /// Fully-qualified name: `"schema"."child_name"`
-    pub(crate) qualified_name: String,
-    pub(crate) modulus: i32,
-    pub(crate) remainder: i32,
-}
-
-/// Discover HASH child partitions (modulus, remainder) for a parent table.
-pub(crate) fn get_hash_children(parent_oid: pg_sys::Oid) -> Result<Vec<HashChild>, PgTrickleError> {
-    Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT n.nspname::text, c.relname::text, \
-                        pg_get_expr(c.relpartbound, c.oid) \
-                 FROM pg_inherits i \
-                 JOIN pg_class c ON c.oid = i.inhrelid \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE i.inhparent = $1 \
-                 ORDER BY c.relname",
-                None,
-                &[parent_oid.into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(format!("hash children: {e}")))?;
-
-        let mut children = Vec::new();
-        for row in rows {
-            let map_spi = |e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string());
-            let schema = row.get::<String>(1).map_err(map_spi)?.unwrap_or_default();
-            let name = row.get::<String>(2).map_err(map_spi)?.unwrap_or_default();
-            let bound_spec = row.get::<String>(3).map_err(map_spi)?.unwrap_or_default();
-
-            // Parse "FOR VALUES WITH (modulus N, remainder M)"
-            let (modulus, remainder) = parse_hash_bound_spec(&bound_spec)?;
-
-            let qualified_name = format!(
-                "{}.{}",
-                crate::api::quote_identifier(&schema),
-                crate::api::quote_identifier(&name),
-            );
-            children.push(HashChild {
-                qualified_name,
-                modulus,
-                remainder,
-            });
-        }
-        Ok(children)
-    })
-}
-
-/// Parse a PostgreSQL HASH partition bound spec.
-///
-/// Input: `"FOR VALUES WITH (modulus 4, remainder 2)"`
-/// Returns: `(4, 2)`
-pub(crate) fn parse_hash_bound_spec(spec: &str) -> Result<(i32, i32), PgTrickleError> {
-    // Parsing pattern: "FOR VALUES WITH (modulus N, remainder M)"
-    let upper = spec.to_uppercase();
-    let modulus = extract_keyword_int(&upper, "MODULUS")?;
-    let remainder = extract_keyword_int(&upper, "REMAINDER")?;
-    Ok((modulus, remainder))
-}
-
-/// Extract an integer value following a keyword in a partition bound spec.
-pub(crate) fn extract_keyword_int(spec: &str, keyword: &str) -> Result<i32, PgTrickleError> {
-    let pos = spec
-        .find(keyword)
-        .ok_or_else(|| PgTrickleError::SpiError(format!("missing {keyword} in bound spec")))?;
-    let after = &spec[pos + keyword.len()..];
-    let digits: String = after
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits
-        .parse::<i32>()
-        .map_err(|_| PgTrickleError::SpiError(format!("invalid {keyword} value in bound spec")))
-}
-
-/// Execute MERGE for a HASH partitioned stream table.
-///
-/// PostgreSQL 15+ handles MERGE with partitioned tables natively — rows are
-/// routed to the correct child partition automatically for both INSERT and
-/// MATCHED (UPDATE/DELETE) operations. We therefore do NOT need per-child
-/// routing or the `satisfies_hash_partition()` internal function (which was
-/// removed in PG17+). Simply strip the `__PGT_PART_PRED__` placeholder from
-/// the merge SQL and run it against the parent table.
-///
-/// Returns the number of rows affected.
-pub(crate) fn execute_hash_partitioned_merge(
-    merge_sql: &str,
-    _resolved_delta_sql: &str,
-    schema: &str,
-    name: &str,
-    _parent_oid: pg_sys::Oid,
-    _partition_key: &str,
-    _pgt_id: i64,
-) -> Result<usize, PgTrickleError> {
-    // Strip the __PGT_PART_PRED__ placeholder — HASH partitions do not use
-    // a range predicate; PostgreSQL routes each row to the correct child.
-    let sql = merge_sql.replace("__PGT_PART_PRED__", "");
-
-    pgrx::debug1!(
-        "[pg_trickle] A1-3b: HASH parent-level MERGE for {}.{}",
-        schema,
-        name,
-    );
-
-    Spi::connect_mut(|client| {
-        let result = client
-            .update(&sql, None, &[])
-            .map_err(|e| PgTrickleError::SpiError(format!("hash merge: {e}")))?;
-        Ok::<usize, PgTrickleError>(result.len())
-    })
-}
-
-/// Build a MERGE SQL statement targeting a specific HASH child partition.
-///
-/// The delta is filtered to only rows whose partition key hashes to this child
-/// using PostgreSQL's `satisfies_hash_partition()` function.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_hash_child_merge(
-    child_target: &str,
-    temp_delta: &str,
-    quoted_partition_col: &str,
-    parent_oid: pg_sys::Oid,
-    modulus: i32,
-    remainder: i32,
-    original_merge: &str,
-    parent_target: &str,
-) -> String {
-    // The original MERGE has a USING clause that references the delta.
-    // We replace the entire MERGE to target the child with a filtered delta.
-    //
-    // Strategy: rewrite the original merge_sql by:
-    // 1. Replacing the parent target with ONLY child_target
-    // 2. Wrapping the USING subquery to filter through satisfies_hash_partition
-    // 3. Removing the __PGT_PART_PRED__ placeholder
-
-    // Find and replace "USING (...) AS d" with filtered version that reads
-    // from the materialized temp table.
-    let using_start = original_merge.find("USING (");
-    let on_clause = original_merge.find(" ON st.");
-
-    if let (Some(us), Some(on)) = (using_start, on_clause) {
-        // Reconstruct: everything before USING + filtered USING + everything from ON
-        let before_using = &original_merge[..us];
-        let from_on = &original_merge[on..];
-
-        // Build filtered USING clause
-        let filtered_using = format!(
-            "USING (SELECT * FROM {temp_delta} WHERE \
-             satisfies_hash_partition({parent_oid}::oid, {modulus}, {remainder}, {quoted_partition_col})) AS d",
-            parent_oid = parent_oid.to_u32(),
-        );
-
-        let result = format!("{before_using}{filtered_using}{from_on}",);
-
-        // Replace parent target with ONLY child_target and strip predicate placeholder
-        result
-            .replace(parent_target, &format!("ONLY {child_target}"))
-            .replace("__PGT_PART_PRED__", "")
-    } else {
-        // Fallback: simple replacement (shouldn't happen in practice)
-        original_merge
-            .replace(parent_target, &format!("ONLY {child_target}"))
-            .replace("__PGT_PART_PRED__", "")
-    }
-}
-
-// ── PART-WARN: Default partition growth warning ─────────────────────
-
-/// After a successful refresh of a partitioned stream table, check whether
-/// the default (catch-all) partition has rows. If so, emit a WARNING
-/// prompting the user to create explicit named partitions.
-///
-/// The check is deliberately lightweight: a single `count(*)` on the default
-/// partition. If the default partition does not exist (unlikely but possible
-/// if the user detached it), the check is silently skipped.
-pub(crate) fn warn_default_partition_growth(schema: &str, name: &str) {
-    let default_name = format!("{name}_default");
-    let qschema = crate::api::quote_identifier(schema);
-    let qdefault = crate::api::quote_identifier(&default_name);
-
-    // Check existence first via pg_catalog to avoid "relation does not exist"
-    // errors from SPI (pgrx SPI does not catch catalog errors via Result).
-    // Use parameterized query to safely pass schema/table names.
-    let exists = Spi::connect(|client| {
-        let rows = client
-            .select(
-                "SELECT 1 FROM pg_catalog.pg_class c \
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = $1 AND c.relname = $2 \
-                 LIMIT 1",
-                None,
-                &[schema.into(), default_name.as_str().into()],
-            )
-            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-        Ok::<bool, PgTrickleError>(!rows.is_empty())
-    })
-    .unwrap_or(false);
-
-    if !exists {
-        return; // No default partition — nothing to warn about.
-    }
-
-    let sql = format!("SELECT count(*)::bigint FROM {qschema}.{qdefault}");
-    match Spi::get_one::<i64>(&sql) {
-        Ok(Some(count)) if count > 0 => {
-            pgrx::warning!(
-                "pg_trickle: PART-WARN: default partition {schema}.{default_name} of \
-                 stream table {schema}.{name} contains {count} row(s). \
-                 Create explicit named partitions to improve query performance and \
-                 enable partition pruning. Example:\n  \
-                 CREATE TABLE {schema}.{name}_2026q1 PARTITION OF {schema}.{name} \
-                 FOR VALUES FROM ('2026-01-01') TO ('2026-04-01');"
-            );
-        }
-        Ok(_) => {}  // Default partition is empty — no warning.
-        Err(_) => {} // Silently skip on any other error.
-    }
-}
-
-// ── DAG-3: Delta amplification detection ────────────────────────────
-
-/// Compute the amplification ratio between input delta and output delta.
-///
-/// Returns `output / input` when `input > 0`, otherwise `0.0` (no
-/// amplification measurable when there was no input).
-///
-/// This is a pure function separated from the SPI layer so it can be
-/// unit-tested without a PostgreSQL backend.
-pub(crate) fn compute_amplification_ratio(input_delta: i64, output_delta: i64) -> f64 {
-    if input_delta <= 0 {
-        return 0.0;
-    }
-    output_delta as f64 / input_delta as f64
-}
-
-/// Determine whether the amplification ratio exceeds the configured
-/// threshold and a WARNING should be emitted.
-///
-/// Returns `false` when detection is disabled (threshold ≤ 0) or when
-/// there is no meaningful input (input_delta ≤ 0).
-pub(crate) fn should_warn_amplification(
-    input_delta: i64,
-    output_delta: i64,
-    threshold: f64,
-) -> bool {
-    if threshold <= 0.0 || input_delta <= 0 {
-        return false;
-    }
-    compute_amplification_ratio(input_delta, output_delta) > threshold
-}
-
 pub fn execute_differential_refresh(
     st: &StreamTableMeta,
     prev_frontier: &Frontier,
@@ -1052,6 +401,8 @@ pub fn execute_differential_refresh(
 ) -> Result<(i64, i64), PgTrickleError> {
     let schema = &st.pgt_schema;
     let name = &st.pgt_name;
+    // F10: record start time for OTLP span (nanoseconds since Unix epoch).
+    let start_ns = crate::otel::now_ns();
 
     if !st.is_populated {
         return Err(PgTrickleError::InvalidArgument(format!(
@@ -3413,68 +2764,136 @@ pub fn execute_differential_refresh(
         warn_default_partition_growth(schema, name);
     }
 
+    // F10 (v0.37.0): Emit OTLP trace span when trace propagation is enabled.
+    // The trace context was stored in __pgt_trace_context at CDC capture time.
+    // We read it from the change buffer's earliest recent row and emit a child span.
+    emit_trace_span_if_enabled(st, "DIFFERENTIAL", start_ns);
+
     Ok((effective_count, 0))
 }
 
-// ── Unit tests ─────────────────────────────────────────────────────────────
-
-/// PROF-DLT: Capture `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` for the
-/// resolved delta SQL and persist the plan to
-/// `/tmp/delta_plans/<schema>_<name>.json`.
+/// F10 (v0.37.0): Emit an OTLP child span for the refresh cycle when
+/// `pg_trickle.enable_trace_propagation = on`.
 ///
-/// Called when `PGS_PROFILE_DELTA=1` is set in the environment.  Errors are
-/// logged as warnings so profiling failures never abort a real refresh cycle.
-pub(crate) fn capture_delta_explain(schema: &str, name: &str, delta_sql: &str) {
-    use std::path::PathBuf;
-
-    let dir = PathBuf::from("/tmp/delta_plans");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        pgrx::warning!("[pg_trickle] PGS_PROFILE_DELTA: failed to create /tmp/delta_plans: {e}");
+/// Reads the trace context from `__pgt_trace_context` in the change buffer
+/// (earliest row in the most recent batch), then either:
+/// - Exports via OTLP HTTP if `pg_trickle.otel_endpoint` is configured, or
+/// - Logs the trace context at INFO if only propagation is enabled (no endpoint).
+///
+/// This function is non-fatal — any error is logged at DEBUG level.
+fn emit_trace_span_if_enabled(st: &StreamTableMeta, refresh_mode: &str, start_ns: u64) {
+    if !crate::config::pg_trickle_enable_trace_propagation() {
         return;
     }
 
-    // Build EXPLAIN query wrapping the delta SQL.
-    let explain_sql = format!(
-        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ({delta_sql}) __pgt_explain_d"
-    );
+    let end_ns = crate::otel::now_ns();
 
-    let plan_json = Spi::connect(|client| {
-        let result = client
-            .select(&explain_sql, None, &[])
-            .map_err(|e| format!("SPI error in explain: {e}"))?;
-        let mut lines = Vec::new();
-        for row in result {
-            let line: Option<pgrx::JsonB> = row.get(1).unwrap_or(None);
-            if let Some(j) = line {
-                lines.push(j.0.to_string());
-            }
-        }
-        Ok::<String, String>(lines.join("\n"))
-    });
+    // Attempt to read trace context from the change buffer.
+    let trace_ctx =
+        read_trace_context_from_change_buffer(st).or_else(crate::otel::read_session_trace_context);
 
-    let plan_json = match plan_json {
-        Ok(j) => j,
-        Err(e) => {
-            pgrx::warning!(
-                "[pg_trickle] PGS_PROFILE_DELTA: EXPLAIN failed for {schema}.{name}: {e}"
-            );
-            return;
-        }
+    let Some(ctx) = trace_ctx else {
+        return;
     };
 
-    // Write to /tmp/delta_plans/<schema>_<name>.json
-    let safe_schema = schema.replace('"', "").replace('/', "_");
-    let safe_name = name.replace('"', "").replace('/', "_");
-    let path = dir.join(format!("{safe_schema}_{safe_name}.json"));
-    if let Err(e) = std::fs::write(&path, &plan_json) {
-        pgrx::warning!(
-            "[pg_trickle] PGS_PROFILE_DELTA: failed to write {}: {e}",
-            path.display()
+    let span_name = match refresh_mode {
+        "DIFFERENTIAL" => crate::otel::SPAN_MERGE_APPLY,
+        "FULL" => crate::otel::SPAN_MERGE_APPLY,
+        _ => crate::otel::SPAN_MERGE_APPLY,
+    };
+
+    let span = crate::otel::OtelSpan::new(ctx.clone(), span_name, start_ns, end_ns)
+        .attr("refresh.mode", refresh_mode)
+        .attr("st.name", format!("{}.{}", st.pgt_schema, st.pgt_name));
+
+    let endpoint = crate::config::pg_trickle_otel_endpoint().unwrap_or_default();
+
+    if endpoint.is_empty() {
+        crate::otel::log_trace_context(
+            &ctx,
+            &format!("merge_apply/{refresh_mode}"),
+            &format!("{}.{}", st.pgt_schema, st.pgt_name),
         );
     } else {
-        pgrx::debug1!(
-            "[pg_trickle] PGS_PROFILE_DELTA: plan written to {}",
-            path.display()
+        crate::otel::export_span_background(endpoint, span);
+    }
+}
+
+/// Read `__pgt_trace_context` from the most recent row in the change buffer for this ST.
+///
+/// Returns the first non-null trace context found, if any.
+fn read_trace_context_from_change_buffer(
+    st: &StreamTableMeta,
+) -> Option<crate::otel::TraceContext> {
+    use pgrx::prelude::*;
+
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+    let pgt_id = st.pgt_id;
+
+    // Query the most recent non-null trace context from any change buffer
+    // associated with the source tables of this stream table.
+    let result: String = Spi::connect(|client| {
+        // First try: source buffer via dependency lookup.
+        if let Ok(rows) = client.select(
+            &format!(
+                "SELECT cb.__pgt_trace_context \
+                 FROM pgtrickle.pgt_dependencies d \
+                 JOIN LATERAL ( \
+                     SELECT cb.__pgt_trace_context FROM {change_schema}.changes_pgt_{pgt_id} cb \
+                     WHERE cb.__pgt_trace_context IS NOT NULL \
+                     ORDER BY cb.change_id DESC LIMIT 1 \
+                 ) cb ON TRUE \
+                 WHERE d.pgt_id = {pgt_id} \
+                 LIMIT 1",
+                change_schema = change_schema,
+                pgt_id = pgt_id,
+            ),
+            None,
+            &[],
+        ) {
+            for row in rows {
+                if let Ok(Some(tc)) = row.get::<String>(1) {
+                    return tc;
+                }
+            }
+        }
+
+        // Second try: any source-table change buffer (query pgt_dependencies for relids).
+        let dep_sql = format!(
+            "SELECT d.source_stable_name \
+             FROM pgtrickle.pgt_dependencies d \
+             WHERE d.pgt_id = {pgt_id} \
+               AND d.source_stable_name IS NOT NULL \
+             LIMIT 3",
+            pgt_id = pgt_id,
         );
+        if let Ok(dep_rows) = client.select(&dep_sql, None, &[]) {
+            for dep_row in dep_rows {
+                if let Ok(Some(stable_name)) = dep_row.get::<String>(1) {
+                    let buf_sql = format!(
+                        "SELECT __pgt_trace_context FROM {change_schema}.changes_{stable_name} \
+                         WHERE __pgt_trace_context IS NOT NULL \
+                         ORDER BY change_id DESC LIMIT 1",
+                        change_schema = change_schema,
+                        stable_name = stable_name,
+                    );
+                    if let Ok(buf_rows) = client.select(&buf_sql, Some(1), &[]) {
+                        for row in buf_rows {
+                            if let Ok(Some(tc)) = row.get::<String>(1) {
+                                return tc;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        String::new()
+    });
+
+    if !result.is_empty() {
+        crate::otel::TraceContext::parse(&result)
+    } else {
+        None
     }
 }

@@ -10,6 +10,13 @@ use crate::version::Frontier;
 #[allow(unused_imports)]
 use pgrx::prelude::*;
 
+// ── Functions moved to merge sub-modules (A16 split) — import for unit tests ─
+use crate::refresh::merge::columns::{
+    PartitionBounds, extract_keyword_int, inject_partition_predicate, parse_hash_bound_spec,
+    pg_quote_literal,
+};
+use crate::refresh::merge::delete::{build_hash_child_merge, should_warn_amplification};
+
 // ── Helper: build a minimal StreamTableMeta for testing ─────────
 
 fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {

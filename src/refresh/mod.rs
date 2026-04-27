@@ -40,7 +40,6 @@ pub(crate) mod phd1;
 // Precedence: explicit `pub use` overrides the `pub(crate) use *` glob for
 // the same name, giving those items public (not just crate) visibility.
 pub(crate) use codegen::*;
-pub(crate) use merge::*;
 pub(crate) use orchestrator::*;
 
 // ── External public API surface ─────────────────────────────────────────
@@ -53,6 +52,7 @@ pub use codegen::{
     has_downstream_st_consumers, has_template_cache_entry, invalidate_merge_cache,
     prewarm_merge_cache, set_fallback_leaf_oids,
 };
+pub(crate) use merge::compute_amplification_ratio;
 pub use merge::{
     execute_differential_refresh, execute_full_refresh, execute_no_data_refresh,
     execute_topk_refresh, poll_foreign_table_sources_for_st, post_full_refresh_cleanup,
