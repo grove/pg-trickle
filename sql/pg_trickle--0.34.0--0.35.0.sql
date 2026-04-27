@@ -33,3 +33,61 @@ COMMENT ON COLUMN pgtrickle.pgt_stream_tables.in_shadow_build IS
 COMMENT ON COLUMN pgtrickle.pgt_stream_tables.shadow_table_name IS
     'v0.35.0 UX-SHADOW: Name of the shadow table currently being built '
     '(NULL when in_shadow_build is FALSE).';
+
+-- ── New functions (v0.35.0) ──────────────────────────────────────────────────
+-- pgrx requires CREATE OR REPLACE to register new C functions on ALTER EXTENSION UPDATE.
+-- These stubs reference the shared library symbol; the actual implementation is in the .so.
+
+CREATE OR REPLACE FUNCTION pgtrickle."subscribe"(
+    "stream_table" TEXT,
+    "channel" TEXT
+) RETURNS void
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'subscribe_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."unsubscribe"(
+    "stream_table" TEXT,
+    "channel" TEXT
+) RETURNS void
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'unsubscribe_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."list_subscriptions"() RETURNS TABLE (
+    "stream_table" TEXT,
+    "channel" TEXT,
+    "created_at" timestamp with time zone
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'list_subscriptions_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."sla_summary"() RETURNS TABLE (
+    "stream_table" TEXT,
+    "p50_ms" float8,
+    "p99_ms" float8,
+    "freshness_lag_s" float8,
+    "error_rate" float8,
+    "error_budget_remaining" float8
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'sla_summary_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."explain_stream_table"(
+    "name" TEXT
+) RETURNS TEXT
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'explain_stream_table_wrapper';
+
+CREATE OR REPLACE FUNCTION pgtrickle."view_evolution_status"() RETURNS TABLE (
+    "stream_table" TEXT,
+    "in_shadow_build" bool,
+    "shadow_table_name" TEXT,
+    "status" TEXT
+)
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'view_evolution_status_wrapper';
