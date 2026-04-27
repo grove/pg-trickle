@@ -266,8 +266,8 @@ pub fn create_change_trigger(
     let truncate_fn_sql = format!(
         "CREATE OR REPLACE FUNCTION {change_schema}.pg_trickle_cdc_truncate_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -1730,8 +1730,8 @@ fn build_row_trigger_fn_sql(
     format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -1821,8 +1821,8 @@ fn build_stmt_trigger_fn_sql(
     let ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -1847,8 +1847,8 @@ fn build_stmt_trigger_fn_sql(
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -1889,8 +1889,8 @@ fn build_stmt_trigger_fn_sql(
         format!(
             "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_upd_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
@@ -1924,8 +1924,8 @@ fn build_stmt_trigger_fn_sql(
     let del_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
-         SECURITY DEFINER
-         SET search_path = pg_catalog, pgtrickle, pgtrickle_changes, public AS $$
+         SECURITY DEFINER -- nosemgrep: sql.security-definer.present
+         SET search_path = pgtrickle_changes, pgtrickle, pg_catalog, pg_temp AS $$
          BEGIN
              -- A07: CDC cdc_paused guard (A07).
              IF (current_setting('pg_trickle.cdc_paused', true) = 'on') THEN
