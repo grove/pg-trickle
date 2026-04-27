@@ -35,6 +35,7 @@ pub mod error;
 mod hash;
 mod hooks;
 mod ivm;
+pub mod logging;
 pub(crate) mod metrics_server;
 mod monitor;
 mod refresh;
