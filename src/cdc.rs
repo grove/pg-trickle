@@ -1394,7 +1394,6 @@ pub fn alter_change_buffer_add_columns(
             );
         }
     } else {
-        // WB-1 migration: convert BIGINT bitmask column to VARBIT.
         // atttypid 20 = int8 (BIGINT). NULL-out existing rows — changed_cols
         // is a performance hint only; losing old bitmasks is safe.
         let is_bigint: bool = Spi::get_one::<bool>(&format!(
@@ -1422,6 +1421,23 @@ pub fn alter_change_buffer_add_columns(
                      failed to migrate changed_cols to VARBIT: {e}"
                 );
             }
+        }
+    }
+
+    // F10 (v0.37.0): Ensure __pgt_trace_context column exists (upgrade migration path).
+    // Fresh change buffers created in v0.37.0+ always have the column; buffers from
+    // v0.36.0 or earlier need the column added here so the rebuilt trigger function works.
+    if !existing_set.contains("__pgt_trace_context") {
+        let add_trace_sql = format!(
+            "ALTER TABLE {schema}.{buf} ADD COLUMN IF NOT EXISTS __pgt_trace_context TEXT",
+            schema = change_schema,
+            buf = buf_base,
+        );
+        if let Err(e) = Spi::run(&add_trace_sql) {
+            pgrx::debug1!(
+                "[pg_trickle] alter_change_buffer_add_columns: \
+                 failed to add __pgt_trace_context: {e}"
+            );
         }
     }
 
@@ -2451,11 +2467,18 @@ fn sync_change_buffer_columns(
 
     // System columns: never dropped, not tracked as data columns.
     // changed_cols is a system column (Task 3.1 bitmask — preserved across schema changes).
-    let system_cols: std::collections::HashSet<&str> =
-        ["change_id", "lsn", "action", "pk_hash", "changed_cols"]
-            .iter()
-            .copied()
-            .collect();
+    // __pgt_trace_context is the F10 trace propagation column — preserved as a system column.
+    let system_cols: std::collections::HashSet<&str> = [
+        "change_id",
+        "lsn",
+        "action",
+        "pk_hash",
+        "changed_cols",
+        "__pgt_trace_context",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     // Ensure changed_cols VARBIT column exists (WB-1: migrated from BIGINT).
     if !existing_cols.contains_key("changed_cols") {
