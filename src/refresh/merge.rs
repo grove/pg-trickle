@@ -3403,50 +3403,6 @@ pub fn execute_differential_refresh(
         );
     }
 
-    // CORR-1 / A01 (v0.35.0): unconditional cross-cycle PH-D1 cleanup for
-    // non-deduplicated (join-based) stream tables.
-    //
-    // For join queries, the Z-set pipeline may accumulate phantom row-id
-    // residuals when an insert-then-delete on the left side collides with a
-    // delete on the right within the same refresh cycle.  Route every join
-    // refresh cycle through the anti-join cleanup unconditionally (batch size
-    // 1,024) instead of gating on a per-cycle residual flag.
-    //
-    // Only runs for join-based queries (is_deduplicated == false) where the
-    // stream table is fully populated and the cleanup cost is O(batch).
-    if !is_dedup_flag && st.is_populated {
-        let quoted_table = format!(
-            "\"{}\".\"{}\"",
-            schema.replace('"', "\"\""),
-            name.replace('"', "\"\""),
-        );
-        match crate::refresh::phd1::cleanup_cross_cycle_phantoms(
-            st.pgt_id,
-            &quoted_table,
-            &st.defining_query,
-            1_024,
-        ) {
-            Ok(cleaned) if cleaned > 0 => {
-                pgrx::debug1!(
-                    "[pg_trickle] A01/EC01-2: removed {} cross-cycle phantom rows for {}.{}",
-                    cleaned,
-                    schema,
-                    name,
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                // Non-fatal: log and continue. The next cycle will retry.
-                pgrx::debug1!(
-                    "[pg_trickle] A01/EC01-2: phantom cleanup failed for {}.{}: {}",
-                    schema,
-                    name,
-                    e,
-                );
-            }
-        }
-    }
-
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("DIFFERENTIAL");
 
