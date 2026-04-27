@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The pgvector Tooling Landscape in 2026
 
 ## What each tool actually does — and where pg_trickle fits in

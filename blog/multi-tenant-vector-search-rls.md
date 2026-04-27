@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Multi-Tenant Vector Search with Row-Level Security and pg_trickle
 
 ## Zero cross-tenant data leakage without separate tables or databases

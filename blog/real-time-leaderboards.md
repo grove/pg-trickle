@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Real-Time Leaderboards That Don't Lie
 
 ## Maintaining ranked lists incrementally — no full recomputation, no stale scores

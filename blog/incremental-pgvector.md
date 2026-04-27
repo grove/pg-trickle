@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Your pgvector Index Is Lying to You
 
 ## How pg_trickle + pgvector keep your embeddings honest

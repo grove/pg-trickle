@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Z-Set: The Data Structure That Makes IVM Correct
 
 ## A short tour of the data structure under pg_trickle's differential engine

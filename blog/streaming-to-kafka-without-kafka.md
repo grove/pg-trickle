@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Streaming to Kafka Without Kafka Expertise
 
 ## How pgtrickle-relay bridges stream table deltas to external systems

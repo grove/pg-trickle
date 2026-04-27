@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # HNSW Recall Is a Lie
 
 ## How Distribution Drift Silently Breaks Similarity Search (and What to Do About It)

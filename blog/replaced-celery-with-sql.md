@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # How We Replaced a Celery Pipeline with 3 SQL Statements
 
 ## A before/after story about async Python workers and differential view maintenance

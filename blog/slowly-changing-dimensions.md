@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Slowly Changing Dimensions in Real Time
 
 ## SCD Type 2 without nightly ETL, without Airflow, without leaving PostgreSQL

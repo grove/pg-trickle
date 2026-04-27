@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Testing Stream Tables: Shadow Mode and Correctness Fuzzing
 
 ## How pg_trickle validates that differential refresh matches full refresh

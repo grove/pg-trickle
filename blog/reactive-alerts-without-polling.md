@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Reactive Alerts Without Polling
 
 ## PostgreSQL as a Push System — No Polling Loop Required

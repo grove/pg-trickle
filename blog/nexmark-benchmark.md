@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # From Nexmark to Production: Benchmarking Stream Processing in PostgreSQL
 
 ## How pg_trickle performs on the standard streaming benchmark suite

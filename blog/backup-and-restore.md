@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Backup and Restore for Stream Tables
 
 ## pg_dump, PITR, and what happens when you restore a database with active stream tables

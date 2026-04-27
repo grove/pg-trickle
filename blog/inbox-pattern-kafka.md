@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Inbox Pattern: Receiving Events from Kafka into PostgreSQL
 
 ## Idempotent, ordered, exactly-once event ingestion without writing a consumer

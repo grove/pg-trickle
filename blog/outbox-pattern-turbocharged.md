@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Outbox Pattern, Turbocharged
 
 ## Transactionally Consistent Event Emission from PostgreSQL Without Dual-Write

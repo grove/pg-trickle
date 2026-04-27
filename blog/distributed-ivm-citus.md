@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Distributed IVM with Citus
 
 ## Incremental view maintenance across sharded PostgreSQL

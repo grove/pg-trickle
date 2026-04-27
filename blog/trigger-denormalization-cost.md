@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Hidden Cost of Trigger-Based Denormalization
 
 ## How hand-rolled sync logic breaks — and what to do about it

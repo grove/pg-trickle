@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Temporal Stream Tables: Time-Windowed Views That Update Themselves
 
 ## Handling the "last 7 days" problem without cron

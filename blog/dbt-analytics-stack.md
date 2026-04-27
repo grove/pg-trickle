@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # dbt + pg_trickle: The Analytics Engineer's Stack
 
 ## Using dbt to manage stream tables that actually stay fresh
