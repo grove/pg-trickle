@@ -55,9 +55,14 @@ jobs:
                          if f.endswith('.md') and f not in ('README.md', 'SUMMARY.md'))
           lines = ['# Summary\n', '\n', '[Blog Index](README.md)\n', '\n']
           for f in files:
+              title = f  # fallback to filename
               with open(os.path.join(src, f)) as fp:
-                  first = fp.readline().strip().lstrip('# ').strip()
-              lines.append(f'- [{first}]({f})\n')
+                  for line in fp:
+                      stripped = line.strip()
+                      if stripped.startswith('# '):
+                          title = stripped.lstrip('# ').strip()
+                          break
+              lines.append(f'- [{title}]({f})\n')
           with open(os.path.join(src, 'SUMMARY.md'), 'w') as fp:
               fp.writelines(lines)
           PYEOF
