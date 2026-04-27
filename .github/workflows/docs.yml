@@ -43,6 +43,36 @@ jobs:
       - name: Build documentation
         run: mdbook build
 
+      - name: Build blog posts as standalone pages
+        run: |
+          mkdir -p /tmp/blog-build/src
+          cp docs/blog/*.md /tmp/blog-build/src/
+          # Generate SUMMARY.md for blog sub-book
+          python3 - << 'PYEOF'
+          import os
+          src = '/tmp/blog-build/src'
+          files = sorted(f for f in os.listdir(src)
+                         if f.endswith('.md') and f not in ('README.md', 'SUMMARY.md'))
+          lines = ['# Summary\n', '\n', '[Blog Index](README.md)\n', '\n']
+          for f in files:
+              with open(os.path.join(src, f)) as fp:
+                  first = fp.readline().strip().lstrip('# ').strip()
+              lines.append(f'- [{first}]({f})\n')
+          with open(os.path.join(src, 'SUMMARY.md'), 'w') as fp:
+              fp.writelines(lines)
+          PYEOF
+          cat > /tmp/blog-build/book.toml << 'EOF'
+          [book]
+          src = "src"
+          language = "en"
+          [output.html]
+          site-url = "/pg-trickle/blog/"
+          default-theme = "navy"
+          EOF
+          mdbook build /tmp/blog-build
+          # Merge blog output into the main book output under blog/
+          cp -r /tmp/blog-build/book/. book/blog/
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
