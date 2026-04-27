@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Stop Rebuilding Your Search Index at 3am
 
 ## pg_trickle's scheduler, SLA tiers, and how to tune refresh for your workload

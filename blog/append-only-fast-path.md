@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Append-Only Fast Path
 
 ## Why event logs get special treatment in the differential engine

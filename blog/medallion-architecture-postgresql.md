@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Medallion Architecture Lives Inside PostgreSQL
 
 ## Bronze, Silver, Gold — without Spark, without Airflow, without leaving your database

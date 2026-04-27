@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # IMMEDIATE Mode: When "Good Enough Freshness" Isn't Good Enough
 
 ## Synchronous IVM inside your transaction

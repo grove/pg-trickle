@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # How to Change a Stream Table Query Without Taking It Offline
 
 ## Online schema evolution for incremental views

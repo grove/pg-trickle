@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Incremental Aggregates in PostgreSQL: No ETL Required
 
 ## Running SUM, COUNT, AVG, and vector_avg over live tables without batch jobs

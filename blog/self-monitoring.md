@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # pg_trickle Monitors Itself
 
 ## How the extension eats its own cooking

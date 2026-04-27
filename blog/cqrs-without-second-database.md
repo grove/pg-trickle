@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # CQRS Without a Second Database
 
 ## Command Query Responsibility Segregation using stream tables instead of a separate read store

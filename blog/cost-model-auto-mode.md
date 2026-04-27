@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # The Cost Model: How pg_trickle Decides Whether to Refresh Differentially
 
 ## Inside the AUTO mode decision engine

@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # How pg_trickle Handles Diamond Dependencies
 
 ## The refresh ordering problem that nobody talks about until it causes double-counting

@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Migrating from pg_ivm to pg_trickle
 
 ## Feature gap, SQL differences, and a step-by-step migration procedure

@@ -1,3 +1,5 @@
+[← Back to Blog Index](README.md)
+
 # Differential Dataflow for the Rest of Us
 
 ## The mathematics behind incremental view maintenance, explained without a PhD
