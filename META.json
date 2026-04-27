@@ -38,6 +38,40 @@
     "rust",
     "differential-dataflow"
   ],
+  "no_index": {
+    "directory": [
+      "roadmap",
+      "plans",
+      "demo",
+      "monitoring",
+      "playground",
+      "pgtrickle-relay",
+      "pgtrickle-tui",
+      "dbt-pgtrickle",
+      "benches",
+      "fuzz",
+      "examples",
+      "tests",
+      "cnpg",
+      "docker",
+      "scripts",
+      "docs",
+      "src",
+      "sql",
+      "proptest-regressions"
+    ],
+    "file": [
+      "test_output.txt",
+      "staged_files.txt",
+      "AGENTS.md",
+      "ESSENCE.md",
+      "CONTRIBUTING.md",
+      "SECURITY.md",
+      "CHANGELOG.md",
+      "ROADMAP.md",
+      "INSTALL.md"
+    ]
+  },
   "release_status": "stable",
   "generated_by": "pg_trickle contributors",
   "meta-spec": {
