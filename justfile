@@ -529,6 +529,58 @@ package:
 
 # ── Release ───────────────────────────────────────────────────────────────
 
+# Bump the version in Cargo.toml and META.json atomically, then print next steps.
+# Usage: just bump-version 0.35.0
+[group: "release"]
+bump-version VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NEW="{{ VERSION }}"
+    # Validate semver shape
+    if ! echo "$NEW" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "Error: version must be x.y.z (got '$NEW')"
+        exit 1
+    fi
+    OLD=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+    echo "Bumping $OLD → $NEW"
+    # Cargo.toml — only the first [package] version line (awk for macOS/Linux compat)
+    awk -v new_ver="$NEW" 'done!="yes" && /^version = "/ {sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" new_ver "\""); done="yes"} 1' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+    # META.json — both version fields
+    jq --arg v "$NEW" '.version = $v | .provides["pg_trickle"].version = $v' META.json > META.json.tmp && mv META.json.tmp META.json
+    echo ""
+    echo "Done. Files updated:"
+    echo "  Cargo.toml  $(grep '^version' Cargo.toml | head -1)"
+    echo "  META.json   $(jq -r '.version' META.json)"
+    echo ""
+    echo "Next steps:"
+    echo "  1. cargo check --features pg18   # Cargo.lock refresh"
+    echo "  2. just check-meta-version       # sanity check"
+    echo "  3. git add Cargo.toml Cargo.lock META.json"
+    echo "  4. git commit -m \"chore: bump version to $NEW\""
+    echo "  5. git tag v$NEW && git push origin v$NEW"
+
+# Verify META.json version matches Cargo.toml (run before tagging a release)
+[group: "release"]
+check-meta-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+    META_VERSION=$(jq -r '.version' META.json)
+    META_PROVIDES=$(jq -r '.provides["pg_trickle"].version' META.json)
+    FAILED=0
+    if [ "$META_VERSION" != "$CARGO_VERSION" ]; then
+        echo "Error: META.json .version ($META_VERSION) != Cargo.toml ($CARGO_VERSION)"
+        FAILED=1
+    fi
+    if [ "$META_PROVIDES" != "$CARGO_VERSION" ]; then
+        echo "Error: META.json .provides.pg_trickle.version ($META_PROVIDES) != Cargo.toml ($CARGO_VERSION)"
+        FAILED=1
+    fi
+    if [ "$FAILED" -eq 0 ]; then
+        echo "META.json version check passed: $META_VERSION"
+    fi
+    exit $FAILED
+
 # Package the extension into a zip archive and upload it to PGXN
 [group: "release"]
 pgxn-publish:
