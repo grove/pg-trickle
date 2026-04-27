@@ -25,3 +25,7 @@ package-lock.yml
 # TPC-H test run logs (local artefacts, not for VCS)
 test-tpch*.log
 clippy_output.txt
+
+# Dev/CI artifacts that must not be distributed via PGXN
+test_output.txt
+staged_files.txt
