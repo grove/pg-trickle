@@ -2338,6 +2338,16 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         config::pg_trickle_event_driven_wake(),
     );
 
+    // Mark scheduler as running in shared memory so cluster_worker_summary()
+    // and other shmem-based health consumers reflect the correct state.
+    // SAFETY: MyProcPid is always valid inside a background worker.
+    let my_pid = unsafe { pg_sys::MyProcPid };
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    crate::shmem::set_scheduler_meta(my_pid, true, now_ts);
+
     let mut dag_version: u64 = 0;
     let mut dag: Option<StDag> = None;
     // Follow-up flag: after an incremental rebuild, schedule a full rebuild
@@ -2543,6 +2553,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             wake_stats_event = 0;
             wake_stats_poll = 0;
             wake_stats_last_log_ms = now_for_stats;
+
+            // Update the last-wake timestamp in shared memory for monitoring.
+            // SAFETY: MyProcPid is always valid inside a background worker.
+            let my_pid = unsafe { pg_sys::MyProcPid };
+            crate::shmem::set_scheduler_meta(my_pid, true, (now_for_stats / 1000) as i64);
         }
 
         unsafe {
@@ -2559,6 +2574,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         if !should_continue {
             // SIGTERM received — shut down gracefully.
             log!("pg_trickle scheduler shutting down");
+            crate::shmem::set_scheduler_meta(0, false, 0);
             break;
         }
 
@@ -2586,6 +2602,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 "pg_trickle scheduler: pg_trickle was dropped from database '{}', exiting",
                 db_name
             );
+            crate::shmem::set_scheduler_meta(0, false, 0);
             return;
         }
 

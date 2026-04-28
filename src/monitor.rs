@@ -2565,10 +2565,27 @@ fn health_check() -> TableIterator<
 
     Spi::connect(|client| {
         // ── 1. Scheduler running ────────────────────────────────────────────
+        // Check launcher first, then the per-database scheduler for this DB.
+        // Distinguishing the two lets us emit a precise, actionable message:
+        //   - Launcher absent  → ERROR  (shared_preload_libraries / enabled)
+        //   - Launcher present, no per-DB scheduler → WARN (transient start-up)
+        //   - Per-DB scheduler present               → OK
+        let launcher_count = client
+            .select(
+                "SELECT count(*)::int FROM pg_stat_activity \
+                 WHERE backend_type = 'pg_trickle launcher'",
+                None,
+                &[],
+            )
+            .ok()
+            .and_then(|r| r.first().get::<i32>(1).unwrap_or(None))
+            .unwrap_or(0);
+
         let scheduler_count = client
             .select(
                 "SELECT count(*)::int FROM pg_stat_activity \
-                 WHERE backend_type = 'pg_trickle scheduler'",
+                 WHERE backend_type = 'pg_trickle scheduler' \
+                   AND datname = current_database()",
                 None,
                 &[],
             )
@@ -2578,12 +2595,21 @@ fn health_check() -> TableIterator<
 
         let (sev, detail) = if scheduler_count > 0 {
             ("OK", format!("{} worker(s) running", scheduler_count))
+        } else if launcher_count > 0 {
+            (
+                "WARN",
+                "pg_trickle launcher is running but no per-database scheduler found \
+                 for this database yet. The launcher will spawn one within ~10 s. \
+                 If this persists beyond 1 minute check the PostgreSQL server log \
+                 for 'pg_trickle launcher' messages."
+                    .to_string(),
+            )
         } else {
             (
                 "ERROR",
-                "No pg_trickle scheduler background worker found in pg_stat_activity. \
-                 Check that pg_trickle is in shared_preload_libraries and \
-                 pg_trickle.enabled = on."
+                "No pg_trickle launcher or scheduler background worker found in \
+                 pg_stat_activity. Check that pg_trickle is in \
+                 shared_preload_libraries and pg_trickle.enabled = on."
                     .to_string(),
             )
         };
@@ -2913,10 +2939,23 @@ fn health_summary() -> TableIterator<
             .unwrap_or((0, None));
 
         // ── Scheduler status ────────────────────────────────────────────
+        // Check per-database scheduler first; fall back to launcher presence.
         let scheduler_running = client
             .select(
                 "SELECT count(*)::int FROM pg_stat_activity \
-                 WHERE backend_type = 'pg_trickle scheduler'",
+                 WHERE backend_type = 'pg_trickle scheduler' \
+                   AND datname = current_database()",
+                None,
+                &[],
+            )
+            .ok()
+            .and_then(|r| r.first().get::<i32>(1).unwrap_or(None))
+            .unwrap_or(0);
+
+        let launcher_running = client
+            .select(
+                "SELECT count(*)::int FROM pg_stat_activity \
+                 WHERE backend_type = 'pg_trickle launcher'",
                 None,
                 &[],
             )
@@ -2926,6 +2965,8 @@ fn health_summary() -> TableIterator<
 
         let scheduler_status = if scheduler_running > 0 {
             "ACTIVE".to_string()
+        } else if launcher_running > 0 {
+            "STARTING".to_string()
         } else if crate::shmem::is_shmem_available() {
             "STOPPED".to_string()
         } else {
