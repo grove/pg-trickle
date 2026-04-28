@@ -83,8 +83,8 @@
 | [v0.35.0](roadmap/v0.35.0.md) | EC-01 correctness closeout, Citus chaos hardening, reactive subscriptions, zero-downtime schema changes | Released | Large | [Full details](roadmap/v0.35.0.md-full.md) |
 | [v0.36.0](roadmap/v0.36.0.md) | Structural hardening, L0 cache, WAL backpressure, temporal IVM, columnar storage | ✅ Released | Large | [Full details](roadmap/v0.36.0.md-full.md) |
 | [v0.37.0](roadmap/v0.37.0.md) | Scheduler & merge modularisation, pgVectorMV (vector_avg/sum), OpenTelemetry trace propagation | Released | Medium | [Full details](roadmap/v0.37.0.md-full.md) |
-| [v0.38.0](roadmap/v0.38.0.md) | Correctness closeout and operational truthfulness: EC-01, RowIdSchema planning, backpressure wiring, wake/docs fixes | Planned | Large | [Full details](roadmap/v0.38.0.md-full.md) |
-| [v0.39.0](roadmap/v0.39.0.md) | Distributed hardening and performance diagnostics: Citus chaos rig, durable CDC hold, TPC-H explain artifacts, fuzzing | Planned | Large | [Full details](roadmap/v0.39.0.md-full.md) |
+| [v0.38.0](roadmap/v0.38.0.md) | EC-01 Correctness Sprint (Hard Gate): join phantom rows, property-test convergence proof — BLOCKING release gate | Planned | Medium | [Full details](roadmap/v0.38.0.md-full.md) |
+| [v0.39.0](roadmap/v0.39.0.md) | Operational Truthfulness & Distributed Hardening: backpressure/wake fix, generated docs, Citus chaos, SQLSTATE rollout, diagnostics | Planned | Large | [Full details](roadmap/v0.39.0.md-full.md) |
 | [v0.40.0](roadmap/v0.40.0.md) | Operator trust and maintainability: generated references, alerting, drain-mode proof, secret hygiene, unsafe gating | Planned | Large | [Full details](roadmap/v0.40.0.md-full.md) |
 | [v0.41.0](roadmap/v0.41.0.md) | Embedding pipeline infrastructure: post-refresh hooks, drift-based reindex, vector monitoring | Planned | Medium | [Full details](roadmap/v0.41.0.md-full.md) |
 | [v0.42.0](roadmap/v0.42.0.md) | Sparse & half-precision vector aggregates, reactive distance subscriptions, hybrid-search benchmarks | Planned | Medium | [Full details](roadmap/v0.42.0.md-full.md) |
@@ -166,17 +166,28 @@ partially open or insufficiently proven. v0.36.0 and v0.37.0 still delivered
 substantial structural gains: L0 cache construction, temporal IVM,
 `RowIdSchema`, scheduler and merge splits, pgVectorMV, and OpenTelemetry trace
 capture. The next three releases now form a hardening programme rather than an
-immediate feature expansion. v0.38.0 closes the highest-risk correctness and
-truthfulness gaps (EC-01 mitigation, planner-enforced row-id compatibility,
-backpressure wiring or deprecation, wake/docs repair, SQLSTATE rollout, trace
-integration proof, and generated configuration docs). v0.39.0 extends that
-with distributed and diagnostic coverage: Citus chaos testing, durable CDC hold
-semantics, per-query TPC-H explain artifacts, SQLancer light PR mode, targeted
-fuzzing, and inbox/outbox reliability tests. v0.40.0 then focuses on operator
-trust and maintainability: generated SQL/GUC references, drain-mode proof,
-monitoring/alert rules, security-model and secret-handling docs, upgrade-gate
-coverage, unsafe-inventory PR gating, and continued decomposition of the
-largest files. Only after that hardening arc does the roadmap resume the
-embedding programme in v0.41.0-v0.43.0, preserving the pgvector work while
+immediate feature expansion.
+
+**v0.38.0 is a dedicated EC-01 correctness sprint with a hard release gate:**
+This release will NOT ship until join phantom rows are proven closed with a
+comprehensive DIFF-vs-FULL property test suite covering Q07/Q15-style joins.
+EC-01 has been labeled critical since v0.20.0 (6+ releases) and deferred multiple
+times; v0.38.0 breaks that pattern by making EC-01 closure the sole release
+objective. No other features, no operational docs, no SQLSTATE rollout — just the
+join phantom-row fix and its proof.
+
+**v0.39.0 absorbs the operational truthfulness items** that were originally planned
+for v0.38.0: backpressure hysteresis or deprecation, wake-truthfulness repair,
+generated configuration and upgrade docs, OpenTelemetry collector proof, SQLSTATE
+rollout on hot paths, and the full distributed/diagnostic coverage (Citus chaos
+testing, durable CDC hold semantics, per-query TPC-H explain artifacts, SQLancer
+light PR mode, targeted fuzzing, and inbox/outbox reliability tests).
+
+**v0.40.0** then focuses on operator trust and maintainability: generated SQL/GUC
+references, drain-mode proof, monitoring/alert rules, security-model and
+secret-handling docs, upgrade-gate coverage, unsafe-inventory PR gating, and
+continued decomposition of the largest files. Only after that hardening arc does
+the roadmap resume the embedding programme in v0.41.0-v0.43.0, preserving the
+pgvector work while
 aligning the release order with the assessment's conclusion that closing
 correctness and operational gaps matters more than adding new surface area.
