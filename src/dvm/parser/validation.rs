@@ -651,11 +651,44 @@ pub(crate) fn resolves_to_base_table(op: &OpTree) -> bool {
     }
 }
 
+/// F4 (v0.37.0): Returns true if an expression contains any pgvector distance
+/// operator: `<->` (L2), `<=>` (cosine), `<#>` (inner product), `<+>` (L1).
+///
+/// These operators are non-monotone and non-linear — no differentiation rule
+/// exists for them. Stream tables using these in WHERE/ORDER BY predicates
+/// are "FULL-fallback safe": they always produce correct results via FULL
+/// refresh. This function is used to emit a clear INFO/WARNING instead of a
+/// silent fallback.
+fn contains_pgvector_distance_op_in_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Raw(s) => {
+            s.contains("<->") || s.contains("<=>") || s.contains("<#>") || s.contains("<+>")
+        }
+        // Recurse into structured expressions if needed in the future.
+        // For now, Raw is the primary representation for complex predicates.
+        _ => false,
+    }
+}
+
 pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleError> {
     match tree {
         OpTree::Scan { .. } => Ok(()),
         OpTree::Project { child, .. } => check_ivm_support(child),
-        OpTree::Filter { child, .. } => check_ivm_support(child),
+        OpTree::Filter { predicate, child } => {
+            // F4 (v0.37.0): pgvector distance operators in WHERE clauses are
+            // FULL-fallback safe — no differentiation rule exists for non-monotone,
+            // non-linear operators like <->, <=>, <#>, <+>. Document the fallback
+            // so users get a clear INFO message instead of a silent FULL refresh.
+            if contains_pgvector_distance_op_in_expr(predicate) {
+                return Err(PgTrickleError::UnsupportedOperator(
+                    "pgvector distance operator (<->, <=>, <#>, <+>) in WHERE clause — \
+                     falling back to FULL refresh (expected and safe: distance operators \
+                     are non-monotone and cannot be differentiated)"
+                        .to_string(),
+                ));
+            }
+            check_ivm_support(child)
+        }
         OpTree::InnerJoin { left, right, .. }
         | OpTree::LeftJoin { left, right, .. }
         | OpTree::FullJoin { left, right, .. } => {
@@ -714,7 +747,10 @@ pub(crate) fn check_ivm_support_inner(tree: &OpTree) -> Result<(), PgTrickleErro
                     | AggFunc::HypPercentRank
                     | AggFunc::HypCumeDist
                     | AggFunc::ComplexExpression(_)
-                    | AggFunc::UserDefined(_) => {}
+                    | AggFunc::UserDefined(_)
+                    // F4: vector aggregates — supported via group-rescan strategy
+                    | AggFunc::VectorAvg
+                    | AggFunc::VectorSum => {}
                 }
             }
             check_ivm_support(child)

@@ -1379,6 +1379,31 @@ pub static PGS_COLUMNAR_BACKEND: GucSetting<Option<std::ffi::CString>> =
 /// Default: `false` (standard non-temporal storage).
 pub static PGS_TEMPORAL_STREAM_TABLES: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators.
+/// When `true`, `avg(vector_col)` and `sum(vector_col)` in stream table defining
+/// queries are handled by the DVM engine using a group-rescan strategy so they
+/// remain correct under differential refresh. Requires pgvector extension.
+/// Default: `false`.
+pub static PGS_ENABLE_VECTOR_AGG: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline.
+/// When `true`, pg_trickle reads `pg_trickle.trace_id` from the session GUC at
+/// CDC capture time and stores it in the change-buffer row. At refresh time, spans
+/// are opened and exported via OTLP/gRPC to `pg_trickle.otel_endpoint`.
+/// Default: `false`.
+pub static PGS_ENABLE_TRACE_PROPAGATION: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// F10 (v0.37.0): OTLP/gRPC endpoint for OpenTelemetry span export.
+/// Empty string = disabled (no spans emitted).
+/// Example: `"http://jaeger:4317"`.
+pub static PGS_OTEL_ENDPOINT: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// F10 (v0.37.0): Session-level W3C traceparent header for trace context propagation.
+/// Set in the application session before DML: `SET pg_trickle.trace_id = 'traceparent: ...'`.
+pub static PGS_TRACE_ID: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
 /// A20 (v0.36.0): Log format enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -2963,6 +2988,48 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // F4 (v0.37.0): pgVectorMV — incremental vector aggregate operators.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.enable_vector_agg",
+        c"F4: Enable pgVectorMV incremental vector aggregate operators (avg/sum on vector types).",
+        c"When true, avg(vector_col) and sum(vector_col) in stream table defining queries \
+          are handled by the DVM engine using a group-rescan strategy so they remain correct \
+          under differential refresh. Requires pgvector extension to be installed. Default false.",
+        &PGS_ENABLE_VECTOR_AGG,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // F10 (v0.37.0): OpenTelemetry W3C Trace Context propagation.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.enable_trace_propagation",
+        c"F10: Enable W3C Trace Context propagation through the refresh pipeline.",
+        c"When true, pg_trickle reads pg_trickle.trace_id from the session GUC at \
+          CDC capture time and stores it in the change buffer. At refresh time, spans \
+          are exported via OTLP/gRPC to pg_trickle.otel_endpoint. Default false.",
+        &PGS_ENABLE_TRACE_PROPAGATION,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_trickle.otel_endpoint",
+        c"F10: OTLP/gRPC endpoint for OpenTelemetry span export.",
+        c"Empty string disables span export. Example: 'http://jaeger:4317'. Default empty.",
+        &PGS_OTEL_ENDPOINT,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_trickle.trace_id",
+        c"F10: Session-level W3C traceparent header for trace context propagation.",
+        c"Set before DML: SET pg_trickle.trace_id = 'traceparent: 00-...'. \
+          Captured into the change buffer when enable_trace_propagation is on. \
+          Default empty.",
+        &PGS_TRACE_ID,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -3653,6 +3720,30 @@ pub fn pg_trickle_inbox_drain_interval_seconds() -> u64 {
 /// (0 = disabled).
 pub fn pg_trickle_inbox_dlq_alert_max_per_refresh() -> i32 {
     PGS_INBOX_DLQ_ALERT_MAX_PER_REFRESH.get()
+}
+
+/// F4 (v0.37.0): Returns whether pgVectorMV vector aggregate support is enabled.
+pub fn pg_trickle_enable_vector_agg() -> bool {
+    PGS_ENABLE_VECTOR_AGG.get()
+}
+
+/// F10 (v0.37.0): Returns whether OpenTelemetry trace propagation is enabled.
+pub fn pg_trickle_enable_trace_propagation() -> bool {
+    PGS_ENABLE_TRACE_PROPAGATION.get()
+}
+
+/// F10 (v0.37.0): Returns the OTLP endpoint for trace export (empty = disabled).
+pub fn pg_trickle_otel_endpoint() -> Option<String> {
+    PGS_OTEL_ENDPOINT
+        .get()
+        .and_then(|s| s.to_str().ok().map(|v| v.to_string()))
+}
+
+/// F10 (v0.37.0): Returns the current session trace_id (W3C traceparent).
+pub fn pg_trickle_trace_id() -> Option<String> {
+    PGS_TRACE_ID
+        .get()
+        .and_then(|s| s.to_str().ok().map(|v| v.to_string()))
 }
 
 #[cfg(test)]

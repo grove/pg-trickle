@@ -234,6 +234,18 @@ pub enum AggFunc {
     /// may use exotic syntax that cannot be reconstructed from parts.
     /// Any change in the group triggers full re-aggregation from source data.
     UserDefined(String),
+    /// F4 (v0.37.0): pgvector element-wise average — algebraic via aux.
+    ///
+    /// Maintains `__pgt_aux_sum_*` (vector) and `__pgt_aux_count_*` (bigint).
+    /// Result = `__pgt_aux_sum / __pgt_aux_count` (element-wise scalar division).
+    /// Gate: `pg_trickle.enable_vector_agg = on`.
+    VectorAvg,
+    /// F4 (v0.37.0): pgvector element-wise sum — algebraically invertible.
+    ///
+    /// Maintains `__pgt_aux_sum_*` (vector) via running sum.
+    /// On INSERT: add element-wise; on DELETE: subtract element-wise.
+    /// Gate: `pg_trickle.enable_vector_agg = on`.
+    VectorSum,
 }
 
 /// Determine the effective output column names for a LATERAL SRF.
@@ -327,6 +339,8 @@ impl AggFunc {
             AggFunc::HypCumeDist => "CUME_DIST",
             AggFunc::ComplexExpression(_) => "COMPLEX_EXPRESSION",
             AggFunc::UserDefined(_) => "USER_DEFINED",
+            AggFunc::VectorAvg => "avg",
+            AggFunc::VectorSum => "sum",
         }
     }
 
@@ -430,6 +444,10 @@ impl AggFunc {
                 | AggFunc::HypCumeDist
                 | AggFunc::ComplexExpression(_)
                 | AggFunc::UserDefined(_)
+                // F4 (v0.37.0): vector aggregates use group-rescan strategy
+                // (re-aggregate affected groups using pgvector's native avg/sum)
+                | AggFunc::VectorAvg
+                | AggFunc::VectorSum
         )
     }
 }

@@ -626,6 +626,12 @@ pub fn create_change_buffer_table(
         ""
     };
 
+    // F10 (v0.37.0): __pgt_trace_context column always included in new change buffer
+    // tables. Stores the W3C traceparent from session GUC pg_trickle.trace_id at
+    // trigger execution time (NULL when GUC not set). Reading/exporting trace context
+    // is gated on pg_trickle.enable_trace_propagation = on at refresh time.
+    // Always-on column avoids conditional trigger SQL and ALTER TABLE migrations.
+
     // INVARIANT: change_id uses BIGSERIAL which defaults to CACHE 1.
     // CACHE 1 is a **hard correctness requirement** — do NOT increase it.
     //
@@ -648,11 +654,12 @@ pub fn create_change_buffer_table(
     // names survive pg_dump/restore and are identical across Citus nodes.
     let sql = format!(
         "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_{name} (\
-            change_id   BIGSERIAL,\
-            lsn         PG_LSN NOT NULL,\
-            action      CHAR(1) NOT NULL\
+            change_id             BIGSERIAL,\
+            lsn                   PG_LSN NOT NULL,\
+            action                CHAR(1) NOT NULL\
             {pk_col}\
-            {typed_col_defs}\
+            {typed_col_defs},\
+            __pgt_trace_context   TEXT\
         ){partition_clause}",
         schema = change_schema,
         name = stable_name,
@@ -737,11 +744,12 @@ pub fn create_st_change_buffer_table(
     // silently corrupts compaction and delta ordering. Ref: issue #536.
     let sql = format!(
         "CREATE {unlogged_kw}TABLE IF NOT EXISTS {schema}.changes_pgt_{id} (\
-            change_id   BIGSERIAL,\
-            lsn         PG_LSN NOT NULL,\
-            action      CHAR(1) NOT NULL,\
-            pk_hash     BIGINT\
-            {typed_col_defs}\
+            change_id             BIGSERIAL,\
+            lsn                   PG_LSN NOT NULL,\
+            action                CHAR(1) NOT NULL,\
+            pk_hash               BIGINT\
+            {typed_col_defs},\
+            __pgt_trace_context   TEXT\
         )",
         schema = change_schema,
         id = pgt_id,
@@ -1386,7 +1394,6 @@ pub fn alter_change_buffer_add_columns(
             );
         }
     } else {
-        // WB-1 migration: convert BIGINT bitmask column to VARBIT.
         // atttypid 20 = int8 (BIGINT). NULL-out existing rows — changed_cols
         // is a performance hint only; losing old bitmasks is safe.
         let is_bigint: bool = Spi::get_one::<bool>(&format!(
@@ -1414,6 +1421,23 @@ pub fn alter_change_buffer_add_columns(
                      failed to migrate changed_cols to VARBIT: {e}"
                 );
             }
+        }
+    }
+
+    // F10 (v0.37.0): Ensure __pgt_trace_context column exists (upgrade migration path).
+    // Fresh change buffers created in v0.37.0+ always have the column; buffers from
+    // v0.36.0 or earlier need the column added here so the rebuilt trigger function works.
+    if !existing_set.contains("__pgt_trace_context") {
+        let add_trace_sql = format!(
+            "ALTER TABLE {schema}.{buf} ADD COLUMN IF NOT EXISTS __pgt_trace_context TEXT",
+            schema = change_schema,
+            buf = buf_base,
+        );
+        if let Err(e) = Spi::run(&add_trace_sql) {
+            pgrx::debug1!(
+                "[pg_trickle] alter_change_buffer_add_columns: \
+                 failed to add __pgt_trace_context: {e}"
+            );
         }
     }
 
@@ -1727,6 +1751,9 @@ fn build_row_trigger_fn_sql(
     // when event-driven mode is active. The NOTIFY is coalesced by
     // PostgreSQL — only one notification per transaction regardless of
     // how many rows are affected. Cost is negligible (~0.5 µs).
+    //
+    // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
+    // current_setting returns '' when GUC is not set; NULLIF converts to NULL.
     format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -1739,24 +1766,27 @@ fn build_row_trigger_fn_sql(
              END IF;
              IF TG_OP = 'INSERT' THEN
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{ncn})
+                     (lsn, action, pk_hash{ncn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'I'
-                         {ip}{nv});
+                         {ip}{nv},
+                         NULLIF(current_setting('pg_trickle.trace_id', true), ''));
                  PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'UPDATE' THEN
                  -- changed_cols IS NULL for INSERT/DELETE (all columns populated).
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{uccd}{ncn}{ocn})
+                     (lsn, action, pk_hash{uccd}{ncn}{ocn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'U'
-                         {up}{ucv}{nv}{ov});
+                         {up}{ucv}{nv}{ov},
+                         NULLIF(current_setting('pg_trickle.trace_id', true), ''));
                  PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN NEW;
              ELSIF TG_OP = 'DELETE' THEN
                  INSERT INTO {cs}.changes_{name}
-                     (lsn, action, pk_hash{ocn})
+                     (lsn, action, pk_hash{ocn}, __pgt_trace_context)
                  VALUES (pg_current_wal_insert_lsn(), 'D'
-                         {dp}{ov});
+                         {dp}{ov},
+                         NULLIF(current_setting('pg_trickle.trace_id', true), ''));
                  PERFORM pg_notify('pgtrickle_wake', '');
                  RETURN OLD;
              END IF;
@@ -1818,6 +1848,7 @@ fn build_stmt_trigger_fn_sql(
 
     // INSERT trigger function — only accesses __pgt_new transition table.
     // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
+    // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let ins_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_ins_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -1829,8 +1860,9 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ncn})
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
+                 (lsn, action, pk_hash{ncn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -1855,12 +1887,14 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ocn})
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
+                 (lsn, action, pk_hash{ocn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ncn})
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
+                 (lsn, action, pk_hash{ncn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -1897,17 +1931,20 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{uccd}{ncn}{ocn})
-             SELECT pg_current_wal_insert_lsn(), 'U', {pkn}{ucv}{ncr}{ocr}
+                 (lsn, action, pk_hash{uccd}{ncn}{ocn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'U', {pkn}{ucv}{ncr}{ocr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n JOIN __pgt_old o ON {join};
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ocn})
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
+                 (lsn, action, pk_hash{ocn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o
              WHERE NOT EXISTS (SELECT 1 FROM __pgt_new n WHERE {not_exists_join});
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ncn})
-             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr}
+                 (lsn, action, pk_hash{ncn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'I', {pkn}{ncr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_new n
              WHERE NOT EXISTS (SELECT 1 FROM __pgt_old o WHERE {not_exists_join});
              PERFORM pg_notify('pgtrickle_wake', '');
@@ -1921,6 +1958,7 @@ fn build_stmt_trigger_fn_sql(
 
     // DELETE trigger function — only accesses __pgt_old transition table.
     // WAKE-1: PERFORM pg_notify wakes the scheduler immediately.
+    // F10: Capture W3C traceparent from session GUC into __pgt_trace_context.
     let del_fn = format!(
         "CREATE OR REPLACE FUNCTION {cs}.pg_trickle_cdc_del_fn_{name}()
          RETURNS trigger LANGUAGE plpgsql
@@ -1932,8 +1970,9 @@ fn build_stmt_trigger_fn_sql(
                  RETURN NULL;
              END IF;
              INSERT INTO {cs}.changes_{name}
-                 (lsn, action, pk_hash{ocn})
-             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr}
+                 (lsn, action, pk_hash{ocn}, __pgt_trace_context)
+             SELECT pg_current_wal_insert_lsn(), 'D', {pko}{ocr},
+                    NULLIF(current_setting('pg_trickle.trace_id', true), '')
              FROM __pgt_old o;
              PERFORM pg_notify('pgtrickle_wake', '');
              RETURN NULL;
@@ -2428,11 +2467,18 @@ fn sync_change_buffer_columns(
 
     // System columns: never dropped, not tracked as data columns.
     // changed_cols is a system column (Task 3.1 bitmask — preserved across schema changes).
-    let system_cols: std::collections::HashSet<&str> =
-        ["change_id", "lsn", "action", "pk_hash", "changed_cols"]
-            .iter()
-            .copied()
-            .collect();
+    // __pgt_trace_context is the F10 trace propagation column — preserved as a system column.
+    let system_cols: std::collections::HashSet<&str> = [
+        "change_id",
+        "lsn",
+        "action",
+        "pk_hash",
+        "changed_cols",
+        "__pgt_trace_context",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     // Ensure changed_cols VARBIT column exists (WB-1: migrated from BIGINT).
     if !existing_cols.contains_key("changed_cols") {
