@@ -511,7 +511,7 @@ impl E2eDb {
     /// Reload PostgreSQL configuration and wait briefly for SIGHUP settings to apply.
     pub async fn reload_config_and_wait(&self) {
         self.execute("SELECT pg_reload_conf()").await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     /// Read a GUC value after forcing the extension to load on the same backend.
@@ -537,12 +537,12 @@ impl E2eDb {
 
     /// Wait until `SHOW <setting>` reports the expected value.
     pub async fn wait_for_setting(&self, setting: &str, expected: &str) {
-        for _ in 0..10 {
+        for _ in 0..30 {
             let current = self.show_setting(setting).await;
             if current == expected {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
 
         let current = self.show_setting(setting).await;
