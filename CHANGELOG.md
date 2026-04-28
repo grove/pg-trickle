@@ -55,16 +55,6 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
-## [Unreleased]
-
-### Removed
-
-- **`pgtrickle-tui`** — The terminal dashboard binary has been removed from
-  this repository. All SQL-level monitoring functions (`pgtrickle.health_check()`,
-  `pgtrickle.list_stream_tables()`, etc.) remain fully available in the extension.
-
----
-
 ## [0.38.0] — EC-01 Join Correctness Sprint
 
 v0.38.0 is a focused correctness release for EC-01, the join phantom-row class
@@ -98,6 +88,12 @@ multiset equality and row-id diagnostics.
 
 Q07 and Q15 are no longer allowed in `IMMEDIATE_SKIP_ALLOWLIST`, so CI must
 prove those query shapes instead of accepting silent skips.
+
+### Removed
+
+- **`pgtrickle-tui`** — The terminal dashboard binary has been removed from
+  this repository. All SQL-level monitoring functions (`pgtrickle.health_check()`,
+  `pgtrickle.list_stream_tables()`, etc.) remain fully available in the extension.
 
 **Upgrade:** The `0.37.0 -> 0.38.0` migration has no SQL-object changes; the
 release changes Rust DVM/refresh behavior and test coverage only.
