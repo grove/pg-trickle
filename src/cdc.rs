@@ -407,12 +407,24 @@ pub fn build_changed_cols_bitmask_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            format!(
-                "(CASE WHEN NEW.\"{qcol}\" IS DISTINCT FROM OLD.\"{qcol}\" \
-                 THEN B'1' ELSE B'0' END)::varbit"
-            )
+            // pgvector types (vector, halfvec, sparsevec) do not define an '='
+            // operator, so IS DISTINCT FROM (which uses '=') would fail.
+            // Cast to text for comparison — text always supports equality.
+            let base_type = type_name.split('(').next().unwrap_or("").trim();
+            let is_pgvector = matches!(base_type, "vector" | "halfvec" | "sparsevec");
+            if is_pgvector {
+                format!(
+                    "(CASE WHEN NEW.\"{qcol}\"::text IS DISTINCT FROM OLD.\"{qcol}\"::text \
+                     THEN B'1' ELSE B'0' END)::varbit"
+                )
+            } else {
+                format!(
+                    "(CASE WHEN NEW.\"{qcol}\" IS DISTINCT FROM OLD.\"{qcol}\" \
+                     THEN B'1' ELSE B'0' END)::varbit"
+                )
+            }
         })
         .collect();
     Some(parts.join(" ||\n        "))
@@ -2032,12 +2044,24 @@ fn build_changed_cols_bitmask_stmt_expr(
     }
     let parts: Vec<String> = columns
         .iter()
-        .map(|(col_name, _)| {
+        .map(|(col_name, type_name)| {
             let qcol = col_name.replace('"', "\"\"");
-            format!(
-                "(CASE WHEN n.\"{qcol}\" IS DISTINCT FROM o.\"{qcol}\" \
-                 THEN B'1' ELSE B'0' END)::varbit"
-            )
+            // pgvector types (vector, halfvec, sparsevec) do not define an '='
+            // operator, so IS DISTINCT FROM (which uses '=') would fail.
+            // Cast to text for comparison — text always supports equality.
+            let base_type = type_name.split('(').next().unwrap_or("").trim();
+            let is_pgvector = matches!(base_type, "vector" | "halfvec" | "sparsevec");
+            if is_pgvector {
+                format!(
+                    "(CASE WHEN n.\"{qcol}\"::text IS DISTINCT FROM o.\"{qcol}\"::text \
+                     THEN B'1' ELSE B'0' END)::varbit"
+                )
+            } else {
+                format!(
+                    "(CASE WHEN n.\"{qcol}\" IS DISTINCT FROM o.\"{qcol}\" \
+                     THEN B'1' ELSE B'0' END)::varbit"
+                )
+            }
         })
         .collect();
     Some(parts.join(" ||\n\t\t        "))

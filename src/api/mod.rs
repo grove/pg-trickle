@@ -1818,6 +1818,45 @@ fn validate_and_parse_query(
     })
 }
 
+/// F4: Post-fix vector aggregate output column types to include explicit
+/// dimensions (e.g. `vector` → `vector(3)`).
+///
+/// `avg(embedding)` where `embedding` is `vector(3)` returns type `vector`
+/// (undimensioned) at the PostgreSQL query-analysis level. HNSW / IVFFlat
+/// indexes require the column to have an explicit dimension. This function
+/// looks up each VectorAvg/VectorSum output column's source column typmod and
+/// runs `ALTER TABLE … ALTER COLUMN … TYPE vector(N)` when the dimension is
+/// known.
+fn fix_vector_aggregate_column_types(
+    schema: &str,
+    table_name: &str,
+    tree: &crate::dvm::parser::OpTree,
+) -> Result<(), PgTrickleError> {
+    let dims = crate::dvm::extract_vector_agg_output_dims(tree);
+    for (col_alias, typmod) in dims {
+        if typmod <= 0 {
+            continue;
+        }
+        // Look up the pgvector type name to build the correct type expression.
+        // We need the base type name (vector / halfvec / sparsevec) as well as
+        // the dimension. `format_type(oid, typmod)` handles this canonically.
+        let alter_sql = format!(
+            "ALTER TABLE {}.{} ALTER COLUMN {} TYPE vector({})",
+            quote_identifier(schema),
+            quote_identifier(table_name),
+            quote_identifier(&col_alias),
+            typmod,
+        );
+        Spi::run(&alter_sql).map_err(|e| {
+            PgTrickleError::SpiError(format!(
+                "F4: failed to set vector dimension for column '{}': {}",
+                col_alias, e
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Set up the storage table: CREATE TABLE, row_id index, DML guard trigger,
 /// and optional GROUP BY composite index.
 #[allow(clippy::too_many_arguments)]
@@ -3361,6 +3400,17 @@ fn create_stream_table_impl(
         &vq.nonnull_aux_columns,
         partition_by,
     )?;
+
+    // F4: Fix vector aggregate column dimensions (VectorAvg/VectorSum output
+    // columns need vector(N) type with explicit dimension for HNSW / IVFFlat
+    // index support). avg(vector(3)) returns undimensioned `vector` at the
+    // SQL type-inference level; we post-fix via ALTER COLUMN using the source
+    // column's atttypmod.
+    if crate::config::pg_trickle_enable_vector_agg()
+        && let Some(ref pr) = vq.parsed_tree
+    {
+        fix_vector_aggregate_column_types(&schema, &table_name, &pr.tree)?;
+    }
 
     // CITUS-7: Distribute the output storage table when requested and Citus is available.
     if let Some(dist_col) = output_distribution_column {

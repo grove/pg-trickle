@@ -885,6 +885,113 @@ pub(crate) fn reclassify_vector_aggregates(
     }
 }
 
+/// F4: Walk an OpTree and return `(output_alias, dimension)` for every
+/// `VectorAvg` / `VectorSum` aggregate whose source column has an explicit
+/// `vector(N)` / `halfvec(N)` dimension in `pg_attribute`.
+///
+/// This is used after stream-table creation to `ALTER COLUMN … TYPE vector(N)`
+/// so that HNSW / IVFFlat indexes (which require explicit dimensions) can be
+/// built on the centroid column.
+#[cfg(feature = "pg18")]
+pub(crate) fn extract_vector_agg_output_dims(tree: &parser::OpTree) -> Vec<(String, i32)> {
+    use parser::{AggFunc, Expr, OpTree};
+    use pgrx::prelude::*;
+
+    fn lookup_typmod(source_oids: &[u32], col_name: &str) -> i32 {
+        if source_oids.is_empty() {
+            return -1;
+        }
+        let oid_list = source_oids
+            .iter()
+            .map(|o| o.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        // Only consider vector/halfvec/sparsevec columns — others return -1.
+        let sql = format!(
+            "SELECT a.atttypmod \
+             FROM pg_catalog.pg_attribute a \
+             JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+             WHERE a.attrelid IN ({oid_list}) \
+               AND a.attname = $1 \
+               AND t.typname IN ('vector', 'halfvec', 'sparsevec') \
+               AND a.attnum > 0 \
+               AND NOT a.attisdropped \
+             LIMIT 1",
+        );
+        Spi::get_one_with_args::<i32>(&sql, &[col_name.into()])
+            .unwrap_or(Some(-1))
+            .unwrap_or(-1)
+    }
+
+    fn walk(tree: &OpTree, result: &mut Vec<(String, i32)>) {
+        match tree {
+            OpTree::Aggregate {
+                aggregates, child, ..
+            } => {
+                walk(child, result);
+                let child_oids = child.source_oids();
+                for agg in aggregates {
+                    if !matches!(agg.function, AggFunc::VectorAvg | AggFunc::VectorSum) {
+                        continue;
+                    }
+                    let col_name = match &agg.argument {
+                        Some(Expr::ColumnRef { column_name, .. }) => column_name.as_str(),
+                        _ => continue,
+                    };
+                    let typmod = lookup_typmod(&child_oids, col_name);
+                    if typmod > 0 {
+                        result.push((agg.alias.clone(), typmod));
+                    }
+                }
+            }
+            OpTree::Filter { child, .. }
+            | OpTree::Project { child, .. }
+            | OpTree::Subquery { child, .. }
+            | OpTree::Window { child, .. }
+            | OpTree::Distinct { child }
+            | OpTree::LateralFunction { child, .. }
+            | OpTree::LateralSubquery { child, .. }
+            | OpTree::ScalarSubquery { child, .. } => walk(child, result),
+            OpTree::InnerJoin { left, right, .. }
+            | OpTree::LeftJoin { left, right, .. }
+            | OpTree::FullJoin { left, right, .. }
+            | OpTree::SemiJoin { left, right, .. }
+            | OpTree::AntiJoin { left, right, .. }
+            | OpTree::Intersect { left, right, .. }
+            | OpTree::Except { left, right, .. } => {
+                walk(left, result);
+                walk(right, result);
+            }
+            OpTree::UnionAll { children, .. } => {
+                for c in children {
+                    walk(c, result);
+                }
+            }
+            OpTree::RecursiveCte {
+                base, recursive, ..
+            } => {
+                walk(base, result);
+                walk(recursive, result);
+            }
+            OpTree::CteScan { body, .. } => {
+                if let Some(b) = body.as_ref() {
+                    walk(b, result);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut result = Vec::new();
+    walk(tree, &mut result);
+    result
+}
+
+#[cfg(not(feature = "pg18"))]
+pub(crate) fn extract_vector_agg_output_dims(_tree: &parser::OpTree) -> Vec<(String, i32)> {
+    Vec::new()
+}
+
 /// Check whether a defining query needs the `__pgt_count` auxiliary column
 /// (the top-level operator is Aggregate or Distinct).
 ///
