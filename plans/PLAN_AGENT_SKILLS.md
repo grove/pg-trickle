@@ -8,7 +8,7 @@
 ## Motivation
 
 The pg_trickle project has a rich, multi-layered development workflow spanning
-Rust extension code, SQL migration scripts, dbt Jinja macros, TUI development,
+Rust extension code, SQL migration scripts, dbt Jinja macros,
 Docker image building, benchmarking, and release management. Currently three
 agent skills exist:
 

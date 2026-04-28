@@ -701,7 +701,6 @@ fuzz targets.
 | [`docs/integrations/multi-tenant.md`](../docs/integrations/multi-tenant.md) | Excellent. **Add:** worked example of a noisy-neighbour scenario and the corresponding alert. | **Low** |
 | [`docs/GETTING_STARTED.md`](../docs/GETTING_STARTED.md) | Comprehensive (1,491 LOC). **Missing:** snapshot/PITR walkthrough; predictive planner advice. | **Medium** |
 | [`docs/PERFORMANCE_COOKBOOK.md`](../docs/PERFORMANCE_COOKBOOK.md) | Should add a recipe: “use `recommend_schedule` to right-size a 100-table dbt project.” | **Low** |
-| [`docs/TUI.md`](../docs/TUI.md) | Does not mention SNAP / PLAN / CLUS / METR functions. | **Medium** |
 | [`docs/PRE_DEPLOYMENT.md`](../docs/PRE_DEPLOYMENT.md) | Does not mention `change_buffer_durability` or `frontier_holdback_*` GUCs. | **Medium** |
 | [`docs/FAQ.md`](../docs/FAQ.md) | No entry for “How do I take a snapshot?” or “How do I tune `schedule_recommendation_min_samples`?” | **Low** |
 | [ROADMAP.md](../ROADMAP.md) | The v0.29.0 row in the milestone table at line 89 contains a copy-paste typo: it repeats v0.27.0's description (“Operability, observability & DR”) instead of describing the Relay CLI. | **Low** |
@@ -906,7 +905,7 @@ ship them.
 | 22 | Add E2E tests: predictive planner sparse history, multi-DB worker fairness | §7 | P1 | v0.29.0 |
 | 23 | Document `change_buffer_durability` in [docs/PRE_DEPLOYMENT.md](../docs/PRE_DEPLOYMENT.md) | §8 | P1 | v0.29.0 |
 | 24 | Surface CNPG 1.29 compatibility in [cnpg/](../cnpg/) and CI | §9 | P1 | v0.29.0 |
-| 25 | Add TUI parity for SNAP/PLAN/CLUS/METR functions | §9 | P2 | v0.30.0 |
+| 25 | Add SQL reference docs for SNAP/PLAN/CLUS/METR functions | §9 | P2 | v0.30.0 |
 | 26 | Ship first-party Grafana dashboard JSON in `monitoring/grafana/` | §9 | P2 | v0.30.0 |
 | 27 | Add OpenTelemetry tracing spans for refresh/CDC/snapshot | §9 | P2 | v1.0 |
 | 28 | Adaptive batching of refreshes that share a source table | §10.3 | P2 | v0.30.0 |

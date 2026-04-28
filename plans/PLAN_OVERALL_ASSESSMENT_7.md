@@ -96,7 +96,7 @@ right" and the distributed coordination to "documented and tested".
 The project's overall maturity now sits between Materialize CE (early
 2024) and pg_ivm: comparable correctness rigour to pg_ivm, comparable
 streaming features to early Materialize, but better operational ergonomics
-than either (TUI, dbt adapter, snapshot/PITR, downstream publications).
+than either (dbt adapter, snapshot/PITR, downstream publications).
 With the EC-01 + Citus closeout it is on track for a credible v1.0 GA in
 late 2026.
 

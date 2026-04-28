@@ -541,7 +541,7 @@ per-node *refresh latency* and *change volume* so operators can see
 where time is being spent at a glance. Data already exists in
 `pgt_refresh_history`.
 
-> **→ Roadmap:** [v0.23.0 §TUI/CLI Visualization Polish](../ROADMAP.md#phase-6--tuicli-visualization-polish) — item OP-1.
+> **→ Roadmap:** [v0.23.0 §CLI Visualization Polish](../ROADMAP.md#phase-6--cli-visualization-polish) — item OP-1.
 
 ---
 
@@ -641,7 +641,7 @@ Colour each node by *p95 latency* and width by *rows per refresh*
 using existing `pgt_refresh_history` data. One SQL aggregate plus a
 Mermaid template tweak.
 
-> **→ Roadmap:** [v0.23.0 §TUI/CLI Visualization Polish](../ROADMAP.md#phase-6--tuicli-visualization-polish) — item OP-1.
+> **→ Roadmap:** [v0.23.0 §CLI Visualization Polish](../ROADMAP.md#phase-6--cli-visualization-polish) — item OP-1.
 
 ### 9.12 Transactional outbox helper (S effort — 1 week)
 

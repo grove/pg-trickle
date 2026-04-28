@@ -383,7 +383,6 @@ mode creates one slot per source table; trigger CDC mode does not.
 | SPI | Server Programming Interface (PostgreSQL's in-process query API) |
 | SRF | Set-Returning Function |
 | ST | Stream Table |
-| TUI | Terminal User Interface |
 | WAL | Write-Ahead Log |
 
 ---

@@ -92,8 +92,8 @@ operates independently. [Full answer →](#interoperability)
 ### 13. How do I monitor stream table health?
 
 Built-in views (`pgtrickle.pgt_status`, `pgtrickle.pgt_refresh_history`),
-Prometheus metrics endpoint, Grafana dashboard, NOTIFY-based alerts, and
-a TUI tool. [Full answer →](#monitoring--alerting)
+Prometheus metrics endpoint, Grafana dashboard, and NOTIFY-based alerts.
+[Full answer →](#monitoring--alerting)
 
 ### 14. What happens if a refresh fails?
 

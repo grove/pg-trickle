@@ -46,8 +46,6 @@
 - [Security Guide](SECURITY_GUIDE.md)
 - [Troubleshooting & Runbook](TROUBLESHOOTING.md)
 - [Error Reference](ERRORS.md)
-- [TUI Tool](TUI.md)
-- [CLI Reference](CLI_REFERENCE.md)
 
 ---
 
