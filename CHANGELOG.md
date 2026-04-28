@@ -54,6 +54,16 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
+## [Unreleased]
+
+### Removed
+
+- **`pgtrickle-tui`** — The terminal dashboard binary has been removed from
+  this repository. All SQL-level monitoring functions (`pgtrickle.health_check()`,
+  `pgtrickle.list_stream_tables()`, etc.) remain fully available in the extension.
+
+---
+
 ## [0.37.0] — pgVector Incremental Aggregates & Distributed Trace Propagation
 
 v0.37.0 adds two independent capability pillars: incremental vector aggregates

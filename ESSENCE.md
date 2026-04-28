@@ -172,7 +172,7 @@ mode).
 The fastest paths from zero to a working stream table:
 
 ```bash
-# Option 1 — playground (sample data, dashboards, TUI ready)
+# Option 1 — playground (sample data, dashboards)
 cd playground && docker compose up -d
 
 # Option 2 — minimal Docker image

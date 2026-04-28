@@ -33,7 +33,7 @@
   - [B.8 SIGHUP Reload (extends Phase 1 hot-reload)](#b8-sighup-reload)
   - [B.9 Dry-Run & Replay Mode](#b9-dry-run--replay-mode)
   - [B.10 OpenTelemetry Tracing](#b10-opentelemetry-tracing)
-  - [B.11 Relay TUI Dashboard](#b11-relay-tui-dashboard)
+  - [B.11 Relay Dashboard](#b11-relay-dashboard)
   - [B.12 Plugin System (Dynamic Backends)](#b12-plugin-system-dynamic-backends)
   - [B.13 Encryption Envelope](#b13-encryption-envelope)
   - [B.14 Webhook Signature Verification](#b14-webhook-signature-verification)
@@ -58,7 +58,7 @@ databases, and data lake storage.
 Beyond backends, Phase 2 introduces **13 operational improvements**: dead-letter
 queues, schema registry integration, message transforms, content-based routing,
 rate limiting, circuit breakers, SIGHUP config reload, dry-run/replay mode,
-OpenTelemetry tracing, a TUI dashboard, a plugin system, payload encryption,
+OpenTelemetry tracing, a relay dashboard, a plugin system, payload encryption,
 and webhook signature verification.
 
 > **Note:** Multi-pipeline support and database-driven hot-reload are already
@@ -988,14 +988,13 @@ on Kafka records. For NATS, uses `traceparent` NATS header.
 
 **Effort:** 1.5d
 
-### B.11 Relay TUI Dashboard
+### B.11 Relay Dashboard
 
-**Problem:** The `pgtrickle-tui` provides a dashboard for stream tables.
-A similar dashboard for the relay would help operators monitor pipeline
-health, throughput, and errors in real-time.
+**Problem:** A dashboard for the relay would help operators monitor pipeline
+health, throughput, and errors in real-time. The `pgtrickle-tui` crate that
+previously provided a stream-table dashboard has been removed from the project.
 
-**Design:** Extend `pgtrickle-tui` with a relay dashboard tab, or add a
-`pgtrickle-relay dashboard` subcommand.
+**Design:** Add a `pgtrickle-relay dashboard` subcommand backed by ratatui.
 
 **Dashboard panels:**
 - Pipeline overview (mode, source, sink, status)
@@ -1007,7 +1006,7 @@ health, throughput, and errors in real-time.
 - Circuit breaker state
 - Active connections health
 
-**Implementation:** Reuse the `ratatui` framework from `pgtrickle-tui`.
+**Implementation:** Use the `ratatui` crate directly in `pgtrickle-relay`.
 Read metrics from the relay's Prometheus endpoint (scrape `/metrics`).
 
 **Effort:** 2d
@@ -1242,7 +1241,7 @@ header = "X-Webhook-Signature"            # header containing the signature
 |------|-------------|-----------|
 | RELAY-P3-1 | Apache Pulsar backend | Lower demand than cloud-native alternatives |
 | RELAY-P3-2 | Arrow Flight / gRPC backend | Emerging standard, not yet mainstream |
-| RELAY-P3-3 | Relay TUI dashboard | Nice-to-have, operators can use Grafana |
+| RELAY-P3-3 | Relay dashboard | Nice-to-have, operators can use Grafana |
 | RELAY-P3-4 | Plugin system (WASM backends) | High complexity, unclear demand |
 | RELAY-P3-5 | Encryption envelope (KMS integration) | Niche compliance requirement |
 | RELAY-P3-6 | AMQP 1.0 backend (Azure Service Bus, Qpid, etc.) | Unlocks additional brokers; requires separate SDK from RabbitMQ AMQP 0-9-1 |

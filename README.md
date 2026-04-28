@@ -58,16 +58,7 @@ Then connect with psql:
 psql postgresql://postgres:playground@localhost:5432/playground
 ```
 
-Or launch the **terminal UI** for a live monitoring dashboard:
-
-```bash
-# Install the TUI (requires Rust toolchain)
-cargo install --path pgtrickle-tui
-
-# Make sure ~/.cargo/bin is on your PATH (add to ~/.bashrc or ~/.zshrc if needed)
-export PATH="$HOME/.cargo/bin:$PATH"
-
-# Connect to the playground
+Or connect with any PostgreSQL client:
 pgtrickle --url postgresql://postgres:playground@localhost:5432/playground
 ```
 
@@ -452,13 +443,9 @@ SELECT pgtrickle.drop_stream_table('regional_totals');
 
 pg_trickle ships a standalone terminal tool (`pgtrickle`) for managing and
 monitoring stream tables from outside SQL. It works as both an interactive
-dashboard and a scriptable CLI. See **[docs/TUI.md](docs/TUI.md)** for the
-full user guide.
+dashboard and a scriptable CLI.
 
 ```bash
-# Build (requires Rust toolchain, not the PG extension)
-cargo build --release -p pgtrickle-tui
-
 # Interactive dashboard (auto-refresh every 2s)
 pgtrickle --url postgres://user:pass@host:5432/mydb
 
@@ -549,8 +536,6 @@ the plain-language overview, or jump straight to a topic below.
 | [Security Guide](docs/SECURITY_GUIDE.md) | Roles, grants, RLS, auditing |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptoms → diagnosis → fix |
 | [Error Reference](docs/ERRORS.md) | Every PgTrickleError variant with SQLSTATE |
-| [TUI Tool](docs/TUI.md) | Interactive terminal dashboard |
-| [CLI Reference](docs/CLI_REFERENCE.md) | Every `pgtrickle` subcommand |
 
 ### Distributed & streaming
 

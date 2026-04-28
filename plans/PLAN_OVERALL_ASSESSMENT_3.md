@@ -176,7 +176,7 @@ ROADMAP about whether something is delivered, the source code wins.
   [dbt-pgtrickle/AGENTS.md](../dbt-pgtrickle/AGENTS.md) and
   [plans/dbt/](dbt/).
 - Marketing / website assets.
-- Deep TUI ([pgtrickle-tui/](../pgtrickle-tui/)) audit beyond noting parity
+- Deep TUI audit (pgtrickle-tui has been removed from the project)
   gaps with the new SNAP/PLAN/CLUS/METR functions.
 
 ---
@@ -211,7 +211,7 @@ current state.
 | No predictive scheduler hint | PLAN | **Resolved.** `recommend_schedule` and `schedule_recommendations` SQL functions shipped. | [`src/api/planner.rs`](../src/api/planner.rs); [`sql/pg_trickle--0.26.0--0.27.0.sql:104-130`](../sql/pg_trickle--0.26.0--0.27.0.sql) |
 | No cluster-wide worker visibility | CLUS-1 | **Resolved.** `pgtrickle.cluster_worker_summary()` reads from shmem + `pg_stat_activity`. | [`src/api/cluster.rs`](../src/api/cluster.rs) |
 | No metrics_summary aggregation | METR-3 | **Resolved.** `pgtrickle.metrics_summary()` shipped. | [`src/api/metrics_ext.rs`](../src/api/metrics_ext.rs) |
-| pgrx 0.17 vendor lock | DEP-1 | **Resolved.** `Cargo.toml` is now pgrx 0.18.0 across the workspace, including [pgtrickle-tui/](../pgtrickle-tui/) and [fuzz/](../fuzz/). | [`Cargo.toml`](../Cargo.toml) |
+| pgrx 0.17 vendor lock | DEP-1 | **Resolved.** `Cargo.toml` is now pgrx 0.18.0 across the workspace, including [fuzz/](../fuzz/). | [`Cargo.toml`](../Cargo.toml) |
 | Recursion in DVM parser unbounded | G13-SD | **Resolved.** `cte_ctx.descend()/ascend()` enforced via `pg_trickle.max_parse_depth` GUC; rejection emits `QueryTooComplex`. | [`src/dvm/parser/mod.rs`](../src/dvm/parser/mod.rs) (called in `parse_select_stmt`, `parse_set_operation`, `parse_from_item`); [`src/error.rs:65-67`](../src/error.rs) |
 | `lib.rs` not denying clippy::unwrap_used in non-test | SAF-3 | **Resolved.** [`src/lib.rs:23`](../src/lib.rs) sets `#![cfg_attr(not(test), deny(clippy::unwrap_used))]`. |
 | SCC `.unwrap()` in tarjan algorithm | DAG-PANIC | **Mitigated.** Three `.unwrap()` sites at [`src/dag.rs:1093, 1100, 1112`](../src/dag.rs) carry explicit `nosemgrep` justifications referencing the SCC invariant. Sound but worth a final audit. |
@@ -644,7 +644,7 @@ predictive planner, which are the newest code paths.
   blocked by `pg_trickle.block_source_ddl` (configurable). The audit table
   `pgtrickle.pgt_refresh_history` is INSERT-only by enforcement at
   [`src/cdc.rs:71-83`](../src/cdc.rs).
-- The TUI binary ([pgtrickle-tui/](../pgtrickle-tui/)) connects via
+- The relay binary ([pgtrickle-relay/](../pgtrickle-relay/)) connects via
   ordinary libpq; it does not embed credentials. Good.
 - Fuzz coverage exists for `cdc_fuzz`, `cron_fuzz`, `guc_fuzz`,
   `parser_fuzz` ([`fuzz/fuzz_targets/`](../fuzz/fuzz_targets/)). **Missing:**
@@ -701,7 +701,6 @@ fuzz targets.
 | [`docs/integrations/multi-tenant.md`](../docs/integrations/multi-tenant.md) | Excellent. **Add:** worked example of a noisy-neighbour scenario and the corresponding alert. | **Low** |
 | [`docs/GETTING_STARTED.md`](../docs/GETTING_STARTED.md) | Comprehensive (1,491 LOC). **Missing:** snapshot/PITR walkthrough; predictive planner advice. | **Medium** |
 | [`docs/PERFORMANCE_COOKBOOK.md`](../docs/PERFORMANCE_COOKBOOK.md) | Should add a recipe: “use `recommend_schedule` to right-size a 100-table dbt project.” | **Low** |
-| [`docs/TUI.md`](../docs/TUI.md) | Does not mention SNAP / PLAN / CLUS / METR functions. | **Medium** |
 | [`docs/PRE_DEPLOYMENT.md`](../docs/PRE_DEPLOYMENT.md) | Does not mention `change_buffer_durability` or `frontier_holdback_*` GUCs. | **Medium** |
 | [`docs/FAQ.md`](../docs/FAQ.md) | No entry for “How do I take a snapshot?” or “How do I tune `schedule_recommendation_min_samples`?” | **Low** |
 | [ROADMAP.md](../ROADMAP.md) | The v0.29.0 row in the milestone table at line 89 contains a copy-paste typo: it repeats v0.27.0's description (“Operability, observability & DR”) instead of describing the Relay CLI. | **Low** |
@@ -724,11 +723,10 @@ fuzz targets.
    tracking the upgrade path.
 3. **Helm chart.** No first-party Helm chart yet; the CNPG path is the
    only documented K8s deployment.
-4. **`pgtrickle-tui` parity.** TUI does not surface
-   `snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`,
+4. **SQL API parity.** New SNAP/PLAN/CLUS/METR functions
+   (`snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`,
    `recommend_schedule`, `schedule_recommendations`,
-   `cluster_worker_summary`, `metrics_summary`. The new SNAP/PLAN/CLUS
-   functions exist only via SQL.
+   `cluster_worker_summary`, `metrics_summary`) are only accessible via SQL.
 5. **Grafana dashboards.** Per-DB `db_oid` / `db_name` labels (CLUS-2)
    are documented but no first-party Grafana dashboard JSON ships in
    `monitoring/grafana/`. The dashboard snippets in
@@ -907,7 +905,7 @@ ship them.
 | 22 | Add E2E tests: predictive planner sparse history, multi-DB worker fairness | §7 | P1 | v0.29.0 |
 | 23 | Document `change_buffer_durability` in [docs/PRE_DEPLOYMENT.md](../docs/PRE_DEPLOYMENT.md) | §8 | P1 | v0.29.0 |
 | 24 | Surface CNPG 1.29 compatibility in [cnpg/](../cnpg/) and CI | §9 | P1 | v0.29.0 |
-| 25 | Add TUI parity for SNAP/PLAN/CLUS/METR functions | §9 | P2 | v0.30.0 |
+| 25 | Add SQL reference docs for SNAP/PLAN/CLUS/METR functions | §9 | P2 | v0.30.0 |
 | 26 | Ship first-party Grafana dashboard JSON in `monitoring/grafana/` | §9 | P2 | v0.30.0 |
 | 27 | Add OpenTelemetry tracing spans for refresh/CDC/snapshot | §9 | P2 | v1.0 |
 | 28 | Adaptive batching of refreshes that share a source table | §10.3 | P2 | v0.30.0 |

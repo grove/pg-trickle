@@ -476,8 +476,6 @@ All columns use `ADD COLUMN IF NOT EXISTS` for idempotent upgrades.
   `SECURITY DEFINER` and an explicit `SET search_path`, hardening against
   privilege-escalation attacks. This is applied automatically on upgrade —
   no manual action needed.
-- **TUI binary:** A `pgtrickle` command-line tool is now included in the
-  package. See [TUI.md](TUI.md) for usage.
 
 **No breaking changes.** All v0.13.0 functions, views, and event triggers
 continue to work as before.
@@ -486,7 +484,7 @@ continue to work as before.
 
 ### 0.14.0 → 0.15.0
 
-**No schema changes.** New features: interactive TUI (`pgtrickle-tui` binary),
+**No schema changes.** New features: interactive dashboard,
 bulk `create_stream_tables_from_schema()`, and per-table runaway-refresh
 protection (`max_refresh_duration_ms`).
 

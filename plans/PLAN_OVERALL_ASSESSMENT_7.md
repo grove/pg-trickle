@@ -96,7 +96,7 @@ right" and the distributed coordination to "documented and tested".
 The project's overall maturity now sits between Materialize CE (early
 2024) and pg_ivm: comparable correctness rigour to pg_ivm, comparable
 streaming features to early Materialize, but better operational ergonomics
-than either (TUI, dbt adapter, snapshot/PITR, downstream publications).
+than either (dbt adapter, snapshot/PITR, downstream publications).
 With the EC-01 + Citus closeout it is on track for a credible v1.0 GA in
 late 2026.
 
@@ -133,7 +133,7 @@ top-LOC files line-by-line, ran static analysis scripts (`grep`-based
 counts of `unsafe`, `unwrap`, `expect`, `panic!`, `TODO/FIXME/HACK` outside
 `#[cfg(test)]` blocks), surveyed all 140 files in `tests/`, read the 19
 GitHub workflow files in `.github/workflows/`, and walked
-`pgtrickle-relay/src/`, `pgtrickle-tui/src/`, `dbt-pgtrickle/`, `cnpg/`,
+`pgtrickle-relay/src/`, `dbt-pgtrickle/`, `cnpg/`,
 and `monitoring/`.
 
 I dispatched four read-only exploration sub-agents in parallel against
@@ -923,10 +923,9 @@ Sink errors do not propagate back to the source poller; the
 memory growth in the relay. Add a bounded channel with
 `try_send` + retry-on-full.
 
-### 13.3 pgtrickle-tui lacks inbox/outbox views
+### 13.3 ~~pgtrickle-tui lacks inbox/outbox views~~ *(removed — TUI has been deleted)*
 
-Per infra sub-agent: 18 commands, none for relay/inbox/outbox. Add
-`tui inbox status`, `tui outbox tail`.
+The `pgtrickle-tui` crate has been removed from the project.
 
 ### 13.4 dbt Hub listing pending
 
@@ -1212,7 +1211,7 @@ Sort: Severity desc (CRITICAL → LOW), then Effort asc.
 | A37 | Ops | Grafana p50/p99 + alert rules (§12.4) | MEDIUM | S | v0.35.0 | Obs |
 | A38 | Ecosystem | Relay reconnection backoff (§13.1) | MEDIUM | S | v0.35.0 | Relay lead |
 | A39 | Ecosystem | Relay backpressure (§13.2) | HIGH | M | v0.35.0 | Relay lead |
-| A40 | Ecosystem | TUI inbox/outbox views (§13.3) | LOW | M | v0.36.0 | TUI |
+| A40 | Ecosystem | TUI inbox/outbox views (§13.3) | LOW | M | v0.36.0 | Removed (TUI deleted) |
 | A41 | Ecosystem | dbt Hub submission (§13.4) | LOW | XS | v0.35.0 | dbt lead |
 | A42 | Ecosystem | Multi-arch images (§13.6) | MEDIUM | S | v0.35.0 | Release |
 | A43 | Ecosystem | pg_partman / TimescaleDB integration tests (§13.7) | LOW | M | v0.37.0 | QA |

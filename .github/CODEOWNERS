@@ -24,9 +24,6 @@ pg_trickle.control          @grove @BaardBouvet
 justfile                    @grove @BaardBouvet
 scripts/                    @grove @BaardBouvet
 
-# TUI
-pgtrickle-tui/              @grove @BaardBouvet
-
 # dbt macro package
 dbt-pgtrickle/              @grove @BaardBouvet
 

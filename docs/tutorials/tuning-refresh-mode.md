@@ -162,22 +162,6 @@ Stream tables using volatile functions (e.g., `now()`, `random()`) must use
 FULL mode. pg_trickle rejects volatile functions in DIFFERENTIAL mode at
 creation time.
 
-## Using the TUI
-
-The `pgtrickle` TUI provides a visual diagnostics panel. Press `5` or `d`
-in the interactive dashboard to open the diagnostics view, which shows
-recommendations with confidence levels for all stream tables at a glance.
-
-From the CLI:
-
-```bash
-# Show recommendations for all tables
-pgtrickle diag
-
-# Show recommendations in JSON format (for automation)
-pgtrickle diag --format json
-```
-
 ## See Also
 
 - [SQL Reference: recommend_refresh_mode()](../SQL_REFERENCE.md) — Full

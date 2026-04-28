@@ -44,7 +44,7 @@
 | [v0.11.0](roadmap/v0.11.0.md) | Partitioned stream tables, event-driven scheduler (34× latency), circuit breaker | ✅ Released | Large | [Full details](roadmap/v0.11.0.md-full.md) |
 | [v0.12.0](roadmap/v0.12.0.md) | Three-table join fix (EC-01), developer tools, SQLancer fuzzing | ✅ Released | Medium | [Full details](roadmap/v0.12.0.md-full.md) |
 | [v0.13.0](roadmap/v0.13.0.md) | Columnar change tracking, shared buffers, TPC-H 22/22 DIFFERENTIAL | ✅ Released | Large | [Full details](roadmap/v0.13.0.md-full.md) |
-| [v0.14.0](roadmap/v0.14.0.md) | Tiered scheduling, UNLOGGED buffers, TUI dashboard | ✅ Released | Medium | [Full details](roadmap/v0.14.0.md-full.md) |
+| [v0.14.0](roadmap/v0.14.0.md) | Tiered scheduling, UNLOGGED buffers, diagnostics | ✅ Released | Medium | [Full details](roadmap/v0.14.0.md-full.md) |
 
 ### Performance and Integration (v0.15.x – v0.19.x)
 
@@ -100,7 +100,6 @@
 | [v1.3.0](roadmap/v1.3.0.md-full.md) | Core extraction (`pg_trickle_core`) | Planned | Large | [Full details](roadmap/v1.3.0.md-full.md) |
 | [v1.4.0](roadmap/v1.4.0.md-full.md) | PGlite WASM extension | Planned | Medium | [Full details](roadmap/v1.4.0.md-full.md) |
 | [v1.5.0](roadmap/v1.5.0.md-full.md) | PGlite reactive integration | Planned | Medium | [Full details](roadmap/v1.5.0.md-full.md) |
-| [v1.6.0](roadmap/v1.6.0.md-full.md) | TUI self-monitoring integration | Planned | Medium | [Full details](roadmap/v1.6.0.md-full.md) |
 
 ## How these versions fit together
 

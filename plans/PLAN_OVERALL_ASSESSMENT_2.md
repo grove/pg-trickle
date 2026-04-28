@@ -91,7 +91,7 @@ make 1000-ST deployments routine.
 - Running the full test suite (Docker-based E2E)
 - Byte-level audit of every remaining `unsafe` block (~80 sites
   remain, all with `// SAFETY:` comments per SAF-2)
-- TUI internals (pgtrickle-tui/), dbt-pgtrickle/ adapter internals
+- TUI internals, dbt-pgtrickle/ adapter internals (removed — pgtrickle-tui has been deleted)
 - Benchmark numbers (only architectural cost estimates are quoted)
 
 **What changed in methodology vs. the v0.20 report**
@@ -673,9 +673,8 @@ The investments in v0.21–v0.23 paid off: the previously-flagged
 ### Feature: GUI workflow designer + query lab
 
 - **Category:** Usability
-- **Description:** Extend `pgtrickle-tui` with a visual DAG editor
-  and an EXPLAIN-DIFF preview that shows the rewritten DVM SQL
-  alongside expected delta size.
+- **Description:** Add a visual DAG editor and an EXPLAIN-DIFF preview
+  that shows the rewritten DVM SQL alongside expected delta size.
 - **User value:** Lowers the on-boarding ramp for SQL developers
   unfamiliar with IVM semantics.
 - **Priority:** Medium
@@ -725,7 +724,7 @@ The investments in v0.21–v0.23 paid off: the previously-flagged
   PGlite, useful for a future SQLite/DuckDB bridge.
 - **Stream-table snapshot/restore** for fast replica bootstrap.
 - **Cross-cluster fan-out** through the relay (multi-region patterns).
-- **Visual workflow designer** in the TUI / web extension.
+- **Visual workflow designer** (SQL query lab / web extension).
 
 ---
 

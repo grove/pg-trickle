@@ -4,7 +4,7 @@
 **Status:** PROPOSED — review and prioritise before implementing
 **Scope:** Full review of `docs/`, `README.md`, `ESSENCE.md`, `INSTALL.md`,
 `ROADMAP.md`, the integrations/tutorials/research subtrees, and the
-ancillary READMEs for `playground/`, `demo/`, `pgtrickle-tui`, and
+ancillary READMEs for `playground/`, `demo/`, and
 `pgtrickle-relay/`.
 **Author audience for this report:** maintainers and documentation owners.
 **Audience target the recommendations are written for:** newcomers ranging
@@ -46,11 +46,11 @@ The most important problems are:
    different journeys; today they share a single dense menu of 50+
    entries with no progression hints.
 8. **Visual material is sparse.** A handful of ASCII diagrams,
-   no screenshots (TUI, Grafana, dashboard), no animation or worked
+   no screenshots (Grafana, dashboard), no animation or worked
    "before/after" image of differential refresh.
 9. **Numbers and version markers drift.** ESSENCE claims "1,200+ unit
    tests / 570+ E2E"; README claims "~1,670 unit / ~1,340 E2E / ~140
-   TUI"; PATTERNS.md is pinned at v0.14.0+ while the latest release is
+   PATTERNS.md is pinned at v0.14.0+ while the latest release is
    v0.34.0.
 
 The recommendation is a **major reorganisation in two phases**:
@@ -81,7 +81,7 @@ The review was carried out by:
 3. Sampling representative chapters of larger docs and the first 60–120
    lines of every other doc to assess tone, depth, and accuracy.
 4. Cross-referencing the documented surface area against the source
-   tree (`src/api/*.rs`, `src/*.rs`, `pgtrickle-relay/`, `pgtrickle-tui/`)
+   tree (`src/api/*.rs`, `src/*.rs`, `pgtrickle-relay/`)
    and against the README's own feature list.
 5. Comparing the SUMMARY.md (mdBook navigation) against the actual
    contents of `docs/`.
@@ -137,7 +137,7 @@ addition.
 | Patterns / Performance | PATTERNS, PERFORMANCE_COOKBOOK | 838 lines | 553 lines | Excellent recipes; need to be discoverable from a "Use Cases" page. |
 | Integrations | docs/integrations/* (9 files) | 352 lines | 1 line (stub) | Citus is here but should be promoted. |
 | Research / theory | docs/research/* (6 files) | 177 lines | 1 line (stubs ×3) | Three are mdBook stubs. |
-| Other | DEMO, PLAYGROUND, TUI, RELAY, RELAY_GUIDE, INBOX, OUTBOX, PUBLICATIONS, SLA_SCHEDULING, CDC_MODES | varies | — | Several are excellent stand-alone but invisible from the SUMMARY (see §4.4). |
+| Other | DEMO, PLAYGROUND, RELAY, RELAY_GUIDE, INBOX, OUTBOX, PUBLICATIONS, SLA_SCHEDULING, CDC_MODES | varies | — | Several are excellent stand-alone but invisible from the SUMMARY (see §4.4). |
 
 ### 4.2 Stub files (mdBook `{{#include …}}` only)
 
@@ -201,7 +201,6 @@ under-documented features:
 | `src/api/metrics_ext.rs` | Extended Prometheus metrics | Documented partially in `integrations/prometheus.md`; full metric catalogue absent. |
 | Citus distributed support | Major v0.32+ feature | Only `integrations/citus.md` (338 lines, not in SUMMARY). |
 | `pgtrickle-relay/` (workspace) | Standalone relay binary | RELAY.md focuses on architecture; no "what is this and why would I run it" intro for non-Rust users. |
-| `pgtrickle-tui/` | TUI binary, 18 subcommands, 13 views | TUI.md exists (536 lines); no per-subcommand reference akin to a man page. |
 
 ---
 
@@ -339,9 +338,10 @@ docs today).
 
 ### 6.5 CLI man-pages
 
-The TUI has 18 subcommands. TUI.md is a tour, not a reference. A
-`docs/CLI_REFERENCE.md` with one section per subcommand (synopsis,
-arguments, exit codes, examples) is a low-cost improvement.
+The relay has many subcommands. `docs/CLI_REFERENCE.md` has been removed (it
+covered pgtrickle-tui, which was deleted). A new relay-focused CLI reference
+with one section per subcommand (synopsis, arguments, exit codes, examples)
+would be a low-cost improvement.
 
 ### 6.6 Relay does not have an intro
 
@@ -382,11 +382,11 @@ inline tag) and apply it uniformly.
 
 ### 6.11 Numbers drift
 
-| Source | Unit-test count | E2E count | TUI tests | Releases mentioned |
-|---|---|---|---|---|
-| README.md (line ~620) | ~1,670 | ~1,340 | ~140 | "v0.34.0" |
-| ESSENCE.md | "1,200+" | "570+" | — | "eleven releases" |
-| FAQ.md | (varies) | — | — | — |
+| Source | Unit-test count | E2E count | Releases mentioned |
+|---|---|---|---|
+| README.md (line ~620) | ~1,670 | ~1,340 | "v0.34.0" |
+| ESSENCE.md | "1,200+" | "570+" | "eleven releases" |
+| FAQ.md | (varies) | — | — |
 
 Pick a single source of truth (e.g. a `docs/_data/stats.md` snippet)
 and include it everywhere.
@@ -450,8 +450,8 @@ the docs site. Recommend:
   transition, DAG fan-out, refresh lifecycle) to **Mermaid** (mdBook
   supports it via plug-in). One Mermaid source serves both GitHub and
   the book.
-- Add **two screenshots**: TUI dashboard, Grafana dashboard. The
-  project has both and shows neither.
+- Add **a screenshot**: Grafana dashboard. The
+  project has one and shows it nowhere.
 - Add **one animated GIF** of the demo dashboard updating in real
   time on the landing page — a single 5-second clip would change the
   "what is this?" experience completely.
@@ -520,7 +520,6 @@ solves §4.3):
 - Error Reference
 - Security Guide           (NEW)
 - CLI Reference            (NEW)
-- TUI Tool
 
 # Distributed & Streaming
 - Citus                    (PROMOTED)
@@ -588,9 +587,8 @@ Only docs needing explicit attention are listed.
   it pushes the actual feature list below the fold.
 - TPC-H validation section is too detailed for the README; move all
   but the headline numbers to BENCHMARK.md.
-- "Try it in 30 seconds" is the right idea but immediately requires
-  Rust to install the TUI. Either provide a one-line `docker run`
-  for the TUI too, or label this section "Try it in 5 minutes".
+- "Try it in 30 seconds" is the right idea. Provide a one-line `docker run`
+  or label this section "Try it in 5 minutes".
 
 ### 9.2 docs/introduction.md
 
@@ -702,13 +700,13 @@ Only docs needing explicit attention are listed.
 
 | # | Location | Issue | Suggested fix |
 |---|---|---|---|
-| 1 | README "Testing" | "~1,670 unit tests + … + ~1,340 E2E tests + ~140 TUI tests" | Source from a single counted artifact. |
+| 1 | README "Testing" | "~1,670 unit tests + … + ~1,340 E2E tests" | Source from a single counted artifact. |
 | 2 | ESSENCE | "1,200+ unit tests and 570+ E2E tests across eleven releases" | Same — likely stale. |
 | 3 | PATTERNS | `> **Version:** v0.14.0+` while project is v0.34+ | Update or remove. |
 | 4 | docs/changelog/contributing/installation/roadmap/security | mdBook stubs | See §4.2. |
 | 5 | docs/research/* | Three stubs pointing into `plans/` | See §4.2. |
 | 6 | introduction.md | Uses "stream table" before defining it | Define on first use. |
-| 7 | README §"Try it in 30 seconds" | Requires `cargo install --path pgtrickle-tui` and `cd playground && docker compose up -d` | Realistically ≥ 5 minutes; rename or split the two paths. |
+| 7 | README §"Try it in 30 seconds" | `cd playground && docker compose up -d` | Realistically ≥ 5 minutes; rename the section. |
 | 8 | RELAY.md "Architecture" | Reads as a code map, not an introduction | Add an intro paragraph explaining when to use the relay. |
 | 9 | SECURITY.md vs docs/security.md | The latter is just an include of the former; the user-security guide is missing | See §6.7. |
 | 10 | SUMMARY.md | Missing 17 files | See §4.3. |
@@ -730,7 +728,7 @@ In priority order:
 | 5 | `docs/CITUS.md` (promote) | (existing) | Distributed Postgres users | Replaces integrations/citus.md as canonical |
 | 6 | `docs/SECURITY_GUIDE.md` | 200–400 lines | DBA / SRE | New |
 | 7 | `docs/COMPARISONS.md` | 200–300 lines | Evaluators | Promotes pg_ivm/DBSP comparisons |
-| 8 | `docs/CLI_REFERENCE.md` | 300–500 lines | Operators | Companion to TUI.md |
+| 8 | `docs/CLI_REFERENCE.md` | 300–500 lines | Operators | New relay-focused reference (old TUI-focused file deleted) |
 | 9 | `docs/CAPACITY_PLANNING.md` | 200–300 lines | DBA / SRE | New |
 | 10 | `docs/MULTI_DATABASE.md` | 100–200 lines | DBA | New |
 | 11 | `docs/COST_MODEL.md` | 100–200 lines | Performance-tuners | Pulls from CONFIGURATION + cookbook |
@@ -762,7 +760,7 @@ Existing pages to expand:
 7. Reconcile test-count and version drift (§6.11) into a single
    include.
 8. Add Mermaid versions of the four core diagrams.
-9. Add TUI and Grafana screenshots and one animated GIF.
+9. Add a Grafana screenshot and one animated GIF.
 10. Add persona-routing tiles to the landing page.
 11. Add `See also:` footers to the top 20 most-trafficked docs.
 12. Add "Available since vX.Y" tag convention and apply to all feature

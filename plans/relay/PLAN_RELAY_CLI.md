@@ -59,8 +59,7 @@
 
 `pgtrickle-relay` is a standalone Rust CLI binary that bridges pg-trickle
 outboxes and inboxes with popular messaging systems and destinations. It
-ships as a separate crate in the pg-trickle workspace (`pgtrickle-relay/`),
-alongside the existing `pgtrickle-tui` crate.
+ships as a separate crate in the pg-trickle workspace (`pgtrickle-relay/`).
 
 The relay operates in two modes:
 
@@ -119,8 +118,7 @@ Redis/etc. code serves both directions.
 - **Complex routing / transformation / filtering** beyond subject/topic
   mapping is not in scope. Users needing ETL should compose the relay with
   downstream stream processors.
-- **No embedded PostgreSQL client library** — uses `tokio-postgres` (same as
-  `pgtrickle-tui`).
+- **No embedded PostgreSQL client library** — uses `tokio-postgres`.
 - **Message format conversion** (e.g. Avro → JSON) is not in scope for
   v0.25.0. The relay passes JSON payloads through as-is.
 
@@ -2132,7 +2130,7 @@ pgtrickle-relay config set inbox kafka-to-orders \
 | 1 | Should the relay support multiple pipelines in one process? | (a) One pipeline per process (simpler), (b) Multi-pipeline coordinator (more throughput per pod) | **(b)** — one process runs a coordinator that manages all enabled pipelines via advisory locks. Multiple pods scale horizontally with zero external coordination. This is more resource-efficient and operationally simpler. See [A.15](#a15-horizontal-scaling--work-distribution). |
 | 2 | Should we support custom transforms (e.g. JMESPath, JSONata)? | (a) No transforms in v0.25.0, (b) JMESPath filter | **(a)** — out of scope. The stream table query itself is the transform layer. |
 | 3 | Dead-letter queue for the relay? | (a) Skip poison events + log, (b) DLQ table in PostgreSQL | **(a)** for v0.25.0. Log + metric is sufficient. DLQ can be added later. |
-| 4 | Should `pgtrickle-relay` be a workspace member or a separate repo? | (a) Workspace member (shared CI, version lock), (b) Separate repo | **(a)** — workspace member alongside `pgtrickle-tui`. Shared version, single release. |
+| 4 | Should `pgtrickle-relay` be a workspace member or a separate repo? | (a) Workspace member (shared CI, version lock), (b) Separate repo | **(a)** — workspace member. Shared version, single release. |
 | 5 | Should NATS Micro integration be included for service discovery? | (a) Yes, (b) No | **(b)** for initial release. Can be added if demand exists. |
 | 6 | Google Cloud Pub/Sub as a backend? | (a) v0.25.0, (b) Post-v0.25.0 | **(b)** — add post-launch based on demand. |
 | 7 | Azure Service Bus as a backend? | (a) v0.25.0, (b) Post-v0.25.0 | **(b)** — add post-launch based on demand. |

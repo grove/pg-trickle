@@ -8,7 +8,7 @@
 ## Motivation
 
 The pg_trickle project has a rich, multi-layered development workflow spanning
-Rust extension code, SQL migration scripts, dbt Jinja macros, TUI development,
+Rust extension code, SQL migration scripts, dbt Jinja macros,
 Docker image building, benchmarking, and release management. Currently three
 agent skills exist:
 
@@ -114,7 +114,7 @@ files changed, then runs the minimal set of tests:
    - `tests/e2e_*` → `just test-light-e2e` or `just test-e2e`
    - `sql/**` → `just check-upgrade-all` + `just test-light-e2e`
    - `dbt-pgtrickle/**` → `just test-dbt-fast`
-   - `pgtrickle-tui/**` → `just test-tui-commands`
+   - `pgtrickle-tui/**` → *(removed — TUI deleted)*
    - `benches/**` → `just bench`
 3. Run the selected tiers in dependency order.
 4. Parse output and surface failures with file/line context.

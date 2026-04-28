@@ -11,7 +11,7 @@ keywords = ["postgresql", "streaming", "materialized-view", "incremental", "pgrx
 categories = ["database"]
 
 [workspace]
-members = [".", "pgtrickle-tui", "pgtrickle-relay"]
+members = [".", "pgtrickle-relay"]
 
 # Allow pgrx internal cfg values used by pg_shmem_init! macro
 [lints.rust]

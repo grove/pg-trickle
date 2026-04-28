@@ -23,7 +23,7 @@ install/upgrade scripts, 19 GitHub workflows, 126 GUC definitions, and 132
 `#[pg_extern]` SQL-facing definitions. The project is no longer a small
 extension with a few risky hot files; it is now a full in-database streaming
 platform with CDC, differential view maintenance, a scheduler, distributed
-Citus coordination, relay/TUI/dbt integrations, and substantial operational
+Citus coordination, relay/dbt integrations, and substantial operational
 surface area.
 
 The strongest positive movement since v7 is real:
@@ -135,7 +135,7 @@ I then verified current state against primary sources:
   [ROADMAP.md](../ROADMAP.md), and [ESSENCE.md](../ESSENCE.md).
 - Workflows under [.github/workflows](../.github/workflows/).
 - Supporting integrations: [pgtrickle-relay](../pgtrickle-relay/),
-  [pgtrickle-tui](../pgtrickle-tui/), [dbt-pgtrickle](../dbt-pgtrickle/),
+  [dbt-pgtrickle](../dbt-pgtrickle/),
   [monitoring](../monitoring/), [cnpg](../cnpg/), scripts, Dockerfiles, and
   release metadata.
 
@@ -873,13 +873,12 @@ attach SLSA provenance, and document verification.
 
 **Priority/window:** P2 before v1.0.
 
-### Finding S3 - TUI/relay secret handling needs explicit operator guidance
+### Finding S3 - relay secret handling needs explicit operator guidance
 
 **Severity:** Medium
 
 **Evidence:** Relay has environment-variable interpolation tests and config
-support; TUI connection strings can still include credentials depending on how
-users invoke it. The exact risk is usage-dependent, but secrets in command-line
+support. The exact risk is usage-dependent, but secrets in command-line
 arguments and config files are common operational hazards.
 
 **Why it matters:** Tooling around a database extension should not train users
@@ -938,24 +937,24 @@ worker saturation, Citus lease health, and failed refresh/error budget burn.
 
 **Priority/window:** P2.
 
-### Finding O3 - dbt, relay, and TUI should track new v0.36/v0.37 surface faster
+### Finding O3 - dbt and relay should track new v0.36/v0.37 surface faster
 
 **Severity:** Low/Medium
 
 **Evidence:** The repo includes strong integration projects, but new core
 features such as temporal IVM, vector aggregates, trace propagation, drain mode,
-and force-full override need parallel UX in docs, dbt macros, relay/TUI status,
+and force-full override need parallel UX in docs, dbt macros, relay status,
 and examples.
 
 **Why it matters:** Ecosystem value falls behind core capability if the extra
 tools cannot observe or configure new states.
 
 **Impact:** Users can create advanced stream tables but may not manage them well
-through dbt or TUI workflows.
+through dbt workflows.
 
 **Fix direction:** Add a release checklist item: every new SQL/GUC feature gets
-SQL reference, configuration docs, TUI visibility if operational, dbt support
-if modeling-related, and relay docs if event-related.
+SQL reference, configuration docs, dbt support if modeling-related, and relay
+docs if event-related.
 
 **Priority/window:** P3.
 

@@ -106,7 +106,7 @@ FROM pgtrickle.cluster_health_check()    -- (where exposed)
 WHERE severity != 'OK';
 ```
 
-The TUI's **Workers** view (`pgtrickle workers`) also aggregates
+The `pgtrickle workers` command also aggregates
 across databases when invoked against a server-level URL.
 
 ---
