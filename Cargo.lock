@@ -4977,7 +4977,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f44e94c96d8870a387d88ce3de3fdd608cbfc0705f03cb343cdde91509d3e49a"
 dependencies = [
  "arcstr",
- "async-lock 3.4.2",
+ "async-lock",
  "bytes",
  "cfg-if",
  "combine",
