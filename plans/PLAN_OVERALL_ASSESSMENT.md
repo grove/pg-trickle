@@ -87,7 +87,6 @@ prioritised action table.
 - Bytecode-level audit of `unsafe` blocks (deferred — 547 sites)
 - Running the full test suite (Docker-based E2E)
 - dbt adapter internals (dbt-pgtrickle/)
-- TUI internals (pgtrickle-tui/)
 
 ---
 

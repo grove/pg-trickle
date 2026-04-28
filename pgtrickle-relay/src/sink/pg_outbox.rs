@@ -6,7 +6,7 @@ use crate::envelope::RelayMessage;
 use crate::error::RelayError;
 
 /// Remote PostgreSQL inbox sink.
-/// Uses tokio-postgres directly (same as pgtrickle-tui).
+/// Uses tokio-postgres directly for PostgreSQL connections.
 pub struct PgInboxSink {
     client: Client,
     inbox_table: String,

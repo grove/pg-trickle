@@ -4,7 +4,7 @@
 **Status:** PROPOSED — review and prioritise before implementing
 **Scope:** Full review of `docs/`, `README.md`, `ESSENCE.md`, `INSTALL.md`,
 `ROADMAP.md`, the integrations/tutorials/research subtrees, and the
-ancillary READMEs for `playground/`, `demo/`, `pgtrickle-tui`, and
+ancillary READMEs for `playground/`, `demo/`, and
 `pgtrickle-relay/`.
 **Author audience for this report:** maintainers and documentation owners.
 **Audience target the recommendations are written for:** newcomers ranging
@@ -81,7 +81,7 @@ The review was carried out by:
 3. Sampling representative chapters of larger docs and the first 60–120
    lines of every other doc to assess tone, depth, and accuracy.
 4. Cross-referencing the documented surface area against the source
-   tree (`src/api/*.rs`, `src/*.rs`, `pgtrickle-relay/`, `pgtrickle-tui/`)
+   tree (`src/api/*.rs`, `src/*.rs`, `pgtrickle-relay/`)
    and against the README's own feature list.
 5. Comparing the SUMMARY.md (mdBook navigation) against the actual
    contents of `docs/`.
@@ -201,7 +201,6 @@ under-documented features:
 | `src/api/metrics_ext.rs` | Extended Prometheus metrics | Documented partially in `integrations/prometheus.md`; full metric catalogue absent. |
 | Citus distributed support | Major v0.32+ feature | Only `integrations/citus.md` (338 lines, not in SUMMARY). |
 | `pgtrickle-relay/` (workspace) | Standalone relay binary | RELAY.md focuses on architecture; no "what is this and why would I run it" intro for non-Rust users. |
-| `pgtrickle-tui/` | TUI binary, 18 subcommands, 13 views | TUI.md exists (536 lines); no per-subcommand reference akin to a man page. |
 
 ---
 
@@ -708,7 +707,7 @@ Only docs needing explicit attention are listed.
 | 4 | docs/changelog/contributing/installation/roadmap/security | mdBook stubs | See §4.2. |
 | 5 | docs/research/* | Three stubs pointing into `plans/` | See §4.2. |
 | 6 | introduction.md | Uses "stream table" before defining it | Define on first use. |
-| 7 | README §"Try it in 30 seconds" | Requires `cargo install --path pgtrickle-tui` and `cd playground && docker compose up -d` | Realistically ≥ 5 minutes; rename or split the two paths. |
+| 7 | README §"Try it in 30 seconds" | `cd playground && docker compose up -d` | Realistically ≥ 5 minutes; rename the section. |
 | 8 | RELAY.md "Architecture" | Reads as a code map, not an introduction | Add an intro paragraph explaining when to use the relay. |
 | 9 | SECURITY.md vs docs/security.md | The latter is just an include of the former; the user-security guide is missing | See §6.7. |
 | 10 | SUMMARY.md | Missing 17 files | See §4.3. |

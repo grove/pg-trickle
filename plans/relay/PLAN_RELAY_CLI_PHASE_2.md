@@ -988,14 +988,13 @@ on Kafka records. For NATS, uses `traceparent` NATS header.
 
 **Effort:** 1.5d
 
-### B.11 Relay TUI Dashboard
+### B.11 Relay Dashboard
 
-**Problem:** The `pgtrickle-tui` provides a dashboard for stream tables.
-A similar dashboard for the relay would help operators monitor pipeline
-health, throughput, and errors in real-time.
+**Problem:** A dashboard for the relay would help operators monitor pipeline
+health, throughput, and errors in real-time. The `pgtrickle-tui` crate that
+previously provided a stream-table dashboard has been removed from the project.
 
-**Design:** Extend `pgtrickle-tui` with a relay dashboard tab, or add a
-`pgtrickle-relay dashboard` subcommand.
+**Design:** Add a `pgtrickle-relay dashboard` subcommand backed by ratatui.
 
 **Dashboard panels:**
 - Pipeline overview (mode, source, sink, status)
@@ -1007,7 +1006,7 @@ health, throughput, and errors in real-time.
 - Circuit breaker state
 - Active connections health
 
-**Implementation:** Reuse the `ratatui` framework from `pgtrickle-tui`.
+**Implementation:** Use the `ratatui` crate directly in `pgtrickle-relay`.
 Read metrics from the relay's Prometheus endpoint (scrape `/metrics`).
 
 **Effort:** 2d

@@ -91,12 +91,6 @@ test-integration:
         --test trigger_detection_tests \
         --test workflow_tests \
         --test property_tests
-    just test-tui-commands
-
-# Run TUI command contract tests against stub functions (requires Docker)
-[group: "test"]
-test-tui-commands:
-    cargo test -p pgtrickle-tui --bin pgtrickle test_cmd_ -- --test-threads=4
 
 # Build the pre-compiled builder base image (Rust + cargo-pgrx + pgrx init).
 # Only needed once, or when upgrading the Rust toolchain or pgrx version.

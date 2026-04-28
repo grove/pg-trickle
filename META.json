@@ -46,7 +46,6 @@
       "monitoring",
       "playground",
       "pgtrickle-relay",
-      "pgtrickle-tui",
       "dbt-pgtrickle",
       "benches",
       "fuzz",

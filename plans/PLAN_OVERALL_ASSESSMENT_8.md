@@ -135,7 +135,7 @@ I then verified current state against primary sources:
   [ROADMAP.md](../ROADMAP.md), and [ESSENCE.md](../ESSENCE.md).
 - Workflows under [.github/workflows](../.github/workflows/).
 - Supporting integrations: [pgtrickle-relay](../pgtrickle-relay/),
-  [pgtrickle-tui](../pgtrickle-tui/), [dbt-pgtrickle](../dbt-pgtrickle/),
+  [dbt-pgtrickle](../dbt-pgtrickle/),
   [monitoring](../monitoring/), [cnpg](../cnpg/), scripts, Dockerfiles, and
   release metadata.
 

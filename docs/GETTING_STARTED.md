@@ -1299,8 +1299,6 @@ your monitoring stack:
   `pgtrickle.health_check()` results as custom metrics
 - **Kubernetes CronJob:** Schedule periodic health checks and alert via your
   existing alerting pipeline
-- **pgtrickle-tui:** The [TUI tool](TUI.md) has a dedicated Health view that
-  polls `health_check()` continuously
 
 #### Probe Configuration
 
@@ -1476,7 +1474,6 @@ The control plane continues operating identically without self-monitoring.
 
 ## What's Next?
 
-- **[TUI.md](TUI.md)** — Terminal UI & CLI tool for managing and monitoring stream tables from outside SQL
 - **[SQL_REFERENCE.md](SQL_REFERENCE.md)** — Full API reference for all functions, views, and configuration
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Deep dive into the system architecture and data flow
 - **[DVM_OPERATORS.md](DVM_OPERATORS.md)** — How each SQL operator is differentiated for incremental maintenance
