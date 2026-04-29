@@ -9,28 +9,26 @@
 # Build context must be the project root.
 #
 # Usage (from project root after `cargo pgrx package --features pg18`):
-#   PACKAGE_DIR=target/release/pg_trickle-pg18/usr
-#   docker build \
-#     -f tests/Dockerfile.e2e-base-lite \
-#     --build-arg PACKAGE_DIR="$PACKAGE_DIR" \
-#     -t pg_trickle_e2e:latest .
+#   rm -rf _e2e_pkg
+#   mkdir -p _e2e_pkg/ext _e2e_pkg/lib
+#   cp -r target/release/pg_trickle-pg18/usr/share/postgresql/18/extension/. _e2e_pkg/ext/
+#   cp -r target/release/pg_trickle-pg18/usr/lib/postgresql/18/lib/. _e2e_pkg/lib/
+#   docker build -f tests/Dockerfile.e2e-base-lite -t pg_trickle_e2e:latest .
+#
+# Note: target/ is excluded by .dockerignore; _e2e_pkg/ is the staging dir.
 # =============================================================================
 
 FROM postgres:18.3
 
-# Path inside the build context to the `usr/` subtree produced by
-# `cargo pgrx package`. Defaults to the standard system-PG layout that
-# CI produces on ubuntu-latest with postgresql-18 installed.
-ARG PACKAGE_DIR=target/release/pg_trickle-pg18/usr
-
 LABEL org.opencontainers.image.title="pg_trickle E2E base image (lite)"
 LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle extension (lite build for PR upgrade slice)"
 
-# Copy extension artifacts from the cargo pgrx package output
-COPY ${PACKAGE_DIR}/share/postgresql/18/extension/ \
+# Copy extension artifacts staged into _e2e_pkg/ by the CI build step.
+# (target/ is excluded by .dockerignore and cannot be used here directly.)
+COPY _e2e_pkg/ext/ \
      /usr/share/postgresql/18/extension/
 
-COPY ${PACKAGE_DIR}/lib/postgresql/18/lib/ \
+COPY _e2e_pkg/lib/ \
      /usr/lib/postgresql/18/lib/
 
 # Configure shared_preload_libraries so background worker + shared memory work.
