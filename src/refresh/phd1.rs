@@ -101,7 +101,7 @@ pub fn cleanup_cross_cycle_phantoms(
     // Step 1: materialise the live full-query result into a temp table.
     let recon_table = format!("__pgt_recon_{pgt_id}");
     // Drop any leftover temp from a prior trigger fire in the same session.
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}"));
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}")); // nosemgrep: rust.spi.run.dynamic-format — recon_table is "__pgt_recon_{pgt_id}"; pgt_id is a plain i64, not user-supplied input
     let create_sql = format!(
         "CREATE TEMP TABLE {recon_table} ON COMMIT DROP AS \
          SELECT {row_id_expr} AS __pgt_row_id, sub.* \
@@ -207,7 +207,7 @@ pub fn cleanup_cross_cycle_phantoms(
         .map_err(|e| PgTrickleError::SpiError(format!("EC01-2 reconcile INSERT failed: {e}")))?
         .unwrap_or(0);
 
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}"));
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {recon_table}")); // nosemgrep: rust.spi.run.dynamic-format — recon_table is "__pgt_recon_{pgt_id}"; pgt_id is a plain i64, not user-supplied input
 
     let total = deleted + inserted;
     if total > 0 {
