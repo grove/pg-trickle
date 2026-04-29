@@ -37,6 +37,7 @@
 //! - TopK tables use micro-refresh (recompute top-K on each DML) gated by
 //!   `pg_trickle.ivm_topk_max_limit`.
 
+use crate::api::quote_identifier;
 use crate::error::PgTrickleError;
 use pgrx::prelude::*;
 
@@ -749,13 +750,15 @@ fn pgt_ivm_apply_delta(
     // ── Apply the delta via explicit DML ─────────────────────────────
     // Materialize the delta into a temp table, then apply D/U/I.
     let delta_table = format!("__pgt_ivm_delta_{pgt_id}");
+    let delta_table_quoted = quote_identifier(&delta_table);
 
-    let materialize_sql = format!("CREATE TEMP TABLE {delta_table} ON COMMIT DROP AS {delta_sql}");
-    Spi::run(&materialize_sql)
+    let materialize_sql =
+        format!("CREATE TEMP TABLE {delta_table_quoted} ON COMMIT DROP AS {delta_sql}");
+    Spi::run(&materialize_sql) // nosemgrep: rust.spi.run.dynamic-format — delta_table_quoted is properly escaped; delta_sql is from trusted internal function
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to materialize IVM delta: {e}")))?;
 
     // Count rows to check if there's work to do.
-    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}"))
+    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table_quoted}")) // nosemgrep: rust.spi.query.dynamic-format — delta_table_quoted is a fixed prefix + i64, properly escaped with quote_identifier
         .unwrap_or(Some(0))
         .unwrap_or(0);
 
@@ -784,7 +787,7 @@ fn pgt_ivm_apply_delta(
     }
 
     // Clean up the delta temp table.
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table}"));
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table_quoted}")); // nosemgrep: rust.spi.run.dynamic-format — delta_table_quoted is a fixed prefix + i64, properly escaped with quote_identifier
 
     // EC-01b: reconcile cross-cycle phantom rows in IMMEDIATE mode.
     // Mirrors the post-DML cleanup in `execute_differential_refresh`.
@@ -856,12 +859,15 @@ fn pgt_ivm_apply_delta_enr(
     );
 
     let delta_table = format!("__pgt_ivm_delta_enr_{pgt_id}");
-    let materialize_sql = format!("CREATE TEMP TABLE {delta_table} ON COMMIT DROP AS {delta_sql}");
-    Spi::run(&materialize_sql).map_err(|e| {
-        PgTrickleError::SpiError(format!("Failed to materialize IVM delta (ENR): {e}"))
-    })?;
+    let delta_table_quoted = quote_identifier(&delta_table);
+    let materialize_sql =
+        format!("CREATE TEMP TABLE {delta_table_quoted} ON COMMIT DROP AS {delta_sql}");
+    Spi::run(&materialize_sql) // nosemgrep: rust.spi.run.dynamic-format — delta_table_quoted is properly escaped; delta_sql is from trusted internal function
+        .map_err(|e| {
+            PgTrickleError::SpiError(format!("Failed to materialize IVM delta (ENR): {e}"))
+        })?;
 
-    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table}")) // nosemgrep: semgrep.rust.spi.query.dynamic-format — delta_table is a fixed prefix + i64, not user input
+    let delta_count = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {delta_table_quoted}")) // nosemgrep: rust.spi.query.dynamic-format — delta_table_quoted is a fixed prefix + i64, properly escaped with quote_identifier
         .unwrap_or(Some(0))
         .unwrap_or(0);
 
@@ -880,7 +886,7 @@ fn pgt_ivm_apply_delta_enr(
             .map_err(|e| PgTrickleError::SpiError(format!("IVM delta INSERT (ENR) failed: {e}")))?;
     }
 
-    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table}")); // nosemgrep: semgrep.rust.spi.run.dynamic-format — delta_table is a fixed prefix + i64, not user input
+    let _ = Spi::run(&format!("DROP TABLE IF EXISTS {delta_table_quoted}")); // nosemgrep: rust.spi.run.dynamic-format — delta_table_quoted is a fixed prefix + i64, properly escaped with quote_identifier
 
     // EC-01b: reconcile cross-cycle phantom rows in IMMEDIATE mode (ENR path).
     run_immediate_phantom_cleanup(&st, &st_qualified)?;
