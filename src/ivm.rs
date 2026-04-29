@@ -653,6 +653,13 @@ fn run_immediate_phantom_cleanup(
     if !query_has_join || st.st_partition_key.is_some() {
         return Ok(());
     }
+    // Do NOT run the full-query reconciliation for recursive CTEs. The
+    // ivm_recursive_max_depth guard intentionally limits how many rows
+    // the delta engine materialises.  Running the full query here would
+    // bypass the guard and insert the suppressed rows back.
+    if crate::dvm::query_has_recursive_cte(&st.defining_query).unwrap_or(false) {
+        return Ok(());
+    }
 
     let phantom_cleanup_count = crate::refresh::phd1::cleanup_cross_cycle_phantoms(
         st.pgt_id,

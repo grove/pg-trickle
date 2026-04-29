@@ -2549,7 +2549,11 @@ pub fn execute_differential_refresh(
     // also covered. Falls back to `true` (run cleanup, fail-safe) if the
     // query cannot be parsed.
     let query_has_join = dvm::query_has_join(&st.defining_query).unwrap_or(true);
+    // Skip full-query reconciliation for recursive CTEs — it bypasses the
+    // ivm_recursive_max_depth guard and would insert suppressed rows.
+    let query_has_recursive_cte = dvm::query_has_recursive_cte(&st.defining_query).unwrap_or(false);
     let phantom_cleanup_count = if query_has_join
+        && !query_has_recursive_cte
         && !resolved.is_deduplicated
         && !st.has_keyless_source
         && st.st_partition_key.is_none()
