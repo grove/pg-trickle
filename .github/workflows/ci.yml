@@ -331,7 +331,7 @@ jobs:
         startsWith(github.event.pull_request.title, 'upgrade') ||
         true
       )
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -374,6 +374,25 @@ jobs:
           echo "from=$from" >> "$GITHUB_OUTPUT"
           echo "to=$to"     >> "$GITHUB_OUTPUT"
           echo "PR upgrade slice: ${from} → ${to}"
+
+      - name: Build extension package (lite base image)
+        if: steps.changes.outputs.run_upgrade_slice == 'true'
+        run: |
+          # Build the extension artifacts via cargo pgrx package so we can
+          # create a lite base Docker image without the full ~10-min builder.
+          cargo pgrx package --features pg18 \
+            --pg-config /usr/lib/postgresql/18/bin/pg_config
+
+      - name: Build lite E2E base image
+        if: steps.changes.outputs.run_upgrade_slice == 'true'
+        run: |
+          # Create pg_trickle_e2e:latest from the cargo pgrx package output.
+          # The upgrade image Dockerfile layers on top of this base image.
+          docker build \
+            -f tests/Dockerfile.e2e-base-lite \
+            --build-arg PACKAGE_DIR=target/release/pg_trickle-pg18/usr \
+            -t pg_trickle_e2e:latest \
+            .
 
       - name: Build upgrade E2E Docker image
         if: steps.changes.outputs.run_upgrade_slice == 'true'

@@ -1,0 +1,52 @@
+# =============================================================================
+# Lightweight base image for upgrade E2E PR CI slice.
+#
+# Used by the upgrade-e2e-pr-slice CI job (O39-14).  Builds from a locally-
+# produced `cargo pgrx package` artifact directory instead of the full
+# multi-stage builder image, so it completes in under 2 minutes without
+# requiring the 10-minute full E2E image build.
+#
+# Build context must be the project root.
+#
+# Usage (from project root after `cargo pgrx package --features pg18`):
+#   PACKAGE_DIR=target/release/pg_trickle-pg18/usr
+#   docker build \
+#     -f tests/Dockerfile.e2e-base-lite \
+#     --build-arg PACKAGE_DIR="$PACKAGE_DIR" \
+#     -t pg_trickle_e2e:latest .
+# =============================================================================
+
+FROM postgres:18.3
+
+# Path inside the build context to the `usr/` subtree produced by
+# `cargo pgrx package`. Defaults to the standard system-PG layout that
+# CI produces on ubuntu-latest with postgresql-18 installed.
+ARG PACKAGE_DIR=target/release/pg_trickle-pg18/usr
+
+LABEL org.opencontainers.image.title="pg_trickle E2E base image (lite)"
+LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle extension (lite build for PR upgrade slice)"
+
+# Copy extension artifacts from the cargo pgrx package output
+COPY ${PACKAGE_DIR}/share/postgresql/18/extension/ \
+     /usr/share/postgresql/18/extension/
+
+COPY ${PACKAGE_DIR}/lib/postgresql/18/lib/ \
+     /usr/lib/postgresql/18/lib/
+
+# Configure shared_preload_libraries so background worker + shared memory work.
+RUN echo "" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "# pg_trickle E2E test configuration" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "shared_preload_libraries = 'pg_trickle'" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "wal_level = logical" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "max_replication_slots = 10" >> /usr/share/postgresql/postgresql.conf.sample && \
+    echo "max_worker_processes = 128" >> /usr/share/postgresql/postgresql.conf.sample
+
+# Verify the extension files are in place
+RUN ls -la /usr/share/postgresql/18/extension/pg_trickle* && \
+    ls -la /usr/lib/postgresql/18/lib/pg_trickle*
+
+# Pre-create the extension on the `postgres` database during initdb.
+RUN echo "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;" \
+    > /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
+
+EXPOSE 5432
