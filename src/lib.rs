@@ -32,6 +32,7 @@ pub mod dag;
 mod diagnostics;
 pub mod dvm;
 pub mod error;
+pub mod fuzz_pub;
 mod hash;
 mod hooks;
 mod ivm;

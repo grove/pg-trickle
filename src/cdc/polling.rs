@@ -274,3 +274,66 @@ pub fn poll_matview_changes(
     // of whether the source is a foreign table or a materialized view.
     poll_foreign_table_changes(source_oid, change_schema)
 }
+
+/// Build a `pk_hash` SQL expression for the given list of column names.
+///
+/// Single-column: `pgtrickle.pg_trickle_hash("col"::text)`
+/// Multi-column:  `pgtrickle.pg_trickle_hash_multi(ARRAY["c1"::text, "c2"::text])`
+///
+/// This is a pure-Rust helper extracted from `poll_foreign_table_changes` and
+/// `setup_foreign_table_polling` to enable unit testing.
+pub(crate) fn build_pk_hash_expr(hash_cols: &[String]) -> String {
+    if hash_cols.len() == 1 {
+        let c = format!("\"{}\"", hash_cols[0].replace('"', "\"\""));
+        format!("pgtrickle.pg_trickle_hash({c}::text)")
+    } else {
+        let items: Vec<String> = hash_cols
+            .iter()
+            .map(|c| format!("\"{}\"::text", c.replace('"', "\"\"")))
+            .collect();
+        format!(
+            "pgtrickle.pg_trickle_hash_multi(ARRAY[{}])",
+            items.join(", ")
+        )
+    }
+}
+
+// TEST-10-02 (v0.49.0): Unit tests for pure-Rust polling CDC logic.
+#[cfg(test)]
+mod tests {
+    use super::build_pk_hash_expr;
+
+    #[test]
+    fn test_pk_hash_single_column() {
+        let expr = build_pk_hash_expr(&["id".to_string()]);
+        assert_eq!(expr, r#"pgtrickle.pg_trickle_hash("id"::text)"#);
+    }
+
+    #[test]
+    fn test_pk_hash_multi_column() {
+        let expr = build_pk_hash_expr(&["tenant_id".to_string(), "order_id".to_string()]);
+        assert_eq!(
+            expr,
+            r#"pgtrickle.pg_trickle_hash_multi(ARRAY["tenant_id"::text, "order_id"::text])"#
+        );
+    }
+
+    #[test]
+    fn test_pk_hash_column_with_double_quotes() {
+        // Column names that contain double-quotes must be escaped.
+        let expr = build_pk_hash_expr(&["my\"col".to_string()]);
+        assert!(
+            expr.contains("\"\""),
+            "embedded double-quote must be doubled: {expr}"
+        );
+    }
+
+    #[test]
+    fn test_pk_hash_three_columns() {
+        let expr = build_pk_hash_expr(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(expr.starts_with("pgtrickle.pg_trickle_hash_multi(ARRAY["));
+        assert!(expr.contains(r#""a"::text"#));
+        assert!(expr.contains(r#""b"::text"#));
+        assert!(expr.contains(r#""c"::text"#));
+    }
+}

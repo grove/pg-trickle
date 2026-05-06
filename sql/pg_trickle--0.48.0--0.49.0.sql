@@ -1,0 +1,14 @@
+-- pg_trickle 0.48.0 -> 0.49.0 upgrade migration
+--
+-- v0.49.0 — Test Infrastructure Hardening & Scheduler Decomposition
+--
+-- This release contains no SQL schema changes. All changes are internal:
+--   - Scheduler module decomposition (CQ-10-01): dispatch.rs, scheduler_loop.rs, watermark.rs
+--   - Concurrency test synchronization overhaul (TEST-10-01)
+--   - Unit test coverage additions (TEST-10-02)
+--   - Fuzz targets for merge SQL and row identity (TEST-10-03)
+--   - DDL-during-concurrent-refresh E2E test (TEST-10-04)
+--   - CI smoke filter expansion (CI-10-02)
+--   - Consolidated fuzz recipe (CI-10-03)
+--
+-- No DDL migrations required.

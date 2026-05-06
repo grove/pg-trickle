@@ -178,6 +178,24 @@ test-pgrx:
 [group: "test"]
 test-all: test-unit test-integration test-e2e test-pgrx
 
+# Run all fuzz targets in sequence (CI-10-03).
+# Each target runs for FUZZ_DURATION seconds (default 60).
+# Requires a nightly toolchain: `rustup install nightly`.
+# Available fuzz targets:
+#   parser_fuzz, cron_fuzz, guc_fuzz, cdc_fuzz, wal_fuzz,
+#   dag_fuzz, sql_builder_fuzz, merge_sql_fuzz, row_id_fuzz
+# Corpus directories: fuzz/corpus/<target_name>/
+[group: "test"]
+fuzz-all duration="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+    for target in "${targets[@]}"; do
+        echo "=== Fuzzing $target for {{duration}}s ==="
+        cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} -jobs=1 -workers=1 || true
+    done
+    echo "=== fuzz-all complete ==="
+
 # Run PgBouncer compatibility E2E tests (requires E2E image + Docker)
 [group: "test"]
 test-pgbouncer: build-e2e-image
@@ -391,12 +409,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.48.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.49.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.48.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.49.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

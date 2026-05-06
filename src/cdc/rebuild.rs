@@ -472,7 +472,32 @@ pub fn trigger_exists(source_oid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
 
 /// Get the trigger name for a source OID.
 pub fn trigger_name_for_source(source_oid: pg_sys::Oid) -> String {
-    format!("pg_trickle_cdc_{}", source_oid.to_u32())
+    trigger_name_for_oid_u32(source_oid.to_u32())
+}
+
+/// Pure-Rust inner implementation of trigger name generation.
+///
+/// Separated from `trigger_name_for_source` to allow unit testing without
+/// a PostgreSQL backend (avoids the `pg_sys::Oid` type in test code).
+pub(crate) fn trigger_name_for_oid_u32(oid: u32) -> String {
+    format!("pg_trickle_cdc_{oid}")
+}
+
+/// Pure-Rust helper: returns `true` when `cdc_mode` permits logical replication.
+///
+/// The `"trigger"` mode always bypasses logical replication regardless of
+/// server configuration. Used as the early-exit guard in
+/// `can_use_logical_replication_for_mode`.
+pub(crate) fn cdc_mode_allows_logical(cdc_mode: &str) -> bool {
+    !cdc_mode.eq_ignore_ascii_case("trigger")
+}
+
+/// Pure-Rust helper: returns `true` when `identity` is sufficient for WAL CDC.
+///
+/// Only `"default"` (PK-based) and `"full"` (all columns) provide the OLD
+/// row values needed by logical decoding.
+pub(crate) fn replica_identity_sufficient(identity: &str) -> bool {
+    identity == "default" || identity == "full"
 }
 
 // ── WAL Availability Detection ─────────────────────────────────────────────
@@ -592,4 +617,78 @@ pub fn has_user_triggers(st_relid: pg_sys::Oid) -> Result<bool, PgTrickleError> 
     ))
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))
     .map(|v| v.unwrap_or(false))
+}
+
+// TEST-10-02 (v0.49.0): Unit tests for pure-Rust CDC rebuild logic.
+#[cfg(test)]
+mod tests {
+    use super::{cdc_mode_allows_logical, replica_identity_sufficient, trigger_name_for_oid_u32};
+
+    // ── Trigger name generation ──────────────────────────────────────
+
+    #[test]
+    fn test_trigger_name_for_oid_u32_basic() {
+        assert_eq!(trigger_name_for_oid_u32(12345), "pg_trickle_cdc_12345");
+    }
+
+    #[test]
+    fn test_trigger_name_for_oid_u32_zero() {
+        assert_eq!(trigger_name_for_oid_u32(0), "pg_trickle_cdc_0");
+    }
+
+    #[test]
+    fn test_trigger_name_for_oid_u32_max() {
+        let name = trigger_name_for_oid_u32(u32::MAX);
+        assert!(
+            name.starts_with("pg_trickle_cdc_"),
+            "name must start with prefix: {name}"
+        );
+        assert!(
+            name.ends_with(&u32::MAX.to_string()),
+            "name must end with OID: {name}"
+        );
+    }
+
+    // ── CDC mode logical replication guard ───────────────────────────
+
+    #[test]
+    fn test_cdc_mode_trigger_disallows_logical() {
+        assert!(!cdc_mode_allows_logical("trigger"));
+        assert!(!cdc_mode_allows_logical("TRIGGER"));
+        assert!(!cdc_mode_allows_logical("Trigger"));
+    }
+
+    #[test]
+    fn test_cdc_mode_wal_allows_logical() {
+        assert!(cdc_mode_allows_logical("wal"));
+        assert!(cdc_mode_allows_logical("WAL"));
+    }
+
+    #[test]
+    fn test_cdc_mode_auto_allows_logical() {
+        assert!(cdc_mode_allows_logical("auto"));
+        assert!(cdc_mode_allows_logical("AUTO"));
+    }
+
+    // ── Replica identity sufficiency ─────────────────────────────────
+
+    #[test]
+    fn test_replica_identity_default_sufficient() {
+        assert!(replica_identity_sufficient("default"));
+    }
+
+    #[test]
+    fn test_replica_identity_full_sufficient() {
+        assert!(replica_identity_sufficient("full"));
+    }
+
+    #[test]
+    fn test_replica_identity_nothing_insufficient() {
+        assert!(!replica_identity_sufficient("nothing"));
+    }
+
+    #[test]
+    fn test_replica_identity_index_insufficient() {
+        assert!(!replica_identity_sufficient("index"));
+    }
 }

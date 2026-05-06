@@ -9,6 +9,43 @@ mod e2e;
 
 use e2e::E2eDb;
 
+/// TEST-10-01 (v0.49.0): Poll `pg_stat_activity` until the given backend is
+/// seen in a non-idle state (i.e. its query has started executing), then
+/// return.  Falls back to a short sleep after `timeout_secs` to prevent
+/// an infinite loop on slow CI runners.
+///
+/// This replaces the previous fixed `tokio::time::sleep` calls which were
+/// unreliable on loaded machines and could cause the second concurrent
+/// operation to start before the first had actually acquired any lock.
+async fn wait_for_active_query(pool: &sqlx::PgPool, query_fragment: &str, timeout_secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let found: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_stat_activity
+                WHERE state != 'idle'
+                  AND query ILIKE $1
+                  AND pid != pg_backend_pid()
+             )",
+        )
+        .bind(format!("%{}%", query_fragment))
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+
+        if found {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Timeout: fall through with a minimum delay so the test can still pass
+            // on slow runners where pg_stat_activity visibility is delayed.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 /// PB1: Verify that concurrent `refresh_stream_table()` calls on the same ST
 /// use `SELECT ... FOR UPDATE SKIP LOCKED` correctly:
 ///
@@ -52,6 +89,7 @@ async fn test_pb1_concurrent_refresh_skip_locked_no_corruption() {
     // We clone the pool so each spawned task holds its own connection.
     let pool1 = db.pool.clone();
     let pool2 = db.pool.clone();
+    let pool_wait = db.pool.clone();
 
     let h1 = tokio::spawn(async move {
         sqlx::query("SELECT pgtrickle.refresh_stream_table('pb1_st')")
@@ -59,8 +97,9 @@ async fn test_pb1_concurrent_refresh_skip_locked_no_corruption() {
             .await
     });
     let h2 = tokio::spawn(async move {
-        // Brief sleep so h1 has time to start and hold the lock first.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait until h1 is actively executing the refresh before starting h2.
+        // This replaces a fixed sleep with a deterministic activity poll.
+        wait_for_active_query(&pool_wait, "refresh_stream_table", 5).await;
         sqlx::query("SELECT pgtrickle.refresh_stream_table('pb1_st')")
             .execute(&pool2)
             .await
@@ -207,6 +246,7 @@ async fn test_refresh_and_drop_race() {
 
     let pool_refresh = db.pool.clone();
     let pool_drop = db.pool.clone();
+    let pool_wait = db.pool.clone();
 
     let h_refresh = tokio::spawn(async move {
         sqlx::query("SELECT pgtrickle.refresh_stream_table('cc_race_st')")
@@ -215,8 +255,8 @@ async fn test_refresh_and_drop_race() {
     });
 
     let h_drop = tokio::spawn(async move {
-        // Slight delay to let refresh start
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // Wait until refresh is actively executing before issuing the DROP.
+        wait_for_active_query(&pool_wait, "refresh_stream_table", 5).await;
         sqlx::query("SELECT pgtrickle.drop_stream_table('cc_race_st')")
             .execute(&pool_drop)
             .await
@@ -433,6 +473,7 @@ async fn test_conc1_alter_while_refresh_no_deadlock() {
 
     let pool_refresh = db.pool.clone();
     let pool_alter = db.pool.clone();
+    let pool_wait = db.pool.clone();
 
     // Fire both concurrently: one refreshes (takes a moment), one ALTERs the query.
     let h_refresh = tokio::spawn(async move {
@@ -442,8 +483,8 @@ async fn test_conc1_alter_while_refresh_no_deadlock() {
     });
 
     let h_alter = tokio::spawn(async move {
-        // Brief delay so refresh has time to start.
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // Wait until refresh is actively executing before issuing the ALTER.
+        wait_for_active_query(&pool_wait, "refresh_stream_table", 5).await;
         // ALTER to the same defining query — idempotent but forces catalog update.
         sqlx::query(
             "SELECT pgtrickle.alter_stream_table('conc1_st', \
@@ -506,6 +547,7 @@ async fn test_conc2_drop_while_refresh_no_orphans() {
 
     let pool_refresh = db.pool.clone();
     let pool_drop = db.pool.clone();
+    let pool_wait = db.pool.clone();
 
     let h_refresh = tokio::spawn(async move {
         sqlx::query("SELECT pgtrickle.refresh_stream_table('conc2_st')")
@@ -514,7 +556,8 @@ async fn test_conc2_drop_while_refresh_no_orphans() {
     });
 
     let h_drop = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // Wait until refresh is actively executing before issuing the DROP.
+        wait_for_active_query(&pool_wait, "refresh_stream_table", 5).await;
         sqlx::query("SELECT pgtrickle.drop_stream_table('conc2_st')")
             .execute(&pool_drop)
             .await
@@ -676,5 +719,92 @@ async fn test_conc4_canary_promotion_consistent_metadata() {
     assert_eq!(
         count, 200,
         "ST must contain exactly 200 rows after concurrent full refreshes"
+    );
+}
+
+/// TEST-10-04 (v0.49.0): DDL during a concurrent refresh does not corrupt the stream table.
+///
+/// Fires a `refresh_stream_table()` and an `ALTER STREAM TABLE SET query` concurrently.
+/// After both complete, verifies:
+/// - The catalog is in a consistent state (ACTIVE or ERROR, never INITIALIZING + corrupted).
+/// - Three additional refresh cycles converge to the correct row count.
+/// - No deadlock or panic occurred.
+///
+/// This differs from `test_conc1_alter_while_refresh_no_deadlock` in that it:
+/// - Uses a FULL-refresh stream table (simpler timing model).
+/// - Runs 3 post-race refresh cycles (stronger convergence guarantee).
+/// - Asserts the final row count matches the source exactly.
+#[tokio::test]
+async fn test_ddl_during_concurrent_refresh() {
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE ddl_conc_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO ddl_conc_src SELECT g, 'v' || g FROM generate_series(1, 100) g")
+        .await;
+
+    db.create_st(
+        "ddl_conc_st",
+        "SELECT id, val FROM ddl_conc_src",
+        "1m",
+        "FULL",
+    )
+    .await;
+    assert_eq!(db.count("public.ddl_conc_st").await, 100);
+
+    // Add rows so the next refresh has real work to do.
+    db.execute("INSERT INTO ddl_conc_src SELECT g, 'v' || g FROM generate_series(101, 300) g")
+        .await;
+
+    let pool_refresh = db.pool.clone();
+    let pool_alter = db.pool.clone();
+    let pool_wait = db.pool.clone();
+
+    let h_refresh = tokio::spawn(async move {
+        sqlx::query("SELECT pgtrickle.refresh_stream_table('ddl_conc_st')")
+            .execute(&pool_refresh)
+            .await
+    });
+
+    let h_alter = tokio::spawn(async move {
+        // Wait until the refresh is actively running before issuing the ALTER.
+        wait_for_active_query(&pool_wait, "refresh_stream_table", 5).await;
+        // ALTER to an identical query with an explicit WHERE — forces catalog update.
+        sqlx::query(
+            "SELECT pgtrickle.alter_stream_table('ddl_conc_st', \
+             query => $$ SELECT id, val FROM ddl_conc_src WHERE id > 0 $$)",
+        )
+        .execute(&pool_alter)
+        .await
+    });
+
+    let (r_refresh, r_alter) = tokio::join!(h_refresh, h_alter);
+
+    // Neither must panic at the task level — lock contention errors are acceptable.
+    let _ = r_refresh.expect("refresh task panicked");
+    let _ = r_alter.expect("alter task panicked");
+
+    // Catalog must be in a known-good state: ACTIVE or ERROR (not torn state).
+    let status: String = db
+        .query_scalar(
+            "SELECT status FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'ddl_conc_st'",
+        )
+        .await;
+    assert!(
+        status == "ACTIVE" || status == "ERROR",
+        "Catalog status must be ACTIVE or ERROR after DDL race, got: {status}"
+    );
+
+    // Three convergence refreshes — the ST must reach the correct count.
+    for _ in 0..3 {
+        db.refresh_st("ddl_conc_st").await;
+    }
+
+    let final_count: i64 = db
+        .query_scalar("SELECT count(*) FROM public.ddl_conc_st")
+        .await;
+    assert_eq!(
+        final_count, 300,
+        "After convergence refreshes, ST must contain all 300 source rows"
     );
 }

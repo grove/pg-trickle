@@ -58,6 +58,20 @@ path = "fuzz_targets/sql_builder_fuzz.rs"
 test = false
 doc = false
 
+# FUZZ-7 (v0.49.0): TEST-10-03 — Merge SQL construction pipeline fuzz target.
+[[bin]]
+name = "merge_sql_fuzz"
+path = "fuzz_targets/merge_sql_fuzz.rs"
+test = false
+doc = false
+
+# FUZZ-8 (v0.49.0): TEST-10-03 — Row identity schema fuzz target.
+[[bin]]
+name = "row_id_fuzz"
+path = "fuzz_targets/row_id_fuzz.rs"
+test = false
+doc = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 pg_trickle = { path = "..", features = [] }
