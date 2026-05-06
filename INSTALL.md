@@ -73,7 +73,7 @@ pg_trickle is distributed as an OCI extension image for use with
 
 ```bash
 # Pull the extension image
-docker pull ghcr.io/grove/pg_trickle-ext:<ver>
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:<ver>
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and
@@ -88,12 +88,12 @@ defaults (`wal_level`, `shared_preload_libraries`, memory, scheduler settings)
 are baked in — no configuration file editing needed.
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle:latest
+docker pull ghcr.io/trickle-labs/pg_trickle:latest
 
 docker run --rm \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
-  ghcr.io/grove/pg_trickle:latest
+  ghcr.io/trickle-labs/pg_trickle:latest
 ```
 
 `CREATE EXTENSION pg_trickle;` runs automatically on the default `postgres`
@@ -113,7 +113,7 @@ Override any GUC at runtime without rebuilding:
 docker run --rm \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
-  ghcr.io/grove/pg_trickle:latest \
+  ghcr.io/trickle-labs/pg_trickle:latest \
   -c shared_buffers=2GB -c work_mem=64MB -c effective_cache_size=6GB
 ```
 
@@ -125,7 +125,7 @@ docker run -d \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
   -v pg_trickle_data:/var/lib/postgresql/data \
-  ghcr.io/grove/pg_trickle:latest
+  ghcr.io/trickle-labs/pg_trickle:latest
 ```
 
 **Alternative — manual mount from a release archive:**

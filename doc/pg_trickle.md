@@ -161,7 +161,7 @@ Restart PostgreSQL, then run `CREATE EXTENSION pg_trickle;` in your database.
 pg_trickle is available as an OCI extension image for CloudNativePG:
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle-ext:0.10.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.10.0
 ```
 
 ### Docker Hub
@@ -203,10 +203,10 @@ Apache 2.0 licensed. 1,100+ unit tests and 800+ end-to-end tests.
 
 ## Links
 
-- **Source code:** https://github.com/grove/pg-trickle
-- **Documentation:** https://grove.github.io/pg-trickle/
-- **Issue tracker:** https://github.com/grove/pg-trickle/issues
-- **Getting started tutorial:** https://github.com/grove/pg-trickle/blob/main/docs/GETTING_STARTED.md
-- **SQL reference:** https://github.com/grove/pg-trickle/blob/main/docs/SQL_REFERENCE.md
-- **Configuration guide:** https://github.com/grove/pg-trickle/blob/main/docs/CONFIGURATION.md
-- **Roadmap:** https://github.com/grove/pg-trickle/blob/main/ROADMAP.md
+- **Source code:** https://github.com/trickle-labs/pg-trickle
+- **Documentation:** https://trickle-labs.github.io/pg-trickle/
+- **Issue tracker:** https://github.com/trickle-labs/pg-trickle/issues
+- **Getting started tutorial:** https://github.com/trickle-labs/pg-trickle/blob/main/docs/GETTING_STARTED.md
+- **SQL reference:** https://github.com/trickle-labs/pg-trickle/blob/main/docs/SQL_REFERENCE.md
+- **Configuration guide:** https://github.com/trickle-labs/pg-trickle/blob/main/docs/CONFIGURATION.md
+- **Roadmap:** https://github.com/trickle-labs/pg-trickle/blob/main/ROADMAP.md

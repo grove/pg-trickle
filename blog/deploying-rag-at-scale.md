@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # Deploying RAG at Scale: pg_trickle as Your Embedding Infrastructure
 
@@ -271,7 +271,7 @@ For teams evaluating pg_trickle + pgvector or building a proof of concept, v0.38
 docker run -d \
   -e POSTGRES_PASSWORD=secret \
   -p 5432:5432 \
-  ghcr.io/grove/pg-trickle-rag:latest
+  ghcr.io/trickle-labs/pg-trickle-rag:latest
 ```
 
 The image includes:
@@ -526,4 +526,4 @@ The remaining external dependency is the embedding model itself. You still need 
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle). The pgvector integration roadmap spans [v0.37.0](https://github.com/grove/pg-trickle/blob/main/roadmap/v0.37.0.md) through [v0.40.0](https://github.com/grove/pg-trickle/blob/main/roadmap/v0.40.0.md).*
+*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle). The pgvector integration roadmap spans [v0.37.0](https://github.com/trickle-labs/pg-trickle/blob/main/roadmap/v0.37.0.md) through [v0.40.0](https://github.com/trickle-labs/pg-trickle/blob/main/roadmap/v0.40.0.md).*

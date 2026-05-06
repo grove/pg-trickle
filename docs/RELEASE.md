@@ -5,7 +5,7 @@ This document describes how to create a release of **pg_trickle**.
 ## Overview
 
 Releases are fully automated via GitHub Actions. Pushing a version tag (`v*`)
-triggers the [Release workflow](https://github.com/grove/pg-trickle/blob/main/.github/workflows/release.yml), which:
+triggers the [Release workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/release.yml), which:
 
 1. Runs a preflight version-sync check to ensure all version references match the tag
 2. Builds extension packages for Linux (amd64), macOS (arm64), and Windows (amd64)
@@ -13,7 +13,7 @@ triggers the [Release workflow](https://github.com/grove/pg-trickle/blob/main/.g
 4. Creates a GitHub Release with archives and SHA256 checksums
 5. Builds and pushes a multi-arch extension image to GHCR (for CNPG Image Volumes)
 
-A separate [PGXN workflow](https://github.com/grove/pg-trickle/blob/main/.github/workflows/pgxn.yml) also fires on the same
+A separate [PGXN workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/pgxn.yml) also fires on the same
 `v*` tag and publishes the source archive to the [PostgreSQL Extension Network](https://pgxn.org/).
 
 ## Prerequisites
@@ -91,7 +91,7 @@ git push origin main
 
 ### 4. Wait for CI to pass and verify upgrade completeness
 
-Ensure the [CI workflow](https://github.com/grove/pg-trickle/blob/main/.github/workflows/ci.yml) passes on `main` with
+Ensure the [CI workflow](https://github.com/trickle-labs/pg-trickle/blob/main/.github/workflows/ci.yml) passes on `main` with
 the version bump commit. All unit, integration, E2E, and pgrx tests must be
 green.
 
@@ -131,7 +131,7 @@ This triggers the Release workflow automatically.
 
 ### 6. Monitor the release
 
-Watch the [Actions tab](https://github.com/grove/pg-trickle/actions/workflows/release.yml) for progress.
+Watch the [Actions tab](https://github.com/trickle-labs/pg-trickle/actions/workflows/release.yml) for progress.
 The release workflow runs these jobs in order:
 
 ```
@@ -161,7 +161,7 @@ public once to unlock that:
 
 After that first change:
 - All future pushes keep the package public automatically
-- Unauthenticated `docker pull ghcr.io/grove/pg_trickle-ext:...` works
+- Unauthenticated `docker pull ghcr.io/trickle-labs/pg_trickle-ext:...` works
 - Storage and bandwidth are free (GHCR open-source advantage)
 - The package page shows the README, linked repository, license, and
   description from the OCI labels
@@ -170,16 +170,16 @@ After that first change:
 
 Once both workflows complete:
 
-- [ ] Check the [GitHub Releases](https://github.com/grove/pg-trickle/releases) page for the new release
+- [ ] Check the [GitHub Releases](https://github.com/trickle-labs/pg-trickle/releases) page for the new release
 - [ ] Verify all three platform archives are attached (`.tar.gz` for Linux/macOS, `.zip` for Windows)
 - [ ] Verify `SHA256SUMS.txt` is present
-- [ ] Verify the extension image is available at `ghcr.io/grove/pg_trickle-ext:<version>`
+- [ ] Verify the extension image is available at `ghcr.io/trickle-labs/pg_trickle-ext:<version>`
 - [ ] Verify the PGXN upload succeeded: `pgxn info pg_trickle` should show the new version
 - [ ] Optionally verify the extension image layout:
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle-ext:<version>
-ID=$(docker create ghcr.io/grove/pg_trickle-ext:<version>)
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:<version>
+ID=$(docker create ghcr.io/trickle-labs/pg_trickle-ext:<version>)
 docker cp "$ID:/lib/" /tmp/ext-lib/
 docker cp "$ID:/share/" /tmp/ext-share/
 docker rm "$ID"
@@ -203,7 +203,7 @@ Complete these steps immediately after a release tag has been pushed and both th
 - [ ] **Copy `sql/archive/pg_trickle--<released>.sql` → `sql/archive/pg_trickle--<next>.sql`** — placeholder archive baseline for the next version
 - [ ] **Update `justfile`** — advance `build-upgrade-image` and `test-upgrade` `to` defaults to `<next>`; update the `build-hub` Docker image tag
 - [ ] **Update `tests/e2e_upgrade_tests.rs`** — advance all `unwrap_or("<released>".into())` fallback strings to `<next>`
-- [ ] **Update version numbers in `README.md`** — search for occurrences of the released version (e.g. `0.17.0`) and advance them to `<next>`: CNPG image reference (`ghcr.io/grove/pg_trickle-ext:<version>`), dbt `revision` tag, and any other hardcoded version strings. A quick check: `grep -n '<released>' README.md`
+- [ ] **Update version numbers in `README.md`** — search for occurrences of the released version (e.g. `0.17.0`) and advance them to `<next>`: CNPG image reference (`ghcr.io/trickle-labs/pg_trickle-ext:<version>`), dbt `revision` tag, and any other hardcoded version strings. A quick check: `grep -n '<released>' README.md`
 - [ ] **Run `just check-version-sync`** — must exit 0 before opening the PR
 - [ ] **Open a PR** against `main` with the commit title `chore: start v<next> development cycle`
 
@@ -243,7 +243,7 @@ Each release produces:
 | `pg_trickle-<ver>-pg18-macos-arm64.tar.gz` | Extension files for macOS Apple Silicon |
 | `pg_trickle-<ver>-pg18-windows-amd64.zip`  | Extension files for Windows x64 |
 | `SHA256SUMS.txt` | SHA-256 checksums for all archives |
-| `ghcr.io/grove/pg_trickle-ext:<ver>` | CNPG extension image for Image Volumes (amd64 + arm64) |
+| `ghcr.io/trickle-labs/pg_trickle-ext:<ver>` | CNPG extension image for Image Volumes (amd64 + arm64) |
 
 ### Installing from an archive
 
@@ -336,7 +336,7 @@ Every release requires manual updates to the files below. Missing any of them le
 
 ### Release workflow failed
 
-Go to the [Actions tab](https://github.com/grove/pg-trickle/actions/workflows/release.yml) and identify
+Go to the [Actions tab](https://github.com/trickle-labs/pg-trickle/actions/workflows/release.yml) and identify
 which job failed. Then follow the appropriate recovery path below.
 
 #### Option A: Re-run (transient failure)

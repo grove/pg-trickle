@@ -42,7 +42,7 @@ The dashboard auto-refreshes every 2 seconds.
 
 ## Building the Docker image from source
 
-By default, the demo uses the pre-built `ghcr.io/grove/pg_trickle:latest` image from the GitHub Container Registry. This provides the fastest startup experience.
+By default, the demo uses the pre-built `ghcr.io/trickle-labs/pg_trickle:latest` image from the GitHub Container Registry. This provides the fastest startup experience.
 
 To test changes to the pg_trickle extension without waiting for an official release, you can build the Docker image from your current source code:
 
@@ -79,7 +79,7 @@ The `PG_TRICKLE_IMAGE` environment variable overrides the default pre-built imag
 
 | Image | Usage | Notes |
 |-------|-------|-------|
-| `ghcr.io/grove/pg_trickle:latest` (default) | Pre-built from latest release | Fast startup (no build needed) |
+| `ghcr.io/trickle-labs/pg_trickle:latest` (default) | Pre-built from latest release | Fast startup (no build needed) |
 | `pg_trickle:demo` | Build with `just build-demo` | Tests uncommitted source changes |
 
 ---

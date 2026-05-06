@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # Your pgvector Index Is Lying to You
 
@@ -575,4 +575,4 @@ The combination isn't a workaround. It's what the stack should have looked like 
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle). The pgvector integration roadmap is detailed in the repository's `plans/ecosystem/PLAN_PGVECTOR.md` and roadmap files.*
+*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle). The pgvector integration roadmap is detailed in the repository's `plans/ecosystem/PLAN_PGVECTOR.md` and roadmap files.*

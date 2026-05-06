@@ -7,7 +7,7 @@ Security (RLS), how triggers behave under SECURITY DEFINER vs
 INVOKER, and what to lock down in production.
 
 > **Reporting a vulnerability?** See
-> [SECURITY.md](https://github.com/grove/pg-trickle/blob/main/SECURITY.md)
+> [SECURITY.md](https://github.com/trickle-labs/pg-trickle/blob/main/SECURITY.md)
 > in the repository root for the disclosure policy.
 
 ---
@@ -202,4 +202,4 @@ includes recommended Prometheus alerts.
 [Row-Level Security tutorial](tutorials/ROW_LEVEL_SECURITY.md) ·
 [Pre-Deployment Checklist](PRE_DEPLOYMENT.md) ·
 [Configuration](CONFIGURATION.md) ·
-[SECURITY policy](https://github.com/grove/pg-trickle/blob/main/SECURITY.md)
+[SECURITY policy](https://github.com/trickle-labs/pg-trickle/blob/main/SECURITY.md)

@@ -685,7 +685,7 @@ order that inverts their pre-cached `change_id` values:
 4. The compaction/delta pipeline uses `ORDER BY change_id DESC` to find the
    final state → picks `change_id=33` (Backend B's **stale** data).
 
-Silent data corruption. See [issue #536](https://github.com/grove/pg-trickle/issues/536)
+Silent data corruption. See [issue #536](https://github.com/trickle-labs/pg-trickle/issues/536)
 for full analysis.
 
 **Diagnosis:**

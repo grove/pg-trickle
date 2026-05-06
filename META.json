@@ -20,14 +20,14 @@
     }
   },
   "resources": {
-    "homepage": "https://github.com/grove/pg-trickle",
+    "homepage": "https://github.com/trickle-labs/pg-trickle",
     "repository": {
-      "url": "https://github.com/grove/pg-trickle",
-      "web": "https://github.com/grove/pg-trickle",
+      "url": "https://github.com/trickle-labs/pg-trickle",
+      "web": "https://github.com/trickle-labs/pg-trickle",
       "type": "git"
     },
     "bugtracker": {
-      "web": "https://github.com/grove/pg-trickle/issues"
+      "web": "https://github.com/trickle-labs/pg-trickle/issues"
     }
   },
   "tags": [

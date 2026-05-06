@@ -161,7 +161,7 @@ project works against a local pg_trickle instance out of the box.
 
 ```yaml
 packages:
-  - git: "https://github.com/grove/pg-trickle"
+  - git: "https://github.com/trickle-labs/pg-trickle"
     subdirectory: "dbt-pgtrickle"
     revision: main          # pin to a tag (e.g. v0.4.0) for production use
 ```
@@ -635,7 +635,7 @@ dbt-getting-started:
 |------|---------|--------|-------|
 | GS-1 | `dbt_project.yml` | ✅ Done | Project metadata, seed post-hooks, model defaults |
 | GS-2 | `profiles.yml` | ✅ Done | Connection config via env vars |
-| GS-3 | `packages.yml` | ✅ Done | GitHub URL reference to `grove/pg-trickle`, `subdirectory: dbt-pgtrickle` |
+| GS-3 | `packages.yml` | ✅ Done | GitHub URL reference to `trickle-labs/pg-trickle`, `subdirectory: dbt-pgtrickle` |
 | GS-4 | `seeds/departments.csv` | ✅ Done | 7 rows; blank parent_id for root |
 | GS-5 | `seeds/employees.csv` | ✅ Done | 7 rows |
 | GS-6 | `models/staging/stg_departments.sql` | ✅ Done | Pass-through view |

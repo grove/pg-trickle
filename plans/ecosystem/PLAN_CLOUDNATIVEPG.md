@@ -3,7 +3,7 @@
 Date: 2026-02-26
 Status: IMPLEMENTED
 Supersedes: Project 5 in [PLAN_ECO_SYSTEM.md](PLAN_ECO_SYSTEM.md)
-PR: [#15](https://github.com/grove/pg-trickle/pull/15)
+PR: [#15](https://github.com/trickle-labs/pg-trickle/pull/15)
 Branch: `cloudnative-pg-image-volume`
 
 ---
@@ -207,7 +207,7 @@ image. No Rust compilation happens here.
 # =============================================================================
 FROM scratch
 
-ARG REPO_URL=https://github.com/grove/pg-trickle
+ARG REPO_URL=https://github.com/trickle-labs/pg-trickle
 ARG VERSION=dev
 
 # Extension shared library
@@ -511,7 +511,7 @@ pg_trickle is distributed as an OCI extension image for use with
 
 ```bash
 # Pull the extension image
-docker pull ghcr.io/grove/pg_trickle-ext:0.1.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.1.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and
@@ -543,7 +543,7 @@ Update the release artifacts table:
 
 | Artifact | Description |
 |----------|-------------|
-| `ghcr.io/grove/pg_trickle-ext:<ver>` | CNPG extension image (amd64 + arm64) |
+| `ghcr.io/trickle-labs/pg_trickle-ext:<ver>` | CNPG extension image (amd64 + arm64) |
 
 Update the Docker verification instructions to use the new image name and
 layout validation (since the image has no shell, use `docker create` + `docker cp`).

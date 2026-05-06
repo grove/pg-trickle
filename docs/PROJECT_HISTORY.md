@@ -29,7 +29,7 @@ The result is a **spec-driven** development process, not vibe-coding.
 Every feature starts as a written plan — an architecture decision
 record, a gap analysis, or a phased implementation spec — before any
 code is generated. The
-[`plans/`](https://github.com/grove/pg-trickle/tree/main/plans)
+[`plans/`](https://github.com/trickle-labs/pg-trickle/tree/main/plans)
 directory contains over 110 documents covering operator semantics,
 CDC trade-offs, performance strategies, ecosystem comparisons, and
 edge-case catalogues. Agents work from these specs; the specs are

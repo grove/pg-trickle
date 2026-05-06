@@ -713,7 +713,7 @@ pub fn create_change_buffer_table(
     // order for same-row modifications.
     //
     // The WAL/logical-decoding CDC backend is immune (uses commit-LSN
-    // ordering). See: https://github.com/grove/pg-trickle/issues/536
+    // ordering). See: https://github.com/trickle-labs/pg-trickle/issues/536
     //
     // CITUS-4: Use stable_name instead of OID for all object names so that
     // names survive pg_dump/restore and are identical across Citus nodes.

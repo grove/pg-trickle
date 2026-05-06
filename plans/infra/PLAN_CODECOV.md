@@ -2,7 +2,7 @@
 
 ## Status: Done
 
-Confirmed live at https://app.codecov.io/github/grove/pg-trickle (March 2026).
+Confirmed live at https://app.codecov.io/github/trickle-labs/pg-trickle (March 2026).
 
 The `CODECOV_TOKEN` secret has been added to the GitHub repository.
 The coverage workflow (`coverage.yml`) already collects `lcov.info` via

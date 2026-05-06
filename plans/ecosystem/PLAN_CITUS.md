@@ -29,7 +29,7 @@ much narrower integration:
   `TRIGGER → TRANSITIONING → WAL` lifecycle. Slots and publications can
   live on **other PostgreSQL nodes**; the polling SPI just needs a
   connection. This lines up exactly with the user-suggested architecture
-  in [discussion #619](https://github.com/grove/pg-trickle/discussions/619):
+  in [discussion #619](https://github.com/trickle-labs/pg-trickle/discussions/619):
   publications + slots on workers, consumed from the coordinator.
 - **Outbox + `pgtrickle-relay`** (v0.28.0–0.29.0) give us a battle-tested
   way to **fan deltas out across nodes** (NATS / Kafka / HTTP / pg-inbox)
@@ -693,7 +693,7 @@ automatically selected by the all-distributed rule in P4.1.
   — adjacent partitioning work; some primitives overlap.
 - [plans/infra/PLAN_MULTI_DATABASE.md](plans/infra/PLAN_MULTI_DATABASE.md)
   — multi-database scheduler.
-- [discussion #619](https://github.com/grove/pg-trickle/discussions/619)
+- [discussion #619](https://github.com/trickle-labs/pg-trickle/discussions/619)
   — original user request that motivated the rewrite; follow-up comments
   confirmed all-distributed topology, billion-row ST chains, and PK-only
   REPLICA IDENTITY preference (2026-04-24).

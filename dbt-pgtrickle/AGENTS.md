@@ -3,7 +3,7 @@
 ## Project Overview
 
 dbt package providing a `stream_table` custom materialization for the
-[pg-trickle](https://github.com/grove/pg-trickle) PostgreSQL extension. Pure Jinja
+[pg-trickle](https://github.com/trickle-labs/pg-trickle) PostgreSQL extension. Pure Jinja
 SQL macros — no Python adapter code. Works with stock `dbt-postgres`.
 
 - **Language:** Jinja2 SQL (dbt macros)
@@ -200,7 +200,7 @@ Catalog: `pgtrickle.pgt_stream_tables` (metadata), `pgtrickle.pg_stat_stream_tab
 
 - Integration tests require PostgreSQL 18 with pg-trickle extension
 - Build the Docker image: `docker build -t pg-trickle-e2e:latest -f tests/Dockerfile.e2e .`
-  (from the [pg-trickle repo](https://github.com/grove/pg-trickle))
+  (from the [pg-trickle repo](https://github.com/trickle-labs/pg-trickle))
 - Start: `docker run -d -e POSTGRES_PASSWORD=postgres -p 5432:5432 pg-trickle-e2e:latest`
 - Create extension: `psql -U postgres -c "CREATE EXTENSION pg_trickle;"`
 

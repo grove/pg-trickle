@@ -270,8 +270,8 @@ jobs:
         run: |
           # Pull the pre-built builder image to avoid a ~30–60 min local build.
           # Falls back to building locally if the GHCR image is unavailable.
-          if docker pull ghcr.io/grove/pg-trickle/builder:pg18 2>/dev/null; then
-            docker tag ghcr.io/grove/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."
@@ -340,8 +340,8 @@ jobs:
         run: |
           # Pull the pre-built builder image to avoid a ~30–60 min local build.
           # Falls back to building locally if the GHCR image is unavailable.
-          if docker pull ghcr.io/grove/pg-trickle/builder:pg18 2>/dev/null; then
-            docker tag ghcr.io/grove/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."
@@ -597,8 +597,8 @@ jobs:
         run: |
           # Pull the pre-built builder image to avoid a ~30–60 min local build.
           # Falls back to building locally if the GHCR image is unavailable.
-          if docker pull ghcr.io/grove/pg-trickle/builder:pg18 2>/dev/null; then
-            docker tag ghcr.io/grove/pg-trickle/builder:pg18 pg_trickle_builder:pg18
+          if docker pull ghcr.io/trickle-labs/pg-trickle/builder:pg18 2>/dev/null; then
+            docker tag ghcr.io/trickle-labs/pg-trickle/builder:pg18 pg_trickle_builder:pg18
             echo "Builder image pulled from GHCR — skipping local build"
           else
             echo "::warning::Builder image not in GHCR (first run?). Will build locally."

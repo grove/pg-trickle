@@ -1,7 +1,7 @@
 # dbt-pgtrickle
 
 A [dbt](https://www.getdbt.com/) package that integrates
-[pg_trickle](https://github.com/grove/pg-trickle) stream tables into your dbt
+[pg_trickle](https://github.com/trickle-labs/pg-trickle) stream tables into your dbt
 project via a custom `stream_table` materialization.
 
 No custom Python adapter required — works with the standard `dbt-postgres`
@@ -24,7 +24,7 @@ Add to your `packages.yml`:
 
 ```yaml
 packages:
-  - git: "https://github.com/grove/pg-trickle.git"
+  - git: "https://github.com/trickle-labs/pg-trickle.git"
     revision: v0.15.0
     subdirectory: "dbt-pgtrickle"
 ```
