@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.49.0 — Test Infrastructure Hardening & Scheduler Decomposition](#0490--test-infrastructure-hardening--scheduler-decomposition)
 - [0.48.0 — Complete Embedding Programme: Hybrid Search, Sparse Vectors & Ergonomic API](#0480--complete-embedding-programme-hybrid-search-sparse-vectors--ergonomic-api)
 - [0.47.0 — Embedding Pipeline Infrastructure & ANN Maintenance](#0470--embedding-pipeline-infrastructure--ann-maintenance)
 - [0.46.0 — Extract `pg_tide`: Standalone Outbox, Inbox & Relay](#0460--extract-pg_tide-standalone-outbox-inbox--relay)
@@ -62,6 +63,72 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.49.0] — Test Infrastructure Hardening & Scheduler Decomposition
+
+### What's New
+
+#### TEST-10-01: Concurrency Test Synchronization Overhaul
+- Replaced all `tokio::time::sleep` busy-waits in `tests/e2e_concurrent_tests.rs`
+  with `pg_stat_activity`-polling loops that wait until the target query is
+  actually visible before proceeding.
+- Added `wait_for_active_query` helper with configurable timeout and a clear
+  failure message so flakiness surfaces as a named error rather than a silent pass.
+- Affected tests: `test_pb1_concurrent_refresh_skip_locked_no_corruption`,
+  `test_concurrent_refresh_and_drop`, `test_conc1_alter_while_refresh`,
+  `test_conc2_drop_while_refresh`.
+
+#### TEST-10-02: Unit Test Coverage Sweep
+- Added `#[cfg(test)]` modules to `src/template_cache.rs`, `src/cdc/polling.rs`,
+  and `src/cdc/rebuild.rs` — modules that previously had zero unit test coverage.
+- New tests cover hash key derivation and round-trip correctness, CDC trigger
+  naming conventions, CDC mode classification, replica identity sufficiency checks,
+  and cache guard condition logic.
+
+#### TEST-10-03: Fuzz Targets for Merge Codegen and Row Identity
+- Added `fuzz/fuzz_targets/merge_sql_fuzz.rs` — fuzzes the merge SQL construction
+  pipeline (`pg_quote_literal`, `parse_hash_bound_spec`, `extract_keyword_int`,
+  amplification ratio, `build_content_hash_expr`). Validates no panics, UTF-8
+  output, and deterministic results.
+- Added `fuzz/fuzz_targets/row_id_fuzz.rs` — fuzzes the row identity schema
+  classifier (`is_compatible_with`, `verify_pipeline`). Validates reflexivity
+  and that no byte sequence causes a panic.
+- Both targets registered in `fuzz/Cargo.toml` and the `just fuzz-all` recipe.
+
+#### TEST-10-04: DDL During Concurrent Refresh E2E Test
+- Added `test_ddl_during_concurrent_refresh` to `tests/e2e_concurrent_tests.rs`.
+  Fires `ALTER STREAM TABLE` concurrently with a running refresh and asserts
+  either graceful completion or correct blocking — no torn state.
+
+#### CI-10-02: Expanded e2e-Smoke Filter
+- The PR smoke test now also matches `test_.*join.*`, `test_.*aggregate.*`,
+  `test_.*window.*`, and `test_.*subquery.*` patterns, catching operator-level
+  regressions earlier.
+
+#### CI-10-03: Consolidated Fuzz Recipe
+- Added `just fuzz-all` to the `justfile` — runs every fuzz target for a
+  configurable duration (default 60 s each).
+- Documented all fuzz targets and corpus paths in `CONTRIBUTING.md`.
+
+#### CQ-10-01: Scheduler Module Decomposition
+- `src/scheduler/mod.rs` was 6,700+ lines. Extracted into three focused
+  submodules:
+  - `src/scheduler/dispatch.rs` — parallel dispatch state, dynamic worker spawn,
+    worker claiming, orphan reaping, adaptive poll-interval logic.
+  - `src/scheduler/scheduler_loop.rs` — BGW registration, launcher main loop,
+    per-database scheduler main loop.
+  - `src/scheduler/watermark.rs` — tick watermark computation, xmin holdback,
+    frontier advance helpers.
+- `mod.rs` is now a thin re-export façade. All existing public API is preserved
+  with no behaviour change.
+
+### SQL Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.49.0';
+```
 
 ---
 

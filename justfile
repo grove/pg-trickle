@@ -178,6 +178,24 @@ test-pgrx:
 [group: "test"]
 test-all: test-unit test-integration test-e2e test-pgrx
 
+# Run all fuzz targets in sequence (CI-10-03).
+# Each target runs for FUZZ_DURATION seconds (default 60).
+# Requires a nightly toolchain: `rustup install nightly`.
+# Available fuzz targets:
+#   parser_fuzz, cron_fuzz, guc_fuzz, cdc_fuzz, wal_fuzz,
+#   dag_fuzz, sql_builder_fuzz, merge_sql_fuzz, row_id_fuzz
+# Corpus directories: fuzz/corpus/<target_name>/
+[group: "test"]
+fuzz-all duration="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    targets=(parser_fuzz cron_fuzz guc_fuzz cdc_fuzz wal_fuzz dag_fuzz sql_builder_fuzz merge_sql_fuzz row_id_fuzz)
+    for target in "${targets[@]}"; do
+        echo "=== Fuzzing $target for {{duration}}s ==="
+        cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} -jobs=1 -workers=1 || true
+    done
+    echo "=== fuzz-all complete ==="
+
 # Run PgBouncer compatibility E2E tests (requires E2E image + Docker)
 [group: "test"]
 test-pgbouncer: build-e2e-image

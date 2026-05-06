@@ -161,7 +161,42 @@ docs: document JOIN key change limitation in SQL_REFERENCE
 test: add E2E test for keyless table duplicate-row behaviour
 ```
 
-## Documentation Policy
+## Fuzz Testing
+
+pg_trickle uses `cargo-fuzz` (libFuzzer) to exercise core parser and pipeline
+logic. Fuzz targets live in `fuzz/fuzz_targets/`.
+
+### Available targets
+
+| Target | What it exercises | Added in |
+|--------|-------------------|----------|
+| `parser_fuzz` | DVM SQL parser (OpTree construction) | v0.1.0 |
+| `cron_fuzz` | Cron expression parser | v0.26.0 |
+| `guc_fuzz` | GUC string→enum coercion | v0.26.0 |
+| `cdc_fuzz` | CDC trigger payload decoding | v0.26.0 |
+| `wal_fuzz` | WAL/SQLSTATE error classifier | v0.39.0 |
+| `dag_fuzz` | DAG/merge SQL and snapshot column-list | v0.39.0 |
+| `sql_builder_fuzz` | SQL builder + typed parser facade | v0.44.0 |
+| `merge_sql_fuzz` | Merge SQL codegen with random change streams | v0.49.0 |
+| `row_id_fuzz` | Row identity tracking with random operator trees | v0.49.0 |
+
+### Running all fuzz targets
+
+```bash
+# Run each target for 60 s (requires nightly toolchain):
+just fuzz-all
+
+# Run for a custom duration (seconds):
+just fuzz-all 120
+
+# Run a single target:
+cargo +nightly fuzz run merge_sql_fuzz -- -max_total_time=60
+```
+
+Corpus directories are at `fuzz/corpus/<target_name>/`. Regression cases are
+stored in `proptest-regressions/`.
+
+
 
 **Every new feature ships with documentation.** This is a hard requirement,
 not a nice-to-have.
