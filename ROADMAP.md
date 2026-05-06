@@ -105,6 +105,14 @@
 | [v0.47.0](roadmap/v0.47.0.md) | Embedding pipeline infrastructure: post-refresh hooks, drift-based reindex, vector monitoring | ✅ Released | Medium | [Full details](roadmap/v0.47.0.md-full.md) |
 | [v0.48.0](roadmap/v0.48.0.md) | Complete embedding programme: sparse/half-precision vector aggregates, hybrid search, embedding_stream_table() API, per-tenant ANN, embedding outbox | ✅ Released | Large | [Full details](roadmap/v0.48.0.md-full.md) |
 
+### v1.0 Readiness Arc (v0.49.x – v0.51.x)
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.49.0](roadmap/v0.49.0.md) | Test infrastructure hardening: concurrency synchronization overhaul, 10-module unit test sweep, merge/row_id fuzz targets, DDL-during-refresh E2E, scheduler decomposition, CI smoke breadth | Planned | Large | [Full details](roadmap/v0.49.0.md-full.md) |
+| [v0.50.0](roadmap/v0.50.0.md) | Performance, security & operational hardening: SPI batching in differential refresh, dblink escaping fix, CNPG graceful-drain preStop hook, Docker image digest pinning, invalidation ring observability, deep-join drift monitoring, Prometheus secondary metrics | Planned | Large | [Full details](roadmap/v0.50.0.md-full.md) |
+| [v0.51.0](roadmap/v0.51.0.md) | Citus chaos resilience & documentation truth: chaos test rig (node kill/rebalance/partition), deprecated GUC removal, ARCHITECTURE.md pg_tide boundary, recursive CTE strategy docs, CDC-enabled-flag documentation | Planned | Large | [Full details](roadmap/v0.51.0.md-full.md) |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
@@ -171,6 +179,12 @@ v0.47    ─── Embedding infrastructure: post-refresh actions, drift-based r
     │
 v0.48    ─── Complete embedding programme: sparse vectors, hybrid search, embedding_stream_table(), per-tenant ANN
     │
+v0.49    ─── Test infrastructure hardening: concurrency sync overhaul, 10-module unit sweep, merge fuzz, DDL E2E, scheduler split
+    │
+v0.50    ─── Performance, security & ops hardening: SPI batching, dblink fix, CNPG drain hook, digest pinning, ring observability
+    │
+v0.51    ─── Citus chaos resilience & doc truth: chaos rig, deprecated GUC removal, pg_tide boundary, CTE strategy docs
+    │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
 
@@ -231,3 +245,71 @@ hybrid search, the ergonomic `embedding_stream_table()` API, per-tenant ANN
 patterns, and outbox-emitted embedding events). v0.46.0 precedes this arc
 with the extraction of `pg_tide` — moving the outbox, inbox, and relay
 subsystems into a standalone extension at `trickle-labs/pg-tide`.
+
+**v0.49.0 through v0.51.0 form the v1.0 readiness arc**, driven by the findings
+in the v0.48.0 overall assessment (plans/PLAN_OVERALL_ASSESSMENT_10.md). The
+assessment confirmed that every P0 correctness issue from prior assessments is
+closed — EC-01 phantom rows, snapshot cache-key weakness, placeholder resolution,
+and WAL transition TOCTOU are all fixed. The project has transitioned from a
+capability problem to a coverage confidence problem. These three releases
+systematically close the remaining gaps across test reliability, performance,
+security hardening, operational polish, and documentation truth before v1.0.
+
+**v0.49.0 targets test infrastructure quality** — the single highest-risk
+category from the v10 assessment. All concurrency tests currently rely on
+`sleep(50ms)` for synchronization, which provides false confidence: tests may
+pass locally while missing real race conditions on slow CI runners or under
+load. This release replaces sleep-based synchronization with `pg_locks`-polling
+patterns throughout `tests/e2e_concurrent_tests.rs`. Alongside, ten source
+modules that have zero `#[cfg(test)]` unit test coverage are systematically
+addressed: `catalog.rs`, `template_cache.rs`, `ivm.rs`, `cdc/polling.rs`,
+`cdc/rebuild.rs`, `diagnostics.rs`, `logging.rs`, `metrics_server.rs`, and
+`otel.rs`. New fuzz targets are added for the refresh merge SQL codegen
+(`src/refresh/merge/`) and row identity tracking (`src/dvm/row_id.rs`) — two
+high-value surfaces with no current fuzz coverage. An E2E test for concurrent
+DDL during active refresh (`ALTER STREAM TABLE` + in-flight refresh) is added.
+The `src/scheduler/mod.rs` monolith (6,700+ lines) is decomposed into focused
+submodule files: scheduling loop, parallel dispatch state, and cost model
+each become separate files. The e2e-smoke CI filter is widened to cover join,
+aggregate, and window operator regressions on every PR, and a consolidated
+`just fuzz-all` recipe is added to the justfile.
+
+**v0.50.0 targets performance, security, and operational hardening.** The
+differential refresh hot path currently makes 3–4 separate SPI round-trips per
+refresh cycle — buffer existence check, change count per source, and table row
+estimate — that are consolidated into a single CTE query, saving 10–15ms per
+multi-source refresh. The CDC trigger SQL generation loop is tightened using
+`String::with_capacity()` to eliminate per-column heap allocations. The
+watermark computation in the scheduler tick is consolidated into a single
+compound query. On the security side, the `src/citus.rs` dblink calls that
+use manual single-quote doubling for escaping are replaced with
+`pg_escape_literal()` SPI calls for defense-in-depth. Operational gaps are
+closed: the CNPG `cluster-production.yaml` gains a preStop lifecycle hook
+that calls `pgtrickle.drain(timeout_s => 120)` before pod termination,
+preventing interrupted in-flight refreshes during rolling upgrades. All Docker
+base images are pinned to SHA256 digests for reproducible builds. The shared
+memory invalidation ring capacity limit (1,024 entries) is documented in
+`docs/CONFIGURATION.md` with a new `pg_trickle_invalidation_ring_overflow`
+Prometheus counter. Two additional Prometheus metrics are added:
+`pg_trickle_dag_cycles_detected` and `pg_trickle_cache_stale_evictions`.
+The deep join chain Part 3 correction threshold GUC and its trade-off
+between SQL complexity and correctness at >6 join tables is documented in the
+configuration reference with an associated soak-test assertion.
+
+**v0.51.0 closes the Citus resilience gap and brings documentation into full
+truth.** The Citus distributed support shipped in v0.32–v0.34 has never had
+a chaos test suite — there are zero tests validating behaviour under node
+failure, shard rebalance, or network partition. This release delivers a
+docker-compose-based chaos rig with three scenarios: coordinator restart,
+worker node kill with automatic reconnect, and rolling shard rebalance during
+active refresh. The deprecated `pg_trickle.event_driven_wake` GUC (non-functional
+since background workers cannot use `LISTEN`) is removed entirely along with
+all associated code paths and the runtime warning it emits. Documentation is
+brought to full truth: `docs/ARCHITECTURE.md` is updated to clearly describe
+the pg_tide boundary after v0.46.0 extraction; `docs/CONFIGURATION.md` gains
+a deprecation header on the removed GUC entry; the recursive CTE strategy
+selection heuristic (semi-naive vs. DRed vs. recomputation fallback) is
+documented for the first time with an example EXPLAIN output; and a note is
+added to `docs/CONFIGURATION.md` clarifying that CDC triggers fire even when
+`pg_trickle.enabled = false` (by design, to keep buffers ready for re-enable).
+
