@@ -144,6 +144,26 @@ spec:
         immediateCheckpoint: false
         jobs: 4
 
+  # ── Lifecycle Hooks ───────────────────────────────────────────────────────
+  # OPS-10-01: preStop hook — gracefully drains pg_trickle refresh workers
+  # before the pod is terminated (rolling upgrade, scale-down, eviction).
+  #
+  # Without this, in-flight refresh workers are killed mid-execution on pod
+  # shutdown. Stream tables reinitialize safely on the next startup, but a
+  # drain hook reduces post-upgrade latency.
+  #
+  # The `|| true` ensures pod termination even if the database is unavailable
+  # (e.g., when the primary is already down during a failover).
+  #
+  # See: docs/RUNBOOK_DRAIN.md — "Kubernetes rolling upgrade" section.
+  lifecycle:
+    preStop:
+      exec:
+        command:
+          - /bin/sh
+          - -c
+          - psql -U postgres -c "SELECT pgtrickle.drain(timeout_s => 120)" || true
+
   # ── Monitoring ────────────────────────────────────────────────────────────
   # Exposes PostgreSQL metrics to Prometheus via the CNPG metrics endpoint.
   # Pair with the ServiceMonitor in monitoring/production/service-monitor.yaml.

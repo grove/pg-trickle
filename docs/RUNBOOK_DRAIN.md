@@ -221,6 +221,50 @@ changes in order. Monitor `pgtrickle.health_check()` until all tables return
 
 ---
 
+## Kubernetes Rolling Upgrade
+
+When a CNPG-managed pod is terminated (rolling upgrade, scale-down, or eviction),
+any in-flight refresh workers are killed mid-execution. Stream tables recover
+safely on the next startup (they reinitialize), but the full-refresh cycle adds
+latency proportional to table size.
+
+### Configuring a preStop hook (OPS-10-01)
+
+The production cluster manifest (`cnpg/cluster-production.yaml`) includes a
+preStop lifecycle hook that drains pg_trickle before the pod receives SIGTERM:
+
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - psql -U postgres -c "SELECT pgtrickle.drain(timeout_s => 120)" || true
+```
+
+The `|| true` ensures pod termination even if the database is unavailable
+(e.g., primary already down during a failover). The timeout of 120 seconds
+should comfortably cover a CNPG `terminationGracePeriodSeconds` of 60–120.
+
+### Verifying drain behaviour after upgrade
+
+After a rolling upgrade completes:
+```sql
+-- All tables should return to ACTIVE with low staleness
+SELECT pgt_schema, pgt_name, status, staleness
+FROM pgtrickle.pg_stat_stream_tables
+WHERE status != 'ACTIVE' OR staleness > interval '5 minutes'
+ORDER BY staleness DESC;
+```
+
+If tables remain stale, trigger a manual refresh:
+```sql
+SELECT pgtrickle.refresh('myschema', 'my_stream_table');
+```
+
+---
+
 ## Related Documentation
 
 - [docs/SECURITY_MODEL.md](SECURITY_MODEL.md) — security model and `cdc_paused` semantics

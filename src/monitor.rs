@@ -991,6 +991,42 @@ fn cache_stats() -> TableIterator<
     TableIterator::once((l1_hits, l2_hits, misses, evictions, l1_size))
 }
 
+/// OPS-10-02: Reliability counters for Prometheus secondary metrics.
+///
+/// Returns three counters not covered by `cache_stats()`:
+/// - `invalidation_ring_overflows` — times the invalidation ring overflowed
+/// - `dag_cycles_detected` — times a cycle was detected in the ST DAG
+/// - `template_cache_stale_evictions` — delta cache hits where hash mismatched
+///
+/// Exposed as `pgtrickle.reliability_counters()`.
+#[pg_extern(schema = "pgtrickle", name = "reliability_counters")]
+#[allow(clippy::type_complexity)]
+fn reliability_counters() -> TableIterator<
+    'static,
+    (
+        name!(invalidation_ring_overflows, i64),
+        name!(dag_cycles_detected, i64),
+        name!(template_cache_stale_evictions, i64),
+    ),
+> {
+    let (ring_overflows, dag_cycles, stale_evictions) = if crate::shmem::is_shmem_available() {
+        (
+            crate::shmem::INVALIDATION_RING_OVERFLOWS
+                .get()
+                .load(std::sync::atomic::Ordering::Relaxed) as i64,
+            crate::shmem::DAG_CYCLES_DETECTED
+                .get()
+                .load(std::sync::atomic::Ordering::Relaxed) as i64,
+            crate::shmem::TEMPLATE_CACHE_STALE_EVICTIONS
+                .get()
+                .load(std::sync::atomic::Ordering::Relaxed) as i64,
+        )
+    } else {
+        (0, 0, 0)
+    };
+    TableIterator::once((ring_overflows, dag_cycles, stale_evictions))
+}
+
 /// STAB-4: Per-stream-table refresh timing statistics with percentiles.
 ///
 /// Aggregates `pgt_refresh_history` data into per-stream-table timing

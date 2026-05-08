@@ -1472,6 +1472,117 @@ SET pg_trickle.ivm_recursive_max_depth = 500;
 
 ---
 
+## Invalidation Ring & Deep-Join Tuning (v0.50.0)
+
+### SCAL-10-01 — Invalidation ring capacity ceiling
+
+### pg_trickle.invalidation_ring_capacity
+
+Controls the number of slots in the per-backend invalidation ring buffer.
+When a source table DDL change (e.g. `ALTER TABLE`) or schema reload is
+detected, the extension marks affected stream-table OIDs in this ring so
+background refresh workers can schedule a full DAG rebuild.
+
+**Default:** `128`  
+**Range:** `1` – `1024`  
+**Hard ceiling:** `1024` entries (enforced at registration time; values above
+1024 are clamped to 1024)
+
+```sql
+-- Increase for deployments with many simultaneously-modified source tables
+SET pg_trickle.invalidation_ring_capacity = 512;
+```
+
+#### Overflow behaviour
+
+When more than `invalidation_ring_capacity` unique OIDs are invalidated in a
+single burst (e.g. during a schema migration touching hundreds of tables at
+once), the ring overflows. An overflow causes:
+
+1. A full DAG rebuild to be triggered on the next scheduler tick, regardless
+   of which individual OIDs were invalidated.
+2. The `invalidation_ring_overflows` counter (visible via
+   `pgtrickle.reliability_counters()` and the
+   `pg_trickle_reliability_invalidation_ring_overflows_total` Prometheus
+   metric) to be incremented by 1.
+
+Overflows are safe but expensive — a full DAG rebuild scans all registered
+stream tables. A sustained non-zero overflow rate indicates that `capacity`
+should be increased.
+
+#### Guidance for large deployments (1,000+ stream tables)
+
+| ST count | Recommended capacity |
+|----------|--------------------|
+| < 200    | 128 (default)      |
+| 200–500  | 256                |
+| 500–1000 | 512                |
+| > 1000   | 1024 (maximum)     |
+
+> **Note:** Each ring slot consumes ~8 bytes of shared memory (allocated at
+> `pg_trickle.max_shared_memory_kb`). Increasing capacity by 896 slots
+> (128 → 1024) uses an extra ~7 KB of shared memory, which is negligible.
+
+| Setting | Value |
+|---------|-------|
+| Default | `128` |
+| Range | `1` – `1024` |
+| Context | `postmaster` (requires server restart) |
+
+---
+
+### COR-10-01 — Deep join chain threshold
+
+### pg_trickle.part3_max_scan_count
+
+Maximum number of source-table rows the differential engine scans in
+**Part 3** (direct scan strategy) before it escalates to a full deep-join
+delta recomputation.
+
+Part 3 applies when a join chain has depth ≤ `part3_max_scan_count` source
+rows per side. Beyond this threshold the planner falls back to a more
+expensive multi-pass join, which is correct at any depth but generates larger
+SQL plans.
+
+**Default:** `5`  
+**Range:** `1` – `10000`
+
+```sql
+-- Tighten to Part 3 only for very small dimension tables (≤3 rows):
+SET pg_trickle.part3_max_scan_count = 3;
+
+-- Relax for moderately sized dimensions where Part 3 SQL is manageable:
+SET pg_trickle.part3_max_scan_count = 20;
+```
+
+#### Trade-off: SQL complexity vs. delta correctness at depth
+
+| Threshold | Effect |
+|-----------|--------|
+| Low (1–5) | Part 3 used rarely; deeper join strategy always chosen for non-trivial chains; correct but larger delta SQL and higher planning time. |
+| Default (5) | Balanced; Part 3 applies only to tiny lookup tables (static enums, 1-row config rows). Recommended for most workloads. |
+| High (50+) | Part 3 used aggressively; SQL is simpler but intermediate delta estimates may miss correlated rows at join depth > 6. |
+
+#### Recommendation by join-chain depth
+
+- **≤ 6 table join chains:** Default (`5`) is safe and near-optimal.
+- **> 6 table join chains with small dimension tables:** Increase to `10`–`20`
+  only if you observe excessive delta SQL plan sizes in `EXPLAIN` output.
+- **Analytical workloads with 10+ table star schemas:** Leave at default `5`
+  and rely on the planner's GROUP_RESCAN fallback for correctness.
+
+> **Diagnostic:** Set `pg_trickle.log_format = 'verbose'` and look for
+> `part3_direct_scan` tags in the scheduler log to see how often Part 3
+> is being selected.
+
+| Setting | Value |
+|---------|-------|
+| Default | `5` |
+| Range | `1` – `10000` |
+| Context | `superuser` |
+
+---
+
 ## Parallel Refresh
 
 These settings control whether and how the scheduler dispatches refresh

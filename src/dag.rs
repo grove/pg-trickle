@@ -538,6 +538,8 @@ impl StDag {
                 .filter(|n| !processed.contains(n))
                 .map(|n| self.node_name(n))
                 .collect();
+            // OPS-10-02: Count cycle detections for Prometheus alerting.
+            crate::shmem::increment_dag_cycles_detected();
             Err(PgTrickleError::CycleDetected(cycle_nodes))
         } else {
             Ok(())

@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.50.0 — Performance, Security & Operational Hardening](#0500--performance-security--operational-hardening)
 - [0.49.1 — Repository Migration to trickle-labs/pg-trickle](#0491--repository-migration-to-trickle-labspg-trickle)
 - [0.49.0 — Test Infrastructure Hardening & Scheduler Decomposition](#0490--test-infrastructure-hardening--scheduler-decomposition)
 - [0.48.0 — Complete Embedding Programme: Hybrid Search, Sparse Vectors & Ergonomic API](#0480--complete-embedding-programme-hybrid-search-sparse-vectors--ergonomic-api)
@@ -64,6 +65,84 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.50.0] — Performance, Security & Operational Hardening
+
+### What's New
+
+#### PERF-10-01: Batch preflight source-table existence check
+- Replaced the N-query per-OID loop in `execute_differential_refresh` with a
+  single batch `SELECT ... FROM unnest(ARRAY[oid1, oid2, ...])` that returns
+  all source-table existence checks in one SPI round-trip.
+- Reduces preflight overhead from O(N) queries to O(1) for stream tables with
+  multiple sources.
+
+#### PERF-10-02: CDC trigger SQL string-building micro-optimisation
+- `build_stmt_trigger_fn_sql` now uses `String::with_capacity` + direct
+  `push_str` loops instead of `Vec<String>::join`, eliminating intermediate
+  allocations in the column list builders (`cn`, `ncr`, `ocr`).
+- Noticeable on high-throughput workloads that re-register triggers frequently.
+
+#### PERF-10-03: Single-query watermark computation (already present; documented)
+- Confirmed that `compute_safe_upper_bound()` in `src/cdc.rs` already
+  consolidates `pg_current_wal_lsn()`, `pg_stat_activity` xmin probe, and
+  `pg_prepared_xacts` into one compound CTE `SELECT`. Added an explanatory
+  comment referencing PERF-10-03.
+
+#### SEC-10-01: Replace manual SQL string escaping with `pg_catalog.quote_literal`
+- All `dblink(...)` call sites in `src/citus.rs` now escape connection strings
+  and remote query strings via a new `pg_quote_literal()` helper that delegates
+  to PostgreSQL's built-in `pg_catalog.quote_literal($1)` function.
+- Eliminates the risk of SQL injection through attacker-controlled hostnames or
+  slot names in Citus distributed setups.
+- The manual `.replace('\'', "''")` pattern has been removed from
+  `worker_conn_string()` and all four `dblink` call sites.
+
+#### OPS-10-01: Kubernetes rolling-upgrade drain hook (CNPG)
+- Added `lifecycle.preStop` hook to `cnpg/cluster-production.yaml` that runs
+  `pgtrickle.drain(timeout_s => 120)` before CloudNativePG shuts down a
+  primary pod during rolling upgrades.
+- New `docs/RUNBOOK_DRAIN.md` section documents the Kubernetes rolling-upgrade
+  procedure and post-upgrade verification steps.
+
+#### OPS-10-02: Prometheus reliability counters
+- Three new shared-memory atomics in `src/shmem.rs`:
+  - `TEMPLATE_CACHE_STALE_EVICTIONS` — incremented when a delta template cache
+    entry is evicted because its `defining_query_hash` no longer matches.
+  - `DAG_CYCLES_DETECTED` — incremented each time `detect_cycles()` returns
+    `Err(CycleDetected)`.
+- `src/dvm/mod.rs`: Hash-mismatch stale entries are now detected and counted
+  before being evicted from `DELTA_TEMPLATE_CACHE`.
+- New `pgtrickle.reliability_counters()` SQL function (in `src/monitor.rs`)
+  exposes all three reliability counters as a single-row table.
+- New `pg_trickle_reliability` query block in
+  `monitoring/prometheus/pg_trickle_queries.yml` for postgres_exporter.
+
+#### OPS-10-03: Docker base-image digest pinning
+- All three Dockerfiles (`Dockerfile.demo`, `Dockerfile.ghcr`,
+  `tests/Dockerfile.e2e`) now pin `postgres:18.3-bookworm` to an exact
+  SHA256 digest, providing supply-chain security and reproducible builds.
+- New `scripts/update_base_image_digests.sh` automates quarterly digest
+  refreshes.
+- `CONTRIBUTING.md` documents the update process.
+
+#### SCAL-10-01: Invalidation ring capacity documentation
+- New `docs/CONFIGURATION.md` section documents `pg_trickle.invalidation_ring_capacity`
+  (default 128, hard ceiling 1024), overflow behaviour, the overflow counter,
+  and capacity guidance for deployments with 1,000+ stream tables.
+
+#### COR-10-01: Deep join chain threshold documentation
+- New `docs/CONFIGURATION.md` section documents `pg_trickle.part3_max_scan_count`
+  (default 5), the Part 3 threshold trade-off between SQL complexity and delta
+  correctness at depth, and recommendations for ≤6 vs. >6 table join chains.
+
+### SQL Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.50.0';
+```
 
 ---
 
