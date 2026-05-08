@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**116 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**117 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -87,6 +87,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.refresh_groups_fn()` | `pgtrickle` | `TableIterator<` | Return all user-declared refresh groups with member details. |
 | `pgtrickle.refresh_stream_table()` | `pgtrickle` | `` | Manually trigger a synchronous refresh of a stream table. |
 | `pgtrickle.refresh_timeline()` | `pgtrickle` | `` | Exposed as `pgtrickle.refresh_timeline(limit)`. |
+| `pgtrickle.reliability_counters()` | `pgtrickle` | `TableIterator<` | Exposed as `pgtrickle.reliability_counters()`. |
 | `pgtrickle.repair_stream_table()` | `pgtrickle` | `String` | Steps performed (actions taken are summarized in the return text): 1. |
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
