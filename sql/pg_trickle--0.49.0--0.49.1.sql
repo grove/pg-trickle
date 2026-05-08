@@ -1,0 +1,13 @@
+-- pg_trickle 0.49.0 -> 0.49.1 upgrade migration
+--
+-- v0.49.1 — Repository Migration to trickle-labs/pg-trickle
+--
+-- This release contains no SQL schema changes. All changes are packaging and
+-- infrastructure related:
+--   - Repository moved to https://github.com/trickle-labs/pg-trickle
+--   - CI/CD pipelines updated to new repository
+--   - Docker images published under ghcr.io/trickle-labs/pg-trickle
+--   - Docker Hub images published under tricklehq/pg_trickle
+--   - PGXN, dbt Hub, and CloudNativePG plugin listings updated
+--
+-- No DDL migrations required.

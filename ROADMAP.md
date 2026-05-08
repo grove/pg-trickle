@@ -110,6 +110,7 @@
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
 | [v0.49.0](roadmap/v0.49.0.md) | Test infrastructure hardening: concurrency synchronization overhaul, 10-module unit test sweep, merge/row_id fuzz targets, DDL-during-refresh E2E, scheduler decomposition, CI smoke breadth | ✅ Released | Large | [Full details](roadmap/v0.49.0.md-full.md) |
+| [v0.49.1](roadmap/v0.49.1.md) | Repository migration to trickle-labs/pg-trickle: updated CI/CD, Docker, PGXN, dbt Hub, and CloudNativePG artifact publishing | ✅ Released | Patch | — |
 | [v0.50.0](roadmap/v0.50.0.md) | Performance, security & operational hardening: SPI batching in differential refresh, dblink escaping fix, CNPG graceful-drain preStop hook, Docker image digest pinning, invalidation ring observability, deep-join drift monitoring, Prometheus secondary metrics | Planned | Large | [Full details](roadmap/v0.50.0.md-full.md) |
 | [v0.51.0](roadmap/v0.51.0.md) | Citus chaos resilience & documentation truth: chaos test rig (node kill/rebalance/partition), deprecated GUC removal, ARCHITECTURE.md pg_tide boundary, recursive CTE strategy docs, CDC-enabled-flag documentation | Planned | Large | [Full details](roadmap/v0.51.0.md-full.md) |
 
