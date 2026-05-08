@@ -200,6 +200,22 @@ pub static TEMPLATE_CACHE_L1_HITS: PgAtomic<AtomicU64> =
 pub static TEMPLATE_CACHE_EVICTIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_template_cache_evictions") };
 
+/// OPS-10-02: Counter of delta template cache entries evicted because
+/// `defining_query_hash` mismatched (stale entry after ALTER STREAM TABLE
+/// or source schema change).  A sustained spike indicates rapid schema
+/// churn and may predict GROUP_RESCAN fallback storms.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static TEMPLATE_CACHE_STALE_EVICTIONS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_tmpl_stale_evict") };
+
+/// OPS-10-02: Counter of times the DAG cycle detector returned
+/// `Err(CycleDetected)`.  Should always be zero in steady state;
+/// any non-zero value indicates a misconfiguration (circular dependency
+/// created without `allow_circular = on`).
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static DAG_CYCLES_DETECTED: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_dag_cycles_detected") };
+
 /// #536: Current frontier holdback in LSN bytes (gauge).
 ///
 /// Set to 0 when the frontier is not held back.
@@ -277,6 +293,9 @@ pub fn init_shared_memory() {
     pg_shmem_init!(TEMPLATE_CACHE_MISSES);
     pg_shmem_init!(TEMPLATE_CACHE_L1_HITS);
     pg_shmem_init!(TEMPLATE_CACHE_EVICTIONS);
+    // OPS-10-02: Stale hash-mismatch evictions and DAG cycle counter.
+    pg_shmem_init!(TEMPLATE_CACHE_STALE_EVICTIONS);
+    pg_shmem_init!(DAG_CYCLES_DETECTED);
     // CACHE-1: L0 cross-backend cache availability signal.
     pg_shmem_init!(L0_POPULATED_VERSION);
     pg_shmem_init!(FRONTIER_HOLDBACK_LSN_BYTES);
@@ -884,6 +903,33 @@ pub fn increment_template_cache_evictions() {
         return;
     }
     TEMPLATE_CACHE_EVICTIONS
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OPS-10-02: Increment the template cache stale evictions counter.
+///
+/// Called when the L1 delta template cache has a hit on `pgt_id` but the
+/// stored `defining_query_hash` does not match the current query (stale entry
+/// after ALTER STREAM TABLE or source schema change).
+pub fn increment_template_cache_stale_evictions() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    TEMPLATE_CACHE_STALE_EVICTIONS
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OPS-10-02: Increment the DAG cycle detection counter.
+///
+/// Called whenever `detect_cycles()` or `topological_levels()` returns
+/// `Err(CycleDetected)`.  Should remain zero in normal operation.
+pub fn increment_dag_cycles_detected() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    DAG_CYCLES_DETECTED
         .get()
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }

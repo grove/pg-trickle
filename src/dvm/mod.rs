@@ -567,12 +567,22 @@ pub fn generate_delta_query_cached(
     });
 
     // Check the thread-local cache.
-    let cached = DELTA_TEMPLATE_CACHE.with(|cache| {
+    // OPS-10-02: Detect stale entries (hash mismatch) and count them.
+    let (cached, was_stale) = DELTA_TEMPLATE_CACHE.with(|cache| {
         let map = cache.borrow();
-        map.get(&pgt_id)
-            .filter(|entry| entry.defining_query_hash == query_hash)
-            .cloned()
+        match map.get(&pgt_id) {
+            Some(entry) if entry.defining_query_hash == query_hash => (Some(entry.clone()), false),
+            Some(_) => (None, true), // stale: entry exists but hash changed
+            None => (None, false),   // cold miss: no entry at all
+        }
     });
+    if was_stale {
+        // Evict the stale entry so it doesn't consume cache space.
+        DELTA_TEMPLATE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(&pgt_id);
+        });
+        crate::shmem::increment_template_cache_stale_evictions();
+    }
 
     if let Some(entry) = cached {
         // Cache hit — resolve placeholders and return.

@@ -30,9 +30,11 @@
 # =============================================================================
 
 # ── Stage 1: Prepare build environment ──────────────────────────────────────
-FROM postgres:18.3-bookworm AS build-env
+# OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
+# Run scripts/update_base_image_digests.sh to refresh quarterly.
+FROM postgres:18.3-bookworm@sha256:a40f5f7a480e2555f57baeaaf36450446c6b36ee21bdd223afd382d499ac7375 AS build-env
 
-ARG VERSION=0.49.1
+ARG VERSION=0.50.0
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -105,9 +107,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     cp -r target/release/pg_trickle-pg18 /artefacts/
 
 # ── Stage 4: Runtime image ───────────────────────────────────────────────────
-FROM postgres:18.3-bookworm
+# OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
+# Run scripts/update_base_image_digests.sh to refresh quarterly.
+FROM postgres:18.3-bookworm@sha256:a40f5f7a480e2555f57baeaaf36450446c6b36ee21bdd223afd382d499ac7375
 
-ARG VERSION=0.49.1
+ARG VERSION=0.50.0
 ARG REPO_URL=https://github.com/trickle-labs/pg-trickle
 
 LABEL org.opencontainers.image.title="pg_trickle" \

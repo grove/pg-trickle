@@ -230,3 +230,31 @@ pg_trickle_health_summary:
     - cache_hit_rate:
         usage: GAUGE
         description: "Template cache hit rate (0.0–1.0)"
+
+# ── Reliability counters (OPS-10-02) ─────────────────────────────────────────
+# Requires pg_trickle 0.50.0+.
+# Alert rules (suggested thresholds):
+#   - pg_trickle_reliability_invalidation_ring_overflows_total > 0
+#     over 5 minutes → deployment has >1024 simultaneously-DDL'd STs
+#   - pg_trickle_reliability_dag_cycles_detected_total > 0
+#     at any point → circular dependency without allow_circular = on
+#   - pg_trickle_reliability_template_cache_stale_evictions_total spike
+#     → rapid schema churn, may predict GROUP_RESCAN fallback storms
+
+pg_trickle_reliability:
+  query: |
+    SELECT
+        invalidation_ring_overflows,
+        dag_cycles_detected,
+        template_cache_stale_evictions
+    FROM pgtrickle.reliability_counters()
+  metrics:
+    - invalidation_ring_overflows:
+        usage: COUNTER
+        description: "Total invalidation ring overflow events (each means >1024 STs invalidated simultaneously)"
+    - dag_cycles_detected:
+        usage: COUNTER
+        description: "Total DAG cycle detections (should always be 0 in steady state)"
+    - template_cache_stale_evictions:
+        usage: COUNTER
+        description: "Delta template cache entries evicted due to defining_query_hash mismatch (schema change indicator)"

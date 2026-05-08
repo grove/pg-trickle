@@ -75,7 +75,9 @@ RUN echo "=== Package artifacts ===" && \
     echo "========================="
 
 # ── Stage 2: Runtime image with extension installed ─────────────────────────
-FROM postgres:18.3
+# OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
+# Run scripts/update_base_image_digests.sh to refresh quarterly.
+FROM postgres:18.3-bookworm@sha256:a40f5f7a480e2555f57baeaaf36450446c6b36ee21bdd223afd382d499ac7375
 
 LABEL org.opencontainers.image.title="pg_trickle E2E test image"
 LABEL org.opencontainers.image.description="PostgreSQL 18.3 with pg_trickle extension for integration testing"

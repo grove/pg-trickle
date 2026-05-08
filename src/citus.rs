@@ -326,6 +326,24 @@ pub fn shard_placements(table_oid: pg_sys::Oid) -> Vec<NodeAddr> {
 
 // ── Pre-flight checks (COORD-7, COORD-8) ─────────────────────────────────────
 
+/// SEC-10-01: Defense-in-depth escaping helper for dblink SQL literals.
+///
+/// Uses PostgreSQL's own `pg_catalog.quote_literal()` rather than manual
+/// single-quote doubling. This handles the full PostgreSQL literal escape
+/// set (single quotes, backslashes in non-standard_conforming_strings mode).
+///
+/// Note: dblink() calls cannot use parameterised queries because the
+/// connection string and remote query are passed as string literals.
+/// All values here are sourced from `pg_dist_node` catalog and
+/// `current_database()`, never from user input.
+fn pg_quote_literal(s: &str) -> String {
+    Spi::get_one_with_args::<String>("SELECT pg_catalog.quote_literal($1)", &[s.into()])
+        .unwrap_or(None)
+        // Fallback: manual escaping (only reached if SPI is unavailable, which
+        // should not happen during normal scheduler operation).
+        .unwrap_or_else(|| format!("'{}'", s.replace('\'', "''")))
+}
+
 /// COORD-7: Check that all active Citus worker nodes are running the same
 /// pg_trickle version as the coordinator.
 ///
@@ -354,14 +372,14 @@ pub fn check_citus_version_compat() -> Result<(), PgTrickleError> {
 
     for w in &workers {
         let connstr = worker_conn_string(w, &dbname);
-        let connstr_esc = connstr.replace('\'', "''");
-
+        // SEC-10-01: Use pg_quote_literal() for defense-in-depth escaping.
+        let connstr_esc = pg_quote_literal(&connstr);
         let remote_query = "SELECT extversion FROM pg_extension WHERE extname = 'pg_trickle'";
-        let remote_query_esc = remote_query.replace('\'', "''");
+        let remote_query_esc = pg_quote_literal(remote_query);
 
         let sql =
-            format!("SELECT val FROM dblink('{connstr_esc}', '{remote_query_esc}') AS t(val text)");
-        let remote_version = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_query_esc are SQL-escaped server-controlled Citus catalog values
+            format!("SELECT val FROM dblink({connstr_esc}, {remote_query_esc}) AS t(val text)");
+        let remote_version = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values
             .unwrap_or(None)
             .unwrap_or_else(|| "not_installed".into());
 
@@ -402,14 +420,14 @@ pub fn check_worker_wal_levels() -> Result<(), PgTrickleError> {
 
     for w in &workers {
         let connstr = worker_conn_string(w, &dbname);
-        let connstr_esc = connstr.replace('\'', "''");
-
+        // SEC-10-01: Use pg_quote_literal() for defense-in-depth escaping.
+        let connstr_esc = pg_quote_literal(&connstr);
         let remote_query = "SELECT current_setting('wal_level')";
-        let remote_query_esc = remote_query.replace('\'', "''");
+        let remote_query_esc = pg_quote_literal(remote_query);
 
         let sql =
-            format!("SELECT val FROM dblink('{connstr_esc}', '{remote_query_esc}') AS t(val text)");
-        let wal_level = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_query_esc are SQL-escaped server-controlled Citus catalog values
+            format!("SELECT val FROM dblink({connstr_esc}, {remote_query_esc}) AS t(val text)");
+        let wal_level = Spi::get_one::<String>(&sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values
             .unwrap_or(None)
             .unwrap_or_else(|| "unknown".into());
 
@@ -545,17 +563,18 @@ pub fn extend_st_lock(lock_key: &str, holder: &str, lease_ms: i64) -> Result<boo
 ///
 /// Reads the current database name from `current_database()` and combines it
 /// with the node's hostname and port.  The resulting string is suitable for
-/// passing to `dblink(connstr, query)`.
+/// passing through `pg_quote_literal()` before embedding in a
+/// `dblink(connstr, query)` call.
 ///
 /// # Security
 /// Connection strings are constructed from catalog values (`pg_dist_node`)
 /// plus the current database name, never from user-supplied input.
+/// The caller is responsible for escaping this string via `pg_quote_literal()`
+/// before embedding it in SQL.
 pub fn worker_conn_string(worker: &NodeAddr, dbname: &str) -> String {
     format!(
         "host={} port={} dbname={} options='-c enable_seqscan=on'",
-        worker.node_name.replace('\'', "''"),
-        worker.node_port,
-        dbname.replace('\'', "''"),
+        worker.node_name, worker.node_port, dbname,
     )
 }
 
@@ -598,16 +617,17 @@ pub fn poll_worker_slot_changes(
         .unwrap_or_else(|| "postgres".into());
 
     let connstr = worker_conn_string(worker, &dbname);
-    let connstr_esc = connstr.replace('\'', "''");
-    let slot_esc = slot_name.replace('\'', "''");
+    // SEC-10-01: Use pg_quote_literal() for defense-in-depth escaping.
+    let connstr_esc = pg_quote_literal(&connstr);
+    let slot_esc = pg_quote_literal(slot_name);
 
     // Build the remote query that drains the slot.
     let remote_sql = format!(
         "SELECT lsn::text, xid::text, data \
-         FROM pg_logical_slot_get_changes('{}', NULL, {}, 'include-timestamp', 'on')",
+         FROM pg_logical_slot_get_changes({}, NULL, {}, 'include-timestamp', 'on')",
         slot_esc, max_changes,
     );
-    let remote_sql_esc = remote_sql.replace('\'', "''");
+    let remote_sql_esc = pg_quote_literal(&remote_sql);
 
     // Materialize dblink results into a temp table for batch processing.
     let temp_name = format!("__pgt_worker_changes_{}", source_oid.to_u32());
@@ -615,7 +635,7 @@ pub fn poll_worker_slot_changes(
     let create_sql = format!(
         "CREATE TEMP TABLE {temp_name} ON COMMIT DROP AS \
          SELECT lsn, xid, data \
-         FROM dblink('{connstr_esc}', '{remote_sql_esc}') \
+         FROM dblink({connstr_esc}, {remote_sql_esc}) \
          AS t(lsn text, xid text, data text)"
     );
     Spi::run(&create_sql).map_err(|e| {
@@ -649,18 +669,18 @@ pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTr
         .unwrap_or_else(|| "postgres".into());
 
     let connstr = worker_conn_string(worker, &dbname);
-    let connstr_esc = connstr.replace('\'', "''");
-    let slot_esc = slot_name.replace('\'', "''");
+    // SEC-10-01: Use pg_quote_literal() for defense-in-depth escaping.
+    let connstr_esc = pg_quote_literal(&connstr);
+    let slot_esc = pg_quote_literal(slot_name);
 
     // Check if slot exists on the remote worker.
     let remote_check =
-        format!("SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{slot_esc}'");
-    let remote_check_esc = remote_check.replace('\'', "''");
+        format!("SELECT count(*) FROM pg_replication_slots WHERE slot_name = {slot_esc}");
+    let remote_check_esc = pg_quote_literal(&remote_check);
 
-    let slot_check_sql = format!(
-        "SELECT val::bigint FROM dblink('{connstr_esc}', '{remote_check_esc}') AS t(val text)"
-    );
-    let exists_count = Spi::get_one::<i64>(&slot_check_sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; connstr_esc/remote_check_esc are SQL-escaped server-controlled Citus catalog values
+    let slot_check_sql =
+        format!("SELECT val::bigint FROM dblink({connstr_esc}, {remote_check_esc}) AS t(val text)");
+    let exists_count = Spi::get_one::<i64>(&slot_check_sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values
         .map_err(|e| {
             PgTrickleError::SpiError(format!(
                 "dblink check slot on {}:{}: {e}",
@@ -675,11 +695,12 @@ pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTr
 
     // Create the slot on the remote worker.
     let remote_create =
-        format!("SELECT pg_create_logical_replication_slot('{slot_esc}', 'test_decoding')");
-    let remote_create_esc = remote_create.replace('\'', "''");
+        format!("SELECT pg_create_logical_replication_slot({slot_esc}, 'test_decoding')");
+    let remote_create_esc = pg_quote_literal(&remote_create);
 
-    Spi::run(&format!( // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; connstr_esc/remote_create_esc use SQL single-quote escaping on internal Citus catalog values only
-        "SELECT * FROM dblink('{connstr_esc}', '{remote_create_esc}') AS t(slot_name text, lsn text)"
+    Spi::run(&format!(
+        // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values only
+        "SELECT * FROM dblink({connstr_esc}, {remote_create_esc}) AS t(slot_name text, lsn text)"
     ))
     .map_err(|e| {
         PgTrickleError::SpiError(format!(

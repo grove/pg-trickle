@@ -475,22 +475,49 @@ pub fn execute_differential_refresh(
         .collect();
 
     // ── Pre-flight: verify all change buffer tables exist ─────────────
+    // PERF-10-01: Single batch query instead of N separate to_regclass()
+    // calls — saves one SPI round-trip per source OID.
+    //
     // Query pg_class (safe — never errors for catalog tables) to confirm
     // that every source's change buffer table still exists.  If any are
     // missing (e.g. race with a concurrent DROP or stale deps), skip the
     // refresh instead of crashing with a relation-not-found ERROR.
     //
-    // Also uses to_regclass() as a secondary check that resolves the
-    // schema-qualified name the same way a FROM clause would.
-    for &oid in &catalog_source_oids {
-        let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(oid));
-        let qualified = format!("{change_schema}.{buf_name}");
-        let reg_exists =
-            Spi::get_one::<bool>(&format!("SELECT to_regclass('{qualified}') IS NOT NULL",))
-                .unwrap_or(Some(false))
-                .unwrap_or(false);
-
-        if !reg_exists {
+    // IMPORTANT: Change buffer tables are named `changes_{stable_name}` where
+    // stable_name is the xxh64 hash of "schema.table" stored in
+    // pgtrickle.pgt_change_tracking.  The LEFT JOIN resolves the stable name;
+    // the COALESCE falls back to `changes_{oid}` only for untracked sources
+    // (mirrors buffer_base_name_for_oid logic exactly).
+    if !catalog_source_oids.is_empty() {
+        let oids_sql = catalog_source_oids
+            .iter()
+            .map(|o| format!("{o}::oid"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // OIDs are numeric system-catalog values; change_schema is a GUC value, not user input.
+        let batch_sql = format!(
+            "SELECT o.oid::bigint, \
+             to_regclass('{change_schema}.' || \
+                 COALESCE('changes_' || ct.source_stable_name, 'changes_' || o.oid::text) \
+             ) IS NOT NULL AS reg_exists \
+             FROM unnest(ARRAY[{oids_sql}]) AS o(oid) \
+             LEFT JOIN pgtrickle.pgt_change_tracking ct ON ct.source_relid = o.oid"
+        ); // nosemgrep: rust.spi.query.dynamic-format — oids_sql contains only numeric OIDs; change_schema is a GUC value
+        let missing_oid: Option<u32> = Spi::connect(|client| {
+            let result = client
+                .select(&batch_sql, None, &[])
+                .map_err(|e| PgTrickleError::SpiError(format!("batch preflight: {e}")))?;
+            for row in result {
+                let oid = row.get::<i64>(1).unwrap_or(None).unwrap_or(0) as u32;
+                let exists = row.get::<bool>(2).unwrap_or(None).unwrap_or(false);
+                if !exists {
+                    return Ok::<Option<u32>, PgTrickleError>(Some(oid));
+                }
+            }
+            Ok(None)
+        })?;
+        if let Some(missing) = missing_oid {
+            let buf_name = crate::cdc::buffer_base_name_for_oid(pg_sys::Oid::from(missing));
             pgrx::warning!(
                 "[pg_trickle] PREFLIGHT FAIL: change buffer table \
                  \"{change_schema}\".{buf_name} not found via to_regclass \
