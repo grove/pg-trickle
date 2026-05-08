@@ -540,8 +540,15 @@ async fn settle_auto_invariants(
             return;
         }
         // Wait for another scheduler cycle (l1 is the leaf and must process
-        // CDC before l2/l3 can be correct).
-        wait_for_refresh_cycle(db, "prop_auto_l1", Duration::from_secs(15)).await;
+        // CDC before l2/l3 can be correct).  Cap the inner wait at the
+        // remaining time so the outer deadline is always respected (important
+        // for slow coverage / instrumented builds where 15 s may expire).
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining < Duration::from_millis(500) {
+            assert_st_query_invariants(db, &AUTO_INVARIANTS, seed, cycle, step).await;
+            return;
+        }
+        wait_for_refresh_cycle(db, "prop_auto_l1", remaining.min(Duration::from_secs(30))).await;
     }
 }
 
