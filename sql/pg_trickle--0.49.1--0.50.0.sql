@@ -15,5 +15,15 @@
 --   SCAL-10-01: Invalidation ring capacity documentation (docs/CONFIGURATION.md)
 --   COR-10-01:  Deep join chain threshold documentation (docs/CONFIGURATION.md)
 --
--- No DDL migrations required. The new pgtrickle.reliability_counters() function is
--- registered automatically by pgrx when the extension is loaded.
+-- OPS-10-02: New monitoring function — must be explicitly created on upgrade.
+-- (pgrx does not auto-register new functions via ALTER EXTENSION UPDATE.)
+
+-- pg_trickle::monitor::reliability_counters
+CREATE OR REPLACE FUNCTION pgtrickle."reliability_counters"() RETURNS TABLE (
+        "invalidation_ring_overflows" bigint,
+        "dag_cycles_detected" bigint,
+        "template_cache_stale_evictions" bigint
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'reliability_counters_wrapper';
