@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.49.1 — Repository Migration to trickle-labs/pg-trickle](#0491--repository-migration-to-trickle-labspg-trickle)
 - [0.49.0 — Test Infrastructure Hardening & Scheduler Decomposition](#0490--test-infrastructure-hardening--scheduler-decomposition)
 - [0.48.0 — Complete Embedding Programme: Hybrid Search, Sparse Vectors & Ergonomic API](#0480--complete-embedding-programme-hybrid-search-sparse-vectors--ergonomic-api)
 - [0.47.0 — Embedding Pipeline Infrastructure & ANN Maintenance](#0470--embedding-pipeline-infrastructure--ann-maintenance)
@@ -63,6 +64,26 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.49.1] — Repository Migration to trickle-labs/pg-trickle
+
+### What's New
+
+#### Repository Migration
+- pg_trickle has moved to its permanent home at **[trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle)**.
+- All CI/CD pipelines, Docker image publishing, and release artifacts now originate from the new repository.
+- GitHub Container Registry images are published under `ghcr.io/trickle-labs/pg-trickle`.
+- Docker Hub images are published under `tricklehq/pg_trickle`.
+- The PGXN distribution, dbt Hub package, and CloudNativePG plugin listings are updated to reflect the new repository URL.
+- No code changes — this is a pure packaging and infrastructure release.
+
+### SQL Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.49.1';
+```
 
 ---
 
