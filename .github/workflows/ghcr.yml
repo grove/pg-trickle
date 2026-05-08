@@ -2,7 +2,7 @@
 # GHCR Image Workflow — Build, smoke-test, and publish the pg_trickle image
 # to GitHub Container Registry.
 #
-# Published image: ghcr.io/grove/pg_trickle
+# Published image: ghcr.io/trickle-labs/pg_trickle
 # Tags produced:
 #   <version>-pg18.3          — immutable, e.g. 0.13.0-pg18.3
 #   latest                    — moves to the most recent release
@@ -262,9 +262,9 @@ jobs:
           labels: |
             org.opencontainers.image.title=pg_trickle
             org.opencontainers.image.description=PostgreSQL ${{ env.PG_MINOR }} with pg_trickle streaming tables and incremental view maintenance
-            org.opencontainers.image.vendor=grove
+            org.opencontainers.image.vendor=trickle-labs
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.documentation=https://github.com/grove/pg-trickle/blob/main/docs/GETTING_STARTED.md
+            org.opencontainers.image.documentation=https://github.com/trickle-labs/pg-trickle/blob/main/docs/GETTING_STARTED.md
 
       - name: Download all digests
         uses: actions/download-artifact@v8

@@ -2,7 +2,7 @@
 
 A plain-language reference for the terms used throughout the pg_trickle
 documentation. If a term isn't here, check the
-[FAQ](FAQ.md) — and please [open an issue](https://github.com/grove/pg-trickle/issues)
+[FAQ](FAQ.md) — and please [open an issue](https://github.com/trickle-labs/pg-trickle/issues)
 so we can add it.
 
 > **How to use this page.** Most pg_trickle pages link the *first* use of a

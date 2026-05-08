@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # Incremental Aggregates in PostgreSQL: No ETL Required
 
@@ -269,4 +269,4 @@ The ETL pipeline that takes 40 minutes of engineering per incident and lives in 
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

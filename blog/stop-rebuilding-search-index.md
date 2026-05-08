@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # Stop Rebuilding Your Search Index at 3am
 
@@ -251,4 +251,4 @@ That's the real value proposition of continuous incremental maintenance. Not jus
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

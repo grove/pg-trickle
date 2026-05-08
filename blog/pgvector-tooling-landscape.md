@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # The pgvector Tooling Landscape in 2026
 
@@ -362,4 +362,4 @@ The two aren't alternatives. They're layers. And understanding which layer your 
 ---
 
 *pg_trickle is an open-source PostgreSQL extension for incremental view maintenance.
-Source, documentation, and the pgvector integration roadmap are at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+Source, documentation, and the pgvector integration roadmap are at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

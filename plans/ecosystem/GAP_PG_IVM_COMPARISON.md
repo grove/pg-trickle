@@ -55,7 +55,7 @@ PG version breadth and production maturity**.
 
 | Attribute | pg_ivm | pg_trickle |
 |---|---|---|
-| Repository | [sraoss/pg_ivm](https://github.com/sraoss/pg_ivm) | [grove/pg-trickle](https://github.com/grove/pg-trickle) |
+| Repository | [sraoss/pg_ivm](https://github.com/sraoss/pg_ivm) | [trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle) |
 | Language | C | Rust (pgrx 0.17) |
 | Latest release | 1.13 (2025-10-20) | 0.9.0 (2026-03-20) |
 | Stars | ~1,400 | early stage |
@@ -916,7 +916,7 @@ the same zero-staleness guarantee. A full compatibility layer (`pgivm.create_imm
 ## References
 
 - pg_ivm repository: https://github.com/sraoss/pg_ivm
-- pg_trickle repository: https://github.com/grove/pg-trickle
+- pg_trickle repository: https://github.com/trickle-labs/pg-trickle
 - DBSP differential dataflow paper: https://arxiv.org/abs/2203.16684
 - pg_trickle ESSENCE.md: [../../ESSENCE.md](../../ESSENCE.md)
 - pg_trickle DVM operators: [../../docs/DVM_OPERATORS.md](../../docs/DVM_OPERATORS.md)

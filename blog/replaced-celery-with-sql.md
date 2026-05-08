@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # How We Replaced a Celery Pipeline with 3 SQL Statements
 
@@ -293,4 +293,4 @@ The three SQL statements that created this setup were the end of a 3-year journe
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

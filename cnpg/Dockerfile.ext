@@ -16,7 +16,7 @@
 # =============================================================================
 FROM scratch
 
-ARG REPO_URL=https://github.com/grove/pg-trickle
+ARG REPO_URL=https://github.com/trickle-labs/pg-trickle
 ARG VERSION=dev
 
 # Extension shared library (.so)

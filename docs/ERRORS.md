@@ -2,7 +2,7 @@
 
 This document lists all `PgTrickleError` variants with descriptions, common
 causes, and suggested fixes. If you encounter an error not listed here, please
-[open an issue](https://github.com/grove/pg-trickle/issues).
+[open an issue](https://github.com/trickle-labs/pg-trickle/issues).
 
 > **Tip:** Most errors include context (table name, OID, or query fragment) in
 > the message text. Use that context to narrow down the root cause.
@@ -416,7 +416,7 @@ pg_trickle.
 **Common causes:**
 - This should not happen in normal operation
 
-**Suggested fix:** Please [report the issue](https://github.com/grove/pg-trickle/issues)
+**Suggested fix:** Please [report the issue](https://github.com/trickle-labs/pg-trickle/issues)
 with the full error message, your PostgreSQL version, and pg_trickle version.
 Include the output of `pgtrickle.check_health()` and the relevant PostgreSQL
 log entries.

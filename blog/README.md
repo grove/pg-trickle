@@ -8,7 +8,7 @@
 > for informative purposes — to learn about interesting topics in the context of
 > pg_trickle. It is a showcase for use-cases rather than a definitive
 > reference; for authoritative documentation see the
-> [pg_trickle documentation](https://grove.github.io/pg-trickle/).
+> [pg_trickle documentation](https://trickle-labs.github.io/pg-trickle/).
 
 ---
 

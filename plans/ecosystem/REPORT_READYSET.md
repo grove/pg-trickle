@@ -34,7 +34,7 @@ most powerful combination.
 
 | Attribute | pg_trickle | ReadySet |
 |---|---|---|
-| Repository | [grove/pg-trickle](https://github.com/grove/pg-trickle) | [readysettech/readyset](https://github.com/readysettech/readyset) |
+| Repository | [trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle) | [readysettech/readyset](https://github.com/readysettech/readyset) |
 | Heritage | DBSP (Budiu et al., 2023) | Noria (Gjengset et al., OSDI 2018) |
 | Language | Rust (pgrx 0.17) | Rust |
 | Latest release | 0.1.2 (2026-02-28) | See note in §14 |

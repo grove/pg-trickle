@@ -9,7 +9,7 @@ in real time, and dropped it again — without leaving `psql`.
 > for a pre-loaded environment, or pull the prebuilt image:
 > ```bash
 > docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 \
->   ghcr.io/grove/pg_trickle:latest
+>   ghcr.io/trickle-labs/pg_trickle:latest
 > ```
 > Then connect with `psql postgres://postgres:secret@localhost:5432/postgres`
 > and skip to **Step 2** below.
@@ -27,7 +27,7 @@ Docker image — one command, no configuration:
 
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 \
-  ghcr.io/grove/pg_trickle:latest
+  ghcr.io/trickle-labs/pg_trickle:latest
 ```
 
 Connect with `psql`:

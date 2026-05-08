@@ -113,7 +113,7 @@ When the primary fails and a replica is promoted:
 
 ## CNPG (Kubernetes) specifics
 
-- Use the OCI extension image: `ghcr.io/grove/pg_trickle-ext:<version>`.
+- Use the OCI extension image: `ghcr.io/trickle-labs/pg_trickle-ext:<version>`.
 - CNPG's standby cluster topology is supported — pg_trickle behaves
   exactly as on bare-metal streaming replication.
 - `Cluster.spec.postgresql.shared_preload_libraries` must include
@@ -122,7 +122,7 @@ When the primary fails and a replica is promoted:
 
 Full example: see
 [integrations/cloudnativepg.md](integrations/cloudnativepg.md) and
-the [`cnpg/`](https://github.com/grove/pg-trickle/tree/main/cnpg)
+the [`cnpg/`](https://github.com/trickle-labs/pg-trickle/tree/main/cnpg)
 directory in the repository.
 
 ---

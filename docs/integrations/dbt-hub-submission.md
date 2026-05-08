@@ -14,7 +14,7 @@ a `dbt_project.yml` at the repository root.
 ## Current Status
 
 `dbt-pgtrickle` lives in the `dbt-pgtrickle/` subdirectory of the
-[grove/pg-trickle](https://github.com/grove/pg-trickle) monorepo. Because
+[trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle) monorepo. Because
 hubcap expects `dbt_project.yml` at the repository root, a monorepo layout
 requires one of the approaches below.
 
@@ -48,7 +48,7 @@ functional but requires users to specify a git URL and revision:
 
 ```yaml
 packages:
-  - git: "https://github.com/grove/pg-trickle.git"
+  - git: "https://github.com/trickle-labs/pg-trickle.git"
     revision: v0.15.0
     subdirectory: "dbt-pgtrickle"
 ```

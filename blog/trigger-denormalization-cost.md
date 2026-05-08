@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # The Hidden Cost of Trigger-Based Denormalization
 
@@ -216,4 +216,4 @@ The trigger function graveyard you've been maintaining? Replace it with a SQL qu
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

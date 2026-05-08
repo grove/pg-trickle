@@ -57,7 +57,7 @@ jobs:
           context: .
           file: tests/Dockerfile.builder
           push: true
-          tags: ghcr.io/grove/pg-trickle/builder:pg18
+          tags: ghcr.io/trickle-labs/pg-trickle/builder:pg18
           # Registry-backed layer cache so repeated runs only rebuild changed layers.
-          cache-from: type=registry,ref=ghcr.io/grove/pg-trickle/builder:cache
-          cache-to: type=registry,ref=ghcr.io/grove/pg-trickle/builder:cache,mode=max
+          cache-from: type=registry,ref=ghcr.io/trickle-labs/pg-trickle/builder:cache
+          cache-to: type=registry,ref=ghcr.io/trickle-labs/pg-trickle/builder:cache,mode=max

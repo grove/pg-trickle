@@ -161,7 +161,7 @@ producer.
 ### Option A — Move the binary, keep catalog in core
 
 **What changes:** Move `pgtrickle-relay/` into a new repo
-`grove/pg-trickle-relay`. Leave `relay_outbox_config`, `relay_inbox_config`,
+`trickle-labs/pg-trickle-relay`. Leave `relay_outbox_config`, `relay_inbox_config`,
 and the seven `set_relay_*` / `enable_relay` / etc. SQL functions inside the
 core extension exactly where they are.
 
@@ -179,7 +179,7 @@ core extension exactly where they are.
 
 ### Option B — Move the binary AND extract a small `pgtrickle_relay` extension *(recommended)*
 
-**What changes:** New repo `grove/pg-trickle-relay` containing:
+**What changes:** New repo `trickle-labs/pg-trickle-relay` containing:
 
 1. The Rust CLI binary (today's `pgtrickle-relay`).
 2. A new tiny pgrx extension `pgtrickle_relay` (single SQL file, no Rust to
@@ -241,7 +241,7 @@ option B prevents doing C later.
 
 ## 3. ~~Detailed plan for option B~~ (superseded — see §7 for the active plan)
 
-### 3.1 New repository layout (`grove/pg-trickle-relay`)
+### 3.1 New repository layout (`trickle-labs/pg-trickle-relay`)
 
 ```
 pg-trickle-relay/

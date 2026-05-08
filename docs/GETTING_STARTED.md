@@ -61,7 +61,7 @@ This tutorial walks through a concrete org-chart example so you can see this flo
 
 > **Quick start with Docker:** Pull the pre-built GHCR image — PostgreSQL 18.3 + pg_trickle ready to run, no configuration needed:
 > ```bash
-> docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 ghcr.io/grove/pg_trickle:latest
+> docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 ghcr.io/trickle-labs/pg_trickle:latest
 > ```
 > All GUC defaults (`wal_level`, `shared_preload_libraries`, scheduler settings) are pre-configured. See [Installation](installation.md#4-ghcr-docker-image-recommended-for-local-dev) for tag details and volume mounting.
 
@@ -232,7 +232,7 @@ By the end you will have:
 > ```bash
 > ./examples/dbt_getting_started/scripts/run_example.sh
 > ```
-> See [examples/dbt_getting_started/](https://github.com/grove/pg-trickle/tree/main/examples/dbt_getting_started/) for full details.
+> See [examples/dbt_getting_started/](https://github.com/trickle-labs/pg-trickle/tree/main/examples/dbt_getting_started/) for full details.
 
 ---
 
@@ -1134,7 +1134,7 @@ cd monitoring && docker compose up
 
 This starts PostgreSQL + postgres_exporter + Prometheus + Grafana with
 pre-configured dashboards and alerting rules. Grafana is available at
-`http://localhost:3000` (admin/admin). See the [monitoring README](https://github.com/grove/pg-trickle/blob/main/monitoring/README.md)
+`http://localhost:3000` (admin/admin). See the [monitoring README](https://github.com/trickle-labs/pg-trickle/blob/main/monitoring/README.md)
 for the full list of exported metrics and alert conditions.
 
 **Key Prometheus metrics:**
@@ -1289,7 +1289,7 @@ kubectl apply -f cnpg/cluster-example.yaml
 kubectl apply -f cnpg/database-example.yaml
 ```
 
-Full example manifests are in the [`cnpg/`](https://github.com/grove/pg-trickle/tree/main/cnpg) directory.
+Full example manifests are in the [`cnpg/`](https://github.com/trickle-labs/pg-trickle/tree/main/cnpg) directory.
 
 #### Health Monitoring
 
@@ -1385,7 +1385,7 @@ recreate.
 
 ### dbt Integration
 
-With the [dbt-pgtrickle](https://github.com/grove/pg-trickle/tree/main/dbt-pgtrickle)
+With the [dbt-pgtrickle](https://github.com/trickle-labs/pg-trickle/tree/main/dbt-pgtrickle)
 package, stream tables are just dbt models with `materialized='stream_table'`:
 
 ```sql
@@ -1494,4 +1494,4 @@ The control plane continues operating identically without self-monitoring.
 - **[What Happens on UPDATE](tutorials/WHAT_HAPPENS_ON_UPDATE.md)** — How UPDATEs are split into D+I, group key changes, and net-effect computation
 - **[What Happens on DELETE](tutorials/WHAT_HAPPENS_ON_DELETE.md)** — Reference counting, group deletion, and INSERT+DELETE cancellation
 - **[What Happens on TRUNCATE](tutorials/WHAT_HAPPENS_ON_TRUNCATE.md)** — Why TRUNCATE bypasses triggers and how to recover
-- **[dbt Getting Started example](https://github.com/grove/pg-trickle/tree/main/examples/dbt_getting_started/)** — Everything above, expressed as dbt models and seeds with a one-command Docker runner
+- **[dbt Getting Started example](https://github.com/trickle-labs/pg-trickle/tree/main/examples/dbt_getting_started/)** — Everything above, expressed as dbt models and seeds with a one-command Docker runner

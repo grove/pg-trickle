@@ -2287,8 +2287,8 @@ However, stream tables replicated from the primary are **readable** on the stand
 
 pg_trickle is compatible with CloudNativePG. The `cnpg/` directory in the repository contains example manifests:
 
-- [Dockerfile.ext](https://github.com/grove/pg-trickle/blob/main/cnpg/Dockerfile.ext) — builds a PostgreSQL image with pg_trickle pre-installed
-- [cluster-example.yaml](https://github.com/grove/pg-trickle/blob/main/cnpg/cluster-example.yaml) — CloudNativePG Cluster manifest with `shared_preload_libraries = 'pg_trickle'`
+- [Dockerfile.ext](https://github.com/trickle-labs/pg-trickle/blob/main/cnpg/Dockerfile.ext) — builds a PostgreSQL image with pg_trickle pre-installed
+- [cluster-example.yaml](https://github.com/trickle-labs/pg-trickle/blob/main/cnpg/cluster-example.yaml) — CloudNativePG Cluster manifest with `shared_preload_libraries = 'pg_trickle'`
 
 Key considerations:
 - Include `pg_trickle` in `shared_preload_libraries` in the Cluster's `postgresql` configuration.

@@ -26,7 +26,7 @@ IMAGE_TAG="latest"
 # In CI the "Pull builder image from GHCR" step pulls the pre-built image and
 # tags it as pg_trickle_builder:pg18 so this default is found immediately.
 # To point directly at GHCR without a retag step:
-#   BUILDER_IMAGE=ghcr.io/grove/pg-trickle/builder:pg18 ./tests/build_e2e_image.sh
+#   BUILDER_IMAGE=ghcr.io/trickle-labs/pg-trickle/builder:pg18 ./tests/build_e2e_image.sh
 BUILDER_IMAGE="${BUILDER_IMAGE:-pg_trickle_builder:pg18}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

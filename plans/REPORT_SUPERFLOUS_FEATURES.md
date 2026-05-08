@@ -261,7 +261,7 @@ SQL.
   tests) that have nothing to do with the core Postgres extension.
 - Users who do not use dbt still pay the cost: longer builds, more CI time,
   a larger download.
-- A separate repository (`grove/pg-trickle-dbt`) would let it evolve on its
+- A separate repository (`trickle-labs/pg-trickle-dbt`) would let it evolve on its
   own schedule without blocking core releases.
 
 ### 7.2 The message relay binary (`pgtrickle-relay/`)
@@ -283,7 +283,7 @@ downstream services need to react when data changes.
   larger.
 - It already has a separate Dockerfile and several CI pipelines dedicated to
   building and testing it alone.
-- A separate repository (`grove/pg-trickle-relay`) would make both projects
+- A separate repository (`trickle-labs/pg-trickle-relay`) would make both projects
   simpler to build and release.
 
 **Impact of moving both:** The core repo loses ~800+ files, the build becomes
@@ -317,7 +317,7 @@ tools.
 - It is ~20 files of configuration that rarely gets tested.
 
 **Recommendation:** Move to a companion repository (e.g.
-`grove/pg-trickle-observability`) or reduce to a single example dashboard JSON
+`trickle-labs/pg-trickle-observability`) or reduce to a single example dashboard JSON
 file in the documentation.
 
 ---

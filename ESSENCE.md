@@ -177,7 +177,7 @@ cd playground && docker compose up -d
 
 # Option 2 — minimal Docker image
 docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 \
-  ghcr.io/grove/pg_trickle:latest
+  ghcr.io/trickle-labs/pg_trickle:latest
 ```
 
 Then read **[the 5-Minute Quickstart](docs/QUICKSTART_5MIN.md)**.
@@ -193,7 +193,7 @@ Then read **[the 5-Minute Quickstart](docs/QUICKSTART_5MIN.md)**.
 | **DBA / SRE** | [Pre-Deployment Checklist](docs/PRE_DEPLOYMENT.md) → [Configuration](docs/CONFIGURATION.md) → [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | **Data / analytics engineer** | [Use Cases](docs/USE_CASES.md) → [dbt integration](docs/integrations/dbt.md) → [Migrating from materialized views](docs/tutorials/MIGRATING_FROM_MATERIALIZED_VIEWS.md) |
 
-Source: <https://github.com/grove/pg-trickle>
+Source: <https://github.com/trickle-labs/pg-trickle>
 
 > **Note on terminology.** A few terms are used throughout the
 > docs without further definition: *stream table*, *differential*,

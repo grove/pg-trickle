@@ -1,6 +1,6 @@
 # pgtrickle-relay
 
-Standalone Rust CLI binary that bridges [pg_trickle](https://github.com/grove/pg-trickle) outbox and inbox tables with external messaging systems.
+Standalone Rust CLI binary that bridges [pg_trickle](https://github.com/trickle-labs/pg-trickle) outbox and inbox tables with external messaging systems.
 
 ## Overview
 
@@ -35,7 +35,7 @@ cargo install --path pgtrickle-relay --features default
 ### From Docker
 
 ```bash
-docker pull ghcr.io/grove/pgtrickle-relay:0.29.0
+docker pull ghcr.io/trickle-labs/pgtrickle-relay:0.29.0
 ```
 
 ## Configuration

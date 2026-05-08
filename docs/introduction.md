@@ -47,7 +47,7 @@ releases, or the [Changelog](changelog.md) for the full history.
 - Written in Rust using [pgrx](https://github.com/pgcentralfoundation/pgrx).
 - Targets PostgreSQL 18.
 - Apache 2.0 licensed.
-- Repository: <https://github.com/grove/pg-trickle>
+- Repository: <https://github.com/trickle-labs/pg-trickle>
 - [Project history](PROJECT_HISTORY.md) ·
   [Roadmap](roadmap.md) ·
   [Contributing](contributing.md) ·

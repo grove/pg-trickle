@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # Incremental Vector Aggregates: Building Recommendation Engines in Pure SQL
 
@@ -460,4 +460,4 @@ Your recommendation engine doesn't need Kafka, Flink, Redis, or a feature store.
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle). Vector aggregate support is detailed in the [v0.37.0 roadmap](https://github.com/grove/pg-trickle/blob/main/roadmap/v0.37.0.md).*
+*pg_trickle is an open-source PostgreSQL extension. Source code, documentation, and installation instructions are at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle). Vector aggregate support is detailed in the [v0.37.0 roadmap](https://github.com/trickle-labs/pg-trickle/blob/main/roadmap/v0.37.0.md).*

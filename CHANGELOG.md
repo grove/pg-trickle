@@ -3248,7 +3248,7 @@ view or the TUI dashboard, and fix it by altering the stream table's query.
   The old setting names still work but are ignored in favor of the new one.
 
 - **GHCR Docker image** — a multi-architecture Docker image
-  (`ghcr.io/grove/pg_trickle`) with PostgreSQL 18.3 and pg_trickle
+  (`ghcr.io/trickle-labs/pg_trickle`) with PostgreSQL 18.3 and pg_trickle
   pre-installed is now published automatically on each release.
 
 - **Pre-deployment checklist** — new [PRE_DEPLOYMENT.md](docs/PRE_DEPLOYMENT.md)

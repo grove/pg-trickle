@@ -1,15 +1,15 @@
 # pg_trickle
 
-[![Build](https://github.com/grove/pg-trickle/actions/workflows/build.yml/badge.svg)](https://github.com/grove/pg-trickle/actions/workflows/build.yml)
-[![CI](https://github.com/grove/pg-trickle/actions/workflows/ci.yml/badge.svg)](https://github.com/grove/pg-trickle/actions/workflows/ci.yml)
-[![Release](https://github.com/grove/pg-trickle/actions/workflows/release.yml/badge.svg)](https://github.com/grove/pg-trickle/actions/workflows/release.yml)
-[![Coverage](https://codecov.io/gh/grove/pg-trickle/branch/main/graph/badge.svg)](https://codecov.io/gh/grove/pg-trickle)
+[![Build](https://github.com/trickle-labs/pg-trickle/actions/workflows/build.yml/badge.svg)](https://github.com/trickle-labs/pg-trickle/actions/workflows/build.yml)
+[![CI](https://github.com/trickle-labs/pg-trickle/actions/workflows/ci.yml/badge.svg)](https://github.com/trickle-labs/pg-trickle/actions/workflows/ci.yml)
+[![Release](https://github.com/trickle-labs/pg-trickle/actions/workflows/release.yml/badge.svg)](https://github.com/trickle-labs/pg-trickle/actions/workflows/release.yml)
+[![Coverage](https://codecov.io/gh/trickle-labs/pg-trickle/branch/main/graph/badge.svg)](https://codecov.io/gh/trickle-labs/pg-trickle)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-view-blue)](docs/BENCHMARK.md)
 [![Roadmap](https://img.shields.io/badge/Roadmap-view-informational)](ROADMAP.md)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![PostgreSQL 18](https://img.shields.io/badge/PostgreSQL-18-blue?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx 0.18](https://img.shields.io/badge/pgrx-0.18-orange)](https://github.com/pgcentralfoundation/pgrx)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/grove/pg-trickle)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/trickle-labs/pg-trickle)
 
 > **Pre-1.0 Notice:** pg_trickle is under active development and has not yet reached a stable 1.0 release. The core feature set is extensive and thoroughly tested, but APIs and configuration options may still change between minor versions. See [ROADMAP.md](ROADMAP.md) for the planned path to 1.0.
 
@@ -360,7 +360,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/grove/pg_trickle-ext:0.42.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.42.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -374,7 +374,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/grove/pg_trickle-ext:0.42.0
+          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.42.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -482,7 +482,7 @@ The `dbt-pgtrickle` package provides a custom `stream_table` materialization for
 ```yaml
 # packages.yml
 packages:
-  - git: "https://github.com/grove/pg-trickle.git"
+  - git: "https://github.com/trickle-labs/pg-trickle.git"
     revision: v0.42.0
     subdirectory: "dbt-pgtrickle"
 ```

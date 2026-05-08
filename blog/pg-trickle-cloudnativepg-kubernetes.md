@@ -1,4 +1,4 @@
-[← Back to Blog Index](https://grove.github.io/pg-trickle/blog/) | [Documentation](https://grove.github.io/pg-trickle/)
+[← Back to Blog Index](https://trickle-labs.github.io/pg-trickle/blog/) | [Documentation](https://trickle-labs.github.io/pg-trickle/)
 
 # pg_trickle on CloudNativePG
 
@@ -52,7 +52,7 @@ RUN cargo install cargo-pgrx --version 0.18.0 && \
 # Build and install pg_trickle
 ARG PGTRICKLE_VERSION=0.36.0
 RUN git clone --depth 1 --branch v${PGTRICKLE_VERSION} \
-    https://github.com/grove/pg-trickle.git /tmp/pg-trickle && \
+    https://github.com/trickle-labs/pg-trickle.git /tmp/pg-trickle && \
     cd /tmp/pg-trickle && \
     cargo pgrx install --release --pg-config /usr/lib/postgresql/18/bin/pg_config && \
     rm -rf /tmp/pg-trickle
@@ -369,4 +369,4 @@ Before going live with pg_trickle on CNPG:
 
 ---
 
-*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/grove/pg-trickle](https://github.com/grove/pg-trickle).*
+*pg_trickle is an open-source PostgreSQL extension for incremental view maintenance. Source and documentation at [github.com/trickle-labs/pg-trickle](https://github.com/trickle-labs/pg-trickle).*

@@ -6,8 +6,8 @@ language    = "en"
 
 [output.html]
 default-theme       = "navy"
-git-repository-url  = "https://github.com/grove/pg-trickle"
-edit-url-template   = "https://github.com/grove/pg-trickle/edit/main/{path}"
+git-repository-url  = "https://github.com/trickle-labs/pg-trickle"
+edit-url-template   = "https://github.com/trickle-labs/pg-trickle/edit/main/{path}"
 site-url            = "/pg-trickle/"
 
 [output.html.search]

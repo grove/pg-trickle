@@ -7,7 +7,7 @@ installation, no configuration. One command and you're running.
 ## Quick Start
 
 ```bash
-git clone https://github.com/grove/pg-trickle.git
+git clone https://github.com/trickle-labs/pg-trickle.git
 cd pg-trickle/playground
 docker compose up -d
 ```

@@ -394,7 +394,7 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             )
             .set_hint(
                 "This is a bug in pg_trickle. Please report it at \
-                 https://github.com/grove/pg-trickle/issues with the full error \
+                 https://github.com/trickle-labs/pg-trickle/issues with the full error \
                  message and PostgreSQL log output."
                     .to_string(),
             )
@@ -554,7 +554,7 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             )
             .set_hint(
                 "This is a bug in pg_trickle. Please report it at \
-                 https://github.com/grove/pg-trickle/issues with the full error message."
+                 https://github.com/trickle-labs/pg-trickle/issues with the full error message."
                     .to_string(),
             )
             .report(PgLogLevel::ERROR);
