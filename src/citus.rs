@@ -337,14 +337,11 @@ pub fn shard_placements(table_oid: pg_sys::Oid) -> Vec<NodeAddr> {
 /// All values here are sourced from `pg_dist_node` catalog and
 /// `current_database()`, never from user input.
 fn pg_quote_literal(s: &str) -> String {
-    Spi::get_one_with_args::<String>(
-        "SELECT pg_catalog.quote_literal($1)",
-        &[s.into()],
-    )
-    .unwrap_or(None)
-    // Fallback: manual escaping (only reached if SPI is unavailable, which
-    // should not happen during normal scheduler operation).
-    .unwrap_or_else(|| format!("'{}'", s.replace('\'', "''")))
+    Spi::get_one_with_args::<String>("SELECT pg_catalog.quote_literal($1)", &[s.into()])
+        .unwrap_or(None)
+        // Fallback: manual escaping (only reached if SPI is unavailable, which
+        // should not happen during normal scheduler operation).
+        .unwrap_or_else(|| format!("'{}'", s.replace('\'', "''")))
 }
 
 /// COORD-7: Check that all active Citus worker nodes are running the same
@@ -577,9 +574,7 @@ pub fn extend_st_lock(lock_key: &str, holder: &str, lease_ms: i64) -> Result<boo
 pub fn worker_conn_string(worker: &NodeAddr, dbname: &str) -> String {
     format!(
         "host={} port={} dbname={} options='-c enable_seqscan=on'",
-        worker.node_name,
-        worker.node_port,
-        dbname,
+        worker.node_name, worker.node_port, dbname,
     )
 }
 
@@ -683,9 +678,8 @@ pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTr
         format!("SELECT count(*) FROM pg_replication_slots WHERE slot_name = {slot_esc}");
     let remote_check_esc = pg_quote_literal(&remote_check);
 
-    let slot_check_sql = format!(
-        "SELECT val::bigint FROM dblink({connstr_esc}, {remote_check_esc}) AS t(val text)"
-    );
+    let slot_check_sql =
+        format!("SELECT val::bigint FROM dblink({connstr_esc}, {remote_check_esc}) AS t(val text)");
     let exists_count = Spi::get_one::<i64>(&slot_check_sql) // nosemgrep: rust.spi.query.dynamic-format — dblink() call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values
         .map_err(|e| {
             PgTrickleError::SpiError(format!(
@@ -704,7 +698,8 @@ pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTr
         format!("SELECT pg_create_logical_replication_slot({slot_esc}, 'test_decoding')");
     let remote_create_esc = pg_quote_literal(&remote_create);
 
-    Spi::run(&format!( // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values only
+    Spi::run(&format!(
+        // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values only
         "SELECT * FROM dblink({connstr_esc}, {remote_create_esc}) AS t(slot_name text, lsn text)"
     ))
     .map_err(|e| {
