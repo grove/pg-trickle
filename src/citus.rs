@@ -698,11 +698,13 @@ pub fn ensure_worker_slot(worker: &NodeAddr, slot_name: &str) -> Result<(), PgTr
         format!("SELECT pg_create_logical_replication_slot({slot_esc}, 'test_decoding')");
     let remote_create_esc = pg_quote_literal(&remote_create);
 
-    Spi::run(&format!(
-        // nosemgrep: rust.spi.run.dynamic-format — dblink call cannot be parameterized; inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus catalog values only
+    // nosemgrep: rust.spi.run.dynamic-format — dblink cannot be parameterized;
+    // inputs are SQL-escaped via pg_quote_literal() from server-controlled Citus
+    // catalog values only (connstr_esc, slot_esc, remote_create_esc).
+    let create_slot_sql = format!(
         "SELECT * FROM dblink({connstr_esc}, {remote_create_esc}) AS t(slot_name text, lsn text)"
-    ))
-    .map_err(|e| {
+    );
+    Spi::run(&create_slot_sql).map_err(|e| {
         PgTrickleError::SpiError(format!(
             "dblink create slot '{}' on {}:{}: {e}",
             slot_name, worker.node_name, worker.node_port
