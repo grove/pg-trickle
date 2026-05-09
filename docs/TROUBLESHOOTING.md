@@ -754,7 +754,6 @@ When investigating any issue, follow this sequence:
 | `pg_trickle.enabled` | `on` | Must be `on` for scheduler to run |
 | `pg_trickle.max_consecutive_errors` | `3` | Stream tables suspend after this many failures |
 | `pg_trickle.scheduler_interval_ms` | `100` | Very high values cause refresh lag |
-| `pg_trickle.event_driven_wake` | `on` | `off` = poll-only, higher latency |
 | `pg_trickle.cdc_mode` | `auto` | `trigger` for reliable fallback |
 | `pg_trickle.max_concurrent_refreshes` | `4` | Per-database parallel refresh cap |
 | `pg_trickle.fixed_point_max_iterations` | `10` | Circular pipeline iteration limit |

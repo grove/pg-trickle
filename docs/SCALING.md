@@ -167,7 +167,6 @@ LIMIT 20;
 
 ```ini
 pg_trickle.scheduler_interval_ms = 200
-pg_trickle.event_driven_wake = on
 pg_trickle.parallel_refresh_mode = 'on'
 pg_trickle.max_dynamic_refresh_workers = 8
 pg_trickle.tiered_scheduling = on

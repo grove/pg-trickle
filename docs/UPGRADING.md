@@ -352,7 +352,6 @@ reinitialise to add them.
 
 **Behavioral notes:**
 
-- Event-driven wake (`pg_trickle.event_driven_wake`) is `on` by default — the background worker now wakes within ~15 ms of a source-table write instead of waiting up to 500 ms.
 - Stream-table-to-stream-table chains now refresh **incrementally** — downstream tables receive a small insert/delete delta rather than cascading full refreshes.
 - `pg_trickle.tiered_scheduling` now defaults to `on`.
 - Declaratively partitioned stream tables are supported via `partition_by` — the refresh MERGE is automatically restricted to only the changed partitions.
@@ -977,10 +976,6 @@ No breaking changes.
 
 **Behavioral notes:**
 
-- **O39-2 wake truthfulness:** Setting `pg_trickle.event_driven_wake = on`
-  now explicitly emits a `WARNING` that LISTEN is not supported in background
-  workers. The scheduler remains in polling-only mode regardless of the GUC.
-  The warning can be suppressed by setting `event_driven_wake = off`.
 - **O39-6 SQLSTATE-first retry:** When `use_sqlstate_classification = true`
   (default), scheduler retry decisions use the bracketed SQLSTATE code from
   `PgTrickleError::SpiErrorCode` instead of English error message text,
@@ -1020,6 +1015,52 @@ ALTER EXTENSION pg_trickle UPDATE TO '0.39.0';
 ```
 
 No catalog schema changes. The upgrade script is a no-op DDL-wise.
+
+---
+
+### 0.39.0 → 0.40.0
+
+**No SQL schema changes.** This release contains internal improvements only.
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.40.0';
+```
+
+---
+
+### 0.40.0 → 0.50.0
+
+**No SQL schema changes.** This release contains internal improvements and new documentation only.
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.50.0';
+```
+
+---
+
+### 0.50.0 → 0.51.0
+
+**Breaking changes:**
+
+- `pg_trickle.event_driven_wake` GUC has been **removed** (CQ-10-02). Remove
+  any `ALTER SYSTEM SET pg_trickle.event_driven_wake ...` or
+  `postgresql.conf` entries for this GUC before upgrading.
+- `pg_trickle.wake_debounce_ms` GUC has been **removed** (CQ-10-02). Remove
+  any references to this GUC from your configuration.
+
+**No SQL schema changes.** Only code and documentation changes.
+
+**Migration:**
+
+```sql
+-- Remove obsolete GUC settings before upgrading (run as superuser):
+ALTER SYSTEM RESET pg_trickle.event_driven_wake;
+ALTER SYSTEM RESET pg_trickle.wake_debounce_ms;
+SELECT pg_reload_conf();
+
+-- Then upgrade:
+ALTER EXTENSION pg_trickle UPDATE TO '0.51.0';
+```
 
 ---
 
@@ -1071,8 +1112,11 @@ automatically when you run `ALTER EXTENSION pg_trickle UPDATE`.
 | 0.36.0 | 0.37.0 | `pg_trickle--0.36.0--0.37.0.sql` |
 | 0.37.0 | 0.38.0 | `pg_trickle--0.37.0--0.38.0.sql` |
 | 0.38.0 | 0.39.0 | `pg_trickle--0.38.0--0.39.0.sql` |
+| 0.39.0 | 0.40.0 | `pg_trickle--0.39.0--0.40.0.sql` |
+| 0.40.0 | 0.50.0 | `pg_trickle--0.40.0--0.50.0.sql` |
+| 0.50.0 | 0.51.0 | `pg_trickle--0.50.0--0.51.0.sql` |
 
-Any installation from 0.1.3 onward can be upgraded to 0.39.0 in a single
+Any installation from 0.1.3 onward can be upgraded to 0.51.0 in a single
 `ALTER EXTENSION pg_trickle UPDATE` — PostgreSQL chains the hops automatically
 after the new binaries are installed and the server has been restarted.
 

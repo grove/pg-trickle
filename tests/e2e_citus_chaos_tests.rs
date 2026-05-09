@@ -445,3 +445,330 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
         .await;
     db.execute("DROP TABLE IF EXISTS chaos4_src CASCADE").await;
 }
+
+// ── CHAOS-5: Coordinator restart during active refresh (FEAT-10-01) ───────────
+
+/// CHAOS-5: Coordinator restart during active refresh.
+///
+/// Per v0.51.0 FEAT-10-01 Scenario 1:
+/// 1. Create a distributed stream table across 3 workers.
+/// 2. Start a refresh cycle.
+/// 3. Restart the coordinator container mid-refresh.
+/// 4. Verify the refresh retries and completes correctly on reconnect.
+/// 5. Run 5 subsequent refresh cycles; assert no phantom rows or missing rows.
+#[tokio::test]
+#[ignore]
+async fn test_citus_chaos_coordinator_restart_during_refresh() {
+    let _url = match citus_coordinator_url() {
+        Some(u) => u,
+        None => {
+            eprintln!("[CHAOS-5] CITUS_COORDINATOR_URL not set — skipping");
+            return;
+        }
+    };
+    let coord_container = match citus_container("COORDINATOR") {
+        Some(c) => c,
+        None => {
+            eprintln!("[CHAOS-5] CITUS_COORDINATOR_CONTAINER not set — skipping");
+            return;
+        }
+    };
+
+    let db = E2eDb::new().await.with_extension().await;
+
+    // Create a source table distributed across workers.
+    db.execute("CREATE TABLE chaos5_src (id int PRIMARY KEY, val text)")
+        .await;
+    if db
+        .try_execute("SELECT create_distributed_table('chaos5_src', 'id')")
+        .await
+        .is_err()
+    {
+        eprintln!("[CHAOS-5] Citus not available — skipping");
+        return;
+    }
+
+    db.execute(
+        "INSERT INTO chaos5_src SELECT g, md5(g::text) \
+         FROM generate_series(1, 5000) g",
+    )
+    .await;
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'chaos5_st', \
+         defining_query => 'SELECT id, val FROM chaos5_src', \
+         schedule => '5s', \
+         mode => 'FULL'\
+         )",
+    )
+    .await;
+
+    // Fire-and-forget refresh to simulate mid-refresh coordinator restart.
+    let _ = db
+        .try_execute("SELECT pgtrickle.refresh_stream_table('chaos5_st')")
+        .await;
+
+    // Restart the coordinator while the refresh may be in flight.
+    docker_restart(&coord_container).await;
+
+    // Wait for the coordinator to be ready again.
+    let mut ready = false;
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        if db.try_execute("SELECT 1").await.is_ok() {
+            ready = true;
+            break;
+        }
+    }
+    assert!(
+        ready,
+        "CHAOS-5: coordinator must become ready within 30 s after restart"
+    );
+
+    // Run 5 refresh cycles and verify correctness after each.
+    for cycle in 1..=5 {
+        db.execute("SELECT pgtrickle.refresh_stream_table('chaos5_st')")
+            .await;
+
+        let st_count: i64 = db
+            .query_scalar("SELECT COUNT(*) FROM public.chaos5_st")
+            .await;
+        let src_count: i64 = db.query_scalar("SELECT COUNT(*) FROM chaos5_src").await;
+        assert_eq!(
+            st_count, src_count,
+            "CHAOS-5 cycle {cycle}: stream table must match source after coordinator restart"
+        );
+    }
+
+    db.execute("SELECT pgtrickle.drop_stream_table('chaos5_st')")
+        .await;
+    db.execute("DROP TABLE IF EXISTS chaos5_src CASCADE").await;
+}
+
+// ── CHAOS-6: Worker node kill with shard redistribution (FEAT-10-01) ──────────
+
+/// CHAOS-6: Worker node kill with shard redistribution.
+///
+/// Per v0.51.0 FEAT-10-01 Scenario 2:
+/// 1. Create distributed source tables with data across 3 workers.
+/// 2. Kill one worker container.
+/// 3. Trigger a shard rebalance.
+/// 4. Verify the stream table refreshes correctly after rebalance completes.
+/// 5. Assert CDC change buffers are consistent post-recovery.
+#[tokio::test]
+#[ignore]
+async fn test_citus_chaos_worker_kill_with_shard_redistribution() {
+    let _url = match citus_coordinator_url() {
+        Some(u) => u,
+        None => {
+            eprintln!("[CHAOS-6] CITUS_COORDINATOR_URL not set — skipping");
+            return;
+        }
+    };
+    let worker_container = match citus_container("WORKER_0") {
+        Some(c) => c,
+        None => {
+            eprintln!("[CHAOS-6] CITUS_WORKER_0_CONTAINER not set — skipping");
+            return;
+        }
+    };
+
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE chaos6_src (id int PRIMARY KEY, amount numeric)")
+        .await;
+    if db
+        .try_execute("SELECT create_distributed_table('chaos6_src', 'id')")
+        .await
+        .is_err()
+    {
+        eprintln!("[CHAOS-6] Citus not available — skipping");
+        return;
+    }
+
+    db.execute(
+        "INSERT INTO chaos6_src SELECT g, g * 2.5 \
+         FROM generate_series(1, 2000) g",
+    )
+    .await;
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'chaos6_st', \
+         defining_query => 'SELECT id, amount FROM chaos6_src', \
+         schedule => '5s', \
+         mode => 'DIFFERENTIAL'\
+         )",
+    )
+    .await;
+
+    // Initial refresh to establish baseline.
+    db.execute("SELECT pgtrickle.refresh_stream_table('chaos6_st')")
+        .await;
+
+    // Kill one worker container.
+    docker_kill(&worker_container, "SIGKILL").await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Bring the worker back.
+    docker_restart(&worker_container).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    // Trigger shard rebalance after worker recovery.
+    let _ = db
+        .try_execute("SELECT rebalance_table_shards('chaos6_src')")
+        .await;
+
+    // Insert additional rows to generate CDC changes.
+    db.execute(
+        "INSERT INTO chaos6_src SELECT g, g * 3.0 \
+         FROM generate_series(2001, 2100) g",
+    )
+    .await;
+
+    // The stream table must refresh correctly post-recovery.
+    db.execute("SELECT pgtrickle.refresh_stream_table('chaos6_st')")
+        .await;
+
+    let st_count: i64 = db
+        .query_scalar("SELECT COUNT(*) FROM public.chaos6_st")
+        .await;
+    let src_count: i64 = db.query_scalar("SELECT COUNT(*) FROM chaos6_src").await;
+    assert_eq!(
+        st_count, src_count,
+        "CHAOS-6: stream table must match source after worker kill + shard redistribution"
+    );
+
+    // Verify CDC change buffers are consistent (no orphaned change records).
+    let orphaned_changes: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables st \
+             JOIN pgtrickle_changes.changes_chaos6_src src ON true \
+             WHERE st.pgt_name = 'chaos6_st' \
+             AND src.op IS NULL",
+        )
+        .await;
+    assert_eq!(
+        orphaned_changes, 0,
+        "CHAOS-6: no orphaned CDC change records should remain after recovery"
+    );
+
+    db.execute("SELECT pgtrickle.drop_stream_table('chaos6_st')")
+        .await;
+    db.execute("DROP TABLE IF EXISTS chaos6_src CASCADE").await;
+}
+
+// ── CHAOS-7: Network partition simulation (FEAT-10-01) ────────────────────────
+
+/// CHAOS-7: Network partition simulation using docker network disconnect.
+///
+/// Per v0.51.0 FEAT-10-01 Scenario 3:
+/// 1. Use `docker network disconnect` to isolate one worker.
+/// 2. Insert rows on the remaining workers.
+/// 3. Reconnect the isolated worker.
+/// 4. Verify the stream table converges to the correct state within 3 refresh
+///    cycles with no data loss.
+#[tokio::test]
+#[ignore]
+async fn test_citus_chaos_network_partition_and_recovery() {
+    let _url = match citus_coordinator_url() {
+        Some(u) => u,
+        None => {
+            eprintln!("[CHAOS-7] CITUS_COORDINATOR_URL not set — skipping");
+            return;
+        }
+    };
+    let worker_container = match citus_container("WORKER_1") {
+        Some(c) => c,
+        None => {
+            eprintln!("[CHAOS-7] CITUS_WORKER_1_CONTAINER not set — skipping");
+            return;
+        }
+    };
+    let network_name =
+        std::env::var("CITUS_NETWORK").unwrap_or_else(|_| "citus_default".to_string());
+
+    let db = E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE chaos7_src (id int PRIMARY KEY, val text)")
+        .await;
+    if db
+        .try_execute("SELECT create_distributed_table('chaos7_src', 'id')")
+        .await
+        .is_err()
+    {
+        eprintln!("[CHAOS-7] Citus not available — skipping");
+        return;
+    }
+
+    db.execute(
+        "INSERT INTO chaos7_src SELECT g, 'initial-' || g::text \
+         FROM generate_series(1, 300) g",
+    )
+    .await;
+
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+         name => 'chaos7_st', \
+         defining_query => 'SELECT id, val FROM chaos7_src', \
+         schedule => '5s', \
+         mode => 'DIFFERENTIAL'\
+         )",
+    )
+    .await;
+
+    // Initial refresh.
+    db.execute("SELECT pgtrickle.refresh_stream_table('chaos7_st')")
+        .await;
+
+    // Isolate one worker via network disconnect.
+    let _ = tokio::process::Command::new("docker")
+        .args(["network", "disconnect", &network_name, &worker_container])
+        .output()
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // Insert rows while the worker is isolated (these go to the remaining workers).
+    db.execute(
+        "INSERT INTO chaos7_src SELECT g, 'partitioned-' || g::text \
+         FROM generate_series(301, 400) g \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .await;
+
+    // Reconnect the isolated worker.
+    let _ = tokio::process::Command::new("docker")
+        .args(["network", "connect", &network_name, &worker_container])
+        .output()
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Verify the stream table converges within 3 refresh cycles.
+    let src_count: i64 = db.query_scalar("SELECT COUNT(*) FROM chaos7_src").await;
+
+    let mut converged = false;
+    for cycle in 1..=3 {
+        db.execute("SELECT pgtrickle.refresh_stream_table('chaos7_st')")
+            .await;
+
+        let st_count: i64 = db
+            .query_scalar("SELECT COUNT(*) FROM public.chaos7_st")
+            .await;
+        if st_count == src_count {
+            converged = true;
+            println!("[CHAOS-7] Converged at cycle {cycle}: {st_count} rows");
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+
+    assert!(
+        converged,
+        "CHAOS-7: stream table must converge to source ({src_count} rows) within 3 refresh cycles"
+    );
+
+    db.execute("SELECT pgtrickle.drop_stream_table('chaos7_st')")
+        .await;
+    db.execute("DROP TABLE IF EXISTS chaos7_src CASCADE").await;
+}

@@ -353,7 +353,33 @@ test-dbt-getting-started:
 test-dbt-getting-started-fast:
     SKIP_BUILD=1 ./examples/dbt_getting_started/scripts/run_example.sh
 
-# ── Upgrade Tests ─────────────────────────────────────────────────────────
+# ── Citus Chaos Tests (FEAT-10-01, v0.51.0) ───────────────────────────────
+
+# Spin up the 1-coordinator + 3-worker Citus chaos cluster.
+[group: "citus"]
+citus-chaos-up:
+    docker compose -f docker/docker-compose.citus.yml up -d --wait
+    @echo "Citus chaos cluster is up."
+    @echo "Set these environment variables before running just test-citus-chaos:"
+    @echo "  export CITUS_COORDINATOR_URL=postgresql://postgres:postgres@localhost:15432/postgres"
+    @echo "  export CITUS_COORDINATOR_CONTAINER=citus-coordinator"
+    @echo "  export CITUS_WORKER_0_CONTAINER=citus-worker-0"
+    @echo "  export CITUS_WORKER_1_CONTAINER=citus-worker-1"
+    @echo "  export CITUS_WORKER_2_CONTAINER=citus-worker-2"
+    @echo "  export CITUS_NETWORK=docker_citus_default"
+
+# Tear down the Citus chaos cluster and remove volumes.
+[group: "citus"]
+citus-chaos-down:
+    docker compose -f docker/docker-compose.citus.yml down -v
+
+# Run the Citus chaos test suite (requires `just citus-chaos-up` first).
+# All tests are marked #[ignore] and must be opted-in explicitly.
+[group: "citus"]
+test-citus-chaos:
+    cargo test --test e2e_citus_chaos_tests -- --ignored --test-threads=1 --nocapture
+
+
 
 # Validate upgrade script covers all new SQL objects (no Docker needed)
 [group: "upgrade"]
@@ -409,12 +435,12 @@ check-upgrade-all:
 
 # Build the upgrade Docker image for testing FROM→TO migrations
 [group: "upgrade"]
-build-upgrade-image from="0.40.0" to="0.50.0": build-e2e-image
+build-upgrade-image from="0.40.0" to="0.51.0": build-e2e-image
     ./tests/build_e2e_upgrade_image.sh {{from}} {{to}}
 
 # Run upgrade E2E tests (builds base + upgrade Docker images first)
 [group: "upgrade"]
-test-upgrade from="0.7.0" to="0.50.0": (build-upgrade-image from to)
+test-upgrade from="0.7.0" to="0.51.0": (build-upgrade-image from to)
     PGS_E2E_IMAGE=pg_trickle_upgrade_e2e:latest \
     PGS_UPGRADE_FROM={{from}} PGS_UPGRADE_TO={{to}} \
         ./scripts/run_e2e_tests.sh --test e2e_upgrade_tests --run-ignored all --no-capture

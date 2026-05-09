@@ -10,7 +10,7 @@ Not sure which GUC to change? Start here.
 
 | Goal | GUCs to adjust |
 |---|---|
-| **Lower refresh latency** | `scheduler_interval_ms`, `event_driven_wake`, `wake_debounce_ms`, `min_schedule_seconds` |
+| **Lower refresh latency** | `scheduler_interval_ms`, `min_schedule_seconds` |
 | **Reduce write overhead on busy tables** | `compact_threshold`, `max_buffer_rows`, `cleanup_use_truncate`, `user_triggers` |
 | **Handle larger DAGs without timeouts** | `max_workers`, `max_dynamic_refresh_workers`, `scheduler_interval_ms` |
 | **Connection-pooler compatibility (PgBouncer)** | `pooler_compatibility_mode`, `use_prepared_statements` |
@@ -32,8 +32,6 @@ notes. Use `pgtrickle.recommend_refresh_mode()` for per-table advice.
     - [pg\_trickle.enabled](#pg_trickleenabled)
     - [pg\_trickle.cdc\_mode](#pg_tricklecdc_mode)
     - [pg\_trickle.scheduler\_interval\_ms](#pg_tricklescheduler_interval_ms)
-    - [pg\_trickle.event\_driven\_wake](#pg_trickleevent_driven_wake)
-    - [pg\_trickle.wake\_debounce\_ms](#pg_tricklewake_debounce_ms)
     - [pg\_trickle.min\_schedule\_seconds](#pg_tricklemin_schedule_seconds)
     - [pg\_trickle.default\_schedule\_seconds](#pg_trickledefault_schedule_seconds)
     - [pg\_trickle.max\_consecutive\_errors](#pg_tricklemax_consecutive_errors)
@@ -183,6 +181,17 @@ Enable or disable the pg_trickle extension.
 
 When set to `false`, the background scheduler stops processing refreshes. Existing stream tables remain in the catalog but are not refreshed. Manual `pgtrickle.refresh_stream_table()` calls still work.
 
+> **Note on CDC triggers**: Setting `enabled = false` stops the scheduler from
+> refreshing stream tables but does **not** disable CDC trigger execution.
+> Change buffers continue to accumulate. This is intentional: when the extension
+> is re-enabled, stream tables can refresh immediately from the buffered changes
+> rather than performing a full table scan.
+>
+> To fully quiesce CDC overhead during extended maintenance, use
+> `pgtrickle.drain()` before disabling, then `DROP TRIGGER` the CDC triggers
+> manually and recreate them via `pgtrickle.repair_stream_table()` when
+> re-enabling.
+
 ```sql
 -- Disable automatic refreshes
 SET pg_trickle.enabled = false;
@@ -259,46 +268,27 @@ SET pg_trickle.scheduler_interval_ms = 500;
 
 ### pg_trickle.event_driven_wake
 
-Enable event-driven scheduler wake via LISTEN/NOTIFY. When enabled, CDC triggers emit `pg_notify('pgtrickle_wake', '')` after writing to the change buffer, and the scheduler LISTENs on that channel, waking immediately instead of waiting for the full `scheduler_interval_ms` poll. This reduces median end-to-end latency from ~500 ms to ~15 ms for low-volume workloads.
-
-| Property | Value |
-|---|---|
-| Type | `bool` |
-| Default | `true` |
-| Context | `SUSET` |
-| Restart Required | No |
-
-**Tuning Guidance:**
-- **Low-latency workloads**: Leave enabled (default) for the best latency.
-- **Extreme write throughput** (>100K DML/s): Consider disabling if the per-statement NOTIFY overhead is measurable. The NOTIFY is coalesced by PostgreSQL (one notification per transaction), so the actual overhead is negligible for most workloads.
-
-```sql
--- Disable event-driven wake (fall back to poll-only)
-SET pg_trickle.event_driven_wake = off;
-```
+> ⚠️ **Removed in v0.51.0** — This GUC has been removed. It had no effect since
+> v0.39.0 because PostgreSQL's `LISTEN` command is not permitted inside
+> background worker processes. The scheduler always uses efficient latch-based
+> polling regardless of this setting.
+>
+> **Migration:** Remove `pg_trickle.event_driven_wake` from `postgresql.conf`
+> and any `ALTER SYSTEM` settings. The scheduler behavior is unchanged — it
+> wakes at `pg_trickle.scheduler_interval_ms` intervals. To reduce latency,
+> lower `scheduler_interval_ms` instead (e.g. `200` ms for sub-200 ms refresh
+> latency).
 
 ---
 
 ### pg_trickle.wake_debounce_ms
 
-After the scheduler receives the first `pgtrickle_wake` notification, it waits this many milliseconds to coalesce rapidly arriving notifications before starting a refresh tick. Lower values reduce latency; higher values reduce wake overhead during bulk DML.
-
-| Property | Value |
-|---|---|
-| Type | `int` |
-| Default | `10` (10 milliseconds) |
-| Range | `1` – `5000` |
-| Context | `SUSET` |
-| Restart Required | No |
-
-**Tuning Guidance:**
-- **Single-statement latency-sensitive**: Use `1`–`5` ms.
-- **Bulk DML workloads**: Use `50`–`200` ms to coalesce more notifications per tick.
-- **Default** (`10` ms) balances sub-20 ms latency with reasonable coalescing.
-
-```sql
-SET pg_trickle.wake_debounce_ms = 50;
-```
+> ⚠️ **Removed in v0.51.0** — This GUC has been removed together with
+> `event_driven_wake`. It had no effect since `event_driven_wake` was always
+> non-functional in background workers.
+>
+> **Migration:** Remove `pg_trickle.wake_debounce_ms` from `postgresql.conf`
+> and any `ALTER SYSTEM` settings. No replacement is needed.
 
 ---
 
@@ -2976,8 +2966,6 @@ documents these cross-dependencies to help avoid misconfiguration.
 
 | GUC A | GUC B | Interaction |
 |-------|-------|-------------|
-| `event_driven_wake` | `scheduler_interval_ms` | When `event_driven_wake = true`, the scheduler wakes on NOTIFY and `scheduler_interval_ms` serves only as the poll-based fallback interval. Lowering `scheduler_interval_ms` below 100 ms with event-driven wake enabled adds little value and wastes CPU. |
-| `event_driven_wake` | `wake_debounce_ms` | `wake_debounce_ms` only takes effect when `event_driven_wake = true`. It coalesces rapid-fire notifications during bulk DML. Set higher (50–100 ms) for write-heavy workloads, lower (5–10 ms) for latency-sensitive workloads. |
 | `auto_backoff` | `min_schedule_seconds` | `auto_backoff` stretches the effective interval up to 8× the configured schedule, but never below `min_schedule_seconds`. If `min_schedule_seconds` is high, backoff has limited room to operate. |
 | `auto_backoff` | `default_schedule_seconds` | The backoff multiplier is applied to `default_schedule_seconds` (or the per-ST override); raising this value gives backoff a wider range. |
 | `parallel_refresh_mode` | `max_concurrent_refreshes` | `parallel_refresh_mode = 'on'` dispatches independent STs to parallel workers, up to `max_concurrent_refreshes` per database. Setting `max_concurrent_refreshes = 1` effectively disables parallelism even when the mode is `'on'`. |
@@ -3006,12 +2994,8 @@ settings into your `postgresql.conf` and adjust to taste.
 update. Best for dashboards, real-time analytics, and operational monitoring.
 
 ```ini
-# Event-driven wake — sub-50ms median latency
-pg_trickle.event_driven_wake = true
-pg_trickle.wake_debounce_ms = 5              # aggressive: 5ms coalesce
-
-# Fast scheduling
-pg_trickle.scheduler_interval_ms = 200       # poll fallback (rarely used)
+# Fast scheduling (polling-based, sub-200ms median latency)
+pg_trickle.scheduler_interval_ms = 200       # poll interval
 pg_trickle.min_schedule_seconds = 1
 pg_trickle.default_schedule_seconds = 1
 
@@ -3038,12 +3022,8 @@ heavy write load. Accepts slightly higher latency in exchange for better
 batching and resource efficiency.
 
 ```ini
-# Batched wake — coalesce writes into larger deltas
-pg_trickle.event_driven_wake = true
-pg_trickle.wake_debounce_ms = 50             # 50ms coalesce window
-
-# Relaxed scheduling
-pg_trickle.scheduler_interval_ms = 2000      # 2-second poll fallback
+# Batched scheduling
+pg_trickle.scheduler_interval_ms = 2000      # 2-second poll interval
 pg_trickle.min_schedule_seconds = 2
 pg_trickle.default_schedule_seconds = 5
 
@@ -3074,8 +3054,7 @@ hosting, or development environments. Accepts higher latency and slower
 throughput.
 
 ```ini
-# Poll-based only — no NOTIFY overhead
-pg_trickle.event_driven_wake = false
+# Poll-based scheduling (conservative)
 pg_trickle.scheduler_interval_ms = 5000      # 5-second poll
 
 # Conservative scheduling
@@ -3233,32 +3212,31 @@ have no effect on extension behaviour and should be removed from new deployments
 
 ### pg_trickle.event_driven_wake
 
-**Deprecated since v0.37.0.**
-
-This GUC formerly controlled whether the scheduler woke up on PostgreSQL
-NOTIFY events. Event-driven wake is now always enabled as the default
-scheduler behaviour and is not configurable.
-
-**Migration:** Remove `pg_trickle.event_driven_wake = on` from
-`postgresql.conf`. The extension will emit a `NOTICE` if this GUC is set
-to remind you to clean up the configuration file.
-
-| Setting | Value |
-|---------|-------|
-| Default | `true` |
-| Context | `superuser` |
+> ⚠️ **Removed in v0.51.0** — This GUC has been fully removed from the
+> extension. If it appears in `postgresql.conf` after upgrading to v0.51.0,
+> PostgreSQL will emit an "unrecognized configuration parameter" warning at
+> startup. Remove it to suppress the warning.
+>
+> **Migration:** Remove `pg_trickle.event_driven_wake` from `postgresql.conf`
+> and any `ALTER SYSTEM` settings. No replacement is needed — the scheduler
+> always uses efficient latch-based polling.
 
 ### pg_trickle.wake_debounce_ms
 
-**Deprecated since v0.37.0.**
+> ⚠️ **Removed in v0.51.0** — This GUC has been fully removed together with
+> `event_driven_wake`. Remove it from `postgresql.conf` to avoid an
+> "unrecognized configuration parameter" warning at startup.
+>
+> **Migration:** Remove `pg_trickle.wake_debounce_ms` from `postgresql.conf`.
+> No replacement is needed.
 
-Formerly controlled the debounce window (in milliseconds) for event-driven
-wake. Because `event_driven_wake` is now permanently enabled and the debounce
-is automatically tuned, this GUC has no effect.
+### pg_trickle.merge_planner_hints
 
-**Migration:** Remove `pg_trickle.wake_debounce_ms` from `postgresql.conf`.
+> ⚠️ **Deprecated** — accepted for backwards compatibility but has no effect.
+> Will be removed in a future major version.
 
-| Setting | Value |
-|---------|-------|
-| Default | `10` |
-| Context | `superuser` |
+### pg_trickle.user_triggers (value `'on'`)
+
+> ⚠️ **Deprecated** — The value `'on'` is accepted as a deprecated alias for
+> `'auto'` and has no distinct behaviour. Use `'auto'` (default) or `'off'`
+> instead. The `'on'` alias will be removed in a future major version.

@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**115 configuration parameters** extracted from `src/config.rs`.
+**114 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -116,7 +116,6 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_USE_PREPARED_STATEMENTS)` | `bool` | `true` | Disable if prepared-statement parameter sniffing produces poor plans (e.g., highly skewed LSN distributions). |
 | `(registration pending — PGS_USE_SQLSTATE_CLASSIFICATION)` | `bool` | `true` | The SQLSTATE-based classification is locale-safe: it works correctly regardless of `lc_messages`. |
 | `(registration pending — PGS_VOLATILE_FUNCTION_POLICY)` | `Option\<std::ffi::CString` | `"reject"` | Controls how volatile functions in defining queries are handled: - `"reject"` (default): Error — volatile functions are rejected. |
-| `(registration pending — PGS_WAKE_DEBOUNCE_MS)` | `i32` | `10` | **Note:** `pg_trickle.event_driven_wake` is deprecated and has no effect. |
 | `(registration pending — PGS_WAL_MAX_CHANGES_PER_POLL)` | `i32` | `10000` | Default: 10 000. |
 | `(registration pending — PGS_WAL_MAX_LAG_BYTES)` | `i32` | `65536` | Default: 65 536 (64 KiB). |
 | `(registration pending — PGS_WAL_TRANSITION_TIMEOUT)` | `i32` | `300` | Maximum time (seconds) to wait for the WAL decoder to catch up during transition from triggers to WAL-based CDC before falling back to triggers. |
