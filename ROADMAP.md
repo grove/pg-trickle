@@ -114,13 +114,29 @@
 | [v0.50.0](roadmap/v0.50.0.md) | Performance, security & operational hardening: SPI batching in differential refresh, dblink escaping fix, CNPG graceful-drain preStop hook, Docker image digest pinning, invalidation ring observability, deep-join drift monitoring, Prometheus secondary metrics | ✅ Released | Large | [Full details](roadmap/v0.50.0.md-full.md) |
 | [v0.51.0](roadmap/v0.51.0.md) | Citus chaos resilience & documentation truth: chaos test rig (node kill/rebalance/partition), deprecated GUC removal, ARCHITECTURE.md pg_tide boundary, recursive CTE strategy docs, CDC-enabled-flag documentation | ✅ Released | Large | [Full details](roadmap/v0.51.0.md-full.md) |
 
+### Assessment-Driven Final Hardening Arc (v0.52.x – v0.55.x)
+
+Driven by the findings in the v0.51.0 overall assessment
+([plans/PLAN_OVERALL_ASSESSMENT_11.md](plans/PLAN_OVERALL_ASSESSMENT_11.md)).
+The assessment found 0 critical, 2 HIGH, and 22 MEDIUM findings across
+correctness, performance, scalability, test coverage, code quality,
+security, and feature completeness — all resolved in this four-release arc
+before v1.0.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.52.0](roadmap/v0.52.0.md) | DVM hot-path performance: O(1) placeholder resolution (aho-corasick), thread-local volatility cache, lazy DiffContext allocations, O(1) template LRU eviction | Planned | Large | [Full details](roadmap/v0.52.0.md-full.md) |
+| [v0.53.0](roadmap/v0.53.0.md) | Unit test depth sweep: dag, scheduler, CDC, parser, config — eleven modules with zero inline coverage — plus proptest extension and buffer-growth sleep removal | Planned | Large | [Full details](roadmap/v0.53.0.md-full.md) |
+| [v0.54.0](roadmap/v0.54.0.md) | DVM engine hardening: diff_node depth limit, DiffContext CTE cap (OOM guard), snapshot fingerprint caching, Expr::to_sql() caching, view inlining fixpoint + batched relkind, ST source frontier validation, O(V+E) diamond detection | Planned | Large | [Full details](roadmap/v0.54.0.md-full.md) |
+| [v0.55.0](roadmap/v0.55.0.md) | Final pre-1.0 polish: GUC-configurable invalidation ring, api/mod.rs and monitor.rs module decomposition, serde_json NOTIFY payloads, multi-column IN rewrite to EXISTS, DVM parse metrics, reserved-prefix docs, GUC rationale comments, PR coverage gate | Planned | Large | [Full details](roadmap/v0.55.0.md-full.md) |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|------- |---------- |
 | [v1.0.0](roadmap/v1.0.0.md-full.md) | Stable release — PostgreSQL 19, package registries, signed artifacts, SBOMs, zero breaking changes | Planned | Large | [Full details](roadmap/v1.0.0.md-full.md) |
-| [v1.1.0](roadmap/v1.1.0.md-full.md) | PostgreSQL 17 support | Planned | Medium | [Full details](roadmap/v1.1.0.md-full.md) |
-| [v1.2.0](roadmap/v1.2.0.md-full.md) | PGlite proof of concept | Planned | Medium | [Full details](roadmap/v1.2.0.md-full.md) |
+| [v1.1.0](roadmap/v1.1.0.md-full.md) | PostgreSQL 17 support; WITH RECURSIVE … SEARCH/CYCLE clause; auto_explain integration hook | Planned | Medium | [Full details](roadmap/v1.1.0.md-full.md) |
+| [v1.2.0](roadmap/v1.2.0.md-full.md) | PGlite proof of concept; pg_partman automated partition scheduling integration | Planned | Medium | [Full details](roadmap/v1.2.0.md-full.md) |
 | [v1.3.0](roadmap/v1.3.0.md-full.md) | Core extraction (`pg_trickle_core`) | Planned | Large | [Full details](roadmap/v1.3.0.md-full.md) |
 | [v1.4.0](roadmap/v1.4.0.md-full.md) | PGlite WASM extension | Planned | Medium | [Full details](roadmap/v1.4.0.md-full.md) |
 | [v1.5.0](roadmap/v1.5.0.md-full.md) | PGlite reactive integration | Planned | Medium | [Full details](roadmap/v1.5.0.md-full.md) |
@@ -185,6 +201,14 @@ v0.49    ─── Test infrastructure hardening: concurrency sync overhaul, 10-
 v0.50    ─── Performance, security & ops hardening: SPI batching, dblink fix, CNPG drain hook, digest pinning, ring observability
     │
 v0.51    ─── Citus chaos resilience & doc truth: chaos rig, deprecated GUC removal, pg_tide boundary, CTE strategy docs
+    │
+v0.52    ─── DVM hot-path perf: O(1) placeholder resolution, volatility cache, lazy DiffContext, O(1) LRU eviction
+    │
+v0.53    ─── Unit test depth: dag/scheduler/CDC/parser/config sweep, proptest extension, sleep removal
+    │
+v0.54    ─── DVM hardening: diff_node depth limit, DiffContext OOM cap, snapshot fingerprint cache, view inlining fixpoint, O(V+E) diamond detection
+    │
+v0.55    ─── Final pre-1.0 polish: configurable ring, module decomposition, serde_json NOTIFY, multi-column IN rewrite, DVM metrics, docs
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
@@ -298,6 +322,87 @@ between SQL complexity and correctness at >6 join tables is documented in the
 configuration reference with an associated soak-test assertion.
 
 **v0.51.0 closes the Citus resilience gap and brings documentation into full
+truth** — the chaos test rig (node kill, rebalance, and network-partition
+scenarios) proves that every Citus failure mode is handled, while deprecated
+GUC removals, ARCHITECTURE.md boundary updates, recursive CTE strategy
+documentation, and CDC-enabled-flag documentation eliminate the last
+documentation inaccuracies identified in the v10 assessment.
+
+**v0.52.0 through v0.55.0 form the final pre-1.0 hardening arc**, driven by
+the findings in the v0.51.0 overall assessment
+(plans/PLAN_OVERALL_ASSESSMENT_11.md). The assessment found no critical
+issues, two HIGH findings (both performance-class), and 22 MEDIUM findings
+across correctness, performance, scalability, test coverage, code quality,
+security, and feature completeness. These four releases close every one of
+them in priority order.
+
+**v0.52.0 targets the two HIGH-severity performance gaps on the DVM hot
+path.** `resolve_delta_template()` currently resolves LSN placeholders by
+calling `.replace()` twice per source OID — an O(k×n) scan for k source
+tables in a SQL string of length n. This is replaced with a single
+`aho-corasick` pass that resolves all placeholders in one traversal, cutting
+multi-source refresh latency proportionally. Alongside, `lookup_function_volatility()`
+currently makes one SPI round-trip to `pg_proc` for every unknown function in
+a query — up to 50 ms overhead for function-heavy queries. A thread-local
+`HashMap<String, char>` cache pre-populated with all PostgreSQL built-in
+functions eliminates these trips on the hot path. Two further allocator
+improvements close the LOW-rated findings: `DiffContext::new()` switches from
+12 unconditional `HashMap::new()` calls to `Option<HashMap>` with lazy
+initialization (saving 5–10 µs per refresh for simple queries), and the
+template cache eviction path is replaced with a proper LRU data structure for
+O(1) eviction instead of O(N) scanning.
+
+**v0.53.0 is the eleven-module unit test depth sweep.** Five source modules
+that are responsible for core algorithmic logic — `dag.rs` (cycle detection,
+topological sort, diamond detection, schedule resolution), the eight
+`scheduler/` submodules (cost model, tier transitions, watermark computation),
+`cdc.rs`/`cdc/polling.rs`/`cdc/rebuild.rs` (buffer naming, column escaping,
+trigger SQL), all five `dvm/parser/` files (Expr::to_sql(), AggFunc
+classification, strip_qualifier()), and `config.rs` (mode parsing, threshold
+conversion) — have zero inline `#[cfg(test)]` unit tests and are only
+exercised through full-stack E2E tests. This release adds focused
+`#[cfg(test)]` modules to every one of them using mock structures that require
+no PostgreSQL backend. `proptest!` coverage is extended to DAG cycle detection
+and schedule resolution. The two remaining fixed-sleep tests in
+`e2e_buffer_growth_tests.rs` (7s and 20s sleeps) are replaced with adaptive
+`pg_locks`-polling helpers.
+
+**v0.54.0 hardens the DVM engine against pathological queries and slow
+parsing.** `diff_node()` gains a depth counter that errors on breach of
+`max_parse_depth` (default 64), preventing stack overflow on extreme nesting.
+`DiffContext` gains a configurable CTE count ceiling (default 1,000) that
+returns a clean error before OOM can occur. The snapshot cache fingerprint is
+computed and stored at `OpTree` construction time instead of re-traversing the
+tree on every diff cycle, and `Expr::to_sql()` caches its result string to
+eliminate redundant allocations. View inlining (`rewrite_views_inline()`) is
+refactored to batch all `relkind` lookups into a single SPI query and use a
+fixpoint check (no changes this iteration) instead of a hard counter, cutting
+3-level view hierarchies from ~15 ms to a single parse + one SPI call. The
+ST-to-ST frontier resolver is hardened to return `PgTrickleError::SourceNotFound`
+instead of silently defaulting to `"0/0"` when a required source is missing.
+Finally, diamond detection is reimplemented with a BFS-based visited-set merge
+algorithm, reducing complexity from O(V²) pairwise comparisons to O(V+E)
+— critical for deployments with 500+ stream tables.
+
+**v0.55.0 delivers the final pre-1.0 polish pass** across scalability,
+module structure, security, documentation, and one new SQL feature. The
+shared-memory invalidation ring capacity (currently hardcoded at 1,024) becomes
+a GUC with a default of 1,024 and a maximum of 4,096, preventing excessive full
+DAG rebuilds in DDL-burst environments. `src/api/mod.rs` (7,600+ lines) is
+decomposed into focused submodules (`api/create.rs`, `api/alter.rs`,
+`api/refresh.rs`), and `src/monitor.rs` (4,000+ lines) is split into
+`monitor/alert.rs`, `monitor/health.rs`, and `monitor/tree.rs`. NOTIFY alert
+payloads are switched from manual string escaping to `serde_json::json!()`
+to guarantee correct JSON for error messages containing backslashes or control
+characters. The DVM parser gains automatic rewriting of `WHERE (a, b) IN
+(SELECT x, y FROM ...)` multi-column row IN subqueries to equivalent
+`EXISTS` form, closing the last user-visible SQL coverage gap. DVM parse
+timing metrics (`pg_trickle_dvm_parse_ms`, `pg_trickle_delta_query_size_bytes`)
+are added to the Prometheus metrics endpoint. The `__PGS_`/`__PGT_` reserved
+column-name prefixes are documented in `docs/SQL_REFERENCE.md`, rationale
+comments are added to all magic-number GUC defaults in `src/config.rs`, and
+coverage reporting is added to the PR gate so regressions are visible before
+merge.
 truth.** The Citus distributed support shipped in v0.32–v0.34 has never had
 a chaos test suite — there are zero tests validating behaviour under node
 failure, shard rebalance, or network partition. This release delivers a
