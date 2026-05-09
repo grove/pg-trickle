@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.51.0 — Citus Chaos Resilience & Documentation Truth](#0510--citus-chaos-resilience--documentation-truth)
 - [0.50.0 — Performance, Security & Operational Hardening](#0500--performance-security--operational-hardening)
 - [0.49.1 — Repository Migration to trickle-labs/pg-trickle](#0491--repository-migration-to-trickle-labspg-trickle)
 - [0.49.0 — Test Infrastructure Hardening & Scheduler Decomposition](#0490--test-infrastructure-hardening--scheduler-decomposition)
@@ -65,6 +66,86 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.51.0] — Citus Chaos Resilience & Documentation Truth
+
+### Breaking Changes
+
+- **`pg_trickle.event_driven_wake` has been removed.** This GUC had no effect
+  since v0.39.0 because PostgreSQL's `LISTEN` command is not permitted inside
+  background worker processes. Remove it from `postgresql.conf` and any
+  `ALTER SYSTEM` settings to avoid an "unrecognized configuration parameter"
+  warning on upgrade. No behavioral change — the scheduler always used
+  efficient latch-based polling regardless of this setting.
+
+- **`pg_trickle.wake_debounce_ms` has been removed.** This GUC was only
+  meaningful when `event_driven_wake` was functional (it never was). Remove it
+  from `postgresql.conf` as well.
+
+### What's New
+
+#### FEAT-10-01: Citus Chaos Test Rig
+
+Three new chaos resilience scenarios for the Citus distributed integration,
+proving correctness under real production failure modes:
+
+- **CHAOS-5 — Coordinator restart during active refresh**: Creates a distributed
+  stream table, starts a refresh, restarts the coordinator mid-flight, and
+  verifies that 5 subsequent cycles produce the correct result with no phantom
+  or missing rows.
+
+- **CHAOS-6 — Worker kill with shard redistribution**: Kills a worker node,
+  triggers `rebalance_table_shards()`, inserts new rows on the remaining workers,
+  and verifies that DIFFERENTIAL refresh produces a consistent result post-recovery.
+  Asserts that CDC change buffers contain no orphaned records.
+
+- **CHAOS-7 — Network partition and recovery**: Uses `docker network disconnect`
+  to isolate one worker, inserts rows on the remaining workers, reconnects the
+  isolated worker, and verifies that the stream table converges to the correct
+  state within 3 refresh cycles with no data loss.
+
+All three tests are marked `#[ignore]` and run nightly in the `stability-tests.yml`
+workflow alongside the existing G17-SOAK and G17-MDB tests. Use
+`just citus-chaos-up && just test-citus-chaos` to run them locally.
+
+#### CQ-10-02: Remove Deprecated event_driven_wake GUC
+
+Removed the non-functional `event_driven_wake` and `wake_debounce_ms` GUCs
+and all associated dead code paths from the scheduler loop. The code that
+emitted a WARNING when `event_driven_wake = on` is gone. The scheduler log
+message at startup no longer includes the GUC value.
+
+#### DOC-10-01: ARCHITECTURE.md — pg_tide Integration Boundary
+
+Added a new **§ pg_tide Integration** section to `docs/ARCHITECTURE.md` that
+clearly describes the v0.46.0 extraction boundary: what remains in pg_trickle
+(`attach_outbox()` hook, change buffer subscription interface) vs what lives in
+the standalone `pg_tide` extension (outbox, inbox, consumer groups, relay binary).
+Updated the module layout diagram to reflect the extraction.
+
+#### DOC-10-03: ARCHITECTURE.md — Recursive CTE Strategy Selection
+
+Added a new **§ Recursive CTE Strategy Selection** subsection to the DVM Engine
+section documenting the five-tier strategy selection logic (Tier 1 inline
+expansion → Tier 2 shared delta → Tier 3a semi-naive → Tier 3b DRed → Tier 3c
+recomputation), a selection criteria table, observability via
+`explain_stream_table()`, and a concrete Tier 3a example for hierarchical
+closure queries.
+
+#### DOC-10-02 + COR-10-02: Configuration Documentation Truth
+
+- **CONFIGURATION.md**: `event_driven_wake` and `wake_debounce_ms` sections
+  replaced with clear removal notices. All tuning profiles, interaction matrix
+  entries, and example configs updated to remove these GUCs.
+- **CONFIGURATION.md**: Added deprecation `⚠️` callouts for
+  `merge_planner_hints` (accepted, no effect) and `user_triggers = 'on'`
+  (deprecated alias for `'auto'`).
+- **CONFIGURATION.md**: Added a **Note on CDC triggers** to the
+  `pg_trickle.enabled` section explaining that CDC triggers continue to fire
+  when the scheduler is disabled, why this is intentional, and how to fully
+  quiesce CDC overhead during extended maintenance.
 
 ---
 

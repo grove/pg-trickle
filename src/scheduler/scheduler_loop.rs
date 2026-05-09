@@ -368,9 +368,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     }
 
     log!(
-        "pg_trickle scheduler started (interval={}ms, event_driven_wake={})",
+        "pg_trickle scheduler started (interval={}ms)",
         config::pg_trickle_scheduler_interval_ms(),
-        config::pg_trickle_event_driven_wake(),
     );
 
     // Mark scheduler as running in shared memory so cluster_worker_summary()
@@ -468,33 +467,8 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         check_cdc_transition_health();
     }));
 
-    // WAKE-1: Event-driven wake via LISTEN/NOTIFY.
-    //
-    // PostgreSQL's LISTEN command is restricted to regular backends
-    // (MyBackendType == B_BACKEND). Background workers — which the scheduler
-    // always is — are rejected with "cannot execute LISTEN within a background
-    // process" (async.c:Async_Listen()). Attempting LISTEN causes an elog(ERROR)
-    // that escapes pgrx's catch_unwind and exits the process with exit code 1.
-    //
-    // Until a background-worker-compatible notification mechanism is implemented
-    // (e.g., direct latch signalling via shared memory), event_driven_wake is
-    // always forced to false here regardless of the GUC value. CDC triggers still
-    // emit pg_notify('pgtrickle_wake') for future use once this is re-enabled.
-    let event_driven = false;
-    if config::pg_trickle_event_driven_wake() {
-        // GUC is on but feature is not yet functional in BGWs — warn once at startup.
-        warning!(
-            "pg_trickle scheduler: event_driven_wake=on is not supported in background \
-             workers (PostgreSQL LISTEN is restricted to B_BACKEND processes). \
-             Operating in polling-only mode. Set pg_trickle.event_driven_wake=off \
-             to suppress this warning."
-        );
-    }
-
-    // WAKE-1: Statistics for event-driven vs poll-based wakes.
-    let mut wake_stats_event: u64 = 0;
-    let mut wake_stats_poll: u64 = 0;
-    let mut wake_stats_last_log_ms: u64 = current_epoch_ms();
+    // Timestamp for periodic shmem wake-time update (every 60s).
+    let mut last_wake_ts_update_ms: u64 = current_epoch_ms();
 
     // OPS-6: Workload-aware poll — overlap count from df_scheduling_interference.
     // Refreshed once per auto-apply cycle (10 min).
@@ -534,7 +508,6 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         parallel_state.adaptive_poll_ms = poll_ms;
         parallel_state.completions_this_tick = 0;
 
-        let wake_start = std::time::Instant::now();
         let should_continue =
             BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(poll_ms)));
 
@@ -547,39 +520,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             ms.serve_one_request(&metrics_text);
         }
 
-        // WAKE-1: Determine whether this wake was event-driven (notification)
-        // or poll-based (timeout expired). If the latch returned faster than
-        // the poll interval, a notification (or signal) woke us early.
-        let wake_elapsed_ms = wake_start.elapsed().as_millis() as u64;
-        let was_event_wake = event_driven && wake_elapsed_ms < poll_ms.saturating_sub(5);
-
-        if was_event_wake {
-            wake_stats_event += 1;
-            // WAKE-1: Debounce — wait briefly to coalesce rapidly arriving
-            // notifications from bulk DML before starting the tick.
-            let debounce_ms = config::pg_trickle_wake_debounce_ms() as u64;
-            if debounce_ms > 0 {
-                let _ = BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(
-                    debounce_ms,
-                )));
-            }
-        } else {
-            wake_stats_poll += 1;
-        }
-
-        // WAKE-1: Log wake statistics every 60 seconds.
+        // Update the last-wake timestamp in shared memory every 60 seconds.
         let now_for_stats = current_epoch_ms();
-        if now_for_stats.saturating_sub(wake_stats_last_log_ms) >= 60_000 {
-            if event_driven && (wake_stats_event > 0 || wake_stats_poll > 0) {
-                log!(
-                    "pg_trickle scheduler: wake stats — event={}, poll={} (last 60s)",
-                    wake_stats_event,
-                    wake_stats_poll,
-                );
-            }
-            wake_stats_event = 0;
-            wake_stats_poll = 0;
-            wake_stats_last_log_ms = now_for_stats;
+        if now_for_stats.saturating_sub(last_wake_ts_update_ms) >= 60_000 {
+            last_wake_ts_update_ms = now_for_stats;
 
             // Update the last-wake timestamp in shared memory for monitoring.
             // SAFETY: MyProcPid is always valid inside a background worker.

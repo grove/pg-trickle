@@ -1,17 +1,14 @@
 //! WAKE-1: E2E tests for scheduler wake behaviour.
 //!
-//! O39-2 (v0.39.0): `event_driven_wake` is NOT functional in background
-//! workers — PostgreSQL's `LISTEN` is restricted to B_BACKEND processes.
-//! The scheduler always operates in polling-only mode regardless of the GUC.
+//! CQ-10-02 (v0.51.0): `event_driven_wake` GUC has been removed. The scheduler
+//! always operates in polling-only mode via latch-based sleeping.
 //! CDC triggers still emit `pg_notify('pgtrickle_wake')` for future use
-//! once a background-worker-compatible latch mechanism is available.
+//! once a background-worker-compatible notification mechanism is available.
 //!
 //! Verifies that:
 //! 1. CDC triggers emit `pg_notify('pgtrickle_wake', '')` after writing to
 //!    the change buffer (for future use).
-//! 2. Setting `event_driven_wake = on` emits a warning; the scheduler operates
-//!    in polling-only mode.
-//! 3. Poll-based operation works correctly regardless of the GUC value.
+//! 2. Poll-based operation works correctly.
 
 mod e2e;
 
@@ -19,35 +16,6 @@ use e2e::E2eDb;
 use std::time::Duration;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Configure the scheduler with a long poll interval to make event-driven
-/// wake distinguishable from poll-based wake.
-#[allow(dead_code)]
-async fn configure_event_driven_scheduler(db: &E2eDb) {
-    // Set a long poll interval so we can distinguish event-driven wake
-    // (fast) from poll-based wake (slow).
-    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 5000")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.event_driven_wake = on")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.wake_debounce_ms = 10")
-        .await;
-    db.reload_config_and_wait().await;
-    db.wait_for_setting("pg_trickle.scheduler_interval_ms", "5000")
-        .await;
-    db.wait_for_setting("pg_trickle.event_driven_wake", "on")
-        .await;
-
-    let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
-    assert!(
-        sched_running,
-        "pg_trickle scheduler did not appear within 90 s"
-    );
-}
 
 /// Wait until a ST has at least `min_completed` COMPLETED refreshes.
 async fn wait_for_n_refreshes(
@@ -160,61 +128,7 @@ async fn test_wake_truncate_trigger_emits_notify() {
     );
 }
 
-/// WAKE-O39-2: Verify that setting event_driven_wake=on still operates in
-/// poll-only mode (the GUC does not cause a panic or LISTEN attempt in the
-/// background worker).
-///
-/// Since LISTEN is not supported in background workers, the scheduler must
-/// remain in polling-only mode when event_driven_wake=on. This test asserts
-/// that refreshes complete via polling even with the GUC enabled.
-#[tokio::test]
-async fn test_wake_event_driven_guc_falls_back_to_poll() {
-    let db = E2eDb::new_on_postgres_db().await.with_extension().await;
-
-    // Use a short poll interval so the poll completes quickly.
-    db.execute("ALTER SYSTEM SET pg_trickle.scheduler_interval_ms = 500")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.min_schedule_seconds = 1")
-        .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
-        .await;
-    // Enable event_driven_wake — this should emit a warning but still work
-    // in poll-only mode without crashing the background worker.
-    db.execute("ALTER SYSTEM SET pg_trickle.event_driven_wake = on")
-        .await;
-    db.reload_config_and_wait().await;
-    db.wait_for_setting("pg_trickle.event_driven_wake", "on")
-        .await;
-
-    let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
-    assert!(
-        sched_running,
-        "pg_trickle scheduler did not appear within 90 s (should not crash with event_driven_wake=on)"
-    );
-
-    db.execute("CREATE TABLE lat_src (id INT PRIMARY KEY, val INT)")
-        .await;
-    db.execute("INSERT INTO lat_src VALUES (1, 100)").await;
-    db.create_st(
-        "lat_st",
-        "SELECT id, val FROM lat_src",
-        "1s",
-        "DIFFERENTIAL",
-    )
-    .await;
-
-    // With poll interval = 500ms, the refresh should complete via polling
-    // within a few seconds. This confirms poll-only mode is working.
-    let ok = wait_for_n_refreshes(&db, "lat_st", 1, Duration::from_secs(30)).await;
-    assert!(
-        ok,
-        "Poll-only refresh with event_driven_wake=on did not complete within 30 s. \
-         Scheduler may have crashed due to LISTEN attempt in background worker.",
-    );
-}
-
-/// WAKE-1: Verify that poll-based fallback still works when event_driven_wake
-/// is disabled.
+/// WAKE-1: Verify that poll-based scheduling works correctly.
 #[tokio::test]
 async fn test_wake_poll_fallback_works() {
     let db = E2eDb::new_on_postgres_db().await.with_extension().await;
@@ -225,11 +139,7 @@ async fn test_wake_poll_fallback_works() {
         .await;
     db.execute("ALTER SYSTEM SET pg_trickle.auto_backoff = off")
         .await;
-    db.execute("ALTER SYSTEM SET pg_trickle.event_driven_wake = off")
-        .await;
     db.reload_config_and_wait().await;
-    db.wait_for_setting("pg_trickle.event_driven_wake", "off")
-        .await;
 
     let sched_running = db.wait_for_scheduler(Duration::from_secs(90)).await;
     assert!(sched_running, "scheduler did not start");

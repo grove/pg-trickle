@@ -63,8 +63,7 @@ The public entry point for users. All operations are exposed as `#[pg_extern]` f
 |------|----------------|
 | `src/api/mod.rs` | Core lifecycle: `create_stream_table`, `alter_stream_table`, `drop_stream_table`, `refresh_stream_table`, `bulk_create`, `repair_stream_table`, `pgt_status` |
 | `src/api/diagnostics.rs` | Inspection helpers: `explain_st`, `explain_refresh_mode`, `dependency_tree`, `list_sources` |
-| `src/api/outbox.rs` | Transactional outbox API (v0.28.0): `enable_outbox`, `poll_outbox`, `consumer_lag`, consumer group management |
-| `src/api/inbox.rs` | Transactional inbox API (v0.28.0): `create_inbox`, `enable_inbox_ordering`, `inbox_is_my_partition` |
+| `src/api/outbox_hook.rs` | pg_tide integration hook: `attach_outbox()` — calls into pg_tide after each successful refresh (v0.46.0+) |
 | `src/api/snapshot.rs` | Stream table snapshots (v0.27.0): `snapshot_stream_table`, `restore_from_snapshot`, `list_snapshots`, `drop_snapshot` |
 | `src/api/self_monitoring.rs` | Self-monitoring setup/teardown and auto-apply policy |
 | `src/api/cluster.rs` | Multi-database cluster overview: `cluster_worker_summary` |
@@ -273,6 +272,46 @@ The parser produces an `OpTree` — a tree of operator nodes. CTE handling follo
 1. **Tier 1 (Inline Expansion)** — Non-recursive CTEs referenced once are expanded into `Subquery` nodes, equivalent to subqueries in FROM.
 2. **Tier 2 (Shared Delta)** — Non-recursive CTEs referenced multiple times produce `CteScan` nodes that share a single delta computation via a CTE registry and delta cache.
 3. **Tier 3a/3b/3c (Recursive)** — Recursive CTEs (`WITH RECURSIVE`) are detected via `query_has_recursive_cte()`. In FULL mode, the query executes as-is. In DIFFERENTIAL mode, the strategy is auto-selected: semi-naive evaluation for INSERT-only changes, Delete-and-Rederive (DRed) for mixed changes, or recomputation fallback when CTE columns don't match ST storage or when the recursive term contains non-monotone operators (EXCEPT, Aggregate, Window, DISTINCT, AntiJoin, INTERSECT SET). In IMMEDIATE mode, the same semi-naive / DRed machinery runs against statement transition tables and is bounded by `pg_trickle.ivm_recursive_max_depth` to guard against unbounded recursion.
+
+#### § Recursive CTE Strategy Selection
+
+The DVM engine selects among five strategies for `WITH RECURSIVE` queries. The
+selection is logged at startup and visible via `explain_stream_table()`.
+
+| Tier | Condition | Strategy |
+|------|-----------|----------|
+| **Tier 1** | CTE is non-recursive and referenced once | Inline expansion — CTE is expanded inline; no differential overhead. |
+| **Tier 2** | CTE is non-recursive and referenced 2+ times | Shared delta — single delta computation reused across all reference sites. |
+| **Tier 3a** | CTE is recursive with monotone operators only (UNION ALL, no NOT EXISTS / aggregation) | Semi-naive evaluation — frontier-bounded delta avoids full recomputation. |
+| **Tier 3b** | CTE is recursive with non-monotone operators; base tables have primary keys | DRed (Deletion Propagation in Recursive Datalog) — handles deletions by re-deriving affected tuples. |
+| **Tier 3c** | CTE is recursive with non-monotone operators and no primary keys, or cycle in dependency graph | Full recomputation — most conservative; correct for all inputs. |
+
+**Observability**: `explain_stream_table(st_name)` returns a `recursive_cte_strategy`
+field showing which tier was selected and the reason. Example output:
+
+```json
+{
+  "recursive_cte_strategy": "semi_naive",
+  "recursive_cte_reason": "Tier 3a: monotone UNION ALL recursion with no aggregation or NOT EXISTS"
+}
+```
+
+**Example — Tier 3a (semi-naive) for hierarchical closure:**
+
+```sql
+WITH RECURSIVE ancestors AS (
+  SELECT id, parent_id FROM org_chart WHERE parent_id IS NULL
+  UNION ALL
+  SELECT c.id, c.parent_id
+  FROM org_chart c
+  JOIN ancestors a ON c.parent_id = a.id
+)
+SELECT * FROM ancestors;
+```
+
+Because the recursive term uses only `UNION ALL` and a plain `JOIN` (both
+monotone), pg_trickle selects **Tier 3a (semi-naive)**: only newly reachable
+rows are computed per delta, not the full transitive closure.
 
 #### Operators (`src/dvm/operators/`)
 
@@ -627,29 +666,37 @@ The policy is set on the convergence (fan-in) node. When multiple convergence no
 
 The `pgtrickle.diamond_groups()` SQL function exposes detected groups for operational visibility. See [SQL_REFERENCE.md](SQL_REFERENCE.md) for details.
 
-### 14. Transactional Outbox & Inbox (`src/api/outbox.rs`, `src/api/inbox.rs`)
+### 14. pg_tide Integration
 
-> **Added in v0.28.0.**
+> **Extracted in v0.46.0.** The outbox, inbox, and relay subsystems were moved
+> to the standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide)
+> extension to give event messaging its own focused release cadence and reduce
+> the surface area of `pg_trickle`.
 
-The outbox and inbox subsystems enable reliable, at-least-once event delivery between stream tables and external systems.
+#### What Stays in pg_trickle
 
-#### Outbox
+- **`attach_outbox()` integration hook** — a lightweight hook that pg_tide calls
+  after each successful refresh cycle to publish the delta summary to pg_tide's
+  outbox table. pg_trickle itself never writes to the outbox; it only invokes
+  the hook.
+- **Change buffer subscription** — pg_trickle exposes the internal change buffer
+  (`pgtrickle_changes.changes_<oid>`) as a stable interface so pg_tide consumers
+  can subscribe to raw CDC events without going through the refresh engine.
 
-When `enable_outbox(name)` is called on a stream table, the refresh engine writes a summary row to `pgtrickle.pgt_outbox_<st>` after every successful refresh. Each row records `inserted_count`, `deleted_count`, and optionally a JSON payload. For large deltas, pg_trickle switches to **claim-check mode** — the payload is stored separately and consumers get a pointer.
+#### What Lives in pg_tide
 
-Consumers read via `poll_outbox(group, consumer, ...)` which grants a **visibility lease**. Consumers must call `commit_offset()` before the lease expires, or the rows become visible again. Multiple independent **consumer groups** each maintain their own offset into the outbox.
+- `enable_outbox()` / `poll_outbox()` — outbox provisioning and polling API.
+- Consumer groups and visibility lease management.
+- Claim-check mode for large payloads.
+- `create_inbox()` / `enable_inbox_ordering()` — inbox provisioning.
+- FNV-1a consistent hashing (`inbox_is_my_partition()`) for horizontal scaling.
+- The `pgtrickle-relay` binary — forwards outbox rows to Kafka, NATS, SQS, and
+  other transports.
 
-#### Inbox
+#### API Documentation
 
-`create_inbox(name)` provisions an inbox table plus three stream tables on top of it:
-
-- `<name>_pending` — messages awaiting processing
-- `<name>_dlq` — dead-letter messages (exceeded `max_retries`)
-- `<name>_stats` — message counts grouped by `event_type`
-
-Optionally, `enable_inbox_ordering()` adds a `next_<name>` stream table that surfaces only the lowest-sequence unprocessed message per aggregate, ensuring per-aggregate ordering without application-side coordination.
-
-`inbox_is_my_partition(aggregate_id, worker_id, total_workers)` uses FNV-1a consistent hashing to route aggregates to specific workers, enabling horizontal scaling without a central coordinator.
+See the [pg_tide repository](https://github.com/trickle-labs/pg-tide) for the
+complete API reference, deployment guide, and relay architecture.
 
 ### 15. Stream Table Snapshots (`src/api/snapshot.rs`)
 
@@ -746,8 +793,7 @@ src/
 ├── api/
 │   ├── mod.rs       # Core lifecycle functions (create/alter/drop/refresh/status)
 │   ├── diagnostics.rs   # explain_st, explain_refresh_mode, dependency_tree
-│   ├── outbox.rs    # Transactional outbox API (v0.28.0)
-│   ├── inbox.rs     # Transactional inbox API (v0.28.0)
+│   ├── outbox_hook.rs   # pg_tide integration hook (attach_outbox, v0.46.0+)
 │   ├── snapshot.rs  # Stream table snapshots (v0.27.0)
 │   ├── self_monitoring.rs  # Self-monitoring setup/teardown
 │   ├── cluster.rs   # cluster_worker_summary
@@ -819,5 +865,5 @@ target's `share/extension/` directory alongside the SQL migration scripts.
 
 > **Note:** The relay binary (`pgtrickle-relay`), outbox, and inbox subsystems
 > were extracted to the standalone [`pg_tide`](https://github.com/trickle-labs/pg-tide)
-> extension in v0.46.0. See the `pg_tide` repository for the relay architecture
-> and deployment guide.
+> extension in v0.46.0. See [§ 14 pg_tide Integration](#14-pg_tide-integration)
+> and the `pg_tide` repository for the relay architecture and deployment guide.

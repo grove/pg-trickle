@@ -1,0 +1,22 @@
+-- pg_trickle 0.50.0 -> 0.51.0 upgrade migration
+--
+-- v0.51.0 — Citus Chaos Resilience & Documentation Truth
+--
+-- This release contains no SQL schema changes. All changes are:
+--   FEAT-10-01: Citus chaos test rig (docker/docker-compose.citus.yml,
+--               tests/e2e_citus_chaos_tests.rs CHAOS-5/6/7,
+--               .github/workflows/stability-tests.yml)
+--   CQ-10-02:   Remove deprecated event_driven_wake and wake_debounce_ms GUCs
+--               (src/config.rs, src/scheduler/scheduler_loop.rs)
+--   DOC-10-01:  ARCHITECTURE.md — pg_tide integration boundary section
+--   DOC-10-02:  CONFIGURATION.md — deprecation and removal banners,
+--               CDC-fires-when-disabled note
+--   DOC-10-03:  ARCHITECTURE.md — Recursive CTE strategy selection heuristic
+--   COR-10-02:  CONFIGURATION.md — pg_trickle.enabled CDC trigger note
+
+-- CQ-10-02: event_driven_wake removed; no data change needed.
+-- If this GUC appears in postgresql.conf after upgrade, PostgreSQL will emit
+-- an "unrecognized configuration parameter" warning. Remove it to suppress.
+
+-- v0.51: wake_debounce_ms removed together with event_driven_wake; no data
+-- change needed.

@@ -372,35 +372,6 @@ pub fn pg_trickle_metrics_port() -> i32 {
     PGS_METRICS_PORT.get()
 }
 
-/// WAKE-1 / O40-8: **DEPRECATED** — `pg_trickle.event_driven_wake` has no
-/// effect and will be removed in a future release.
-///
-/// **Reason for deprecation:** PostgreSQL's `LISTEN` command is not permitted
-/// inside background worker processes (`MyBackendType != B_BACKEND` —
-/// see `async.c:Async_Listen()`). Because the pg_trickle scheduler runs as a
-/// background worker, event-driven wake via `LISTEN/NOTIFY` cannot function
-/// as designed. The scheduler always uses latch-based polling
-/// (`BackgroundWorker::wait_latch(scheduler_interval_ms)`), which is the
-/// correct and supported wake mechanism for background workers.
-///
-/// **Migration:** Remove `pg_trickle.event_driven_wake = on` from
-/// `postgresql.conf` and `ALTER SYSTEM` settings. The scheduler behaviour
-/// is unchanged — it wakes at `pg_trickle.scheduler_interval_ms` intervals
-/// with efficient latch-based sleeping.
-///
-/// The GUC is preserved in v0.40.0 for upgrade compatibility (setting it
-/// emits a WARNING but does not break existing configurations). It will be
-/// removed in v1.0.
-// WAKE-1: This GUC is kept for upgrade compatibility only. Setting it to true
-// logs a WARNING in the scheduler loop (since v0.39.0 wake-truthfulness fix).
-pub static PGS_EVENT_DRIVEN_WAKE: GucSetting<bool> = GucSetting::<bool>::new(false);
-
-/// WAKE-1: Coalesce debounce interval in milliseconds.
-///
-/// **Note:** `pg_trickle.event_driven_wake` is deprecated and has no effect.
-/// This GUC is likewise deprecated and will be removed in v1.0.
-pub static PGS_WAKE_DEBOUNCE_MS: GucSetting<i32> = GucSetting::<i32>::new(10);
-
 /// Buffer table partitioning mode (Task 3.3).
 ///
 /// Controls whether change buffer tables use `PARTITION BY RANGE (lsn)`:
@@ -2168,33 +2139,6 @@ pub fn register_gucs() {
         GucFlags::default(),
     );
 
-    // WAKE-1: Event-driven scheduler wake GUCs.
-    GucRegistry::define_bool_guc(
-        c"pg_trickle.event_driven_wake",
-        c"Enable event-driven scheduler wake via LISTEN/NOTIFY (default off; not yet functional in background workers).",
-        c"Reserved for future use. PostgreSQL LISTEN is not allowed in background \
-           worker processes (MyBackendType != B_BACKEND), so enabling this has no \
-           effect — the scheduler operates in polling-only mode regardless. \
-           CDC triggers still emit pg_notify('pgtrickle_wake') for future use.",
-        &PGS_EVENT_DRIVEN_WAKE,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"pg_trickle.wake_debounce_ms",
-        c"Coalesce debounce interval (ms) after first NOTIFY wake.",
-        c"After the first pgtrickle_wake notification, the scheduler waits this \
-           many milliseconds to coalesce rapidly arriving notifications before \
-           starting a refresh tick. Lower values reduce latency; higher values \
-           reduce wake overhead during bulk DML.",
-        &PGS_WAKE_DEBOUNCE_MS,
-        1,     // min
-        5_000, // max
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-
     GucRegistry::define_bool_guc(
         c"pg_trickle.log_merge_sql",
         c"Log the generated MERGE SQL template on every refresh cycle.",
@@ -3525,16 +3469,6 @@ pub fn pg_trickle_agg_diff_cardinality_threshold() -> i32 {
 /// G13-SD: Returns the maximum recursion depth for query parser visitors.
 pub fn pg_trickle_max_parse_depth() -> usize {
     PGS_MAX_PARSE_DEPTH.get() as usize
-}
-
-/// WAKE-1: Returns whether event-driven scheduler wake is enabled.
-pub fn pg_trickle_event_driven_wake() -> bool {
-    PGS_EVENT_DRIVEN_WAKE.get()
-}
-
-/// WAKE-1: Returns the debounce interval in milliseconds.
-pub fn pg_trickle_wake_debounce_ms() -> i32 {
-    PGS_WAKE_DEBOUNCE_MS.get()
 }
 
 /// VOL-1: Returns the volatile function handling policy.

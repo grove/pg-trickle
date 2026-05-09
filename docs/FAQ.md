@@ -2556,8 +2556,6 @@ Key values to check:
 | `pg_trickle.tiered_scheduling` | `on` (fine) | `on` with all STs at `tier = 'frozen'` -- silently skips them |
 | `pg_trickle.max_consecutive_errors` | `3`-`10` | `1` -- one transient error suspends the ST permanently |
 | `pg_trickle.scheduler_interval_ms` | `100`-`1000` | Very high (e.g. `60000`) -- scheduler only wakes every 60 s |
-| `pg_trickle.event_driven_wake` | `on` | `off` -- falls back to poll-only; latency equals `scheduler_interval_ms` |
-| `pg_trickle.wake_debounce_ms` | `1`-`50` | Very high (e.g. `5000`) -- coalesces notifications for 5 s before acting |
 | `pg_trickle.auto_backoff` | `on` | Fine normally, but if refreshes take >95% of schedule it silently stretches intervals up to 8x |
 | `pg_trickle.default_schedule_seconds` | `1`-`60` | Very high -- isolated CALCULATED tables refresh very infrequently |
 | `max_worker_processes` | `>= 16` (typical) | Too low -- workers cannot be spawned; parallel mode silently stalls |
