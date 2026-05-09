@@ -14,6 +14,8 @@ use crate::error::PgTrickleError;
 #[allow(unused_imports)]
 use crate::version::Frontier;
 #[allow(unused_imports)]
+use lru::LruCache;
+#[allow(unused_imports)]
 use pgrx::prelude::*;
 #[allow(unused_imports)]
 use std::cell::{Cell, RefCell};
@@ -21,6 +23,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::collections::HashSet;
+#[allow(unused_imports)]
+use std::num::NonZeroUsize;
 #[allow(unused_imports)]
 use std::time::Instant;
 
@@ -78,13 +82,18 @@ pub(crate) struct CachedMergeTemplate {
     /// Non-deduplicated deltas (joins) may produce phantom rows that require
     /// PH-D1 with ON CONFLICT rather than MERGE.
     pub(crate) is_deduplicated: bool,
-    /// CACHE-2: Logical access timestamp for LRU eviction.
-    ///
-    /// Set to `LRU_ACCESS_COUNTER` on each read or write. When the cache
-    /// reaches `template_cache_max_entries`, the entry with the smallest
-    /// `last_used` value is evicted.
-    pub(crate) last_used: u64,
 }
+
+/// P-8: Default capacity for the MERGE template `LruCache`.
+///
+/// When `pg_trickle.template_cache_max_entries == 0` (the default, meaning
+/// "unbounded"), the LruCache is initialised with this large capacity so that
+/// no entry is ever evicted in practice. When the GUC is set to a positive
+/// value, `lru_cache_resize_if_needed()` adjusts the capacity before the next
+/// insertion, enabling O(1) eviction via the `lru` crate's built-in LRU logic.
+// 65536 is a positive non-zero compile-time literal; expect() is safe here.
+const LRU_DEFAULT_UNBOUNDED_CAP: NonZeroUsize =
+    NonZeroUsize::new(65536).expect("LRU_DEFAULT_UNBOUNDED_CAP must be non-zero");
 
 thread_local! {
     /// Per-session cache of MERGE SQL templates, keyed by `pgt_id`.
@@ -92,17 +101,15 @@ thread_local! {
     /// Cross-session invalidation (G8.1): flushed when the shared
     /// `CACHE_GENERATION` counter advances.
     ///
-    /// CACHE-2: Bounded by `pg_trickle.template_cache_max_entries` with LRU
-    /// eviction. When the cache reaches the configured limit, the entry with
-    /// the smallest `last_used` counter is evicted on the next insertion.
-    pub(crate) static MERGE_TEMPLATE_CACHE: RefCell<HashMap<i64, CachedMergeTemplate>> =
-        RefCell::new(HashMap::new());
+    /// P-8 / CACHE-2: Replaced `HashMap` + O(N) manual LRU scan with
+    /// `lru::LruCache` which provides O(1) put/get/eviction.
+    /// `LruCache::put()` automatically evicts the least-recently-used entry
+    /// when the cache is at capacity.
+    pub(crate) static MERGE_TEMPLATE_CACHE: RefCell<LruCache<i64, CachedMergeTemplate>> =
+        RefCell::new(LruCache::new(LRU_DEFAULT_UNBOUNDED_CAP));
 
     /// Local snapshot of the shared `CACHE_GENERATION` counter.
     pub(crate) static LOCAL_MERGE_CACHE_GEN: Cell<u64> = const { Cell::new(0) };
-
-    /// CACHE-2: Monotonically increasing access counter for LRU eviction.
-    static LRU_ACCESS_COUNTER: Cell<u64> = const { Cell::new(0) };
 }
 
 // ── D-2: Prepared statement tracking ────────────────────────────────
@@ -1679,42 +1686,35 @@ pub(crate) fn clear_prepared_merge_statements() {
     PREPARED_MERGE_STMTS.with(|stmts| stmts.borrow_mut().clear());
 }
 
-/// Invalidate the MERGE template cache for a ST (call on DDL changes).
-/// CACHE-2: Evict the least-recently-used entry from `MERGE_TEMPLATE_CACHE`
-/// if the cache has reached `template_cache_max_entries`.
+/// P-8: Resize the `MERGE_TEMPLATE_CACHE` LruCache to match the current
+/// `pg_trickle.template_cache_max_entries` GUC value.
 ///
-/// Called before inserting a new cache entry. No-op when
-/// `template_cache_max_entries == 0` (unbounded cache, default).
+/// Called before inserting a new cache entry.  When the GUC is 0 (default,
+/// meaning "unbounded"), the cache capacity is set to
+/// `LRU_DEFAULT_UNBOUNDED_CAP`.  The `lru::LruCache` handles eviction
+/// automatically on `put()` — no manual O(N) scan required.
 pub(crate) fn maybe_evict_lru_cache_entry() {
     let max_entries = crate::config::pg_trickle_template_cache_max_entries();
-    if max_entries <= 0 {
-        return;
-    }
+    let desired_cap = if max_entries <= 0 {
+        LRU_DEFAULT_UNBOUNDED_CAP
+    } else {
+        // max_entries is > 0 by the branch condition; fall back to the default if
+        // the conversion somehow produces zero (should never happen).
+        NonZeroUsize::new(max_entries as usize).unwrap_or(LRU_DEFAULT_UNBOUNDED_CAP)
+    };
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        let mut map = cache.borrow_mut();
-        if map.len() < max_entries as usize {
-            return;
+        let mut c = cache.borrow_mut();
+        if c.cap() != desired_cap {
+            c.resize(desired_cap);
         }
-        // Find the entry with the smallest last_used counter.
-        if let Some(&lru_key) = map.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k) {
-            map.remove(&lru_key);
-            crate::shmem::increment_template_cache_evictions();
-        }
+        // LruCache::put() will automatically evict the LRU entry when at
+        // capacity — no additional action needed here.
     });
-}
-
-/// CACHE-2: Return the next LRU access counter value and increment it.
-pub(crate) fn next_lru_tick() -> u64 {
-    LRU_ACCESS_COUNTER.with(|c| {
-        let v = c.get();
-        c.set(v.wrapping_add(1));
-        v
-    })
 }
 
 pub fn invalidate_merge_cache(pgt_id: i64) {
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&pgt_id);
+        cache.borrow_mut().pop(&pgt_id);
     });
     // D-2: Also deallocate any prepared statement for this ST.
     if PREPARED_MERGE_STMTS.with(|s| s.borrow_mut().remove(&pgt_id)) {
@@ -1755,7 +1755,9 @@ pub fn flush_local_template_cache() {
 /// a structural prewarm).  Full L0 (cross-backend) lookup is handled by the
 /// L2 catalog path in `execute_differential_refresh`.
 pub fn has_template_cache_entry(pgt_id: i64, _cache_generation: u64) -> bool {
-    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().contains_key(&pgt_id))
+    // P-8: Use peek() (shared borrow, does not update LRU order) since this
+    // is purely a membership check with no actual cache use.
+    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().peek(&pgt_id).is_some())
 }
 
 /// Wide-table MERGE hash threshold (F41: G4.6).
@@ -2366,10 +2368,10 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
     // Cache the MERGE template with LSN placeholder tokens.
     // Each refresh resolves the tokens to concrete LSN values
     // via string substitution, then executes the resolved SQL.
-    // CACHE-2: Evict LRU entry if cache is at capacity before inserting.
+    // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
     maybe_evict_lru_cache_entry();
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(
+        cache.borrow_mut().put(
             st.pgt_id,
             CachedMergeTemplate {
                 defining_query_hash: query_hash,
@@ -2384,7 +2386,6 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
                 delta_sql_template: delta_sql_template.clone(),
                 is_all_algebraic: delta_result.is_all_algebraic,
                 is_deduplicated: delta_result.is_deduplicated,
-                last_used: next_lru_tick(),
             },
         );
     });

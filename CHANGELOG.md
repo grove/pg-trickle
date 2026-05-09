@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.52.0 — DVM Hot-Path Performance](#0520--dvm-hot-path-performance)
 - [0.51.0 — Citus Chaos Resilience & Documentation Truth](#0510--citus-chaos-resilience--documentation-truth)
 - [0.50.0 — Performance, Security & Operational Hardening](#0500--performance-security--operational-hardening)
 - [0.49.1 — Repository Migration to trickle-labs/pg-trickle](#0491--repository-migration-to-trickle-labspg-trickle)
@@ -66,6 +67,58 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.52.0] — DVM Hot-Path Performance
+
+### What's New
+
+v0.52.0 eliminates four measurable hot-path costs in the DVM differential
+refresh pipeline, all identified in the v0.51.0 overall assessment (Report 11).
+
+#### P-1: O(1) Placeholder Resolution (aho-corasick)
+
+`resolve_delta_template()` previously called `.replace()` twice per source
+table OID, scanning the full SQL string for each placeholder. For a 10-table
+join (~50 KB SQL), this was 20 full-string scans per refresh cycle. v0.52.0
+replaces the loop with a single-pass [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm)
+multi-pattern replacer that resolves all `__PGS_PREV_LSN_*__` and
+`__PGS_NEW_LSN_*__` tokens in one traversal — O(template_length) regardless
+of the number of source tables.
+
+#### P-2: Thread-Local Volatility Cache
+
+`lookup_function_volatility()` and `lookup_operator_volatility()` previously
+issued one SPI round-trip to `pg_proc` / `pg_operator` for every function or
+operator name encountered during DVM parsing. A query referencing 50 functions
+triggered 50 round-trips (~50 ms overhead). v0.52.0 adds thread-local
+`HashMap<String, char>` caches so each name is resolved via SPI at most once
+per backend session. The caches are flushed by `pgtrickle.clear_caches()`.
+
+#### P-3: Lazy DiffContext Allocations
+
+`DiffContext::new()` previously initialized all maps unconditionally.
+`agg_sum_coalesce_defaults` — only needed for queries with COALESCE-wrapped
+aggregates — is now `Option<HashMap<String, String>>` and allocated lazily on
+first use. Simple scan/filter/project queries never allocate it.
+
+#### P-8: O(1) MERGE Template Cache LRU Eviction
+
+The MERGE template cache previously stored entries in a plain `HashMap` and
+found the least-recently-used entry by scanning all entries for the minimum
+`last_used` counter — O(N) per eviction. v0.52.0 replaces this with
+`lru::LruCache`, which provides O(1) eviction automatically on `put()`.
+
+#### C-1: Safety Fix in filter.rs HAVING Path
+
+Replaced a bare `.expect("BUG: …")` in the HAVING-filter delta path with a
+proper `PgTrickleError::InternalError` return. An invariant violation now
+returns a clean error rather than crashing the backend.
+
+### Upgrade Notes
+
+No SQL schema changes. No configuration changes required.
 
 ---
 

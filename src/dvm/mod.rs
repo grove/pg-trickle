@@ -191,34 +191,51 @@ pub(crate) fn check_no_remaining_placeholders_for(
 /// Returns `Err(PgTrickleError::UnresolvedPlaceholder)` if any
 /// `__PGS_[A-Z0-9_]+__` or `__PGT_[A-Z0-9_]+__` token remains after
 /// all substitution passes (A41-2).
+///
+/// P-1: Uses a single-pass `aho_corasick::AhoCorasick` multi-pattern
+/// replacer to resolve all `__PGS_PREV_LSN_{oid}__` /
+/// `__PGS_NEW_LSN_{oid}__` tokens in O(template_length) regardless of
+/// how many source OIDs are present.  The previous implementation called
+/// `.replace()` twice per OID — O(k × template_length) for k source tables.
 fn resolve_delta_template(
     template: &str,
     source_oids: &[u32],
     prev_frontier: &Frontier,
     new_frontier: &Frontier,
 ) -> Result<String, PgTrickleError> {
-    let mut sql = template.to_string();
+    // Fast path: no OIDs to resolve (e.g. constant-select or IMMEDIATE mode
+    // queries that have already had their tokens stripped).
+    if source_oids.is_empty() && !template.contains("__PGS_PREV_LSN_pgt_") {
+        let sql = template.to_string();
+        check_no_remaining_placeholders(&sql, "resolve_delta_template")?;
+        return Ok(sql);
+    }
+
+    // P-1: Build the Aho-Corasick automaton over all placeholder tokens
+    // and their replacements in a single pass.
+    let mut patterns: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
+    let mut replacements: Vec<String> = Vec::with_capacity(source_oids.len() * 2);
+
     for &oid in source_oids {
-        let prev_placeholder = format!("__PGS_PREV_LSN_{oid}__");
-        let new_placeholder = format!("__PGS_NEW_LSN_{oid}__");
-        let prev_lsn = prev_frontier.get_lsn(oid);
-        let new_lsn = new_frontier.get_lsn(oid);
-        sql = sql.replace(&prev_placeholder, &prev_lsn);
-        sql = sql.replace(&new_placeholder, &new_lsn);
+        patterns.push(format!("__PGS_PREV_LSN_{oid}__"));
+        patterns.push(format!("__PGS_NEW_LSN_{oid}__"));
+        replacements.push(prev_frontier.get_lsn(oid));
+        replacements.push(new_frontier.get_lsn(oid));
     }
 
     // ST-ST-4: Resolve pgt_-prefixed placeholders for ST source frontiers.
+    // Scan once for all pgt_-prefixed tokens, then add them to the Aho-Corasick set.
     let pgt_prefix = "__PGS_PREV_LSN_pgt_";
-    if sql.contains(pgt_prefix) {
+    if template.contains(pgt_prefix) {
         let mut search_from = 0usize;
         let mut pgt_ids: Vec<i64> = Vec::new();
-        while let Some(pos) = sql[search_from..].find(pgt_prefix) {
+        while let Some(pos) = template[search_from..].find(pgt_prefix) {
             let start = search_from + pos + pgt_prefix.len();
-            let end = sql[start..]
+            let end = template[start..]
                 .find("__")
                 .map(|p| start + p)
-                .unwrap_or(sql.len());
-            if let Ok(id) = sql[start..end].parse::<i64>()
+                .unwrap_or(template.len());
+            if let Ok(id) = template[start..end].parse::<i64>()
                 && !pgt_ids.contains(&id)
             {
                 pgt_ids.push(id);
@@ -239,10 +256,21 @@ fn resolve_delta_template(
                 .map(|sv| sv.lsn.clone())
                 .unwrap_or_else(|| "0/0".to_string());
 
-            sql = sql.replace(&format!("__PGS_PREV_LSN_pgt_{pgt_id}__"), &prev_lsn);
-            sql = sql.replace(&format!("__PGS_NEW_LSN_pgt_{pgt_id}__"), &new_lsn);
+            patterns.push(format!("__PGS_PREV_LSN_pgt_{pgt_id}__"));
+            patterns.push(format!("__PGS_NEW_LSN_pgt_{pgt_id}__"));
+            replacements.push(prev_lsn);
+            replacements.push(new_lsn);
         }
     }
+
+    // Single-pass replacement via Aho-Corasick automaton.
+    let sql = if patterns.is_empty() {
+        template.to_string()
+    } else {
+        let ac = aho_corasick::AhoCorasick::new(&patterns)
+            .map_err(|e| PgTrickleError::InternalError(format!("placeholder resolver: {e}")))?;
+        ac.replace_all(template, replacements.as_slice())
+    };
 
     // A41-2: Assert no placeholders remain.
     check_no_remaining_placeholders(&sql, "resolve_delta_template")?;

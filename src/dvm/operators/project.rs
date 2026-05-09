@@ -7,6 +7,7 @@
 //! for join children where the row ID is recomputed from the projected
 //! columns to match the full-refresh hash formula.
 
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 
 use crate::dvm::diff::{DiffContext, DiffResult, quote_ident};
@@ -73,7 +74,9 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
     // When a SUM over FULL JOIN is wrapped in COALESCE(SUM(...), 0), the ST
     // should store 0 (not NULL) when the group becomes empty.  For bare SUM
     // the ST should store NULL.  We communicate this via agg_sum_coalesce_defaults.
-    let saved_coalesce_defaults = ctx.agg_sum_coalesce_defaults.clone();
+    // P-3: agg_sum_coalesce_defaults is Option<HashMap> — only allocated on
+    // first COALESCE detection (lazy allocation).
+    let saved_coalesce_defaults = ctx.agg_sum_coalesce_defaults.take();
     for (expr, alias) in expressions.iter().zip(aliases.iter()) {
         if let crate::dvm::parser::Expr::FuncCall { func_name, args } = expr
             && func_name.eq_ignore_ascii_case("coalesce")
@@ -87,6 +90,7 @@ pub fn diff_project(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, Pg
             // Record the mapping: alias (ST col name) → default.
             let _ = alias; // alias matches the outer SELECT alias
             ctx.agg_sum_coalesce_defaults
+                .get_or_insert_with(HashMap::new)
                 .insert(column_name.clone(), default_val.clone());
         }
     }

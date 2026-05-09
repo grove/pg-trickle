@@ -874,7 +874,7 @@ pub fn execute_differential_refresh(
     let cached_non_monotonic = MERGE_TEMPLATE_CACHE.with(|cache| {
         cache
             .borrow()
-            .get(&st.pgt_id)
+            .peek(&st.pgt_id)
             .map(|entry| has_non_monotonic_cte(&entry.merge_sql_template))
             .unwrap_or(false) // no cache entry → allow promotion (A-3a guard catches it)
     });
@@ -885,7 +885,7 @@ pub fn execute_differential_refresh(
     let cached_is_deduplicated = MERGE_TEMPLATE_CACHE.with(|cache| {
         cache
             .borrow()
-            .get(&st.pgt_id)
+            .peek(&st.pgt_id)
             .map(|entry| entry.is_deduplicated)
             .unwrap_or(true) // no cache → assume dedup (safe: first cycle has no phantoms)
     });
@@ -1355,7 +1355,7 @@ pub fn execute_differential_refresh(
     } else {
         MERGE_TEMPLATE_CACHE.with(|cache| {
             let map = cache.borrow();
-            map.get(&st.pgt_id)
+            map.peek(&st.pgt_id)
                 .filter(|entry| entry.defining_query_hash == query_hash)
                 .cloned()
         })
@@ -1546,10 +1546,10 @@ pub fn execute_differential_refresh(
 
         // Store templates in the cache for subsequent refreshes.
         if !has_recursive_cte {
-            // CACHE-2: Evict LRU entry if cache is at capacity.
+            // P-8: Resize LRU cache if needed, then put() (automatically evicts LRU at capacity).
             maybe_evict_lru_cache_entry();
             MERGE_TEMPLATE_CACHE.with(|cache| {
-                cache.borrow_mut().insert(
+                cache.borrow_mut().put(
                     st.pgt_id,
                     CachedMergeTemplate {
                         defining_query_hash: query_hash,
@@ -1564,7 +1564,6 @@ pub fn execute_differential_refresh(
                         delta_sql_template: delta_sql_template.clone(),
                         is_all_algebraic: delta_result.is_all_algebraic,
                         is_deduplicated: delta_result.is_deduplicated,
-                        last_used: next_lru_tick(),
                     },
                 );
             });
@@ -2642,7 +2641,7 @@ pub fn execute_differential_refresh(
     // approach to safely handle shared change buffers across multiple STs.
     let cleanup_source_oids = MERGE_TEMPLATE_CACHE.with(|cache| {
         let map = cache.borrow();
-        map.get(&st.pgt_id)
+        map.peek(&st.pgt_id)
             .map(|entry| entry.source_oids.clone())
             .unwrap_or_default()
     });

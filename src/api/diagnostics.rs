@@ -1778,6 +1778,10 @@ pub(super) fn clear_caches() -> i64 {
     // Flush L1: thread-local MERGE_TEMPLATE_CACHE in the current backend.
     crate::refresh::flush_local_template_cache();
 
+    // P-2: Flush thread-local volatility caches so custom function/operator
+    // changes take effect immediately without a backend restart.
+    crate::dvm::parser::flush_volatility_cache();
+
     // Flush L2: truncate the shared catalog cache table.
     crate::template_cache::invalidate_all();
 
