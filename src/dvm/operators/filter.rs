@@ -127,13 +127,14 @@ pub fn diff_filter(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, PgT
     let is_window_child = matches!(unwrap_transparent(child), OpTree::Window { .. });
 
     let sql = if is_having && has_st {
-        // CORR-6: Guarded by `has_st` (ctx.st_qualified_name.is_some()),
-        // so expect() should never fire. Replaced bare .unwrap() with
-        // a descriptive message for safety.
-        let st_table = ctx
-            .st_qualified_name
-            .as_deref()
-            .expect("BUG: has_st is true but st_qualified_name is None");
+        // CORR-6: Guarded by `has_st` (ctx.st_qualified_name.is_some()).
+        // C-1: Return a clean error instead of panicking if the invariant
+        // is ever violated by a future refactor.
+        let st_table = ctx.st_qualified_name.as_deref().ok_or_else(|| {
+            PgTrickleError::InternalError(
+                "HAVING filter diff: has_st is true but st_qualified_name is None".into(),
+            )
+        })?;
         format!(
             "-- Part 1: delta rows that satisfy the predicate — pass through\n\
              SELECT __pgt_row_id, __pgt_action, {cols}\n\

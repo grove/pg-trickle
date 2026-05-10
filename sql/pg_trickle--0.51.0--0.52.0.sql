@@ -1,0 +1,20 @@
+-- pg_trickle 0.51.0 -> 0.52.0 upgrade migration
+--
+-- v0.52.0 — DVM Hot-Path Performance
+--
+-- This release contains no SQL schema changes. All changes are
+-- internal performance and safety improvements to the DVM engine:
+--
+--   P-1: O(1) placeholder resolution via aho-corasick single-pass
+--        (src/dvm/mod.rs — resolve_delta_template)
+--   P-2: Thread-local volatility cache in lookup_function_volatility()
+--        and lookup_operator_volatility() (src/dvm/parser/validation.rs)
+--   P-3: Lazy DiffContext allocations — agg_sum_coalesce_defaults is
+--        now Option<HashMap> (src/dvm/diff.rs, operators/project.rs,
+--        operators/aggregate.rs)
+--   P-8: O(1) MERGE template cache LRU eviction — replaced HashMap +
+--        manual O(N) scan with lru::LruCache (src/refresh/codegen.rs,
+--        src/refresh/merge/mod.rs)
+--   C-1: Replace expect() in filter.rs HAVING path with a clean
+--        PgTrickleError::InternalError return
+--        (src/dvm/operators/filter.rs)

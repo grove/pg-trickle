@@ -222,7 +222,11 @@ pub struct DiffContext {
     /// to determine the ELSE branch when the nonnull-count drops to zero:
     /// - `Some(default)` → use the algebraic formula (result is `default` for empty groups)
     /// - `None` → return NULL (bare SUM result for empty groups)
-    pub agg_sum_coalesce_defaults: HashMap<String, String>,
+    ///
+    /// P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate
+    /// is encountered. Most queries (scans, joins, bare aggregates) never
+    /// populate this map.
+    pub agg_sum_coalesce_defaults: Option<HashMap<String, String>>,
 }
 
 /// A41-1: Build a collision-resistant structural fingerprint of an OpTree
@@ -541,7 +545,8 @@ impl DiffContext {
             snapshot_cte_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
-            agg_sum_coalesce_defaults: HashMap::new(),
+            // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
+            agg_sum_coalesce_defaults: None,
         }
     }
 
@@ -578,7 +583,8 @@ impl DiffContext {
             snapshot_cte_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
-            agg_sum_coalesce_defaults: HashMap::new(),
+            // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
+            agg_sum_coalesce_defaults: None,
         }
     }
 

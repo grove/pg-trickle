@@ -353,7 +353,7 @@ fn test_resolve_lsn_b3_1_partial_zero_change() {
 fn test_merge_template_cache_insert_and_retrieve() {
     MERGE_TEMPLATE_CACHE.with(|cache| {
         let mut map = cache.borrow_mut();
-        map.insert(
+        map.put(
             42,
             CachedMergeTemplate {
                 defining_query_hash: 12345,
@@ -368,25 +368,24 @@ fn test_merge_template_cache_insert_and_retrieve() {
                 delta_sql_template: String::new(),
                 is_all_algebraic: false,
                 is_deduplicated: true,
-                last_used: 0,
             },
         );
     });
 
-    let entry = MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().get(&42).cloned());
+    let entry = MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().peek(&42).cloned());
     assert!(entry.is_some());
     let entry = entry.unwrap(); // nosemgrep: semgrep.rust.panic-in-sql-path
     assert_eq!(entry.defining_query_hash, 12345);
     assert_eq!(entry.source_oids, vec![100, 200]);
 
     // Cleanup
-    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().remove(&42));
+    MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow_mut().pop(&42));
 }
 
 #[test]
 fn test_invalidate_merge_cache_removes_entry() {
     MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(
+        cache.borrow_mut().put(
             99,
             CachedMergeTemplate {
                 defining_query_hash: 0,
@@ -401,14 +400,13 @@ fn test_invalidate_merge_cache_removes_entry() {
                 delta_sql_template: String::new(),
                 is_all_algebraic: false,
                 is_deduplicated: true,
-                last_used: 0,
             },
         );
     });
 
     invalidate_merge_cache(99);
 
-    let exists = MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().contains_key(&99));
+    let exists = MERGE_TEMPLATE_CACHE.with(|cache| cache.borrow().peek(&99).is_some());
     assert!(!exists);
 }
 

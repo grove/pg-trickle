@@ -18,6 +18,35 @@ pub fn max_volatility(a: char, b: char) -> char {
     }
 }
 
+// P-2: Thread-local caches for function and operator volatility lookups.
+//
+// Each backend calls `lookup_function_volatility()` once per unique
+// function name encountered during DVM parsing.  Without caching, a
+// query with 50 function calls would issue 50 SPI round-trips to
+// `pg_proc` (~1ms each = 50ms overhead per parse).  With the
+// thread-local cache, each name is resolved at most once per session.
+#[cfg(not(test))]
+thread_local! {
+    static FUNCTION_VOLATILITY_CACHE: std::cell::RefCell<std::collections::HashMap<String, char>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+
+    static OPERATOR_VOLATILITY_CACHE: std::cell::RefCell<std::collections::HashMap<String, char>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Clear the thread-local volatility caches.
+///
+/// Called by `pgtrickle.clear_caches()` so any custom-function or
+/// custom-operator volatility changes take effect without restarting.
+#[cfg(not(test))]
+pub fn flush_volatility_cache() {
+    FUNCTION_VOLATILITY_CACHE.with(|c| c.borrow_mut().clear());
+    OPERATOR_VOLATILITY_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub fn flush_volatility_cache() {}
+
 /// Look up the volatility category of a PostgreSQL function by name.
 ///
 /// Returns `'i'` (immutable), `'s'` (stable), or `'v'` (volatile).
@@ -25,12 +54,20 @@ pub fn max_volatility(a: char, b: char) -> char {
 ///
 /// For overloaded functions (multiple `pg_proc` rows with the same `proname`),
 /// returns the worst volatility across all overloads.
+///
+/// P-2: Results are cached in a thread-local `HashMap` so each function
+/// name is looked up via SPI at most once per backend session.
 #[cfg(not(test))]
 pub fn lookup_function_volatility(func_name: &str) -> Result<char, PgTrickleError> {
     // Strip schema qualification if present (e.g., "pg_catalog.lower" → "lower").
     let bare_name = func_name.rsplit('.').next().unwrap_or(func_name);
 
-    Spi::connect(|client| {
+    // P-2: Check thread-local cache before issuing an SPI round-trip.
+    if let Some(cached) = FUNCTION_VOLATILITY_CACHE.with(|c| c.borrow().get(bare_name).copied()) {
+        return Ok(cached);
+    }
+
+    let result = Spi::connect(|client| {
         let result = client.select(
             "SELECT provolatile::text FROM pg_catalog.pg_proc \
              WHERE proname = $1",
@@ -58,7 +95,12 @@ pub fn lookup_function_volatility(func_name: &str) -> Result<char, PgTrickleErro
     })
     .map_err(|e: pgrx::spi::SpiError| {
         PgTrickleError::SpiError(format!("volatility lookup failed: {e}"))
-    })
+    })?;
+
+    // P-2: Cache the result for future lookups in this session.
+    FUNCTION_VOLATILITY_CACHE.with(|c| c.borrow_mut().insert(bare_name.to_string(), result));
+
+    Ok(result)
 }
 
 /// Test-only stub: SPI is unavailable in unit tests, so assume volatile.
@@ -95,9 +137,17 @@ pub fn lookup_function_volatility(_func_name: &str) -> Result<char, PgTrickleErr
 ///
 /// Closes Gap G7.2: custom operators with volatile `oprcode` functions
 /// (e.g., PostGIS `&&` or user-defined operators) are still detected.
+///
+/// P-2: Results are cached in a thread-local `HashMap` so each operator
+/// name is looked up via SPI at most once per backend session.
 #[cfg(not(test))]
 pub fn lookup_operator_volatility(op_name: &str) -> Result<char, PgTrickleError> {
-    Spi::connect(|client| {
+    // P-2: Check thread-local cache before issuing an SPI round-trip.
+    if let Some(cached) = OPERATOR_VOLATILITY_CACHE.with(|c| c.borrow().get(op_name).copied()) {
+        return Ok(cached);
+    }
+
+    let result = Spi::connect(|client| {
         let result = client.select(
             "SELECT p.provolatile::text AS vol, \
                     COALESCE(tl.typcategory::text, 'X') AS lcat, \
@@ -155,7 +205,12 @@ pub fn lookup_operator_volatility(op_name: &str) -> Result<char, PgTrickleError>
     })
     .map_err(|e: pgrx::spi::SpiError| {
         PgTrickleError::SpiError(format!("operator volatility lookup failed: {e}"))
-    })
+    })?;
+
+    // P-2: Cache the result for future lookups in this session.
+    OPERATOR_VOLATILITY_CACHE.with(|c| c.borrow_mut().insert(op_name.to_string(), result));
+
+    Ok(result)
 }
 
 /// Test-only stub: SPI is unavailable in unit tests, so assume immutable

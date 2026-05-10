@@ -1874,7 +1874,8 @@ pub fn diff_aggregate(ctx: &mut DiffContext, op: &OpTree) -> Result<DiffResult, 
             agg_has_nonnull_aux,
             &st_col_name(&agg.alias),
             ctx.agg_sum_coalesce_defaults
-                .get(&agg.alias)
+                .as_ref()
+                .and_then(|m| m.get(&agg.alias))
                 .map(|s| s.as_str()),
         );
         merge_selects.push(format!(
