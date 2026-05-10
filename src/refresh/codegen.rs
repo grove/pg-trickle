@@ -91,9 +91,10 @@ pub(crate) struct CachedMergeTemplate {
 /// no entry is ever evicted in practice. When the GUC is set to a positive
 /// value, `lru_cache_resize_if_needed()` adjusts the capacity before the next
 /// insertion, enabling O(1) eviction via the `lru` crate's built-in LRU logic.
-// 65536 is a positive non-zero compile-time literal; expect() is safe here.
+// 65536 is a positive non-zero compile-time constant. This `expect()` evaluates
+// at compile time and can never be reached from a SQL-callable function at runtime.
 const LRU_DEFAULT_UNBOUNDED_CAP: NonZeroUsize =
-    NonZeroUsize::new(65536).expect("LRU_DEFAULT_UNBOUNDED_CAP must be non-zero");
+    NonZeroUsize::new(65536).expect("LRU_DEFAULT_UNBOUNDED_CAP must be non-zero"); // nosemgrep: semgrep.rust.panic-in-sql-path
 
 thread_local! {
     /// Per-session cache of MERGE SQL templates, keyed by `pgt_id`.
