@@ -2,15 +2,19 @@
 # OPS-10-03: Update base image SHA256 digests in Dockerfiles.
 #
 # Run this script quarterly or when a PostgreSQL patch release is needed.
-# It resolves the current linux/amd64 digest for postgres:18.3-bookworm
+# It resolves the current manifest-list (index) digest for postgres:18.3-bookworm
 # and patches the relevant Dockerfiles in-place.
+#
+# IMPORTANT: We pin the manifest-list digest (not a per-platform digest) so
+# that multi-platform builds (linux/amd64 + linux/arm64) each pull the correct
+# architecture variant.  A per-platform digest causes the wrong-arch image to
+# be fetched on the other builder, making apt-get fail with exit code 255.
 #
 # Usage:
 #   scripts/update_base_image_digests.sh
 #
 # Requirements:
-#   - docker (with manifest inspect support)
-#   - sed
+#   - docker buildx (for imagetools inspect)
 #
 # See also: CONTRIBUTING.md — "Updating base image digests"
 
@@ -20,19 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 BASE_IMAGE="postgres:18.3-bookworm"
-TARGET_PLATFORM="linux/amd64"
 
-echo "Resolving digest for ${BASE_IMAGE} (${TARGET_PLATFORM})..."
-DIGEST=$(docker manifest inspect "${BASE_IMAGE}" 2>/dev/null \
-  | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for m in d.get('manifests', []):
-    p = m.get('platform', {})
-    if p.get('os') == 'linux' and p.get('architecture') == 'amd64':
-        print(m['digest'])
-        break
-")
+# Resolve the manifest-list (OCI image index) digest — platform-agnostic.
+# This digest works for all architectures; Docker/buildx picks the right
+# platform-specific image automatically at build time.
+echo "Resolving manifest-list digest for ${BASE_IMAGE}..."
+DIGEST=$(docker buildx imagetools inspect "${BASE_IMAGE}" --format '{{.Manifest.Digest}}' 2>/dev/null)
 
 if [[ -z "${DIGEST}" ]]; then
   echo "ERROR: Could not resolve digest for ${BASE_IMAGE}" >&2
