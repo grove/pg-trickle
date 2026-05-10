@@ -36,7 +36,7 @@ RUN cargo install cargo-pgrx && \
 # Final stage: PostgreSQL with built extension
 # OPS-10-03: Pinned to exact SHA256 digest for reproducibility.
 # Run scripts/update_base_image_digests.sh to refresh quarterly.
-FROM postgres:18.3-bookworm@sha256:a40f5f7a480e2555f57baeaaf36450446c6b36ee21bdd223afd382d499ac7375
+FROM postgres:18.3-bookworm@sha256:80630f83606d8db77d30b3851b16a9f78be2d0d4dda6f7b82a1fdca5ebe3acba
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
