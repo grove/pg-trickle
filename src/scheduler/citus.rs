@@ -263,3 +263,96 @@ pub(super) fn reset_worker_failure(pgt_id: i64, worker_key: &str) {
         m.borrow_mut().remove(&(pgt_id, worker_key.to_string()));
     });
 }
+
+/// Read the current failure count for a (pgt_id, worker_key) pair.
+///
+/// Returns 0 when no entry exists.  Used in unit tests to inspect
+/// the thread-local map without triggering pgrx warnings.
+#[cfg(test)]
+fn worker_failure_count(pgt_id: i64, worker_key: &str) -> i32 {
+    CITUS_WORKER_FAILURES.with(|m| {
+        *m.borrow()
+            .get(&(pgt_id, worker_key.to_string()))
+            .unwrap_or(&0)
+    })
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // citus.rs orchestrates distributed CDC via SPI calls.  The
+    // COORD-14 failure tracking functions manipulate a thread-local map
+    // without touching SPI, so they are fully testable here.  All other
+    // functions are covered by E2E tests in tests/e2e_citus_*.rs.
+
+    /// Clear the thread-local map between tests to prevent state leakage.
+    fn clear_failures() {
+        CITUS_WORKER_FAILURES.with(|m| m.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_record_worker_failure_increments_count() {
+        clear_failures();
+        // threshold=0 avoids pgrx::warning! and shmem::increment_*
+        record_worker_failure(1, "worker-a:5432", 0);
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 1);
+        record_worker_failure(1, "worker-a:5432", 0);
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 2);
+        clear_failures();
+    }
+
+    #[test]
+    fn test_record_worker_failure_separate_pgt_ids() {
+        clear_failures();
+        record_worker_failure(10, "worker-a:5432", 0);
+        record_worker_failure(20, "worker-a:5432", 0);
+        assert_eq!(worker_failure_count(10, "worker-a:5432"), 1);
+        assert_eq!(worker_failure_count(20, "worker-a:5432"), 1);
+        clear_failures();
+    }
+
+    #[test]
+    fn test_record_worker_failure_separate_worker_keys() {
+        clear_failures();
+        record_worker_failure(1, "worker-a:5432", 0);
+        record_worker_failure(1, "worker-b:5433", 0);
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 1);
+        assert_eq!(worker_failure_count(1, "worker-b:5433"), 1);
+        clear_failures();
+    }
+
+    #[test]
+    fn test_reset_worker_failure_clears_counter() {
+        clear_failures();
+        record_worker_failure(1, "worker-a:5432", 0);
+        record_worker_failure(1, "worker-a:5432", 0);
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 2);
+
+        reset_worker_failure(1, "worker-a:5432");
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 0);
+        clear_failures();
+    }
+
+    #[test]
+    fn test_reset_worker_failure_missing_entry_is_noop() {
+        clear_failures();
+        // Resetting a non-existent entry should not panic.
+        reset_worker_failure(999, "nonexistent:5432");
+        assert_eq!(worker_failure_count(999, "nonexistent:5432"), 0);
+    }
+
+    #[test]
+    fn test_reset_worker_failure_does_not_affect_other_keys() {
+        clear_failures();
+        record_worker_failure(1, "worker-a:5432", 0);
+        record_worker_failure(1, "worker-b:5433", 0);
+
+        reset_worker_failure(1, "worker-a:5432");
+        assert_eq!(worker_failure_count(1, "worker-a:5432"), 0);
+        assert_eq!(worker_failure_count(1, "worker-b:5433"), 1);
+        clear_failures();
+    }
+}

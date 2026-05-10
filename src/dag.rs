@@ -4392,4 +4392,103 @@ mod tests {
         let order = eu.topological_order().unwrap();
         assert_eq!(order.len(), 1);
     }
+
+    // ── T-2: Proptest — DAG cycle detection and topological order invariants ──
+
+    #[cfg(test)]
+    mod proptest_dag {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Build an acyclic chain DAG: ST(1) → ST(2) → … → ST(n).
+        fn build_chain_dag(n: i64) -> StDag {
+            let mut dag = StDag::new();
+            for id in 1..=n {
+                dag.add_st_node(make_st(id, &format!("st{id}")));
+            }
+            // Chain: base → 1 → 2 → … → n
+            dag.add_edge(NodeId::BaseTable(0), NodeId::StreamTable(1));
+            for id in 1..n {
+                dag.add_edge(NodeId::StreamTable(id), NodeId::StreamTable(id + 1));
+            }
+            dag
+        }
+
+        /// Build a DAG with a back-edge from ST(n) to ST(1), creating a cycle.
+        fn build_cycle_dag(n: i64) -> StDag {
+            let mut dag = build_chain_dag(n);
+            dag.add_edge(NodeId::StreamTable(n), NodeId::StreamTable(1));
+            dag
+        }
+
+        proptest! {
+            /// An acyclic chain DAG must never trigger cycle detection.
+            #[test]
+            fn prop_acyclic_chain_detect_cycles_ok(n in 1i64..=20i64) {
+                let dag = build_chain_dag(n);
+                prop_assert!(
+                    dag.detect_cycles().is_ok(),
+                    "acyclic chain of length {n} should pass detect_cycles"
+                );
+            }
+
+            /// A chain with a back-edge must be detected as cyclic.
+            #[test]
+            fn prop_chain_with_back_edge_is_cyclic(n in 2i64..=20i64) {
+                let dag = build_cycle_dag(n);
+                prop_assert!(
+                    dag.detect_cycles().is_err(),
+                    "chain of length {n} with back-edge should fail detect_cycles"
+                );
+            }
+
+            /// Topological order of an acyclic chain preserves the dependency order.
+            ///
+            /// In a chain 1 → 2 → … → n (with base → 1), the topological order
+            /// must place each ST before its downstream successor.
+            #[test]
+            fn prop_topological_order_respects_edges(n in 2i64..=15i64) {
+                let dag = build_chain_dag(n);
+                let order = dag.topological_order().expect("acyclic chain should have topo order");
+
+                // Build a position map: NodeId → index in topological order.
+                let pos: std::collections::HashMap<NodeId, usize> = order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, node)| (*node, i))
+                    .collect();
+
+                // For each ST edge (id → id+1), verify id comes before id+1.
+                for id in 1..n {
+                    let upstream = NodeId::StreamTable(id);
+                    let downstream = NodeId::StreamTable(id + 1);
+                    let up_pos = pos.get(&upstream).copied().unwrap_or(usize::MAX);
+                    let dn_pos = pos.get(&downstream).copied().unwrap_or(usize::MAX);
+                    prop_assert!(
+                        up_pos < dn_pos,
+                        "ST({id}) must appear before ST({}) in topo order",
+                        id + 1
+                    );
+                }
+            }
+
+            /// Adding any single back-edge to an acyclic DAG makes it cyclic.
+            #[test]
+            fn prop_single_back_edge_always_creates_cycle(
+                n in 2i64..=10i64,
+                back in 2i64..=10i64,
+            ) {
+                // Clamp back to [2, n] so the back-edge is valid.
+                let back = (back % (n - 1) + 2).min(n);
+                // Build acyclic chain, then add ST(back) → ST(back - 1).
+                let mut dag = build_chain_dag(n);
+                dag.add_edge(NodeId::StreamTable(back), NodeId::StreamTable(back - 1));
+                prop_assert!(
+                    dag.detect_cycles().is_err(),
+                    "adding back-edge ST({back}) → ST({}) should create a cycle",
+                    back - 1
+                );
+            }
+        }
+    }
 }

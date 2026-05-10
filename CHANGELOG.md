@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.53.0 — Unit Test Depth Sweep](#0530--unit-test-depth-sweep)
 - [0.52.0 — DVM Hot-Path Performance](#0520--dvm-hot-path-performance)
 - [0.51.0 — Citus Chaos Resilience & Documentation Truth](#0510--citus-chaos-resilience--documentation-truth)
 - [0.50.0 — Performance, Security & Operational Hardening](#0500--performance-security--operational-hardening)
@@ -67,6 +68,77 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.53.0] — Unit Test Depth Sweep
+
+### What's New
+
+v0.53.0 fills the unit-test coverage gaps identified in the v0.51.0 overall
+assessment (Report 11, findings T-2 through T-9). Six scheduler and parser
+submodules that previously had zero inline `#[test]` coverage now each have a
+`#[cfg(test)]` block covering their pure logic. Property-based testing is
+extended to the DAG cycle detection and topological sort invariants. Two fixed
+sleeps in the buffer-growth E2E tests are replaced with adaptive polling.
+
+### Changed
+
+#### Scheduler Module Unit Tests
+
+Five scheduler submodules previously had zero inline unit tests. New
+`#[cfg(test)]` blocks have been added to:
+
+- **`dispatch.rs`** — `parse_worker_extra` (format validation, edge cases,
+  rejected zero/negative job IDs) and `compute_adaptive_poll_ms` (exponential
+  backoff, completion reset, no-inflight fast path).
+- **`pool.rs`** — `pool_size_from_config_value` (negative GUC values clamped
+  to zero, positive values preserved).
+- **`watermark.rs`** — `should_emit_holdback_warning` pure rate-limit helper:
+  disabled threshold, age threshold, 60-second cooldown, saturating subtraction
+  on clock skew.
+- **`citus.rs`** — `record_worker_failure` / `reset_worker_failure` thread-local
+  failure counter: increment, per-key isolation, reset-to-zero, no-op on missing
+  key.
+- **`scheduler_loop.rs`** — Structural compile-check test (module contains only
+  BGW entry points; E2E coverage in `tests/e2e_bgworker_tests.rs`).
+
+#### DVM Parser Unit Tests
+
+`dvm/parser/sublinks.rs` had zero inline unit tests. New tests cover:
+
+- `extract_bare_scalar_subquery_sql` — parenthesised SELECT, missing parens,
+  whitespace trimming, case-insensitive SELECT detection.
+- `is_known_aggregate` — known built-ins, statistical, ordered-set, and range
+  aggregates; unknown function names.
+- `is_star_only` — bare `*`, qualified `t.*`, empty slice, multi-expression.
+- `rewrite_having_expr` — COUNT(*) and SUM rewrites, non-matching functions,
+  recursive rewrite inside BinaryOp, literal pass-through.
+- `split_exists_correlation` — simple equality extraction, non-correlation
+  remaining predicates, AND conjunction splitting.
+- `collect_tree_source_aliases` — single Scan, InnerJoin, Filter, Subquery.
+
+#### Proptest Extension (T-2)
+
+Two new `proptest!` blocks in `src/dag.rs`:
+
+- **Acyclic invariant** — randomly generated chain DAGs of length 1–20 always
+  pass `detect_cycles()`.
+- **Cyclic invariant** — adding a single back-edge to any chain of length 2–20
+  is always detected as a cycle by `detect_cycles()`.
+- **Topological order invariant** — for any acyclic chain, `topological_order()`
+  places every upstream node before its downstream successor.
+- **Back-edge invariant** — any single back-edge added to an acyclic DAG creates
+  a cycle (parameterised over both chain length and back-edge position).
+
+#### Buffer-Growth Sleep Removal (T-8, T-9)
+
+`tests/e2e_buffer_growth_tests.rs` contained two long fixed sleeps in the
+sustained-write test:
+
+- **7-second sleep** replaced with `db.wait_for_auto_refresh("sustained_st", 30s)`.
+- **20-second sleep** replaced with `db.wait_for_condition(...)` polling until
+  the stream table count matches the source count, with a 60-second cap.
 
 ---
 

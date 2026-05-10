@@ -374,7 +374,13 @@ async fn test_buffer_growth_sustained_high_write_rate() {
     .await;
 
     // Wait for initial refresh
-    tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+    let had_refresh = db
+        .wait_for_auto_refresh("sustained_st", std::time::Duration::from_secs(30))
+        .await;
+    assert!(
+        had_refresh,
+        "Initial auto-refresh of sustained_st should complete within 30 seconds"
+    );
 
     // Insert in rapid bursts (10 batches of 5000 rows in quick succession)
     for b in 0..10 {
@@ -387,8 +393,23 @@ async fn test_buffer_growth_sustained_high_write_rate() {
         .await;
     }
 
-    // Wait for the scheduler to catch up (3× the interval + buffer)
-    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    // Wait for the scheduler to catch up (adaptive polling instead of a fixed sleep).
+    let caught_up = db
+        .wait_for_condition(
+            "scheduler catchup after sustained burst",
+            "SELECT (SELECT SUM(cnt)::bigint FROM sustained_st) \
+              = (SELECT COUNT(*)::bigint FROM sustained_source)",
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+    // If the condition isn't met within the timeout, the final manual refresh
+    // below will still produce the correct result — we log a diagnostic here.
+    if !caught_up {
+        eprintln!(
+            "wait_for_condition: scheduler did not catch up within 60 s — forcing manual refresh"
+        );
+    }
 
     // Force a final manual refresh to ensure consistency
     db.execute("SELECT pgtrickle.refresh_stream_table('sustained_st')")

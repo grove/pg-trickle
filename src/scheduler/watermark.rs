@@ -257,3 +257,92 @@ pub(super) fn emit_holdback_warning_if_needed(oldest_txn_age_secs: u64) {
         warn_secs,
     );
 }
+
+/// Pure helper: decide whether to emit a holdback warning.
+///
+/// Extracted so it can be unit-tested without a pgrx backend.
+///
+/// # Arguments
+/// - `warn_secs` — `pg_trickle.frontier_holdback_warn_seconds` GUC value.
+/// - `oldest_txn_age_secs` — age of the oldest long-running transaction.
+/// - `last_warn_secs` — Unix timestamp of the previous WARNING (0 if never).
+/// - `now_secs` — current Unix timestamp.
+///
+/// # Returns
+/// `true` when a WARNING should be emitted (and the caller should update
+/// `LAST_HOLDBACK_WARN_SECS` to `now_secs`).
+pub(super) fn should_emit_holdback_warning(
+    warn_secs: i32,
+    oldest_txn_age_secs: u64,
+    last_warn_secs: u64,
+    now_secs: u64,
+) -> bool {
+    if warn_secs <= 0 {
+        return false;
+    }
+    if oldest_txn_age_secs < warn_secs as u64 {
+        return false;
+    }
+    // Rate-limit: at most once per 60 seconds.
+    now_secs.saturating_sub(last_warn_secs) >= 60
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // watermark.rs contains frontier holdback logic.  The main entry points
+    // call SPI and read pgrx GUCs, so they require a PostgreSQL backend.
+    // `should_emit_holdback_warning` is a pure extraction of the rate-limit
+    // decision and is fully unit-testable here.
+
+    #[test]
+    fn test_should_emit_warning_disabled_when_warn_secs_zero() {
+        // Threshold disabled — never emit.
+        assert!(!should_emit_holdback_warning(0, 9999, 0, 9999));
+    }
+
+    #[test]
+    fn test_should_emit_warning_disabled_when_warn_secs_negative() {
+        assert!(!should_emit_holdback_warning(-5, 9999, 0, 9999));
+    }
+
+    #[test]
+    fn test_should_emit_warning_below_age_threshold() {
+        // Transaction age (30s) is below warn threshold (60s) — no warning.
+        assert!(!should_emit_holdback_warning(60, 30, 0, 100));
+    }
+
+    #[test]
+    fn test_should_emit_warning_at_age_threshold() {
+        // Transaction age equals warn threshold — should emit.
+        assert!(should_emit_holdback_warning(60, 60, 0, 200));
+    }
+
+    #[test]
+    fn test_should_emit_warning_above_age_threshold_first_time() {
+        // First warning (last_warn=0, now=100): 100 - 0 = 100 >= 60 → emit.
+        assert!(should_emit_holdback_warning(30, 120, 0, 100));
+    }
+
+    #[test]
+    fn test_should_emit_warning_rate_limited() {
+        // Emitted 30s ago (100 - 70 = 30 < 60) → suppress.
+        assert!(!should_emit_holdback_warning(30, 120, 70, 100));
+    }
+
+    #[test]
+    fn test_should_emit_warning_rate_limit_expired() {
+        // Last emitted 70s ago (170 - 100 = 70 >= 60) → emit again.
+        assert!(should_emit_holdback_warning(30, 120, 100, 170));
+    }
+
+    #[test]
+    fn test_should_emit_warning_saturating_sub_overflow() {
+        // now_secs < last_warn_secs (clock skew) — saturating_sub returns 0,
+        // which is < 60 → rate-limit fires and suppresses the warning.
+        assert!(!should_emit_holdback_warning(30, 120, 200, 100));
+    }
+}

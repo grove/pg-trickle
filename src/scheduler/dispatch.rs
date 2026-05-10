@@ -1049,3 +1049,131 @@ pub fn reconcile_parallel_state() {
         }
     }
 }
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_worker_extra ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_worker_extra_valid() {
+        let (db, job_id) = parse_worker_extra("mydb|42").unwrap();
+        assert_eq!(db, "mydb");
+        assert_eq!(job_id, 42);
+    }
+
+    #[test]
+    fn test_parse_worker_extra_valid_large_job_id() {
+        let (db, job_id) = parse_worker_extra("production_db|9999999").unwrap();
+        assert_eq!(db, "production_db");
+        assert_eq!(job_id, 9999999);
+    }
+
+    #[test]
+    fn test_parse_worker_extra_db_with_hyphens() {
+        let (db, job_id) = parse_worker_extra("my-app-db|100").unwrap();
+        assert_eq!(db, "my-app-db");
+        assert_eq!(job_id, 100);
+    }
+
+    #[test]
+    fn test_parse_worker_extra_missing_separator() {
+        assert!(parse_worker_extra("mydb42").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_empty_string() {
+        assert!(parse_worker_extra("").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_empty_db_name() {
+        // Empty db_name is rejected.
+        assert!(parse_worker_extra("|42").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_negative_job_id() {
+        // Negative job_id is rejected (job_id <= 0 check).
+        assert!(parse_worker_extra("mydb|-1").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_zero_job_id() {
+        // Zero job_id is rejected.
+        assert!(parse_worker_extra("mydb|0").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_non_numeric_job_id() {
+        assert!(parse_worker_extra("mydb|abc").is_none());
+    }
+
+    #[test]
+    fn test_parse_worker_extra_extra_separators_in_db_name() {
+        // splitn(2, '|') means anything after the first '|' is the job_id field.
+        // A db name containing '|' is not valid but the second '|' becomes part
+        // of the job_id string which fails to parse as i64.
+        assert!(parse_worker_extra("my|db|42").is_none());
+    }
+
+    // ── compute_adaptive_poll_ms ──────────────────────────────────────────
+
+    #[test]
+    fn test_compute_adaptive_poll_no_inflight_returns_base() {
+        // When no workers are in-flight, return the full base interval.
+        assert_eq!(compute_adaptive_poll_ms(100, false, false, 5000), 5000);
+        assert_eq!(compute_adaptive_poll_ms(20, true, false, 1000), 1000);
+    }
+
+    #[test]
+    fn test_compute_adaptive_poll_completion_resets_to_min() {
+        // After a worker completes, reset to ADAPTIVE_POLL_MIN_MS.
+        assert_eq!(
+            compute_adaptive_poll_ms(200, true, true, 5000),
+            ADAPTIVE_POLL_MIN_MS
+        );
+    }
+
+    #[test]
+    fn test_compute_adaptive_poll_doubles_each_tick() {
+        // With in-flight workers and no completion: double, capped at 200.
+        assert_eq!(compute_adaptive_poll_ms(20, false, true, 5000), 40);
+        assert_eq!(compute_adaptive_poll_ms(40, false, true, 5000), 80);
+        assert_eq!(compute_adaptive_poll_ms(80, false, true, 5000), 160);
+        assert_eq!(compute_adaptive_poll_ms(160, false, true, 5000), 200);
+        // Already at max — stays capped.
+        assert_eq!(compute_adaptive_poll_ms(200, false, true, 5000), 200);
+    }
+
+    #[test]
+    fn test_compute_adaptive_poll_min_boundary() {
+        assert_eq!(
+            ADAPTIVE_POLL_MIN_MS, 20,
+            "min poll interval should be 20 ms"
+        );
+        assert_eq!(
+            compute_adaptive_poll_ms(0, false, true, 5000),
+            0,
+            "saturating_mul(2) of 0 stays 0"
+        );
+    }
+
+    // ── ParallelDispatchState ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parallel_dispatch_state_new_no_inflight() {
+        let state = ParallelDispatchState::new();
+        assert!(
+            !state.has_inflight(),
+            "new state should have no in-flight workers"
+        );
+        assert_eq!(state.per_db_inflight, 0);
+        assert_eq!(state.dag_version, 0);
+        assert_eq!(state.adaptive_poll_ms, ADAPTIVE_POLL_MIN_MS);
+        assert_eq!(state.completions_this_tick, 0);
+    }
+}

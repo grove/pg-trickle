@@ -1,0 +1,19 @@
+-- pg_trickle 0.52.0 -> 0.53.0 upgrade migration
+--
+-- v0.53.0 — Unit Test Depth Sweep
+--
+-- This release contains no SQL schema changes. All changes are
+-- internal test coverage improvements and test reliability fixes:
+--
+--   T-2: Unit tests added to scheduler/dispatch.rs
+--        (parse_worker_extra, compute_adaptive_poll_ms, ParallelDispatchState)
+--   T-4: Unit tests added to scheduler/pool.rs, watermark.rs, citus.rs,
+--        scheduler_loop.rs (pure-helper extraction + inline test modules)
+--   T-6: Unit tests added to dvm/parser/sublinks.rs
+--        (22 tests: extract_bare_scalar_subquery_sql, is_known_aggregate,
+--        is_star_only, rewrite_having_expr, split_exists_correlation,
+--        collect_tree_source_aliases)
+--   T-8: Proptest coverage extended in dag.rs
+--        (4 property-based tests: acyclic chains, back-edge cycles,
+--        topological order, single back-edge cycle)
+--   T-9: Fixed sleeps replaced with adaptive polling in e2e_buffer_growth_tests.rs
