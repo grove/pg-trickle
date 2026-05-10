@@ -6557,3 +6557,395 @@ pub(crate) fn rewrite_having_expr(expr: &Expr, aggregates: &[AggExpr]) -> Expr {
 pub(crate) fn is_star_only(exprs: &[Expr]) -> bool {
     exprs.len() == 1 && matches!(exprs[0], Expr::Star { table_alias: None })
 }
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dvm::parser::types::{AggExpr, AggFunc};
+
+    // Helper: build a minimal AggExpr for testing rewrite_having_expr.
+    fn make_count_star_agg(alias: &str) -> AggExpr {
+        AggExpr {
+            function: AggFunc::CountStar,
+            argument: None,
+            alias: alias.to_string(),
+            is_distinct: false,
+            second_arg: None,
+            filter: None,
+            order_within_group: None,
+        }
+    }
+
+    fn make_sum_agg(col: &str, alias: &str) -> AggExpr {
+        AggExpr {
+            function: AggFunc::Sum,
+            argument: Some(Expr::ColumnRef {
+                table_alias: None,
+                column_name: col.to_string(),
+            }),
+            alias: alias.to_string(),
+            is_distinct: false,
+            second_arg: None,
+            filter: None,
+            order_within_group: None,
+        }
+    }
+
+    // Helper: build a minimal Scan node for OpTree tests.
+    fn make_scan(alias: &str) -> OpTree {
+        OpTree::Scan {
+            table_oid: 0,
+            table_name: alias.to_string(),
+            schema: "public".to_string(),
+            columns: vec![],
+            pk_columns: vec![],
+            alias: alias.to_string(),
+        }
+    }
+
+    // ── extract_bare_scalar_subquery_sql ─────────────────────────────────
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_valid() {
+        let result = extract_bare_scalar_subquery_sql("(SELECT 1)");
+        assert_eq!(result, Some("SELECT 1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_with_whitespace() {
+        let result = extract_bare_scalar_subquery_sql("  (  SELECT count(*) FROM t  )  ");
+        assert_eq!(result, Some("SELECT count(*) FROM t".to_string()));
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_no_parens() {
+        assert!(extract_bare_scalar_subquery_sql("SELECT 1").is_none());
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_only_open_paren() {
+        assert!(extract_bare_scalar_subquery_sql("(SELECT 1").is_none());
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_not_a_select() {
+        // Parenthesised expression that doesn't start with SELECT.
+        assert!(extract_bare_scalar_subquery_sql("(42)").is_none());
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_case_insensitive() {
+        // "select" (lowercase) should also be accepted.
+        let result = extract_bare_scalar_subquery_sql("(select count(*) from t)");
+        assert_eq!(result, Some("select count(*) from t".to_string()));
+    }
+
+    #[test]
+    fn test_extract_bare_scalar_subquery_sql_empty() {
+        assert!(extract_bare_scalar_subquery_sql("").is_none());
+    }
+
+    // ── is_known_aggregate ───────────────────────────────────────────────
+
+    #[test]
+    fn test_is_known_aggregate_basic_aggregates() {
+        for name in ["count", "sum", "avg", "min", "max"] {
+            assert!(is_known_aggregate(name), "{name} should be known");
+        }
+    }
+
+    #[test]
+    fn test_is_known_aggregate_string_aggregates() {
+        assert!(is_known_aggregate("string_agg"));
+        assert!(is_known_aggregate("array_agg"));
+        assert!(is_known_aggregate("json_agg"));
+        assert!(is_known_aggregate("jsonb_agg"));
+    }
+
+    #[test]
+    fn test_is_known_aggregate_statistical() {
+        assert!(is_known_aggregate("stddev"));
+        assert!(is_known_aggregate("variance"));
+        assert!(is_known_aggregate("corr"));
+        assert!(is_known_aggregate("regr_slope"));
+    }
+
+    #[test]
+    fn test_is_known_aggregate_ordered_set() {
+        assert!(is_known_aggregate("percentile_cont"));
+        assert!(is_known_aggregate("percentile_disc"));
+        assert!(is_known_aggregate("mode"));
+    }
+
+    #[test]
+    fn test_is_known_aggregate_range_aggregates() {
+        assert!(is_known_aggregate("range_agg"));
+        assert!(is_known_aggregate("range_intersect_agg"));
+    }
+
+    #[test]
+    fn test_is_known_aggregate_unknown_function() {
+        assert!(!is_known_aggregate("lower"));
+        assert!(!is_known_aggregate("upper"));
+        assert!(!is_known_aggregate("my_custom_agg"));
+        assert!(!is_known_aggregate(""));
+    }
+
+    // ── is_star_only ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_star_only_single_star() {
+        assert!(is_star_only(&[Expr::Star { table_alias: None }]));
+    }
+
+    #[test]
+    fn test_is_star_only_qualified_star_is_not_star_only() {
+        // `table.*` is not a bare `*`.
+        assert!(!is_star_only(&[Expr::Star {
+            table_alias: Some("t".to_string()),
+        }]));
+    }
+
+    #[test]
+    fn test_is_star_only_empty_exprs() {
+        assert!(!is_star_only(&[]));
+    }
+
+    #[test]
+    fn test_is_star_only_multiple_exprs() {
+        assert!(!is_star_only(&[
+            Expr::Star { table_alias: None },
+            Expr::ColumnRef {
+                table_alias: None,
+                column_name: "id".to_string(),
+            },
+        ]));
+    }
+
+    #[test]
+    fn test_is_star_only_non_star_expr() {
+        assert!(!is_star_only(&[Expr::ColumnRef {
+            table_alias: None,
+            column_name: "id".to_string(),
+        }]));
+    }
+
+    // ── rewrite_having_expr ──────────────────────────────────────────────
+
+    #[test]
+    fn test_rewrite_having_expr_count_star_rewritten() {
+        // COUNT(*) in HAVING → rewritten to the target-list alias column.
+        let aggs = vec![make_count_star_agg("__pgt_cnt")];
+        let expr = Expr::FuncCall {
+            func_name: "count".to_string(),
+            args: vec![Expr::Raw("*".to_string())],
+        };
+        let result = rewrite_having_expr(&expr, &aggs);
+        match result {
+            Expr::ColumnRef {
+                table_alias,
+                column_name,
+            } => {
+                assert!(table_alias.is_none());
+                assert_eq!(column_name, "__pgt_cnt");
+            }
+            other => panic!("expected ColumnRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_having_expr_sum_with_arg_rewritten() {
+        let aggs = vec![make_sum_agg("amount", "__pgt_total")];
+        let expr = Expr::FuncCall {
+            func_name: "sum".to_string(),
+            args: vec![Expr::ColumnRef {
+                table_alias: None,
+                column_name: "amount".to_string(),
+            }],
+        };
+        let result = rewrite_having_expr(&expr, &aggs);
+        match result {
+            Expr::ColumnRef {
+                table_alias,
+                column_name,
+            } => {
+                assert!(table_alias.is_none());
+                assert_eq!(column_name, "__pgt_total");
+            }
+            other => panic!("expected ColumnRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_having_expr_no_match_unchanged() {
+        // A function not in the agg list is left as-is.
+        let aggs = vec![make_count_star_agg("__pgt_cnt")];
+        let expr = Expr::FuncCall {
+            func_name: "lower".to_string(),
+            args: vec![Expr::ColumnRef {
+                table_alias: None,
+                column_name: "name".to_string(),
+            }],
+        };
+        let result = rewrite_having_expr(&expr, &aggs);
+        // Should be unchanged.
+        match result {
+            Expr::FuncCall { func_name, args } => {
+                assert_eq!(func_name, "lower");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected FuncCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_having_expr_binary_op_recurses() {
+        // BinaryOp containing a matching aggregate gets rewritten inside.
+        let aggs = vec![make_count_star_agg("__pgt_cnt")];
+        let expr = Expr::BinaryOp {
+            op: ">".to_string(),
+            left: Box::new(Expr::FuncCall {
+                func_name: "count".to_string(),
+                args: vec![Expr::Raw("*".to_string())],
+            }),
+            right: Box::new(Expr::Literal("10".to_string())),
+        };
+        let result = rewrite_having_expr(&expr, &aggs);
+        match result {
+            Expr::BinaryOp { op, left, .. } => {
+                assert_eq!(op, ">");
+                match *left {
+                    Expr::ColumnRef { column_name, .. } => {
+                        assert_eq!(column_name, "__pgt_cnt");
+                    }
+                    other => panic!("expected ColumnRef inside BinaryOp.left, got {other:?}"),
+                }
+            }
+            other => panic!("expected BinaryOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_having_expr_literal_passes_through() {
+        let aggs = vec![make_count_star_agg("__pgt_cnt")];
+        let expr = Expr::Literal("42".to_string());
+        match rewrite_having_expr(&expr, &aggs) {
+            Expr::Literal(v) => assert_eq!(v, "42"),
+            other => panic!("expected Literal, got {other:?}"),
+        }
+    }
+
+    // ── collect_tree_source_aliases ──────────────────────────────────────
+
+    #[test]
+    fn test_collect_tree_source_aliases_single_scan() {
+        let tree = make_scan("orders");
+        let aliases = collect_tree_source_aliases(&tree);
+        assert_eq!(aliases, vec!["orders"]);
+    }
+
+    #[test]
+    fn test_collect_tree_source_aliases_inner_join() {
+        let tree = OpTree::InnerJoin {
+            condition: Expr::Literal("TRUE".to_string()),
+            left: Box::new(make_scan("orders")),
+            right: Box::new(make_scan("customers")),
+        };
+        let mut aliases = collect_tree_source_aliases(&tree);
+        aliases.sort();
+        assert_eq!(aliases, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn test_collect_tree_source_aliases_filter_over_scan() {
+        let tree = OpTree::Filter {
+            predicate: Expr::Literal("TRUE".to_string()),
+            child: Box::new(make_scan("orders")),
+        };
+        assert_eq!(collect_tree_source_aliases(&tree), vec!["orders"]);
+    }
+
+    #[test]
+    fn test_collect_tree_source_aliases_subquery() {
+        let tree = OpTree::Subquery {
+            alias: "sub".to_string(),
+            column_aliases: vec![],
+            child: Box::new(make_scan("orders")),
+        };
+        assert_eq!(collect_tree_source_aliases(&tree), vec!["sub"]);
+    }
+
+    // ── split_exists_correlation ─────────────────────────────────────────
+
+    #[test]
+    fn test_split_exists_correlation_simple_equality() {
+        // inner.id = outer.order_id → extracted as correlation pair.
+        let inner_aliases = vec!["inner_t".to_string()];
+        let expr = Expr::BinaryOp {
+            op: "=".to_string(),
+            left: Box::new(Expr::ColumnRef {
+                table_alias: Some("inner_t".to_string()),
+                column_name: "id".to_string(),
+            }),
+            right: Box::new(Expr::ColumnRef {
+                table_alias: Some("outer_t".to_string()),
+                column_name: "order_id".to_string(),
+            }),
+        };
+        let (corr, remaining) = split_exists_correlation(&expr, &inner_aliases);
+        assert_eq!(corr.len(), 1, "one correlation pair expected");
+        assert!(remaining.is_none(), "no remaining predicates");
+    }
+
+    #[test]
+    fn test_split_exists_correlation_non_correlation_kept_as_remaining() {
+        // A predicate that references only the inner table stays in remaining.
+        let inner_aliases = vec!["inner_t".to_string()];
+        let expr = Expr::BinaryOp {
+            op: ">".to_string(),
+            left: Box::new(Expr::ColumnRef {
+                table_alias: Some("inner_t".to_string()),
+                column_name: "amount".to_string(),
+            }),
+            right: Box::new(Expr::Literal("0".to_string())),
+        };
+        let (corr, remaining) = split_exists_correlation(&expr, &inner_aliases);
+        assert!(corr.is_empty(), "no correlation pairs expected");
+        assert!(remaining.is_some(), "non-correlation predicate should stay");
+    }
+
+    #[test]
+    fn test_split_exists_correlation_and_conjunction_splits() {
+        // AND(corr, filter) → corr extracted, filter in remaining.
+        let inner_aliases = vec!["inner_t".to_string()];
+        let corr_pred = Expr::BinaryOp {
+            op: "=".to_string(),
+            left: Box::new(Expr::ColumnRef {
+                table_alias: Some("inner_t".to_string()),
+                column_name: "id".to_string(),
+            }),
+            right: Box::new(Expr::ColumnRef {
+                table_alias: Some("outer_t".to_string()),
+                column_name: "inner_id".to_string(),
+            }),
+        };
+        let filter_pred = Expr::BinaryOp {
+            op: ">".to_string(),
+            left: Box::new(Expr::ColumnRef {
+                table_alias: Some("inner_t".to_string()),
+                column_name: "amount".to_string(),
+            }),
+            right: Box::new(Expr::Literal("0".to_string())),
+        };
+        let and_expr = Expr::BinaryOp {
+            op: "AND".to_string(),
+            left: Box::new(corr_pred),
+            right: Box::new(filter_pred),
+        };
+        let (corr, remaining) = split_exists_correlation(&and_expr, &inner_aliases);
+        assert_eq!(corr.len(), 1);
+        assert!(remaining.is_some());
+    }
+}

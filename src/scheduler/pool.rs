@@ -21,7 +21,15 @@ use super::{
 ///
 /// Returns 0 (the default) when the persistent worker pool is disabled.
 pub(crate) fn configured_worker_pool_size() -> usize {
-    config::pg_trickle_worker_pool_size().max(0) as usize
+    pool_size_from_config_value(config::pg_trickle_worker_pool_size())
+}
+
+/// Convert the raw GUC value (which may be negative) to a valid pool size.
+///
+/// Exposed as a pure helper so it can be unit-tested without a pgrx backend.
+#[inline]
+pub(crate) fn pool_size_from_config_value(raw: i32) -> usize {
+    raw.max(0) as usize
 }
 
 /// SCAL-5: Persistent worker pool coordination.
@@ -239,4 +247,39 @@ fn execute_pool_worker_tick(db_name: &str, worker_idx: u32) -> bool {
     }));
 
     true
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // pool.rs consists primarily of BGW registration and SPI-calling functions
+    // that require a PostgreSQL backend to run.  Pure helpers like
+    // `pool_size_from_config_value` are extracted and tested here; the
+    // remaining behaviour is covered by E2E tests in tests/e2e_bgworker_tests.rs.
+
+    #[test]
+    fn test_pool_size_from_config_value_zero() {
+        assert_eq!(pool_size_from_config_value(0), 0);
+    }
+
+    #[test]
+    fn test_pool_size_from_config_value_positive() {
+        assert_eq!(pool_size_from_config_value(4), 4);
+        assert_eq!(pool_size_from_config_value(16), 16);
+    }
+
+    #[test]
+    fn test_pool_size_from_config_value_negative_clamped_to_zero() {
+        // GUC may return negative values when misconfigured; clamp to 0.
+        assert_eq!(pool_size_from_config_value(-1), 0);
+        assert_eq!(pool_size_from_config_value(i32::MIN), 0);
+    }
+
+    #[test]
+    fn test_pool_size_from_config_value_max() {
+        assert_eq!(pool_size_from_config_value(i32::MAX), i32::MAX as usize);
+    }
 }
