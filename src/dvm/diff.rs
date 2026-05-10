@@ -94,6 +94,23 @@ pub struct DiffContext {
     /// the first encounter differentiates the body and stores the result
     /// here; subsequent encounters reuse it.
     cte_delta_cache: HashMap<usize, DiffResult>,
+    /// C-7 (v0.54.0): Current recursion depth of `diff_node()`.
+    ///
+    /// Incremented on entry to `diff_node()` and decremented on exit.
+    /// Returns `PgTrickleError::DiffDepthExceeded` when the depth
+    /// exceeds `pg_trickle.max_parse_depth`, preventing stack overflows
+    /// on pathologically deep operator trees.
+    diff_depth: usize,
+    /// C-7 / R-7 (v0.54.0): Maximum allowed `diff_node()` depth and CTE count.
+    ///
+    /// Loaded from `pg_trickle.max_parse_depth` at construction time.
+    /// Unit tests use `DiffContext::new_standalone()` which sets this to 64.
+    max_diff_depth: usize,
+    /// R-7 (v0.54.0): Maximum allowed CTE count per differentiation.
+    ///
+    /// Loaded from `pg_trickle.max_diff_ctes` at construction time.
+    /// Guards against unbounded memory growth from pathological queries.
+    max_diff_ctes: usize,
     /// When true, emit `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens instead of literal LSN values. This allows the
     /// generated SQL to be cached and re-used across refreshes by
@@ -195,6 +212,19 @@ pub struct DiffContext {
     /// For a 6-table join, this deduplicates 3–10× redundant EXCEPT ALL
     /// evaluations per leaf.
     snapshot_cte_cache: HashMap<String, String>,
+    /// P-4 (v0.54.0): Cache of structural fingerprints for OpTree nodes.
+    ///
+    /// `snapshot_cache_key()` traverses the full OpTree recursively to
+    /// compute a fingerprint. For queries with deeply shared subtrees,
+    /// the same subtree may be passed to `get_or_register_snapshot_cte()`
+    /// multiple times. This cache maps raw pointer address (as `usize`)
+    /// to the computed fingerprint string, so the O(tree-size) traversal
+    /// only happens once per unique subtree per differentiation call.
+    ///
+    /// Safety: The cache is valid for the lifetime of the DiffContext
+    /// (a single differentiation call). OpTree is borrowed immutably and
+    /// never reallocated during differentiation.
+    snapshot_fingerprint_cache: HashMap<usize, String>,
     /// DI-2: Source table OIDs whose delta fraction exceeds
     /// `max_delta_fraction` for the current refresh cycle.
     ///
@@ -543,8 +573,15 @@ impl DiffContext {
             st_bypass_tables: HashMap::new(),
             scan_delta_ctes: HashMap::new(),
             snapshot_cte_cache: HashMap::new(),
+            // P-4 (v0.54.0): Fingerprint cache, empty at start of each diff call.
+            snapshot_fingerprint_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
+            // C-7 (v0.54.0): Depth tracking for diff_node() stack-overflow guard.
+            diff_depth: 0,
+            max_diff_depth: crate::config::pg_trickle_max_parse_depth(),
+            // R-7 (v0.54.0): CTE count guard — loaded from GUC.
+            max_diff_ctes: crate::config::pg_trickle_max_diff_ctes(),
             // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
             agg_sum_coalesce_defaults: None,
         }
@@ -581,8 +618,15 @@ impl DiffContext {
             st_bypass_tables: HashMap::new(),
             scan_delta_ctes: HashMap::new(),
             snapshot_cte_cache: HashMap::new(),
+            // P-4 (v0.54.0): Fingerprint cache, empty at start of each diff call.
+            snapshot_fingerprint_cache: HashMap::new(),
             fallback_leaf_oids: HashSet::new(),
             source_buffer_names: HashMap::new(),
+            // C-7 (v0.54.0): Depth tracking — use conservative default for unit tests.
+            diff_depth: 0,
+            max_diff_depth: 64,
+            // R-7 (v0.54.0): CTE count guard — use conservative default for unit tests.
+            max_diff_ctes: 1000,
             // P-3: Lazy allocation — only created when a COALESCE-wrapped aggregate is present.
             agg_sum_coalesce_defaults: None,
         }
@@ -703,7 +747,37 @@ impl DiffContext {
     }
 
     /// Recursively differentiate an operator tree node.
+    ///
+    /// C-7 (v0.54.0): Tracks recursion depth and returns
+    /// `PgTrickleError::DiffDepthExceeded` when the depth exceeds
+    /// `pg_trickle.max_parse_depth`, preventing stack overflows on
+    /// pathologically deep operator trees (20+ nesting levels).
+    ///
+    /// R-7 (v0.54.0): Also guards against CTE count explosion by checking
+    /// the accumulated CTE count against `pg_trickle.max_diff_ctes` before
+    /// each dispatch.  An individual operator may add several CTEs; the
+    /// check is intentionally approximate (not per `add_cte` call) to
+    /// avoid changing the infallible `add_cte` API.
     pub fn diff_node(&mut self, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
+        // C-7: Depth guard — increment before dispatch, decrement after.
+        self.diff_depth += 1;
+        if self.diff_depth > self.max_diff_depth {
+            self.diff_depth -= 1;
+            return Err(PgTrickleError::DiffDepthExceeded(self.max_diff_depth));
+        }
+        // R-7: CTE count guard — checked at each diff_node entry so the
+        // approximation error is bounded by the max CTEs one operator adds.
+        if self.ctes.len() >= self.max_diff_ctes {
+            self.diff_depth -= 1;
+            return Err(PgTrickleError::DiffCteCountExceeded(self.max_diff_ctes));
+        }
+        let result = self.diff_node_inner(op);
+        self.diff_depth -= 1;
+        result
+    }
+
+    /// Inner dispatch for `diff_node()` — called after depth and CTE checks.
+    fn diff_node_inner(&mut self, op: &OpTree) -> Result<DiffResult, PgTrickleError> {
         match op {
             OpTree::Scan { .. } => operators::scan::diff_scan(self, op),
             OpTree::Filter { .. } => operators::filter::diff_filter(self, op),
@@ -810,8 +884,25 @@ impl DiffContext {
     /// by default, letting PostgreSQL's planner decide whether to inline
     /// or materialize based on cost. When the reference count reaches ≥3
     /// (checked retroactively), the CTE is promoted to MATERIALIZED.
+    ///
+    /// P-4 (v0.54.0): Uses a two-level lookup to avoid O(tree-size) fingerprint
+    /// recomputation on repeated calls for the same subtree.  The raw pointer
+    /// address of `op` is used as a fast identity key in `snapshot_fingerprint_cache`;
+    /// the structural fingerprint (from `snapshot_cache_key`) is only computed
+    /// once per unique pointer and stored for subsequent structural-equality lookups.
+    /// This is safe because `op` is borrowed immutably and never reallocated
+    /// during a single differentiation call.
     pub fn get_or_register_snapshot_cte(&mut self, op: &crate::dvm::parser::OpTree) -> String {
-        let cache_key = snapshot_cache_key(op);
+        // P-4: Fast path — check fingerprint cache by pointer identity first.
+        let ptr_key = op as *const _ as usize;
+        let cache_key = if let Some(key) = self.snapshot_fingerprint_cache.get(&ptr_key) {
+            key.clone()
+        } else {
+            // Slow path — compute the structural fingerprint (O(tree-size)) once.
+            let key = snapshot_cache_key(op);
+            self.snapshot_fingerprint_cache.insert(ptr_key, key.clone());
+            key
+        };
 
         if let Some(cte_name) = self.snapshot_cte_cache.get(&cache_key) {
             return cte_name.clone();

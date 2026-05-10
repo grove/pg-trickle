@@ -204,6 +204,41 @@ pub enum PgTrickleError {
         /// Contextual description (stream table name or function name).
         context: String,
     },
+
+    // ── v0.54.0: DVM engine hardening errors ─────────────────────────────
+    /// C-7 (v0.54.0): The `diff_node()` recursion depth exceeded the configured limit.
+    ///
+    /// Triggered when a differentially refreshed query has more than
+    /// `pg_trickle.max_parse_depth` nested subquery / operator levels.
+    /// Prevents stack-overflow on pathological deeply-nested queries.
+    #[error(
+        "differential query depth exceeded limit of {0} levels; \
+         reduce query nesting or raise pg_trickle.max_parse_depth"
+    )]
+    DiffDepthExceeded(usize),
+
+    /// R-7 (v0.54.0): The number of CTEs generated during differentiation exceeded
+    /// the configured limit (`pg_trickle.max_diff_ctes`).
+    ///
+    /// Prevents unbounded memory growth for pathological queries that
+    /// produce thousands of intermediate CTEs.
+    #[error(
+        "differential query CTE count exceeded limit of {0}; \
+         simplify the query or raise pg_trickle.max_diff_ctes"
+    )]
+    DiffCteCountExceeded(usize),
+
+    /// C-4 (v0.54.0): An ST-to-ST source frontier entry is missing from the
+    /// refresh frontier, indicating the upstream stream table was dropped
+    /// while a downstream ST still references it.
+    ///
+    /// The downstream ST must be reinitialized or dropped to recover.
+    #[error(
+        "upstream stream table (pgt_id={0}) not found in refresh frontier; \
+         the source stream table may have been dropped — \
+         call pgtrickle.reinitialize_stream_table() to recover"
+    )]
+    StSourceFrontierMissing(i64),
 }
 
 impl PgTrickleError {
@@ -243,7 +278,9 @@ impl PgTrickleError {
     pub fn requires_reinitialize(&self) -> bool {
         matches!(
             self,
-            PgTrickleError::UpstreamSchemaChanged(_) | PgTrickleError::UpstreamTableDropped(_)
+            PgTrickleError::UpstreamSchemaChanged(_)
+                | PgTrickleError::UpstreamTableDropped(_)
+                | PgTrickleError::StSourceFrontierMissing(_)
         )
     }
 
@@ -559,6 +596,14 @@ impl PgTrickleError {
             | PgTrickleError::OutboxNotEnabled(_)
             | PgTrickleError::PgTideMissing
             | PgTrickleError::UnresolvedPlaceholder { .. } => PgTrickleErrorKind::Internal,
+
+            // v0.54.0: DVM engine hardening errors.
+            PgTrickleError::DiffDepthExceeded(_) | PgTrickleError::DiffCteCountExceeded(_) => {
+                PgTrickleErrorKind::User
+            }
+
+            // C-4: Dropped ST source is a schema-level error (requires reinitialize).
+            PgTrickleError::StSourceFrontierMissing(_) => PgTrickleErrorKind::Schema,
         }
     }
 }

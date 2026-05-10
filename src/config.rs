@@ -281,6 +281,16 @@ pub static PGS_MAX_GROUPING_SET_BRANCHES: GucSetting<i32> = GucSetting::<i32>::n
 /// `PgTrickleError::QueryTooComplex` when the limit is exceeded.
 pub static PGS_MAX_PARSE_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(64);
 
+/// C-7 / R-7 (v0.54.0): Maximum number of CTEs that the differential query
+/// generator may produce for a single refresh cycle.
+///
+/// Complex queries with many operators, joins, and set operations can produce
+/// hundreds of CTEs. This guard prevents unbounded memory growth from
+/// pathological queries.  Returns `PgTrickleError::DiffCteCountExceeded`
+/// when the limit is exceeded.  The default of 1000 is well above what
+/// any realistic query requires (~10–60 CTEs for TPC-H queries).
+pub static PGS_MAX_DIFF_CTES: GucSetting<i32> = GucSetting::<i32>::new(1000);
+
 /// Number of differential refresh cycles after which algebraic aggregate
 /// stream tables are automatically reinitialized (full recompute) to reset
 /// accumulated floating-point drift in auxiliary sum/sum2 columns.
@@ -1954,6 +1964,20 @@ pub fn register_gucs() {
     );
 
     GucRegistry::define_int_guc(
+        c"pg_trickle.max_diff_ctes",
+        c"Maximum number of CTEs the differential query generator may produce.",
+        c"Guards against unbounded memory growth from pathological queries with \
+           many operators, joins, and set operations. Returns a DiffCteCountExceeded \
+           error when the limit is exceeded. The default of 1000 is well above any \
+           realistic query requirement.",
+        &PGS_MAX_DIFF_CTES,
+        10,
+        100000,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
         c"pg_trickle.ivm_topk_max_limit",
         c"Maximum LIMIT for TopK stream tables in IMMEDIATE mode.",
         c"TopK queries exceeding this LIMIT are rejected in IMMEDIATE mode. \
@@ -3469,6 +3493,12 @@ pub fn pg_trickle_agg_diff_cardinality_threshold() -> i32 {
 /// G13-SD: Returns the maximum recursion depth for query parser visitors.
 pub fn pg_trickle_max_parse_depth() -> usize {
     PGS_MAX_PARSE_DEPTH.get() as usize
+}
+
+/// C-7 / R-7 (v0.54.0): Returns the maximum number of CTEs the differential
+/// query generator may produce for a single refresh cycle.
+pub fn pg_trickle_max_diff_ctes() -> usize {
+    PGS_MAX_DIFF_CTES.get() as usize
 }
 
 /// VOL-1: Returns the volatile function handling policy.

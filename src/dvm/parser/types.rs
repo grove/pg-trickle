@@ -38,32 +38,65 @@ pub enum Expr {
 
 impl Expr {
     /// Convert expression back to SQL text.
+    ///
+    /// Implemented as a thin wrapper over [`to_sql_into`] to avoid
+    /// allocations when the caller already has a write buffer.
     pub fn to_sql(&self) -> String {
+        let mut buf = String::with_capacity(32);
+        self.to_sql_into(&mut buf);
+        buf
+    }
+
+    /// Write SQL text for this expression into `buf`.
+    ///
+    /// P-5 (v0.54.0): Writes directly into the caller's buffer, avoiding
+    /// intermediate `String` allocations for complex nested expressions.
+    /// For a `BinaryOp` with depth d, this reduces allocations from O(2^d)
+    /// (one per sub-expression) to O(1) (the final buffer write).
+    pub fn to_sql_into(&self, buf: &mut String) {
         match self {
             Expr::ColumnRef {
                 table_alias,
                 column_name,
             } => match table_alias {
-                Some(alias) => format!(
-                    "\"{}\".\"{}\"",
-                    alias.replace('"', "\"\""),
-                    column_name.replace('"', "\"\""),
-                ),
-                None => column_name.clone(),
+                Some(alias) => {
+                    buf.push('"');
+                    buf.push_str(&alias.replace('"', "\"\""));
+                    buf.push_str("\".\"");
+                    buf.push_str(&column_name.replace('"', "\"\""));
+                    buf.push('"');
+                }
+                None => buf.push_str(column_name),
             },
-            Expr::Literal(val) => val.clone(),
+            Expr::Literal(val) => buf.push_str(val),
             Expr::BinaryOp { op, left, right } => {
-                format!("({} {op} {})", left.to_sql(), right.to_sql())
+                buf.push('(');
+                left.to_sql_into(buf);
+                buf.push(' ');
+                buf.push_str(op);
+                buf.push(' ');
+                right.to_sql_into(buf);
+                buf.push(')');
             }
             Expr::FuncCall { func_name, args } => {
-                let arg_strs: Vec<String> = args.iter().map(|a| a.to_sql()).collect();
-                format!("{func_name}({})", arg_strs.join(", "))
+                buf.push_str(func_name);
+                buf.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    a.to_sql_into(buf);
+                }
+                buf.push(')');
             }
             Expr::Star { table_alias } => match table_alias {
-                Some(alias) => format!("{alias}.*"),
-                None => "*".to_string(),
+                Some(alias) => {
+                    buf.push_str(alias);
+                    buf.push_str(".*");
+                }
+                None => buf.push('*'),
             },
-            Expr::Raw(sql) => sql.clone(),
+            Expr::Raw(sql) => buf.push_str(sql),
         }
     }
 
