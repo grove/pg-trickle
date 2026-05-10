@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**114 configuration parameters** extracted from `src/config.rs`.
+**115 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -69,6 +69,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_MAX_CONCURRENT_REFRESHES)` | `i32` | `4` | Maximum number of concurrent refresh workers. |
 | `(registration pending — PGS_MAX_CONSECUTIVE_ERRORS)` | `i32` | `3` | Maximum consecutive errors before auto-suspending a stream table. |
 | `(registration pending — PGS_MAX_DELTA_ESTIMATE_ROWS)` | `i32` | `0` | Set to 0 to disable the estimation check (default). |
+| `(registration pending — PGS_MAX_DIFF_CTES)` | `i32` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs. |
 | `(registration pending — PGS_MAX_DYNAMIC_REFRESH_WORKERS)` | `i32` | `4` | This is distinct from `pg_trickle.max_concurrent_refreshes`, which is the per-database dispatch cap. |
 | `(registration pending — PGS_MAX_FIXPOINT_ITERATIONS)` | `i32` | `100` | When stream tables form a cyclic dependency (circular reference), the scheduler iterates to a fixed point. |
 | `(registration pending — PGS_MAX_GROUPING_SET_BRANCHES)` | `i32` | `64` | Maximum allowed grouping set branches for CUBE/ROLLUP expansion (EC-02). |

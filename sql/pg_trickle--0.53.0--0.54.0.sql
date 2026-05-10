@@ -1,0 +1,14 @@
+-- pg_trickle 0.53.0 -> 0.54.0 upgrade migration
+--
+-- v0.54.0 — DVM Engine Hardening
+--
+-- This release contains no SQL schema changes. All changes are
+-- internal DVM engine improvements:
+--
+--   C-7: diff_node() recursion depth guard (DiffDepthExceeded error)
+--   R-7: DiffContext CTE count cap (max_diff_ctes GUC, DiffCteCountExceeded)
+--   P-4: Snapshot CTE two-level cache (pointer identity + structural fingerprint)
+--   P-5: Expr::to_sql_into() visitor — write SQL directly into pre-allocated buffer
+--   P-6: View-inlining relkind cache — batch SPI catalog lookups per rewrite pass
+--   C-4: Upstream ST frontier validation in generate_delta_query()
+--   S-1: O(V+E) diamond detection via compute_all_ancestors() forward traversal
