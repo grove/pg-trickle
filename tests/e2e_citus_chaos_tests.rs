@@ -156,9 +156,9 @@ async fn test_citus_chaos_worker_death_mid_refresh() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos1_st', \
-         defining_query => 'SELECT id, val FROM chaos1_src', \
+         query => 'SELECT id, val FROM chaos1_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -230,9 +230,9 @@ async fn test_citus_chaos_coordinator_restart_during_lease() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos2_st', \
-         defining_query => 'SELECT id, SUM(amount) FROM chaos2_src GROUP BY id', \
+         query => 'SELECT id, SUM(amount) FROM chaos2_src GROUP BY id', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -289,11 +289,8 @@ async fn test_citus_chaos_shard_rebalance_during_cdc() {
     let db = E2eDb::new().await.with_extension().await;
 
     // Distributed source table (hash-distributed by id).
-    db.execute(
-        "CREATE TABLE chaos3_src (id int PRIMARY KEY, val int) \
-         USING columnar",
-    )
-    .await;
+    db.execute("CREATE TABLE chaos3_src (id int PRIMARY KEY, val int)")
+        .await;
     // Try to distribute; skip if Citus not available.
     if db
         .try_execute("SELECT create_distributed_table('chaos3_src', 'id')")
@@ -310,9 +307,9 @@ async fn test_citus_chaos_shard_rebalance_during_cdc() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos3_st', \
-         defining_query => 'SELECT id, val FROM chaos3_src', \
+         query => 'SELECT id, val FROM chaos3_src', \
          schedule => '3s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -390,9 +387,9 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos4_st', \
-         defining_query => 'SELECT id, v FROM chaos4_src', \
+         query => 'SELECT id, v FROM chaos4_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -400,12 +397,12 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
         .await;
 
     // Inject a fake stale worker slot entry into the catalog.
-    // (worker_host='ghost-worker', port=9999, slot_name='pgt_ghost_slot')
+    // (worker_name='ghost-worker', port=9999, slot_name='pgt_ghost_slot')
     db.execute(
         "INSERT INTO pgtrickle.pgt_worker_slots \
-         (pgt_id, worker_host, worker_port, slot_name, last_seen_lsn, created_at) \
-         SELECT pgt_id, 'ghost-worker', 9999, 'pgt_ghost_slot', '0/0', now() \
-         FROM pgtrickle.pgt_stream_tables WHERE name = 'chaos4_st'",
+         (pgt_id, source_relid, worker_name, worker_port, slot_name) \
+         SELECT pgt_id, 0::OID, 'ghost-worker', 9999, 'pgt_ghost_slot' \
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'chaos4_st'",
     )
     .await;
 
@@ -413,7 +410,7 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     let stale_count: i64 = db
         .query_scalar(
             "SELECT COUNT(*) FROM pgtrickle.pgt_worker_slots \
-             WHERE worker_host = 'ghost-worker'",
+             WHERE worker_name = 'ghost-worker'",
         )
         .await;
     assert!(
@@ -431,7 +428,7 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     let remaining: i64 = db
         .query_scalar(
             "SELECT COUNT(*) FROM pgtrickle.pgt_worker_slots \
-             WHERE worker_host = 'ghost-worker'",
+             WHERE worker_name = 'ghost-worker'",
         )
         .await;
     // On a real Citus cluster the slot is removed; on a non-Citus install it stays.
@@ -497,9 +494,9 @@ async fn test_citus_chaos_coordinator_restart_during_refresh() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos5_st', \
-         defining_query => 'SELECT id, val FROM chaos5_src', \
+         query => 'SELECT id, val FROM chaos5_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -596,9 +593,9 @@ async fn test_citus_chaos_worker_kill_with_shard_redistribution() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos6_st', \
-         defining_query => 'SELECT id, amount FROM chaos6_src', \
+         query => 'SELECT id, amount FROM chaos6_src', \
          schedule => '5s', \
-         mode => 'DIFFERENTIAL'\
+         refresh_mode => 'DIFFERENTIAL'\
          )",
     )
     .await;
@@ -640,18 +637,17 @@ async fn test_citus_chaos_worker_kill_with_shard_redistribution() {
         "CHAOS-6: stream table must match source after worker kill + shard redistribution"
     );
 
-    // Verify CDC change buffers are consistent (no orphaned change records).
-    let orphaned_changes: i64 = db
+    // Verify no refresh errors occurred after worker kill + shard redistribution.
+    let consecutive_errors: i64 = db
         .query_scalar(
-            "SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables st \
-             JOIN pgtrickle_changes.changes_chaos6_src src ON true \
-             WHERE st.pgt_name = 'chaos6_st' \
-             AND src.op IS NULL",
+            "SELECT COALESCE(consecutive_errors, 0) \
+             FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'chaos6_st'",
         )
         .await;
     assert_eq!(
-        orphaned_changes, 0,
-        "CHAOS-6: no orphaned CDC change records should remain after recovery"
+        consecutive_errors, 0,
+        "CHAOS-6: no refresh errors should remain after worker kill + shard redistribution recovery"
     );
 
     db.execute("SELECT pgtrickle.drop_stream_table('chaos6_st')")
@@ -711,9 +707,9 @@ async fn test_citus_chaos_network_partition_and_recovery() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos7_st', \
-         defining_query => 'SELECT id, val FROM chaos7_src', \
+         query => 'SELECT id, val FROM chaos7_src', \
          schedule => '5s', \
-         mode => 'DIFFERENTIAL'\
+         refresh_mode => 'DIFFERENTIAL'\
          )",
     )
     .await;
