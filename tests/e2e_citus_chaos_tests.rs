@@ -156,9 +156,9 @@ async fn test_citus_chaos_worker_death_mid_refresh() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos1_st', \
-         defining_query => 'SELECT id, val FROM chaos1_src', \
+         query => 'SELECT id, val FROM chaos1_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -230,9 +230,9 @@ async fn test_citus_chaos_coordinator_restart_during_lease() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos2_st', \
-         defining_query => 'SELECT id, SUM(amount) FROM chaos2_src GROUP BY id', \
+         query => 'SELECT id, SUM(amount) FROM chaos2_src GROUP BY id', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -289,11 +289,8 @@ async fn test_citus_chaos_shard_rebalance_during_cdc() {
     let db = E2eDb::new().await.with_extension().await;
 
     // Distributed source table (hash-distributed by id).
-    db.execute(
-        "CREATE TABLE chaos3_src (id int PRIMARY KEY, val int) \
-         USING columnar",
-    )
-    .await;
+    db.execute("CREATE TABLE chaos3_src (id int PRIMARY KEY, val int)")
+        .await;
     // Try to distribute; skip if Citus not available.
     if db
         .try_execute("SELECT create_distributed_table('chaos3_src', 'id')")
@@ -310,9 +307,9 @@ async fn test_citus_chaos_shard_rebalance_during_cdc() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos3_st', \
-         defining_query => 'SELECT id, val FROM chaos3_src', \
+         query => 'SELECT id, val FROM chaos3_src', \
          schedule => '3s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -390,9 +387,9 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos4_st', \
-         defining_query => 'SELECT id, v FROM chaos4_src', \
+         query => 'SELECT id, v FROM chaos4_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -497,9 +494,9 @@ async fn test_citus_chaos_coordinator_restart_during_refresh() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos5_st', \
-         defining_query => 'SELECT id, val FROM chaos5_src', \
+         query => 'SELECT id, val FROM chaos5_src', \
          schedule => '5s', \
-         mode => 'FULL'\
+         refresh_mode => 'FULL'\
          )",
     )
     .await;
@@ -596,9 +593,9 @@ async fn test_citus_chaos_worker_kill_with_shard_redistribution() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos6_st', \
-         defining_query => 'SELECT id, amount FROM chaos6_src', \
+         query => 'SELECT id, amount FROM chaos6_src', \
          schedule => '5s', \
-         mode => 'DIFFERENTIAL'\
+         refresh_mode => 'DIFFERENTIAL'\
          )",
     )
     .await;
@@ -710,9 +707,9 @@ async fn test_citus_chaos_network_partition_and_recovery() {
     db.execute(
         "SELECT pgtrickle.create_stream_table(\
          name => 'chaos7_st', \
-         defining_query => 'SELECT id, val FROM chaos7_src', \
+         query => 'SELECT id, val FROM chaos7_src', \
          schedule => '5s', \
-         mode => 'DIFFERENTIAL'\
+         refresh_mode => 'DIFFERENTIAL'\
          )",
     )
     .await;
