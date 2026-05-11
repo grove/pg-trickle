@@ -560,6 +560,61 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        // v0.54.0: DVM engine hardening errors.
+        PgTrickleError::DiffDepthExceeded(limit) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                format!(
+                    "differential query depth exceeded limit of {} levels",
+                    limit
+                ),
+                "",
+            )
+            .set_hint(
+                "Reduce query nesting depth or raise pg_trickle.max_parse_depth. \
+                 Alternatively, use refresh_mode = 'FULL'."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::DiffCteCountExceeded(limit) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                format!("differential query CTE count exceeded limit of {}", limit),
+                "",
+            )
+            .set_hint(
+                "Simplify the defining query or raise pg_trickle.max_diff_ctes. \
+                 Alternatively, use refresh_mode = 'FULL'."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
+        PgTrickleError::StSourceFrontierMissing(pgt_id) => {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!(
+                    "upstream stream table (pgt_id={}) not found in refresh frontier",
+                    pgt_id
+                ),
+                "",
+            )
+            .set_detail(
+                "The upstream stream table may have been dropped while this stream table \
+                 still references it. The consuming stream table cannot be refreshed \
+                 until the dependency is resolved."
+                    .to_string(),
+            )
+            .set_hint(
+                "Call pgtrickle.reinitialize_stream_table('<name>') to rebuild the \
+                 frontier, or drop and recreate the stream table with an updated query."
+                    .to_string(),
+            )
+            .report(PgLogLevel::ERROR);
+            unreachable!()
+        }
     }
 }
 

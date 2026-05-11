@@ -45,6 +45,11 @@ pub fn rewrite_views_inline(query: &str) -> Result<String, PgTrickleError> {
 /// any view RangeVars with `(pg_get_viewdef(oid, true)) AS alias`.
 ///
 /// Returns the original string unchanged if no views are found.
+///
+/// P-6 (v0.54.0): Passes a per-invocation relkind cache through the call chain
+/// so each unique `(schema, relname)` pair is only resolved via SPI once per
+/// iteration, even when the same relation appears multiple times (e.g., in
+/// UNION ALL arms or repeated subqueries).
 fn rewrite_views_inline_once(query: &str) -> Result<String, PgTrickleError> {
     let select = match parse_first_select(query)? {
         // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
@@ -56,8 +61,15 @@ fn rewrite_views_inline_once(query: &str) -> Result<String, PgTrickleError> {
     let mut subs = Vec::new();
     let mut found_view = false;
 
+    // P-6 (v0.54.0): Per-invocation relkind cache — each (schema, relname) pair
+    // is resolved via SPI at most once per rewrite_views_inline_once() call.
+    // Uses HashMap<(String, String), Option<String>> where the value is the relkind
+    // string ('r', 'v', 'm', 'f', etc.) or None if not found in pg_class.
+    let mut relkind_cache: std::collections::HashMap<(String, String), Option<String>> =
+        std::collections::HashMap::new();
+
     // Walk the FROM clause to find views. Also walk set-operation arms and CTEs.
-    collect_view_substitutions(select, &mut subs, &mut found_view)?;
+    collect_view_substitutions(select, &mut subs, &mut found_view, &mut relkind_cache)?;
 
     if !found_view {
         return Ok(query.to_string());
@@ -193,12 +205,18 @@ pub(crate) fn resolve_rangevar_schema(
 /// Walk a SelectStmt's FROM clause (and set-operation arms, CTEs) to find
 /// view references and build the substitution list.
 ///
+/// P-6 (v0.54.0): Takes a `relkind_cache` that is populated on first lookup
+/// for each `(schema, relname)` pair and reused for subsequent lookups within
+/// the same `rewrite_views_inline_once()` call, eliminating redundant SPI
+/// round-trips for relations that appear in multiple FROM positions.
+///
 /// # Safety
 /// Caller must ensure `select` points to a valid `SelectStmt`.
 fn collect_view_substitutions(
     select: *const pg_sys::SelectStmt,
     subs: &mut Vec<ViewSubstitution>,
     found_view: &mut bool,
+    relkind_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
 ) -> Result<(), PgTrickleError> {
     // SAFETY: Pointer verified non-null; parse-tree node allocated by raw_parser in a valid memory context.
     let s = pg_deref!(select);
@@ -206,10 +224,10 @@ fn collect_view_substitutions(
     // Handle set operations: recurse into larg/rarg
     if s.op != pg_sys::SetOperation::SETOP_NONE {
         if !s.larg.is_null() {
-            collect_view_substitutions(s.larg, subs, found_view)?;
+            collect_view_substitutions(s.larg, subs, found_view, relkind_cache)?;
         }
         if !s.rarg.is_null() {
-            collect_view_substitutions(s.rarg, subs, found_view)?;
+            collect_view_substitutions(s.rarg, subs, found_view, relkind_cache)?;
         }
         return Ok(());
     }
@@ -217,7 +235,7 @@ fn collect_view_substitutions(
     // Walk the FROM clause
     let from_list = pg_list::<pg_sys::Node>(s.fromClause);
     for node_ptr in from_list.iter_ptr() {
-        collect_view_subs_from_item(node_ptr, subs, found_view)?;
+        collect_view_subs_from_item(node_ptr, subs, found_view, relkind_cache)?;
     }
 
     // Walk CTE bodies if present
@@ -235,6 +253,7 @@ fn collect_view_substitutions(
                     cte.ctequery as *const pg_sys::SelectStmt,
                     subs,
                     found_view,
+                    relkind_cache,
                 )?;
             }
         }
@@ -251,6 +270,7 @@ fn collect_view_subs_from_item(
     node: *mut pg_sys::Node,
     subs: &mut Vec<ViewSubstitution>,
     found_view: &mut bool,
+    relkind_cache: &mut std::collections::HashMap<(String, String), Option<String>>,
 ) -> Result<(), PgTrickleError> {
     if node.is_null() {
         return Ok(());
@@ -269,8 +289,17 @@ fn collect_view_subs_from_item(
             None => return Ok(()),
         };
 
-        // Check relkind
-        let relkind = resolve_relkind(&schema, &relname)?;
+        // P-6 (v0.54.0): Check relkind cache before issuing SPI.
+        // Cache key is (schema, relname); value is the relkind string or None.
+        let cache_key = (schema.clone(), relname.clone());
+        let relkind = if let Some(cached) = relkind_cache.get(&cache_key) {
+            cached.clone()
+        } else {
+            let result = resolve_relkind(&schema, &relname)?;
+            relkind_cache.insert(cache_key, result.clone());
+            result
+        };
+
         match relkind.as_deref() {
             Some("v") => {
                 // It's a view — get definition and record substitution
@@ -298,14 +327,19 @@ fn collect_view_subs_from_item(
             }
         }
     } else if let Some(join) = cast_node!(node, T_JoinExpr, pg_sys::JoinExpr) {
-        collect_view_subs_from_item(join.larg, subs, found_view)?;
-        collect_view_subs_from_item(join.rarg, subs, found_view)?;
+        collect_view_subs_from_item(join.larg, subs, found_view, relkind_cache)?;
+        collect_view_subs_from_item(join.rarg, subs, found_view, relkind_cache)?;
     } else if let Some(sub) = cast_node!(node, T_RangeSubselect, pg_sys::RangeSubselect)
         && !sub.subquery.is_null()
         // SAFETY: is_a reads the node tag field, valid for any non-null Node* from the parser.
         && is_node_type!(sub.subquery, T_SelectStmt)
     {
-        collect_view_substitutions(sub.subquery as *const pg_sys::SelectStmt, subs, found_view)?;
+        collect_view_substitutions(
+            sub.subquery as *const pg_sys::SelectStmt,
+            subs,
+            found_view,
+            relkind_cache,
+        )?;
     }
     // JSON_TABLE: skip — it doesn't reference tables that could be views.
     // The context item expression references the left-hand table which is

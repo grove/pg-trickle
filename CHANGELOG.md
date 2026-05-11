@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.54.0 — DVM Engine Hardening](#0540--dvm-engine-hardening)
 - [0.53.0 — Unit Test Depth Sweep](#0530--unit-test-depth-sweep)
 - [0.52.0 — DVM Hot-Path Performance](#0520--dvm-hot-path-performance)
 - [0.51.0 — Citus Chaos Resilience & Documentation Truth](#0510--citus-chaos-resilience--documentation-truth)
@@ -68,6 +69,72 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.54.0] — DVM Engine Hardening
+
+### What's New
+
+v0.54.0 hardens the DVM (Differential View Maintenance) engine across seven
+dimensions: depth-limit enforcement, CTE-count cap, snapshot fingerprint
+caching, expression visitor pattern, view-inlining relkind cache, upstream
+frontier validation, and O(V+E) diamond detection.  Every change is targeted
+at correctness and performance; no user-visible API surface changes.
+
+### Changed
+
+#### C-7: diff_node() Recursion Depth Guard
+
+`diff_node()` in `src/dvm/diff.rs` now enforces a hard depth limit drawn from
+the `pg_trickle.max_parse_depth` GUC (default 64).  Exceeding the limit returns
+a new `PgTrickleError::DiffDepthExceeded(limit)` error with a user-actionable
+hint instead of overflowing the call stack.
+
+#### R-7: DiffContext CTE Count Cap (OOM Guard)
+
+`DiffContext` tracks the number of CTEs emitted during a single differentiation
+pass.  When the count reaches the new `pg_trickle.max_diff_ctes` GUC (default
+1000, range 10–100 000), `diff_node()` returns
+`PgTrickleError::DiffCteCountExceeded(limit)` before allocating further
+memory.  This prevents pathological queries from exhausting server memory.
+
+#### P-4: Snapshot Fingerprint Two-Level Cache
+
+`get_or_register_snapshot_cte()` now uses a two-level cache: a fast pointer
+identity check (same `OpTree` node, O(1)) and a structural fingerprint check
+(equal subtrees, O(k)).  Identical subtrees share a single CTE, eliminating
+redundant snapshot SQL generation for diamond-shaped query plans.
+
+#### P-5: Expr::to_sql() Visitor Pattern
+
+`Expr::to_sql()` now delegates to a new `to_sql_into(&self, buf: &mut String)`
+method that writes SQL directly into a pre-allocated buffer using `push`/
+`push_str`.  Intermediate heap allocations for nested expressions are
+eliminated, reducing allocation pressure on large queries.
+
+#### P-6: View-Inlining Relkind Cache
+
+`rewrite_views_inline_once()` now passes a mutable `HashMap<(schema,name),
+Option<relkind>>` through the call chain.  Each relkind lookup is cached for
+the duration of the rewrite pass, preventing repeated SPI catalog queries for
+the same relation within a single inlining iteration.
+
+#### C-4: Upstream Stream-Table Frontier Validation
+
+`generate_delta_query()` now validates that every upstream stream-table source
+referenced in a query has a corresponding entry in the provided refresh
+frontier.  Missing entries return `PgTrickleError::StSourceFrontierMissing`
+with a clear message and the affected `pgt_id`, allowing the scheduler to
+reinitialize rather than silently producing incorrect delta results.
+
+#### S-1: O(V+E) Diamond Detection
+
+`detect_diamonds()` in `src/dag.rs` previously called `collect_ancestors()`
+per fan-in branch (O(V) per branch, O(V²) total for dense graphs).  It now
+calls the new `compute_all_ancestors()` which traverses the DAG once in forward
+topological order, building all ancestor sets in O(V+E) total work.  Per-branch
+ancestor lookup is then O(1) via the precomputed map.
 
 ---
 

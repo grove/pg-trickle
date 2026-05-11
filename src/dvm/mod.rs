@@ -502,6 +502,25 @@ pub fn generate_delta_query(
     // ST-ST-4: Resolve which sources are STs for proper buffer table routing.
     ctx.st_source_pgt_ids = resolve_st_source_pgt_ids(&source_oids);
 
+    // C-4 (v0.54.0): Validate that all ST sources have entries in both frontiers.
+    //
+    // If a source ST was dropped after the consuming ST was created, its pgt_id
+    // will no longer be in the catalog (resolve_st_source_pgt_ids skips it), but
+    // the delta query references its change buffer which may be gone.
+    // For each CURRENT ST source (known to exist via resolve_st_source_pgt_ids),
+    // validate its frontier entry is present. Newly-created ST sources that have
+    // never been refreshed legitimately have no frontier entry yet — we skip them
+    // only if the new_frontier also lacks the key (both missing → not yet seeded).
+    if !ctx.st_source_pgt_ids.is_empty() {
+        for &src_pgt_id in ctx.st_source_pgt_ids.values() {
+            let key = format!("pgt_{src_pgt_id}");
+            if !prev_frontier.sources.contains_key(&key) && !new_frontier.sources.contains_key(&key)
+            {
+                return Err(PgTrickleError::StSourceFrontierMissing(src_pgt_id));
+            }
+        }
+    }
+
     // CITUS-4: Pre-resolve stable buffer names so the scan generator
     // does not need to call SPI during SQL generation.
     ctx.source_buffer_names = resolve_buffer_names_for_sources(&source_oids);
