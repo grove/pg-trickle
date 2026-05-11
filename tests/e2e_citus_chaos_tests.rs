@@ -397,11 +397,11 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
         .await;
 
     // Inject a fake stale worker slot entry into the catalog.
-    // (worker_host='ghost-worker', port=9999, slot_name='pgt_ghost_slot')
+    // (worker_name='ghost-worker', port=9999, slot_name='pgt_ghost_slot')
     db.execute(
         "INSERT INTO pgtrickle.pgt_worker_slots \
-         (pgt_id, worker_host, worker_port, slot_name, last_seen_lsn, created_at) \
-         SELECT pgt_id, 'ghost-worker', 9999, 'pgt_ghost_slot', '0/0', now() \
+         (pgt_id, source_relid, worker_name, worker_port, slot_name) \
+         SELECT pgt_id, 0::OID, 'ghost-worker', 9999, 'pgt_ghost_slot' \
          FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'chaos4_st'",
     )
     .await;
@@ -410,7 +410,7 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     let stale_count: i64 = db
         .query_scalar(
             "SELECT COUNT(*) FROM pgtrickle.pgt_worker_slots \
-             WHERE worker_host = 'ghost-worker'",
+             WHERE worker_name = 'ghost-worker'",
         )
         .await;
     assert!(
@@ -428,7 +428,7 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
     let remaining: i64 = db
         .query_scalar(
             "SELECT COUNT(*) FROM pgtrickle.pgt_worker_slots \
-             WHERE worker_host = 'ghost-worker'",
+             WHERE worker_name = 'ghost-worker'",
         )
         .await;
     // On a real Citus cluster the slot is removed; on a non-Citus install it stays.
