@@ -405,7 +405,7 @@ async fn test_citus_chaos_stale_worker_slot_cleanup() {
         "INSERT INTO pgtrickle.pgt_worker_slots \
          (pgt_id, worker_host, worker_port, slot_name, last_seen_lsn, created_at) \
          SELECT pgt_id, 'ghost-worker', 9999, 'pgt_ghost_slot', '0/0', now() \
-         FROM pgtrickle.pgt_stream_tables WHERE name = 'chaos4_st'",
+         FROM pgtrickle.pgt_stream_tables WHERE pgt_name = 'chaos4_st'",
     )
     .await;
 
@@ -640,18 +640,17 @@ async fn test_citus_chaos_worker_kill_with_shard_redistribution() {
         "CHAOS-6: stream table must match source after worker kill + shard redistribution"
     );
 
-    // Verify CDC change buffers are consistent (no orphaned change records).
-    let orphaned_changes: i64 = db
+    // Verify no refresh errors occurred after worker kill + shard redistribution.
+    let consecutive_errors: i64 = db
         .query_scalar(
-            "SELECT COUNT(*) FROM pgtrickle.pgt_stream_tables st \
-             JOIN pgtrickle_changes.changes_chaos6_src src ON true \
-             WHERE st.pgt_name = 'chaos6_st' \
-             AND src.op IS NULL",
+            "SELECT COALESCE(consecutive_errors, 0) \
+             FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_name = 'chaos6_st'",
         )
         .await;
     assert_eq!(
-        orphaned_changes, 0,
-        "CHAOS-6: no orphaned CDC change records should remain after recovery"
+        consecutive_errors, 0,
+        "CHAOS-6: no refresh errors should remain after worker kill + shard redistribution recovery"
     );
 
     db.execute("SELECT pgtrickle.drop_stream_table('chaos6_st')")
