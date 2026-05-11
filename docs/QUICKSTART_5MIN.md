@@ -20,7 +20,7 @@ in real time, and dropped it again — without leaving `psql`.
 
 If you already have a PostgreSQL 18 server with pg_trickle installed
 (via the playground, the Docker image, or a manual install — see
-[INSTALL.md](installation.md) for full options), skip this step.
+[Installation](installation.md) for full options), skip this step.
 
 Otherwise, the shortest path on a developer machine is the prebuilt
 Docker image — one command, no configuration:

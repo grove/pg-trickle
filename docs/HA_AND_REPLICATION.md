@@ -83,7 +83,7 @@ stream tables on the primary.
 ## Replicating stream tables themselves
 
 If you want a *downstream* system to receive stream-table changes
-(another Postgres, Debezium, Kafka, …), use
+(another PostgreSQL, Debezium, Kafka, …), use
 [downstream publications](PUBLICATIONS.md):
 
 ```sql

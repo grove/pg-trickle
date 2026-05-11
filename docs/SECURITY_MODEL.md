@@ -219,12 +219,21 @@ When `cdc_paused` was active during an incident:
 
 ## v1.0 Supply-Chain Preparation
 
-The following supply-chain controls are staged for v1.0 (tracked by O40-9):
+The following supply-chain controls are staged for v1.0 (tracked by O40-9
+in [ROADMAP.md](../ROADMAP.md)):
 
-- [ ] SBOM generation (`cargo sbom` or `cyclonedx-rust-cargo`)
-- [ ] Artifact signing (sigstore/cosign) for Docker images and PGXN archives
-- [ ] Provenance attestation via `actions/attest-build-provenance`
-- [ ] Reproducible builds verification (`cargo auditable`)
+- **SBOM generation** (`cargo sbom` / `cyclonedx-rust-cargo`): Planned for v1.0.
+  Will be generated in CI and attached to each GitHub release as
+  `sbom.cdx.json`.
+- **Artifact signing** (sigstore/cosign for Docker images and PGXN archives):
+  Planned for v1.0.  Docker images will be signed with `cosign sign` using
+  keyless OIDC signing; signatures will be verifiable via
+  `cosign verify ghcr.io/trickle-labs/pg_trickle:<tag>`.
+- **Provenance attestation** (`actions/attest-build-provenance`): Planned for
+  v1.0.  Build provenance (builder, repository, ref SHA) will be attached to
+  every release artifact.
+- **Reproducible builds** (`cargo auditable`): Planned for v1.0.  Binaries
+  will embed dependency version information auditable via `cargo auditable info`.
 
 ---
 

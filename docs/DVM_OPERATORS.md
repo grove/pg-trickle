@@ -2,6 +2,38 @@
 
 This document describes the Differential View Maintenance (DVM) operators implemented by pgtrickle. Each operator transforms a stream of row-level changes (deltas) propagated from source tables through the operator tree.
 
+## Quick Reference
+
+| Operator | FULL | DIFF | IMMED | Section |
+|----------|:----:|:----:|:-----:|---------|
+| Simple `SELECT` / projection | ✅ | ✅ | ✅ | [Scan & Project](#scan--project) |
+| `WHERE` filter | ✅ | ✅ | ✅ | [Filter](#filter) |
+| `DISTINCT` | ✅ | ✅ | ✅ | [Distinct](#distinct) |
+| `INNER JOIN` | ✅ | ✅ | ✅ | [Joins](#joins) |
+| `LEFT / RIGHT OUTER JOIN` | ✅ | ✅ | ✅ | [Joins](#joins) |
+| `FULL OUTER JOIN` | ✅ | ✅ | ✅ | [Joins](#joins) |
+| `LATERAL JOIN` | ✅ | ✅ | ✅ | [Joins](#joins) |
+| Multi-table join (≥3 right scans) | ✅ | ⚠️ | ⚠️ | [Joins](#joins) |
+| `EXISTS` / `NOT EXISTS` | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
+| Scalar subquery | ✅ | ✅ | ✅ | [Subqueries](#subqueries) |
+| `UNION ALL` | ✅ | ✅ | ✅ | [Set Operations](#set-operations) |
+| `INTERSECT` / `EXCEPT` | ✅ | ✅ | ✅ | [Set Operations](#set-operations) |
+| `COUNT`, `SUM`, `AVG` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
+| `MIN` / `MAX` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
+| `COUNT(DISTINCT)` / `SUM(DISTINCT)` | ✅ | ✅ | ✅ | [Aggregates](#aggregates) |
+| `STRING_AGG` / `ARRAY_AGG` | ✅ | ⚠️ | ⚠️ | [Aggregates](#aggregates) |
+| `JSONB_AGG` / `JSONB_OBJECT_AGG` | ✅ | ⚠️ | ⚠️ | [Aggregates](#aggregates) |
+| Window functions | ✅ | ⚠️ | ⚠️ | [Window Functions](#window-functions) |
+| `ORDER BY … LIMIT` (TopK) | ✅ | ✅ | ✅ | [TopK](#topk) |
+| `HAVING` | ✅ | ✅ | ✅ | [Having](#having) |
+| `GROUP BY ROLLUP / CUBE` | ✅ | ✅ | ✅ | [Grouping Sets](#grouping-sets) |
+| Recursive CTEs | ✅ | ⚠️ | ⚠️ | [CTEs](#ctes) |
+| `vector_avg` / `halfvec_avg` | ✅ | ✅ | ✅ | [Vector Aggregates](#vector-aggregates) |
+
+Legend: ✅ Supported · ⚠️ Partial (see section) · ❌ Not supported
+
+---
+
 ## Prior Art
 
 - Budiu, M. et al. (2023). "DBSP: Automatic Incremental View Maintenance." VLDB 2023. ([comparison](research/DBSP_COMPARISON.md))

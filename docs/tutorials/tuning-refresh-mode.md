@@ -85,6 +85,29 @@ Positive scores favour DIFFERENTIAL; negative scores favour FULL. A
 composite score above +0.15 recommends DIFFERENTIAL; below −0.15
 recommends FULL; in between, the current mode is near-optimal (KEEP).
 
+**Why ±0.15?**  The thresholds create a *dead zone* between −0.15 and +0.15
+where the engine considers the two modes equivalent.  Without this dead zone,
+small fluctuations in the `change_ratio` signal would cause the engine to
+oscillate between FULL and DIFFERENTIAL every few cycles — burning scheduling
+overhead with no net benefit.  The +0.15 threshold means DIFFERENTIAL needs
+a clear edge (roughly a 15% advantage in combined signal weight) before the
+engine switches away from FULL, and vice versa.
+
+You can widen or narrow the dead zone:
+
+```sql
+-- Wider dead zone (less switching) — good for stable, predictable workloads
+ALTER SYSTEM SET pg_trickle.cost_model_safety_margin = 0.25;
+SELECT pg_reload_conf();
+
+-- Narrower dead zone (faster mode switching) — good for highly variable workloads
+ALTER SYSTEM SET pg_trickle.cost_model_safety_margin = 0.05;
+SELECT pg_reload_conf();
+```
+
+The default is `0.15`.  If you see frequent mode oscillation in
+`pgtrickle.pgt_refresh_history`, increase the margin.
+
 **Confidence levels:**
 
 | Level | Meaning |

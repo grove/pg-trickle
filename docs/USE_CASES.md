@@ -162,7 +162,7 @@ See [Transactional Outbox](OUTBOX.md) and [Transactional Inbox](INBOX.md).
 
 Once a stream table exists, you can expose it as a standard PostgreSQL
 logical-replication publication. Anything that speaks logical
-replication — Debezium, Kafka Connect, a downstream Postgres replica,
+replication — Debezium, Kafka Connect, a downstream PostgreSQL replica,
 a Spark Structured Streaming job, a custom WAL consumer — can
 subscribe to live changes.
 
@@ -235,7 +235,7 @@ A short, honest list — knowing when to look elsewhere is a feature.
   across many heterogeneous databases, consider a streaming engine.
 - **Workloads where you cannot install extensions.** Some managed
   PostgreSQL services don't allow third-party extensions. Check
-  [Installation](INSTALL.md) for the support matrix.
+  [Installation](installation.md) for the support matrix.
 
 ---
 

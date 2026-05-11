@@ -93,51 +93,188 @@ LIMIT 20;
 
 ## Pattern 2: RLS-Scoped Corpus (Multi-Tenant)
 
-See [PER_TENANT_ANN_PATTERNS.md](PER_TENANT_ANN_PATTERNS.md) for detailed
-multi-tenant patterns. For single-tenant, enable RLS on the stream table:
+Pattern 2 extends the flat corpus to enforce per-user or per-tenant isolation
+using PostgreSQL Row-Level Security.  The stream table holds rows for all
+tenants; an RLS policy on the stream table filters results at query time.
 
 ```sql
-ALTER TABLE hybrid_corpus ENABLE ROW LEVEL SECURITY;
+-- Source tables (with tenant_id)
+CREATE TABLE tenant_documents (
+    id          BIGSERIAL PRIMARY KEY,
+    tenant_id   UUID    NOT NULL,
+    title       TEXT    NOT NULL,
+    body        TEXT    NOT NULL,
+    category    TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
 
-CREATE POLICY corpus_access ON hybrid_corpus
-    USING (category = current_setting('app.user_category', true));
+CREATE TABLE tenant_doc_embeddings (
+    doc_id      BIGINT PRIMARY KEY REFERENCES tenant_documents(id),
+    tenant_id   UUID NOT NULL,
+    embedding   vector(1536) NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- Hybrid search corpus stream table for all tenants
+SELECT pgtrickle.create_stream_table(
+    'tenant_hybrid_corpus',
+    $$
+        SELECT
+            d.id,
+            d.tenant_id,
+            d.title,
+            d.body,
+            d.category,
+            d.created_at,
+            e.embedding,
+            to_tsvector('english', d.title || ' ' || d.body) AS fts_vector
+        FROM tenant_documents d
+        JOIN tenant_doc_embeddings e ON e.doc_id = d.id
+    $$,
+    '30s',
+    'DIFFERENTIAL'
+);
+
+-- Full-text and vector indexes span all tenants
+CREATE INDEX ON tenant_hybrid_corpus USING gin(fts_vector);
+CREATE INDEX ON tenant_hybrid_corpus USING hnsw(embedding vector_cosine_ops);
+CREATE INDEX ON tenant_hybrid_corpus (tenant_id);
+
+-- Enable RLS for per-tenant isolation at query time
+ALTER TABLE tenant_hybrid_corpus ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_hybrid_corpus FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON tenant_hybrid_corpus
+    FOR SELECT
+    USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+```
+
+**Querying with RLS:**
+
+```sql
+-- Set tenant context (parameterised — never string-interpolated)
+SET app.tenant_id = 'your-tenant-uuid';
+
+SELECT
+    id,
+    title,
+    ts_rank(fts_vector, query) AS bm25_score,
+    1 - (embedding <=> '[...]'::vector) AS cosine_score,
+    ts_rank(fts_vector, query) * 0.4
+        + (1 - (embedding <=> '[...]'::vector)) * 0.6 AS hybrid_score
+FROM
+    tenant_hybrid_corpus,
+    plainto_tsquery('english', 'your search terms') AS query
+WHERE
+    fts_vector @@ query
+    OR embedding <=> '[...]'::vector < 0.3
+ORDER BY hybrid_score DESC
+LIMIT 20;
+-- RLS policy automatically restricts to the current tenant
+```
+
+**GUC reference:**
+
+| GUC | Default | Effect |
+|-----|---------|--------|
+| `pg_trickle.enable_vector_agg` | `off` | Enable `vector_avg` / `halfvec_avg` / `sparsevec_avg` aggregates in defining queries.  Must be `on` for centroid-style stream tables. |
+
+Enable before creating centroid aggregates:
+
+```sql
+SET pg_trickle.enable_vector_agg = on;
 ```
 
 ---
 
 ## Pattern 3: Tiered Storage (halfvec + sparsevec)
 
-Use pg_trickle's `halfvec_avg` / `sparsevec_avg` support (VH-1) to maintain
-storage-efficient tiers:
+Pattern 3 uses pg_trickle's `halfvec_avg` and `sparsevec_avg` support
+(enabled via `pg_trickle.enable_vector_agg`) to maintain storage-efficient
+index tiers alongside full-precision data.
 
 ```sql
--- Full-precision embeddings
-SELECT pgtrickle.create_stream_table(
-    'embeddings_full',
-    'SELECT id, embedding FROM raw_embeddings',
-    '1m', 'DIFFERENTIAL'
+SET pg_trickle.enable_vector_agg = on;
+
+-- Tier 1: Full-precision embeddings (authoritative source)
+CREATE TABLE raw_embeddings (
+    id          BIGSERIAL PRIMARY KEY,
+    category    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    embedding   vector(1536) NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Half-precision for HNSW index efficiency  
+-- Tier 2: Full-precision stream table with GIN + HNSW indexes
+SELECT pgtrickle.create_stream_table(
+    'embeddings_full',
+    $$
+        SELECT id, category, content, embedding,
+               to_tsvector('english', content) AS fts_vector
+        FROM raw_embeddings
+    $$,
+    '1m', 'DIFFERENTIAL'
+);
+CREATE INDEX ON embeddings_full USING gin(fts_vector);
+CREATE INDEX ON embeddings_full USING hnsw(embedding vector_cosine_ops);
+
+-- Tier 3: Half-precision stream table (50% storage savings, same recall for most models)
 SELECT pgtrickle.create_stream_table(
     'embeddings_half',
-    'SELECT id, embedding::halfvec(1536) AS embedding FROM raw_embeddings',
+    $$
+        SELECT id, category, embedding::halfvec(1536) AS embedding
+        FROM raw_embeddings
+    $$,
     '1m', 'DIFFERENTIAL'
 );
 CREATE INDEX ON embeddings_half USING hnsw(embedding halfvec_cosine_ops);
 
--- Per-category centroid for sparse representations
+-- Tier 4: Per-category centroids using vector_avg aggregate
 SELECT pgtrickle.create_stream_table(
     'category_centroids',
     $$
-        SELECT category, avg(embedding) AS centroid
+        SELECT
+            category,
+            vector_avg(embedding)                  AS centroid,
+            halfvec_avg(embedding::halfvec(1536))  AS centroid_half,
+            COUNT(*)                               AS doc_count
         FROM raw_embeddings
         GROUP BY category
     $$,
     '5m', 'DIFFERENTIAL'
 );
-SET pg_trickle.enable_vector_agg = on;
 ```
+
+**Query pattern — route by tier based on use case:**
+
+```sql
+-- High-recall retrieval: full precision (best accuracy)
+SELECT id, content, embedding <=> '[...]'::vector AS distance
+FROM embeddings_full
+ORDER BY embedding <=> '[...]'::vector
+LIMIT 10;
+
+-- Low-latency retrieval: half precision (smaller index, faster scan)
+SELECT id, embedding <=> '[...]'::halfvec AS distance
+FROM embeddings_half
+ORDER BY embedding <=> '[...]'::halfvec
+LIMIT 10;
+
+-- Category routing: find best-matching category centroid first
+SELECT category, centroid <=> '[...]'::vector AS centroid_distance
+FROM category_centroids
+ORDER BY centroid <=> '[...]'::vector
+LIMIT 3;
+-- Then query embeddings_full filtered by category
+```
+
+**Performance comparison (1536-dim, 1M rows):**
+
+| Tier | Storage | Index size | p99 ANN latency |
+|------|---------|------------|-----------------|
+| `vector` (full) | ~6 GB | ~2.5 GB | ~8 ms |
+| `halfvec` (half) | ~3 GB | ~1.3 GB | ~4 ms |
+| Centroids only | < 1 MB | < 1 MB | < 1 ms |
 
 ---
 

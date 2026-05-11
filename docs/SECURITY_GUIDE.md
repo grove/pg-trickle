@@ -181,6 +181,79 @@ includes recommended Prometheus alerts.
 
 ---
 
+## Copy-Paste Role Templates
+
+The following SQL templates create the three standard pg_trickle roles and
+grant the minimum required privileges.  Run these as a superuser immediately
+after installing the extension.
+
+### `pgtrickle_admin` — stream table author
+
+```sql
+CREATE ROLE pgtrickle_admin NOLOGIN NOINHERIT;
+
+-- Extension function access
+GRANT USAGE   ON SCHEMA pgtrickle          TO pgtrickle_admin;
+GRANT USAGE   ON SCHEMA pgtrickle_changes  TO pgtrickle_admin;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgtrickle TO pgtrickle_admin;
+
+-- Create stream tables in the public schema
+GRANT CREATE  ON SCHEMA public TO pgtrickle_admin;
+GRANT USAGE   ON SCHEMA public TO pgtrickle_admin;
+GRANT SELECT  ON ALL TABLES IN SCHEMA public TO pgtrickle_admin;
+
+-- Automatically grant SELECT on new source tables
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT ON TABLES TO pgtrickle_admin;
+```
+
+### `pgtrickle_user` — application backend
+
+```sql
+CREATE ROLE pgtrickle_user NOLOGIN NOINHERIT;
+
+GRANT USAGE   ON SCHEMA pgtrickle TO pgtrickle_user;
+
+-- Monitoring functions (read-only)
+GRANT EXECUTE ON FUNCTION pgtrickle.pgt_status()         TO pgtrickle_user;
+GRANT EXECUTE ON FUNCTION pgtrickle.refresh_efficiency() TO pgtrickle_user;
+GRANT EXECUTE ON FUNCTION pgtrickle.health_check()       TO pgtrickle_user;
+
+-- Per-stream-table SELECT (run after each create_stream_table call):
+-- GRANT SELECT ON <stream_table_name> TO pgtrickle_user;
+```
+
+### `pgtrickle_readonly` — BI and reporting tools
+
+```sql
+CREATE ROLE pgtrickle_readonly NOLOGIN NOINHERIT;
+
+GRANT USAGE ON SCHEMA public TO pgtrickle_readonly;
+
+-- Per-stream-table SELECT (run after each create_stream_table call):
+-- GRANT SELECT ON <stream_table_name> TO pgtrickle_readonly;
+```
+
+### Assign roles to login roles
+
+```sql
+-- Data engineer
+CREATE ROLE de_alice LOGIN PASSWORD '...';
+GRANT pgtrickle_admin    TO de_alice;
+
+-- Application backend
+CREATE ROLE app_backend  LOGIN PASSWORD '...';
+GRANT pgtrickle_user     TO app_backend;
+
+-- BI tool
+CREATE ROLE bi_tool      LOGIN PASSWORD '...';
+GRANT pgtrickle_readonly TO bi_tool;
+```
+
+For a complete worked example including CDC trigger ownership verification,
+see the
+[Security Hardening tutorial](tutorials/SECURITY_HARDENING.md).
+
 ---
 
 ## Hardening checklist
