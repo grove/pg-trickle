@@ -1,0 +1,20 @@
+-- pg_trickle 0.55.0 -> 0.56.0 upgrade migration
+--
+-- v0.56.0 — Documentation Foundation
+--
+-- This release contains no SQL schema changes. All changes are
+-- documentation fixes and additions:
+--
+--   DOC-P0-1: Fix scripts/gen_catalogs.py two-pass GUC scan; regenerate
+--             docs/GUC_CATALOG.md with all 115 correct pg_trickle.* names
+--   DOC-P0-2: Complete docs/ERRORS.md to cover all 39 PgTrickleError variants
+--   DOC-P0-3: Correct pg_trickle.parallel_refresh_mode default to 'on'
+--             in docs/CONFIGURATION.md (has been 'on' since v0.11.0)
+--   DOC-P1-4: Add examples to outbox/inbox consumer functions in SQL_REFERENCE.md
+--   DOC-P1-5: Add catalog table column schemas to SQL_REFERENCE.md
+--   DOC-P1-6: Add standalone abstracts to three research stub documents
+--   DOC-P1-7: Add Before/After SQL examples to DVM_REWRITE_RULES.md
+--   DOC-P1-8: Enrich docs/introduction.md with IVM cycle overview
+--   DOC-P1-9: Add docs/MENTAL_MODEL.md (concept-first IVM explainer)
+--   DOC-P1-10: Add docs/LIMITATIONS.md (comprehensive unsupported-constructs ref)
+--   DOC-NEW-23: Add docs/PERFORMANCE_CHEATSHEET.md (single-page tuning guide)
