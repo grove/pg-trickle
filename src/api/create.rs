@@ -1,0 +1,588 @@
+//! Create stream table API entry points (v0.55.0 decomposition).
+// Extracted from src/api/mod.rs in v0.55.0 module decomposition.
+// All shared helpers, types, and utilities are in api/mod.rs (use super::*).
+
+use super::alter::{CreateStreamTableOptions, alter_stream_table_impl, create_stream_table_impl};
+use super::*;
+
+/// Create a new stream table.
+///
+/// # Arguments
+/// - `name`: Schema-qualified name (`'schema.table'`) or unqualified (`'table'`).
+/// - `query`: The defining SELECT query.
+/// - `schedule`: Desired maximum schedule. `'calculated'` for CALCULATED mode (inherits schedule from downstream dependents).
+/// - `refresh_mode`: `'AUTO'` (default — DIFFERENTIAL with FULL fallback),
+///   `'FULL'`, `'DIFFERENTIAL'`, or `'IMMEDIATE'`.
+/// - `initialize`: Whether to populate the table immediately.
+/// - `diamond_consistency`: `'atomic'` (default) or `'none'`.
+/// - `diamond_schedule_policy`: `'fastest'` (default) or `'slowest'`.
+/// - `output_distribution_column`: When non-NULL and Citus is loaded, the storage
+///   table is converted to a Citus distributed table using this column as the
+///   distribution key after creation. Use `'s'` when the stream table materializes
+///   a view over pg_ripple VP tables and you want co-location with VP shards.
+///   Has no effect when Citus is not installed.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table(
+    name: &str,
+    query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    refresh_mode: default!(&str, "'AUTO'"),
+    initialize: default!(bool, true),
+    diamond_consistency: default!(Option<&str>, "NULL"),
+    diamond_schedule_policy: default!(Option<&str>, "NULL"),
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    pooler_compatibility_mode: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+    // CITUS-7: Distribution column for the output (stream table storage) table.
+    output_distribution_column: default!(Option<&str>, "NULL"),
+    // CORR-1/UX-1 (v0.36.0): temporal IVM mode
+    temporal: default!(bool, false),
+    // CORR-2/UX-3 (v0.36.0): columnar storage backend
+    storage_backend: default!(Option<&str>, "NULL"),
+) {
+    let result = create_stream_table_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule,
+        refresh_mode_str: refresh_mode,
+        initialize,
+        diamond_consistency,
+        diamond_schedule_policy,
+        requested_cdc_mode: cdc_mode,
+        append_only,
+        pooler_compatibility_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        output_distribution_column,
+        temporal_mode: temporal,
+        storage_backend,
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+/// Create a stream table if it does not already exist.
+///
+/// If a stream table with the given name already exists, this is a silent no-op
+/// (an INFO message is logged). The existing definition is never modified.
+///
+/// This is useful for migration scripts that should be safe to re-run.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_stream_table_if_not_exists(
+    name: &str,
+    query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    refresh_mode: default!(&str, "'AUTO'"),
+    initialize: default!(bool, true),
+    diamond_consistency: default!(Option<&str>, "NULL"),
+    diamond_schedule_policy: default!(Option<&str>, "NULL"),
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    pooler_compatibility_mode: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+    // CITUS-7: Distribution column for the output (stream table storage) table.
+    output_distribution_column: default!(Option<&str>, "NULL"),
+    // CORR-1/UX-1 (v0.36.0): temporal IVM mode
+    temporal: default!(bool, false),
+    // CORR-2/UX-3 (v0.36.0): columnar storage backend
+    storage_backend: default!(Option<&str>, "NULL"),
+) {
+    let result = create_stream_table_if_not_exists_impl(CreateStreamTableOptions {
+        name,
+        query,
+        schedule,
+        refresh_mode_str: refresh_mode,
+        initialize,
+        diamond_consistency,
+        diamond_schedule_policy,
+        requested_cdc_mode: cdc_mode,
+        append_only,
+        pooler_compatibility_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        output_distribution_column,
+        temporal_mode: temporal,
+        storage_backend,
+    });
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_stream_table_if_not_exists_impl(
+    opts: CreateStreamTableOptions<'_>,
+) -> Result<(), PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(opts.name)?;
+
+    match StreamTableMeta::get_by_name(&schema, &table_name) {
+        Ok(_) => {
+            pgrx::info!(
+                "Stream table {}.{} already exists — skipping creation.",
+                schema,
+                table_name,
+            );
+            Ok(())
+        }
+        Err(PgTrickleError::NotFound(_)) => create_stream_table_impl(opts),
+        Err(e) => Err(e),
+    }
+}
+
+/// G15-BC: Create multiple stream tables in a single transaction.
+///
+/// Accepts a JSONB array of stream table definitions. Each element must be
+/// an object with at least `name` and `query` keys; all other keys match
+/// the parameters of [`create_stream_table`] (snake_case).
+///
+/// Returns a JSONB array of results, one per input definition:
+/// ```json
+/// [
+///   {"name": "my_st", "status": "created", "pgt_id": 42},
+///   {"name": "bad_st", "status": "error", "error": "query parse error: …"}
+/// ]
+/// ```
+///
+/// On any error, the entire transaction is rolled back (standard PostgreSQL
+/// transactional semantics).
+#[pg_extern(schema = "pgtrickle")]
+fn bulk_create(definitions: pgrx::JsonB) -> pgrx::JsonB {
+    let result = bulk_create_impl(definitions.0);
+    match result {
+        Ok(results_json) => pgrx::JsonB(results_json),
+        Err(e) => raise_error_with_context(e),
+    }
+}
+
+pub(crate) fn bulk_create_impl(
+    definitions: serde_json::Value,
+) -> Result<serde_json::Value, PgTrickleError> {
+    let defs = definitions.as_array().ok_or_else(|| {
+        PgTrickleError::InvalidArgument(
+            "bulk_create() expects a JSONB array of stream table definitions".into(),
+        )
+    })?;
+
+    if defs.is_empty() {
+        return Err(PgTrickleError::InvalidArgument(
+            "bulk_create() definitions array is empty".into(),
+        ));
+    }
+
+    let mut results = Vec::with_capacity(defs.len());
+
+    for (i, def) in defs.iter().enumerate() {
+        let obj = def.as_object().ok_or_else(|| {
+            PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{}] is not a JSON object",
+                i
+            ))
+        })?;
+
+        let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{}] missing required \"name\" string",
+                i
+            ))
+        })?;
+
+        let query = obj.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
+            PgTrickleError::InvalidArgument(format!(
+                "bulk_create() element [{}] \"{}\" missing required \"query\" string",
+                i, name
+            ))
+        })?;
+
+        let schedule = obj.get("schedule").and_then(|v| v.as_str());
+        let refresh_mode = obj
+            .get("refresh_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AUTO");
+        let initialize = obj
+            .get("initialize")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let diamond_consistency = obj.get("diamond_consistency").and_then(|v| v.as_str());
+        let diamond_schedule_policy = obj.get("diamond_schedule_policy").and_then(|v| v.as_str());
+        let cdc_mode = obj.get("cdc_mode").and_then(|v| v.as_str());
+        let append_only = obj
+            .get("append_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let pooler_compatibility_mode = obj
+            .get("pooler_compatibility_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let partition_by = obj.get("partition_by").and_then(|v| v.as_str());
+        let max_differential_joins = obj
+            .get("max_differential_joins")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let max_delta_fraction = obj.get("max_delta_fraction").and_then(|v| v.as_f64());
+        // CITUS-7: optional distribution column for the output table
+        let output_distribution_column = obj
+            .get("output_distribution_column")
+            .and_then(|v| v.as_str());
+        // CORR-1/UX-1 (v0.36.0): temporal IVM mode
+        let temporal = obj
+            .get("temporal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // CORR-2/UX-3 (v0.36.0): columnar storage backend
+        let storage_backend = obj.get("storage_backend").and_then(|v| v.as_str());
+
+        match create_stream_table_impl(CreateStreamTableOptions {
+            name,
+            query,
+            schedule,
+            refresh_mode_str: refresh_mode,
+            initialize,
+            diamond_consistency,
+            diamond_schedule_policy,
+            requested_cdc_mode: cdc_mode,
+            append_only,
+            pooler_compatibility_mode,
+            partition_by,
+            max_differential_joins,
+            max_delta_fraction,
+            output_distribution_column,
+            temporal_mode: temporal,
+            storage_backend,
+        }) {
+            Ok(()) => {
+                // Look up pgt_id for the result
+                let (schema, table_name) =
+                    parse_qualified_name(name).unwrap_or_else(|_| ("public".into(), name.into()));
+                let pgt_id = StreamTableMeta::get_by_name(&schema, &table_name)
+                    .map(|st| st.pgt_id)
+                    .unwrap_or(-1);
+
+                results.push(serde_json::json!({
+                    "name": name,
+                    "status": "created",
+                    "pgt_id": pgt_id,
+                }));
+            }
+            Err(e) => {
+                // Abort the entire batch on error — the transaction will
+                // be rolled back by PostgreSQL. Return immediate error
+                // with context about which definition failed.
+                return Err(PgTrickleError::InvalidArgument(format!(
+                    "bulk_create() failed on element [{}] \"{}\": {}",
+                    i, name, e
+                )));
+            }
+        }
+    }
+
+    pgrx::info!(
+        "pg_trickle: bulk_create created {} stream table(s)",
+        results.len()
+    );
+
+    Ok(serde_json::Value::Array(results))
+}
+
+/// Create or replace a stream table.
+///
+/// If the stream table does not exist, it is created (identical to
+/// [`create_stream_table`]).  If it already exists:
+///
+/// - **Identical definition** → no-op (INFO logged).
+/// - **Query identical, config differs** → delegates to `alter_stream_table_impl`.
+/// - **Query differs** → delegates to `alter_stream_table_impl` with query change
+///   (ALTER QUERY path), plus any config changes.
+///
+/// This is the declarative API for idempotent deployments (dbt, migrations,
+/// GitOps). Mirrors PostgreSQL's `CREATE OR REPLACE` convention.
+#[allow(clippy::too_many_arguments)]
+#[pg_extern(schema = "pgtrickle")]
+fn create_or_replace_stream_table(
+    name: &str,
+    query: &str,
+    schedule: default!(Option<&str>, "'calculated'"),
+    refresh_mode: default!(&str, "'AUTO'"),
+    initialize: default!(bool, true),
+    diamond_consistency: default!(Option<&str>, "NULL"),
+    diamond_schedule_policy: default!(Option<&str>, "NULL"),
+    cdc_mode: default!(Option<&str>, "NULL"),
+    append_only: default!(bool, false),
+    pooler_compatibility_mode: default!(bool, false),
+    partition_by: default!(Option<&str>, "NULL"),
+    max_differential_joins: default!(Option<i32>, "NULL"),
+    max_delta_fraction: default!(Option<f64>, "NULL"),
+    // CITUS-7: Distribution column for the output (stream table storage) table.
+    output_distribution_column: default!(Option<&str>, "NULL"),
+    // CORR-1/UX-1 (v0.36.0): temporal IVM mode
+    temporal: default!(bool, false),
+    // CORR-2/UX-3 (v0.36.0): columnar storage backend
+    storage_backend: default!(Option<&str>, "NULL"),
+) {
+    let result = create_or_replace_stream_table_impl(
+        name,
+        query,
+        schedule,
+        refresh_mode,
+        initialize,
+        diamond_consistency,
+        diamond_schedule_policy,
+        cdc_mode,
+        append_only,
+        pooler_compatibility_mode,
+        partition_by,
+        max_differential_joins,
+        max_delta_fraction,
+        output_distribution_column,
+        temporal,
+        storage_backend,
+    );
+    if let Err(e) = result {
+        raise_error_with_context(e);
+    }
+}
+
+/// Tracks which config parameters differ between an existing stream table
+/// and a `create_or_replace` call.  Fields are `Some` only when changed.
+pub(crate) struct ConfigDiff<'a> {
+    pub(crate) schedule: Option<&'a str>,
+    pub(crate) refresh_mode: Option<&'a str>,
+    pub(crate) diamond_consistency: Option<&'a str>,
+    pub(crate) diamond_schedule_policy: Option<&'a str>,
+    pub(crate) cdc_mode: Option<&'a str>,
+    pub(crate) append_only: Option<bool>,
+    pub(crate) pooler_compatibility_mode: Option<bool>,
+}
+
+impl ConfigDiff<'_> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.schedule.is_none()
+            && self.refresh_mode.is_none()
+            && self.diamond_consistency.is_none()
+            && self.diamond_schedule_policy.is_none()
+            && self.cdc_mode.is_none()
+            && self.append_only.is_none()
+            && self.pooler_compatibility_mode.is_none()
+    }
+}
+
+/// Compare the requested config parameters against the existing catalog row.
+/// Returns `Some` only for parameters that differ from the stored values.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_config_diff<'a>(
+    existing: &StreamTableMeta,
+    new_schedule: Option<&'a str>,
+    new_refresh_mode: &'a str,
+    new_dc: Option<&'a str>,
+    new_dsp: Option<&'a str>,
+    new_cdc_mode: Option<&'a str>,
+    new_append_only: bool,
+    new_pooler_compat: bool,
+) -> ConfigDiff<'a> {
+    // Schedule: compare raw strings.  'calculated' in user input means NULL in catalog.
+    let schedule_changed = match new_schedule {
+        Some(s) if s.trim().eq_ignore_ascii_case("calculated") => existing.schedule.is_some(),
+        Some(s) => existing
+            .schedule
+            .as_deref()
+            .is_none_or(|cur| cur != s.trim()),
+        None => existing.schedule.is_some(),
+    };
+
+    // Refresh mode: compare enum values.  AUTO is resolved to DIFFERENTIAL by from_str.
+    let new_mode = RefreshMode::from_str(new_refresh_mode).unwrap_or(RefreshMode::Differential);
+    let mode_changed = existing.refresh_mode != new_mode;
+
+    // Diamond consistency: compare enum values.
+    let new_dc_val = match new_dc {
+        Some(s) => DiamondConsistency::from_sql_str(&s.to_lowercase()),
+        None => DiamondConsistency::Atomic,
+    };
+    let dc_changed = existing.diamond_consistency != new_dc_val;
+
+    // Diamond schedule policy: compare enum values.
+    let new_dsp_val = match new_dsp {
+        Some(s) => DiamondSchedulePolicy::from_sql_str(s).unwrap_or(DiamondSchedulePolicy::Fastest),
+        None => DiamondSchedulePolicy::Fastest,
+    };
+    let dsp_changed = existing.diamond_schedule_policy != new_dsp_val;
+
+    // CDC mode: compare Option<String>.
+    let new_cdc_normalized = new_cdc_mode.map(|m| m.trim().to_lowercase());
+    let cdc_changed = match (&existing.requested_cdc_mode, &new_cdc_normalized) {
+        (None, None) => false,
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    };
+
+    // Append-only: compare bools.
+    let ao_changed = existing.is_append_only != new_append_only;
+
+    // PB2: Pooler compatibility mode.
+    let pcm_changed = existing.pooler_compatibility_mode != new_pooler_compat;
+
+    ConfigDiff {
+        schedule: if schedule_changed {
+            new_schedule.or(Some("calculated"))
+        } else {
+            None
+        },
+        refresh_mode: if mode_changed {
+            Some(new_refresh_mode)
+        } else {
+            None
+        },
+        diamond_consistency: if dc_changed { new_dc } else { None },
+        diamond_schedule_policy: if dsp_changed { new_dsp } else { None },
+        cdc_mode: if cdc_changed { new_cdc_mode } else { None },
+        append_only: if ao_changed {
+            Some(new_append_only)
+        } else {
+            None
+        },
+        pooler_compatibility_mode: if pcm_changed {
+            Some(new_pooler_compat)
+        } else {
+            None
+        },
+    }
+}
+
+/// Collapse all runs of whitespace (spaces, tabs, newlines) into a single
+/// space and trim leading/trailing whitespace. Used for semantic query
+/// comparison so cosmetic SQL formatting differences are treated as no-ops.
+pub(crate) fn normalize_sql_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_or_replace_stream_table_impl(
+    name: &str,
+    query: &str,
+    schedule: Option<&str>,
+    refresh_mode_str: &str,
+    initialize: bool,
+    diamond_consistency: Option<&str>,
+    diamond_schedule_policy: Option<&str>,
+    cdc_mode: Option<&str>,
+    append_only: bool,
+    pooler_compatibility_mode: bool,
+    partition_by: Option<&str>,
+    max_differential_joins: Option<i32>,
+    max_delta_fraction: Option<f64>,
+    // CITUS-7: Distribution column for the output table (used only on first creation).
+    output_distribution_column: Option<&str>,
+    // CORR-1/UX-1 (v0.36.0): temporal IVM mode (used only on first creation).
+    temporal_mode: bool,
+    // CORR-2/UX-3 (v0.36.0): columnar storage backend (used only on first creation).
+    storage_backend: Option<&str>,
+) -> Result<(), PgTrickleError> {
+    let (schema, table_name) = parse_qualified_name(name)?;
+
+    match StreamTableMeta::get_by_name(&schema, &table_name) {
+        Ok(existing) => {
+            // Stream table exists — determine what changed.
+            let rw = run_query_rewrite_pipeline(query)?;
+            let new_query_rewritten = rw.query;
+
+            // TopK detection: if the new query is TopK, compare against the
+            // base query (ORDER BY/LIMIT stripped) since that's what is stored
+            // in `defining_query`.
+            let topk_info = crate::dvm::detect_topk_pattern(&new_query_rewritten)?;
+            let effective_new_query = match &topk_info {
+                Some(info) => &info.base_query,
+                None => &new_query_rewritten,
+            };
+
+            // Normalize whitespace before comparison so cosmetic differences
+            // (extra spaces, newlines, tabs) are treated as no-ops.
+            let query_changed = normalize_sql_whitespace(&existing.defining_query)
+                != normalize_sql_whitespace(effective_new_query);
+
+            let config_diff = compute_config_diff(
+                &existing,
+                schedule,
+                refresh_mode_str,
+                diamond_consistency,
+                diamond_schedule_policy,
+                cdc_mode,
+                append_only,
+                pooler_compatibility_mode,
+            );
+
+            if !query_changed && config_diff.is_empty() {
+                pgrx::info!(
+                    "Stream table {}.{} already exists with identical definition — no changes made.",
+                    schema,
+                    table_name,
+                );
+                return Ok(());
+            }
+
+            // Delegate to alter_stream_table_impl with the appropriate
+            // combination of query + config changes.
+            alter_stream_table_impl(
+                name,
+                if query_changed { Some(query) } else { None },
+                config_diff.schedule,
+                config_diff.refresh_mode,
+                None, // status: keep current
+                config_diff.diamond_consistency,
+                config_diff.diamond_schedule_policy,
+                config_diff.cdc_mode,
+                config_diff.append_only,
+                config_diff.pooler_compatibility_mode,
+                None, // tier: not set via create_or_replace
+                None, // fuse: not set via create_or_replace
+                None, // fuse_ceiling: not set via create_or_replace
+                None, // fuse_sensitivity: not set via create_or_replace
+                None, // partition_by: not changed via create_or_replace
+                max_differential_joins,
+                max_delta_fraction,
+                None, // post_refresh_action: not set via create_or_replace
+                None, // reindex_drift_threshold: not set via create_or_replace
+            )?;
+
+            pgrx::info!(
+                "Stream table {}.{} replaced (query_changed={}, config_changed={}).",
+                schema,
+                table_name,
+                query_changed,
+                !config_diff.is_empty(),
+            );
+
+            Ok(())
+        }
+        Err(PgTrickleError::NotFound(_)) => {
+            // Does not exist — create from scratch.
+            create_stream_table_impl(CreateStreamTableOptions {
+                name,
+                query,
+                schedule,
+                refresh_mode_str,
+                initialize,
+                diamond_consistency,
+                diamond_schedule_policy,
+                requested_cdc_mode: cdc_mode,
+                append_only,
+                pooler_compatibility_mode,
+                partition_by,
+                max_differential_joins,
+                max_delta_fraction,
+                output_distribution_column,
+                temporal_mode,   // passed through from caller
+                storage_backend, // passed through from caller
+            })
+        }
+        Err(e) => Err(e),
+    }
+}

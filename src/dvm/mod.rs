@@ -703,7 +703,11 @@ pub fn generate_delta_query_cached(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    // M-6 (v0.55.0): Time the DVM parse pass.
+    let parse_start = std::time::Instant::now();
     let mut result = parse_defining_query_full(defining_query)?;
+    let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
+    crate::shmem::increment_dvm_parse_ms(parse_elapsed_ms);
 
     let mut source_oids: Vec<u32> = result.tree.source_oids();
     source_oids.extend(result.cte_registry.source_oids());
@@ -788,6 +792,8 @@ pub fn generate_delta_query_cached(
     // whether to run the expensive DVM parse.
     if crate::shmem::is_shmem_available() {
         crate::shmem::signal_l0_cache_populated();
+        // M-6 (v0.55.0): Track delta SQL template size.
+        crate::shmem::increment_delta_query_bytes(template_sql.len() as u64);
     }
 
     // Resolve placeholders for this invocation.

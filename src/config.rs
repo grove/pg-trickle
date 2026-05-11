@@ -9,16 +9,34 @@ use pgrx::guc::*;
 pub static PGS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Scheduler wake interval in milliseconds.
+///
+/// Default: 1,000 ms (1 s). This provides sub-second refresh latency while
+/// spending negligible CPU when all stream tables are idle. Raise to reduce
+/// scheduler overhead on heavily loaded clusters; lower only if sub-100 ms
+/// refresh latency is required and the cluster has spare CPU.
 pub static PGS_SCHEDULER_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(1000);
 
 /// Minimum allowed schedule in seconds.
+///
+/// Default: 1 s. Prevents runaway re-scheduling below the scheduler tick
+/// interval.  Stream tables with CALCULATED schedules will never refresh
+/// more frequently than once per second regardless of downstream demand.
 pub static PGS_MIN_SCHEDULE_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(1);
 
 /// Default effective schedule (in seconds) for isolated CALCULATED stream tables
 /// that have no downstream dependents.
+///
+/// Default: 1 s. Isolated stream tables inherit their effective schedule from
+/// downstream dependents; this value is used as a fallback when there are none.
+/// Raise to reduce scheduler churn on workloads with many independent STs.
 pub static PGS_DEFAULT_SCHEDULE_SECONDS: GucSetting<i32> = GucSetting::<i32>::new(1);
 
 /// Maximum consecutive errors before auto-suspending a stream table.
+///
+/// Default: 3. Three strikes gives a transient failure (e.g., a momentary
+/// source lock conflict) a chance to self-recover without filling logs,
+/// while reliably catching permanent failures before they cascade. Raise
+/// on high-churn clusters where occasional lock timeouts are expected.
 pub static PGS_MAX_CONSECUTIVE_ERRORS: GucSetting<i32> = GucSetting::<i32>::new(3);
 
 /// Schema name for change buffer tables.
@@ -26,6 +44,11 @@ pub static PGS_CHANGE_BUFFER_SCHEMA: GucSetting<Option<std::ffi::CString>> =
     GucSetting::<Option<std::ffi::CString>>::new(Some(c"pgtrickle_changes"));
 
 /// Maximum number of concurrent refresh workers.
+///
+/// Default: 4. A single worker typically sustains 200–500 refreshes/s on
+/// an 8-core instance; 4 workers cover bursty diamond DAG parallelism
+/// without saturating I/O.  Set equal to the number of parallel refresh
+/// chains in your largest DAG for maximum throughput.
 pub static PGS_MAX_CONCURRENT_REFRESHES: GucSetting<i32> = GucSetting::<i32>::new(4);
 
 /// Maximum change-to-table ratio before falling back to FULL refresh.
@@ -1510,15 +1533,15 @@ pub static PGS_COST_CACHE_CAPACITY: GucSetting<i32> = GucSetting::<i32>::new(256
 ///
 /// Controls how many stream-table pgt_ids can be queued for incremental DAG
 /// re-evaluation between scheduler ticks. When the ring overflows, the scheduler
-/// falls back to a full O(V+E) DAG rebuild. The compile-time maximum is 1024;
+/// falls back to a full O(V+E) DAG rebuild. The compile-time maximum is 4,096;
 /// this GUC can be tuned up to that limit for clusters with high DDL rates.
 ///
 /// Must be set in `postgresql.conf` or via `ALTER SYSTEM` before loading
 /// `shared_preload_libraries` (preload-time). Runtime changes have no effect
 /// until restart.
 ///
-/// Default: 128. Range: 1–1024.
-pub static PGS_INVALIDATION_RING_CAPACITY: GucSetting<i32> = GucSetting::<i32>::new(128);
+/// Default: 1024. Range: 1–4096. Raised from 128/1024 to 1024/4096 in v0.55.0.
+pub static PGS_INVALIDATION_RING_CAPACITY: GucSetting<i32> = GucSetting::<i32>::new(1024);
 
 /// A46-10 (v0.45.0): Enable lag-aware cross-database worker quota adjustment.
 ///
@@ -2999,11 +3022,11 @@ pub fn register_gucs() {
         c"A46-7: Effective capacity of the invalidation ring buffer.",
         c"Controls how many stream-table pgt_ids can be queued for incremental DAG \
           re-evaluation between scheduler ticks. When the ring overflows, the scheduler \
-          falls back to a full O(V+E) DAG rebuild. Compile-time maximum is 1024. \
-          Can be set in postgresql.conf or with SIGHUP (no restart needed). Default: 128.",
+          falls back to a full O(V+E) DAG rebuild. Compile-time maximum is 4096. \
+          Default: 1024. Range: 1-4096. Raised from 1024 max to 4096 in v0.55.0.",
         &PGS_INVALIDATION_RING_CAPACITY,
         1,    // min
-        1024, // max (matches INVALIDATION_RING_MAX_CAPACITY)
+        4096, // max (matches INVALIDATION_RING_MAX_CAPACITY in shmem.rs)
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -3117,7 +3140,7 @@ pub fn pg_trickle_invalidation_ring_capacity() -> usize {
     }
     #[cfg(not(test))]
     {
-        (PGS_INVALIDATION_RING_CAPACITY.get().clamp(1, 1024)) as usize
+        (PGS_INVALIDATION_RING_CAPACITY.get().clamp(1, 4096)) as usize
     }
 }
 

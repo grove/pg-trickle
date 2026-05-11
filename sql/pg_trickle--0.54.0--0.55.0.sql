@@ -1,0 +1,16 @@
+-- pg_trickle 0.54.0 -> 0.55.0 upgrade migration
+--
+-- v0.55.0 — Final Pre-1.0 Polish
+--
+-- This release contains no SQL schema changes. All changes are
+-- internal improvements and documentation updates:
+--
+--   M-1: Invalidation ring capacity raised to max=4096, default=1024
+--   M-2: src/api/mod.rs decomposed into create.rs, alter.rs, refresh_ops.rs
+--   M-3: src/monitor.rs decomposed into alert.rs, health.rs, tree.rs
+--   M-4: NOTIFY payloads migrated to structured serde_json values
+--   M-5: Multi-column IN → AND-chained equality rewrite (DVM sublinks)
+--   M-6: DVM parse-time and delta SQL size metrics in shared memory
+--   M-7: Reserved column-name prefixes (__pgt_*, __pgs_*) documented
+--   M-8: GUC rationale comments added for magic-number defaults
+--   M-9: Codecov upload step added to PR gate CI job

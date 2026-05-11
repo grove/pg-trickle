@@ -69,6 +69,15 @@ jobs:
           report_paths: 'target/nextest/ci/junit.xml'
           commit: ${{github.event.pull_request.head.sha}}
 
+      # M-9 (v0.55.0): Upload unit-test coverage to Codecov for PR gate.
+      # fail_ci_if_error: false so that a Codecov outage never blocks merges.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   # ── Unit tests (extra platforms) ───────────────────────────────────────
   # Keep macOS/Windows coverage off the PR path; Linux remains the merge gate
   # while the wider platform matrix runs on schedule or manual dispatch.

@@ -855,7 +855,7 @@ pub fn execute_differential_refresh(
                 crate::monitor::AlertEvent::AppendOnlyReverted,
                 schema,
                 name,
-                "",
+                serde_json::json!({}),
                 st.pooler_compatibility_mode,
             );
         }

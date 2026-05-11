@@ -362,13 +362,12 @@ pub(crate) fn drain_pending_cleanups() {
                             crate::monitor::AlertEvent::CleanupFailure,
                             "",
                             &buf_name,
-                            &format!(
-                                r#""source_oid":{},"consecutive_failures":{},"operation":"{}","error":"{}""#,
-                                oid,
-                                count,
-                                operation,
-                                msg.replace('"', r#"\""#),
-                            ),
+                            serde_json::json!({
+                                "source_oid": oid,
+                                "consecutive_failures": *count,
+                                "operation": operation,
+                                "error": msg,
+                            }),
                             false,
                         );
                     }
