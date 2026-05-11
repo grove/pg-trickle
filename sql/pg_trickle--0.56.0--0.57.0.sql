@@ -1,0 +1,24 @@
+-- pg_trickle 0.56.0 -> 0.57.0 upgrade migration
+--
+-- v0.57.0 — Tutorial Expansion & Documentation Polish
+--
+-- This release contains no SQL schema changes. All changes are
+-- documentation additions and improvements:
+--
+--   DOC-P1-1: Add docs/tutorials/FIRST_DASHBOARD.md
+--   DOC-P1-2: Add docs/tutorials/EVENT_SOURCING.md
+--   DOC-P1-3: Add docs/tutorials/BACKFILL_AND_MIGRATION.md
+--   DOC-P1-4: Add docs/tutorials/SECURITY_HARDENING.md
+--   DOC-P1-5: Expand docs/tutorials/HYBRID_SEARCH_PATTERNS.md (patterns 2-3)
+--   DOC-P1-6: Expand docs/tutorials/PER_TENANT_ANN_PATTERNS.md (patterns 2-3)
+--   DOC-P2-11: Add copy-paste GRANT templates to docs/SECURITY_GUIDE.md
+--   DOC-P2-12: Backfill docs/WHATS_NEW.md for v0.1-v0.7
+--   DOC-P2-15: Fix link inconsistencies in docs/QUICKSTART_5MIN.md
+--   DOC-P2-16: Add 3 worked examples to docs/PERFORMANCE_COOKBOOK.md
+--   DOC-P2-17: Resolve supply-chain TODOs in docs/SECURITY_MODEL.md
+--   DOC-P3-18: Convert plain-text GUC refs to backticks in docs/FAQ.md
+--   DOC-P3-19: Add operator quick-reference table to docs/DVM_OPERATORS.md
+--   DOC-P3-20: Add parameter breakdown to docs/tutorials/VECTOR_RAG_STARTER.md
+--   DOC-P3-21: Add composite score prose to docs/tutorials/tuning-refresh-mode.md
+--   DOC-P3-22: Add status banner to docs/research/multi_db_refresh_broker.md
+--   DOC-CONS-28..31: Consistency sweep (PostgreSQL casing, terminology)
