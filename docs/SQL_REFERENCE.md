@@ -4771,5 +4771,49 @@ WHERE pgtrickle.inbox_is_my_partition(customer_id::text, 2, 4);
 [Glossary](GLOSSARY.md) ·
 [FAQ](FAQ.md)
 
+---
 
+## Reserved Column-Name Prefixes (v0.55.0)
+
+> **Added in v0.55.0 (M-7).**
+
+pg_trickle uses several internal column-name prefixes for synthetic columns it
+creates during query analysis and delta SQL generation.  **User-defined columns
+whose names begin with these prefixes will conflict with internal template tokens
+and produce incorrect query results.**
+
+### `__pgt_*` — DVM engine columns
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `__pgt_count` | Weight column for aggregate deduplication (DIFF mode) | `__pgt_count` |
+| `__pgt_row_id` | Content-based row identity hash for tables without primary keys | `__pgt_row_id` |
+| `__pgt_wf_N` | Synthetic window-function lifting columns (rewrite pass #7) | `__pgt_wf_1`, `__pgt_wf_2` |
+| `__pgt_in_sub_*` | Derived-table alias for multi-column IN → SemiJoin rewrite (M-5) | `__pgt_in_sub_t` |
+| `__pgt_src_N` | Source partition aliases in generated delta CTEs | `__pgt_src_0` |
+
+### `__pgs_*` — Scheduler / shared-memory columns
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `__pgs_*` | Reserved for future scheduler-side synthetic columns | (none exposed today) |
+
+### Consequences of prefix collision
+
+If your defining query produces a column whose name starts with `__pgt_` or
+`__pgs_`, the DVM engine may:
+
+- Fail to generate correct delta SQL (silently wrong results in DIFFERENTIAL mode).
+- Produce a parse error if the synthetic name is also used as a template token.
+- Cause the MERGE statement to reference the wrong column in the ON clause.
+
+**Mitigation:** rename the conflicting column using an alias:
+
+```sql
+-- Bad: __pgt_count collides with the weight column
+SELECT id, sum(amount) AS __pgt_count FROM orders GROUP BY id;
+
+-- Good: use any name that does not start with __pgt_ or __pgs_
+SELECT id, sum(amount) AS order_total FROM orders GROUP BY id;
+```
 

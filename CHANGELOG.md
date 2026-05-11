@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.55.0 — Final Pre-1.0 Polish](#0550--final-pre-10-polish)
 - [0.54.0 — DVM Engine Hardening](#0540--dvm-engine-hardening)
 - [0.53.0 — Unit Test Depth Sweep](#0530--unit-test-depth-sweep)
 - [0.52.0 — DVM Hot-Path Performance](#0520--dvm-hot-path-performance)
@@ -69,6 +70,63 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.55.0] — Final Pre-1.0 Polish
+
+### What's New
+
+v0.55.0 is a focused polish release that lowers technical debt and improves
+observability ahead of the 1.0 stable label. All nine milestones deliver
+better diagnostics, cleaner code structure, and more operator-friendly
+documentation — without any SQL schema changes.
+
+### Changes
+
+- **M-1 — Wider invalidation ring** (`shmem.rs`, `config.rs`): Maximum ring
+  capacity raised from 1 024 to 4 096; the GUC default is now 1 024 so
+  deployments with many concurrent stream tables no longer drop events.
+
+- **M-2 — API module decomposition** (`src/api/`): `api/mod.rs` split into
+  `create.rs`, `alter.rs`, and `refresh_ops.rs`. Each sub-module is now
+  independently readable and testable.
+
+- **M-3 — Monitor module decomposition** (`src/monitor/`): `monitor.rs` split
+  into `alert.rs`, `health.rs`, and `tree.rs`. Alert emission, health checks,
+  and DAG tree rendering are now in separate, focused units.
+
+- **M-4 — Structured NOTIFY payloads**: All `pg_notify` calls now emit
+  structured `serde_json` values instead of hand-built strings, making it
+  easier to parse alert events in downstream consumers.
+
+- **M-5 — Multi-column `IN` rewrite** (`src/dvm/parser/sublinks.rs`): Row
+  expressions and multi-target sub-selects in `IN` / `NOT IN` predicates are
+  now automatically rewritten to AND-chained equality rather than returning an
+  unsupported-syntax error.
+
+- **M-6 — DVM parse metrics** (`src/shmem.rs`, `src/dvm/mod.rs`): Two new
+  shared-memory counters track cumulative DVM parse time
+  (`pg_trickle_dvm_parse_ms`) and total delta SQL template size
+  (`pg_trickle_delta_query_size_bytes`). Both are exposed via the Prometheus
+  `/metrics` endpoint.
+
+- **M-7 — Reserved column-name prefix docs** (`docs/SQL_REFERENCE.md`): New
+  "Reserved Column-Name Prefixes" section documents `__pgt_*` and `__pgs_*`
+  internal prefixes and explains the consequences of naming conflicts.
+
+- **M-8 — GUC rationale comments** (`src/config.rs`): Every magic-number GUC
+  default now has an inline comment explaining why that value was chosen and
+  when operators should raise or lower it.
+
+- **M-9 — Codecov upload in PR gate** (`.github/workflows/ci.yml`): The
+  Linux unit-test job now uploads coverage data to Codecov after each run.
+  `fail_ci_if_error: false` ensures that a Codecov outage never blocks merges.
+
+### Upgrade
+
+No SQL migration is required. Run `ALTER EXTENSION pg_trickle UPDATE TO '0.55.0'`
+or reinstall to pick up the new extension version string.
 
 ---
 
