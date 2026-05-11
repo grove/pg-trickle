@@ -4390,6 +4390,17 @@ pgtrickle.outbox_rows_consumed(
 Use this when consuming outbox rows **without** a consumer group. For
 consumer-group mode, use `commit_offset()` instead.
 
+**Example:**
+```sql
+-- Simple (non-group) consumer: fetch latest, process, release
+SELECT outbox_id, payload
+FROM pgtrickle.pgt_outbox_latest_orders_agg
+LIMIT 10;
+
+-- After successful processing, release the outbox row:
+SELECT pgtrickle.outbox_rows_consumed('public.orders_agg', 77);
+```
+
 ### Consumer Groups
 
 Consumer groups give independent consumers their own offset pointer into the
@@ -4420,6 +4431,15 @@ pgtrickle.drop_consumer_group(
 
 Drops the group and all its offsets and leases.
 
+**Example:**
+```sql
+-- Remove a consumer group (error if not found)
+SELECT pgtrickle.drop_consumer_group('retired-group');
+
+-- Idempotent removal
+SELECT pgtrickle.drop_consumer_group('retired-group', if_exists => true);
+```
+
 #### `pgtrickle.poll_outbox(group, consumer, batch_size, visibility_seconds)`
 
 Fetch the next batch of unprocessed messages for a consumer.
@@ -4449,6 +4469,18 @@ When `is_claim_check = true`, the `payload` is `NULL` and the actual delta
 rows are in a separate table (call `outbox_rows_consumed()` to release them
 after processing).
 
+**Example:**
+```sql
+-- Fetch up to 50 messages with a 60-second visibility window
+SELECT outbox_id, inserted_count, deleted_count, payload
+FROM pgtrickle.poll_outbox(
+    'analytics-group',
+    'worker-1',
+    batch_size         => 50,
+    visibility_seconds => 60
+);
+```
+
 #### `pgtrickle.commit_offset(group, consumer, last_offset)`
 
 Commit the highest outbox offset the consumer has successfully processed.
@@ -4459,6 +4491,12 @@ pgtrickle.commit_offset(
     consumer    TEXT,
     last_offset BIGINT
 ) → void
+```
+
+**Example:**
+```sql
+-- After successfully processing messages up through offset 142:
+SELECT pgtrickle.commit_offset('analytics-group', 'worker-1', 142);
 ```
 
 #### `pgtrickle.extend_lease(group, consumer, extension_seconds)`
@@ -4473,6 +4511,12 @@ pgtrickle.extend_lease(
 ) → void
 ```
 
+**Example:**
+```sql
+-- Extend the lease by 2 minutes when a large batch takes longer than expected
+SELECT pgtrickle.extend_lease('analytics-group', 'worker-1', extension_seconds => 120);
+```
+
 #### `pgtrickle.seek_offset(group, consumer, new_offset)`
 
 Jump to a specific offset for replay or recovery.
@@ -4485,6 +4529,15 @@ pgtrickle.seek_offset(
 ) → void
 ```
 
+**Example:**
+```sql
+-- Rewind consumer to replay from offset 100 (disaster recovery)
+SELECT pgtrickle.seek_offset('analytics-group', 'worker-1', 100);
+
+-- Fast-forward past known-bad messages to offset 500
+SELECT pgtrickle.seek_offset('analytics-group', 'worker-1', 500);
+```
+
 #### `pgtrickle.consumer_heartbeat(group, consumer)`
 
 Signal that a consumer is still alive. Prevents the consumer from being marked
@@ -4495,6 +4548,12 @@ pgtrickle.consumer_heartbeat(
     group    TEXT,
     consumer TEXT
 ) → void
+```
+
+**Example:**
+```sql
+-- Call periodically from a long-running consumer to stay alive
+SELECT pgtrickle.consumer_heartbeat('analytics-group', 'worker-1');
 ```
 
 #### `pgtrickle.consumer_lag(group)`
@@ -4511,14 +4570,71 @@ pgtrickle.consumer_lag(group TEXT) → SETOF record(
 )
 ```
 
+**Example:**
+```sql
+-- Monitor lag for all consumers in a group
+SELECT consumer, lag, last_seen
+FROM pgtrickle.consumer_lag('analytics-group')
+ORDER BY lag DESC;
+
+-- Alert if any consumer is more than 1000 messages behind
+SELECT consumer, lag
+FROM pgtrickle.consumer_lag('analytics-group')
+WHERE lag > 1000;
+```
+
 ### Outbox Catalog Tables
 
-| Table | Description |
-|-------|-------------|
-| `pgtrickle.pgt_outbox_config` | Per-stream-table outbox configuration |
-| `pgtrickle.pgt_consumer_groups` | Named consumer groups |
-| `pgtrickle.pgt_consumer_offsets` | Per-consumer committed offsets and heartbeat timestamps |
-| `pgtrickle.pgt_consumer_leases` | Active visibility leases |
+#### `pgtrickle.pgt_outbox_config`
+
+Maps stream tables to their `pg_tide` outbox names. Populated by
+`attach_outbox()`; one row per stream table with an outbox enabled.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `stream_table_oid` | `OID` | PostgreSQL OID of the stream table (PRIMARY KEY) |
+| `stream_table_name` | `TEXT` | Qualified name (`schema.table`) of the stream table |
+| `tide_outbox_name` | `TEXT` | Name of the corresponding `pg_tide` outbox |
+| `created_at` | `TIMESTAMPTZ` | When the outbox was attached |
+
+#### `pgtrickle.pgt_consumer_groups`
+
+Named consumer groups that track consumption progress on an outbox.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `group_name` | `TEXT` | Consumer group name (PRIMARY KEY) |
+| `outbox_name` | `TEXT` | Name of the outbox being consumed |
+| `auto_offset_reset` | `TEXT` | Starting position for new groups: `'latest'` or `'earliest'` |
+| `created_at` | `TIMESTAMPTZ` | When the group was created |
+
+#### `pgtrickle.pgt_consumer_offsets`
+
+Per-consumer committed offsets and heartbeat tracking within a group.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `group_name` | `TEXT` | Consumer group (FK → `pgt_consumer_groups`) |
+| `consumer_id` | `TEXT` | Consumer identifier within the group |
+| `committed_offset` | `BIGINT` | Highest outbox offset successfully committed |
+| `last_committed_at` | `TIMESTAMPTZ` | When the last commit occurred |
+| `last_heartbeat_at` | `TIMESTAMPTZ` | Last heartbeat signal timestamp |
+
+Primary key: `(group_name, consumer_id)`
+
+#### `pgtrickle.pgt_consumer_leases`
+
+Visibility leases for in-flight outbox message batches (prevents duplicate delivery).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `group_name` | `TEXT` | Consumer group (FK → `pgt_consumer_offsets`) |
+| `consumer_id` | `TEXT` | Consumer holding the lease |
+| `batch_start` | `BIGINT` | First offset in the leased batch |
+| `batch_end` | `BIGINT` | Last offset in the leased batch |
+| `lease_expires` | `TIMESTAMPTZ` | Lease expiry time; expired leases become visible again |
+
+Primary key: `(group_name, consumer_id)`
 
 ---
 
@@ -4628,6 +4744,22 @@ pgtrickle.replay_inbox_messages(
 ) → BIGINT            -- number of messages reset
 ```
 
+**Example:**
+```sql
+-- Replay two specific messages that failed processing
+SELECT pgtrickle.replay_inbox_messages(
+    'orders_inbox',
+    ARRAY['evt-001', 'evt-002']
+);
+-- Returns: 2
+
+-- Replay all dead-letter messages for manual retry
+SELECT pgtrickle.replay_inbox_messages(
+    'orders_inbox',
+    ARRAY(SELECT event_id FROM orders_inbox_dlq)
+);
+```
+
 ### Per-Aggregate Ordering (INBOX-B1)
 
 By default, multiple workers can process inbox messages concurrently. If
@@ -4690,6 +4822,28 @@ pgtrickle.inbox_ordering_gaps(inbox_name TEXT) → SETOF record(
 )
 ```
 
+**Example:**
+```sql
+-- Find any ordering gaps (missing events) across all aggregates
+SELECT aggregate_id, expected_seq, actual_seq, gap_size
+FROM pgtrickle.inbox_ordering_gaps('orders_inbox')
+ORDER BY gap_size DESC;
+
+-- Alert if any gap is larger than 1
+DO $$
+DECLARE gap RECORD;
+BEGIN
+    FOR gap IN
+        SELECT * FROM pgtrickle.inbox_ordering_gaps('orders_inbox')
+        WHERE gap_size > 1
+    LOOP
+        RAISE WARNING 'Sequence gap for aggregate %: expected %, got % (gap=%)'
+            USING DETAIL = gap.aggregate_id || ' seq ' || gap.expected_seq;
+    END LOOP;
+END;
+$$;
+```
+
 ### Consistent-Hash Partitioning (INBOX-B4)
 
 #### `pgtrickle.inbox_is_my_partition(aggregate_id, worker_id, total_workers)`
@@ -4717,11 +4871,49 @@ WHERE pgtrickle.inbox_is_my_partition(customer_id::text, 2, 4);
 
 ### Inbox Catalog Tables
 
-| Table | Description |
-|-------|-------------|
-| `pgtrickle.pgt_inbox_config` | Named inbox configurations |
-| `pgtrickle.pgt_inbox_ordering_config` | Per-inbox ordering configurations |
-| `pgtrickle.pgt_inbox_priority_config` | Per-inbox priority-tier configurations |
+#### `pgtrickle.pgt_inbox_config`
+
+Catalog of named transactional inbox configurations.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `inbox_name` | `TEXT` | Inbox name (PRIMARY KEY) |
+| `inbox_schema` | `TEXT` | Schema where the inbox table is created (default: `pgtrickle`) |
+| `max_retries` | `INT` | Maximum retry attempts before a message moves to DLQ (default: 3) |
+| `schedule` | `TEXT` | Refresh schedule for associated stream tables (default: `'1s'`) |
+| `with_dead_letter` | `BOOL` | Whether a dead-letter-queue stream table is created (default: `true`) |
+| `with_stats` | `BOOL` | Whether a stats stream table is created (default: `true`) |
+| `retention_hours` | `INT` | How long processed messages are retained (default: 72) |
+| `id_column` | `TEXT` | Column name for the unique event ID (default: `'event_id'`) |
+| `processed_at_column` | `TEXT` | Column name for the processing timestamp (default: `'processed_at'`) |
+| `retry_count_column` | `TEXT` | Column name for the retry counter (default: `'retry_count'`) |
+| `error_column` | `TEXT` | Column name for the last error message (default: `'error'`) |
+| `received_at_column` | `TEXT` | Column name for the receipt timestamp (default: `'received_at'`) |
+| `event_type_column` | `TEXT` | Column name for the event type (default: `'event_type'`) |
+| `is_managed` | `BOOL` | Whether pg_trickle manages the inbox lifecycle (default: `true`) |
+| `created_at` | `TIMESTAMPTZ` | When the inbox was created |
+
+#### `pgtrickle.pgt_inbox_ordering_config`
+
+Per-inbox ordering configuration for per-aggregate sequenced processing (INBOX-B1).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `inbox_name` | `TEXT` | Inbox name (PK, FK → `pgt_inbox_config`) |
+| `aggregate_id_col` | `TEXT` | Column that identifies the aggregate (e.g., `'customer_id'`) |
+| `sequence_num_col` | `TEXT` | Monotonic sequence column (e.g., `'event_sequence'`) |
+| `created_at` | `TIMESTAMPTZ` | When ordering was enabled |
+
+#### `pgtrickle.pgt_inbox_priority_config`
+
+Priority tier configuration for inbox message scheduling (INBOX-B2).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `inbox_name` | `TEXT` | Inbox name (PK, FK → `pgt_inbox_config`) |
+| `priority_col` | `TEXT` | Column that holds the priority value |
+| `tiers` | `JSONB` | Priority tier definitions (threshold → schedule mapping) |
+| `created_at` | `TIMESTAMPTZ` | When priority was enabled |
 
 ---
 

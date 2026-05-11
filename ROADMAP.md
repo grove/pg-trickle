@@ -142,7 +142,7 @@ stable release.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|-------------- |
-| [v0.56.0](roadmap/v0.56.0.md) | Documentation Foundation: fix GUC_CATALOG corruption, complete ERRORS.md (all 44 variants), correct parallel_refresh_mode default, complete SQL_REFERENCE outbox/inbox, add MENTAL_MODEL.md, LIMITATIONS.md, PERFORMANCE_CHEATSHEET.md | Planned | Large | [Full details](roadmap/v0.56.0.md-full.md) |
+| [v0.56.0](roadmap/v0.56.0.md) | Documentation Foundation: fix GUC_CATALOG corruption, complete ERRORS.md (all 44 variants), correct parallel_refresh_mode default, complete SQL_REFERENCE outbox/inbox, add MENTAL_MODEL.md, LIMITATIONS.md, PERFORMANCE_CHEATSHEET.md | ✅ Released | Large | [Full details](roadmap/v0.56.0.md-full.md) |
 | [v0.57.0](roadmap/v0.57.0.md) | Documentation Excellence: four new tutorials (first dashboard, event sourcing, backfill/migration, security hardening), P2/P3 quality polish, full 83-file consistency sweep | Planned | Large | [Full details](roadmap/v0.57.0.md-full.md) |
 
 ### Beyond v1.0

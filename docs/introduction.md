@@ -20,6 +20,34 @@ SELECT count(*) FROM active_orders;  -- 1, automatically
 > **New here?** Read **[What is pg_trickle?](ESSENCE.md)** for the
 > plain-language overview, or jump to the
 > **[5-Minute Quickstart](QUICKSTART_5MIN.md)** to try it.
+> First time installing? See the **[Installation Guide](../INSTALL.md)**.
+
+---
+
+## How it works
+
+pg_trickle keeps stream tables current by tracking every change to the source
+tables — inserts, updates, and deletes — and recomputing only the parts of the
+view that are affected by those changes. This is called **differential** (or
+incremental) view maintenance. Instead of re-running the full query on every
+refresh cycle, pg_trickle applies a *delta* computation proportional to the
+number of changed rows, not the total table size. A stream table over a
+billion-row orders table refreshes in milliseconds when only a few rows changed.
+
+Change capture works through **row-level AFTER triggers** (the default) or
+**WAL-based logical decoding** (`cdc_mode = 'wal'` or the automatic `'auto'`
+mode). Trigger-based capture writes changed rows into a per-source change-buffer
+table within the same transaction, providing full atomicity with no possibility
+of a committed change being missed. The background scheduler reads from the
+change buffer, computes the delta SQL, and applies the result to the stream
+table using `MERGE` in a separate transaction.
+
+For queries that cannot be maintained incrementally (non-monotonic functions,
+`LATERAL` with volatile sub-expressions, etc.), pg_trickle automatically falls
+back to a **full refresh** — replacing the entire stream table contents in a
+single transaction. You can also force full mode explicitly or let the
+cost-based `AUTO` strategy choose per-refresh based on the change-to-table-size
+ratio.
 
 ---
 

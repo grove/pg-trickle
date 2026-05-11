@@ -37,17 +37,73 @@ _GUC_NAME_RE = re.compile(r'c"(pg_trickle\.[^"]+)"')
 _GUC_STATIC_RE = re.compile(
     r'pub static (PGS_\w+)\s*:\s*GucSetting<([^>]+(?:>[^>]*>)?)>'
 )
+_GUC_STATIC_REF_RE = re.compile(r'&(PGS_\w+)\s*,')
 _GUC_DEFAULT_BOOL = re.compile(r"GucSetting::<bool>::new\((true|false)\)")
 _GUC_DEFAULT_I32 = re.compile(r"GucSetting::<i32>::new\(([^)]+)\)")
 _GUC_DEFAULT_F64 = re.compile(r"GucSetting::<f64>::new\(([^)]+)\)")
 _GUC_DEFAULT_STR = re.compile(r'GucSetting::<Option<.*?>>::new\((?:Some\(c"([^"]+)"\)|None)\)')
 _DOC_COMMENT_RE = re.compile(r"^\s*/// (.*)$")
 
+# Mapping from Rust GucSetting type to PostgreSQL type name
+_RUST_TO_PG_TYPE = {
+    "bool": "bool",
+    "i32": "int4",
+    "f64": "float8",
+}
+
+
+def _rust_type_to_pg(type_str: str) -> str:
+    """Convert a Rust GucSetting type string to a PostgreSQL type name."""
+    if type_str in _RUST_TO_PG_TYPE:
+        return _RUST_TO_PG_TYPE[type_str]
+    if "Option" in type_str or "CString" in type_str:
+        return "text"
+    return type_str
+
+
+def _build_static_to_guc_name_map(lines: list[str]) -> dict[str, str]:
+    """Pre-scan the entire file to build a PGS_* → pg_trickle.* name map.
+
+    Each GucRegistry::define_*_guc() block has the form:
+        GucRegistry::define_bool_guc(
+            c"pg_trickle.some_name",
+            ...
+            &PGS_SOME_NAME,
+            ...
+        );
+    We extract both the name and the static reference from a sliding window.
+    """
+    mapping: dict[str, str] = {}
+    n = len(lines)
+    for i, line in enumerate(lines):
+        if "GucRegistry::define_" not in line:
+            continue
+        # Scan forward up to 20 lines to find the guc name and the &PGS_* ref
+        guc_name = None
+        static_ref = None
+        for j in range(i, min(i + 20, n)):
+            if guc_name is None:
+                nm = _GUC_NAME_RE.search(lines[j])
+                if nm:
+                    guc_name = nm.group(1)
+            if static_ref is None:
+                rm = _GUC_STATIC_REF_RE.search(lines[j])
+                if rm:
+                    static_ref = rm.group(1)
+            if guc_name and static_ref:
+                break
+        if guc_name and static_ref:
+            mapping[static_ref] = guc_name
+    return mapping
+
 
 def extract_gucs(config_rs: Path) -> list[dict]:
     """Extract GUC definitions from src/config.rs."""
     text = config_rs.read_text(encoding="utf-8")
     lines = text.splitlines()
+
+    # Pass 1: build the PGS_* → pg_trickle.* name map from registration calls
+    static_to_name = _build_static_to_guc_name_map(lines)
 
     gucs = []
     i = 0
@@ -77,16 +133,16 @@ def extract_gucs(config_rs: Path) -> list[dict]:
         sm = _GUC_STATIC_RE.match(static_line.strip())
         if sm:
             static_name = sm.group(1)
-            type_str = sm.group(2).strip()
+            rust_type = sm.group(2).strip()
+            pg_type = _rust_type_to_pg(rust_type)
 
-            # Find the GUC name by scanning forward for the c"pg_trickle.*" registration
-            # Look for the register call — typically 10–20 lines after static declaration
-            guc_name = None
-            for scan in range(k, min(k + 50, len(lines))):
-                nm = _GUC_NAME_RE.search(lines[scan])
-                if nm:
-                    guc_name = nm.group(1)
-                    break
+            # Resolve GUC name from pre-built map
+            guc_name = static_to_name.get(static_name)
+
+            # Skip entries with no registered GUC name (internal-only statics)
+            if not guc_name:
+                i = k + 1
+                continue
 
             # Extract default value from the new(...) call
             default_val = "—"
@@ -112,8 +168,8 @@ def extract_gucs(config_rs: Path) -> list[dict]:
             gucs.append(
                 {
                     "static": static_name,
-                    "name": guc_name or f"(registration pending — {static_name})",
-                    "type": type_str,
+                    "name": guc_name,
+                    "type": pg_type,
                     "default": default_val,
                     "description": first_sentence,
                 }

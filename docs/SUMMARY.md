@@ -26,7 +26,10 @@
 # Build with Stream Tables
 
 - [Best-Practice Patterns](PATTERNS.md)
+- [Mental Model: How It Works](MENTAL_MODEL.md)
+- [Limitations](LIMITATIONS.md)
 - [Performance Cookbook](PERFORMANCE_COOKBOOK.md)
+- [Performance Cheat Sheet](PERFORMANCE_CHEATSHEET.md)
 - [SQL Reference](SQL_REFERENCE.md)
 - [Configuration](CONFIGURATION.md)
 - [Predictive Cost Model](COST_MODEL.md)
