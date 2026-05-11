@@ -325,6 +325,9 @@ pub fn init_shared_memory() {
     pg_shmem_init!(DRAIN_REQUESTED);
     pg_shmem_init!(DRAIN_COMPLETED);
     pg_shmem_init!(CITUS_WORKER_FAILURE_TOTAL);
+    // M-6 (v0.55.0): DVM parse-time and delta SQL size metrics.
+    pg_shmem_init!(DVM_PARSE_MS);
+    pg_shmem_init!(DELTA_QUERY_SIZE_BYTES);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
