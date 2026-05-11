@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.56.0 — Documentation Foundation](#0560--documentation-foundation)
 - [0.55.0 — Final Pre-1.0 Polish](#0550--final-pre-10-polish)
 - [0.54.0 — DVM Engine Hardening](#0540--dvm-engine-hardening)
 - [0.53.0 — Unit Test Depth Sweep](#0530--unit-test-depth-sweep)
@@ -70,6 +71,72 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.56.0] — Documentation Foundation
+
+### What's New
+
+v0.56.0 is the first release of the Documentation Excellence Arc, resolving all
+findings from the Round 2 documentation audit (2026-05-11). It fixes three P0
+blockers, completes two reference documents, and adds three new conceptual
+guides that bring the documentation to world-class standard before v1.0.
+
+**P0 fixes (breaking inaccuracies):**
+- Fixed `scripts/gen_catalogs.py`: GUC names now correctly resolve to
+  `pg_trickle.*` names instead of `(registration pending — PGS_*)`. Rust types
+  are converted to PostgreSQL type names (`int4`, `float8`, `text`). Stale
+  garbage rows at the end of `GUC_CATALOG.md` are eliminated. The catalog now
+  shows all 115 GUCs with correct names and types.
+- Fixed `docs/CONFIGURATION.md`: `pg_trickle.parallel_refresh_mode` now
+  correctly documents its default as `'on'` (changed from the stale `'off'`
+  which was the pre-v0.11.0 default).
+- Completed `docs/ERRORS.md`: Added documentation for 18 previously missing
+  error variants across 6 new categories (Publication, SLA, CDC, Diagnostic,
+  Snapshot, Outbox/pg_tide, Placeholder, DVM engine). All 39 `PgTrickleError`
+  variants are now documented with SQLSTATE codes, descriptions, causes, and
+  fixes.
+
+**Reference completeness:**
+- `docs/SQL_REFERENCE.md`: Added working code examples for all 10 outbox/inbox
+  consumer API functions (`poll_outbox`, `commit_offset`, `extend_lease`,
+  `seek_offset`, `consumer_heartbeat`, `consumer_lag`, `drop_consumer_group`,
+  `outbox_rows_consumed`, `replay_inbox_messages`, `inbox_ordering_gaps`).
+- `docs/SQL_REFERENCE.md`: Added full column-schema tables for all 7 previously
+  undocumented catalog tables (`pgt_outbox_config`, `pgt_consumer_groups`,
+  `pgt_consumer_offsets`, `pgt_consumer_leases`, `pgt_inbox_config`,
+  `pgt_inbox_ordering_config`, `pgt_inbox_priority_config`).
+- `docs/research/`: Added standalone 3-paragraph abstracts to the three
+  previously stub-only research documents (`CUSTOM_SQL_SYNTAX.md`,
+  `PG_IVM_COMPARISON.md`, `TRIGGERS_VS_REPLICATION.md`).
+- `docs/DVM_REWRITE_RULES.md`: Added concrete before/after SQL examples for all
+  5 rewrite passes (view inlining, grouping sets expansion, EXISTS→anti/semi-join,
+  scalar sublink hoisting, delta key restriction).
+- `docs/introduction.md`: Added 3 paragraphs explaining how pg_trickle works
+  conceptually (CDC → delta SQL → MERGE cycle), plus a link to INSTALL.md.
+
+**New documents:**
+- [`docs/MENTAL_MODEL.md`](docs/MENTAL_MODEL.md): 8-section conceptual guide
+  for developers who know SQL but not IVM. Covers the problem of full
+  recomputation, delta semantics, change capture, delta SQL generation, algebraic
+  operator classification, row identity, the refresh cycle, and DAG chaining.
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md): Comprehensive reference of
+  unsupported SQL constructs, DIFFERENTIAL mode constraints, source table
+  restrictions, operational anti-patterns, and a "Will this work?" decision tree.
+- [`docs/PERFORMANCE_CHEATSHEET.md`](docs/PERFORMANCE_CHEATSHEET.md): Single-page
+  quick reference with the three golden rules, top-10 GUC quick wins, 5
+  FULL-fallback patterns with rewrites, and refresh latency diagnostics.
+
+### Upgrade Notes
+
+No SQL migration is required. Run `ALTER EXTENSION pg_trickle UPDATE TO '0.56.0'`
+or reinstall from packages. All changes are documentation and tooling only.
+
+After upgrading, regenerate `docs/GUC_CATALOG.md` with:
+```bash
+python3 scripts/gen_catalogs.py
+```
 
 ---
 

@@ -34,6 +34,32 @@ as a subquery: `SELECT ... FROM (SELECT ... FROM base_tables) v WHERE ...`
 Inlining is required because the DVM engine needs to see the base
 tables to generate per-table change buffer references.
 
+**Before:**
+```sql
+-- Defining query referencing a view
+SELECT o.customer_id, SUM(o.amount) AS total
+FROM order_summary_view o
+GROUP BY o.customer_id
+```
+
+**After:**
+```sql
+-- View inlined; base tables are now visible for CDC binding
+SELECT o.customer_id, SUM(o.amount) AS total
+FROM (
+    SELECT orders.customer_id,
+           orders.amount,
+           orders.created_at
+    FROM public.orders
+    WHERE orders.status = 'completed'
+) o
+GROUP BY o.customer_id
+```
+
+The inlined form allows the DVM engine to bind `orders` as the CDC source
+and generate delta SQL that reads from `pgtrickle_changes.changes_<orders_oid>`
+instead of the whole table.
+
 ---
 
 ## 2. Grouping Sets Expansion (`rewrite_grouping_sets`)
@@ -50,6 +76,37 @@ independently, and the UNION ALL operator merges the deltas.
 
 **Guard:** `pg_trickle.max_grouping_set_branches` (default 64) limits
 explosion for high-dimensional CUBE expressions.
+
+**Before:**
+```sql
+-- ROLLUP over region + product_type
+SELECT region, product_type, SUM(revenue) AS total
+FROM sales
+GROUP BY ROLLUP(region, product_type)
+```
+
+**After:**
+```sql
+-- Expanded to three GROUP BY branches
+SELECT region, product_type, SUM(revenue) AS total
+FROM sales
+GROUP BY region, product_type
+
+UNION ALL
+
+SELECT region, NULL AS product_type, SUM(revenue) AS total
+FROM sales
+GROUP BY region
+
+UNION ALL
+
+SELECT NULL AS region, NULL AS product_type, SUM(revenue) AS total
+FROM sales
+```
+
+Each branch is an independent leaf node in the `OpTree`. The DVM engine
+differentiates each branch by computing delta rows from the change buffer,
+then merges the results via the UNION ALL parent node.
 
 ---
 
@@ -96,15 +153,44 @@ to differentiate the subquery as a separate operator node.
 full right table.
 
 **Transformation:** Push equi-join key filters from the delta into the
-R_old snapshot:
-```sql
--- Before: R_old scans all of right_table
--- After:  R_old WHERE key IN (SELECT key FROM delta_right)
-```
+R_old snapshot to restrict it to only the changed keys.
 
 **Correctness:** Only right-side rows matching changed keys can affect
 the anti/semi-join output. Restricting R_old to changed keys preserves
 correctness while reducing the scan from O(n) to O(Δ).
+
+**Before:**
+```sql
+-- Anti-join delta: which left rows lost their right-side match?
+-- R_old scans ALL of the right table (O(n))
+SELECT l.*
+FROM left_table l
+WHERE NOT EXISTS (
+    SELECT 1 FROM right_table r_old WHERE r_old.key = l.key
+)
+AND EXISTS (
+    SELECT 1 FROM delta_right d WHERE d.key = l.key
+)
+```
+
+**After:**
+```sql
+-- R_old restricted to only rows matching changed keys (O(Δ))
+SELECT l.*
+FROM left_table l
+WHERE NOT EXISTS (
+    SELECT 1 FROM right_table r_old
+    WHERE r_old.key = l.key
+      AND r_old.key IN (SELECT key FROM delta_right)  -- <-- restriction added
+)
+AND EXISTS (
+    SELECT 1 FROM delta_right d WHERE d.key = l.key
+)
+```
+
+This rewrite is critical for join-heavy queries: without it, every
+anti-join delta scan reads the full right table regardless of how many
+rows actually changed.
 
 ---
 

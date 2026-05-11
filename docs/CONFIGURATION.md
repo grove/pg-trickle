@@ -1580,8 +1580,8 @@ work to multiple dynamic background workers instead of processing
 stream tables sequentially. See
 [PLAN_PARALLELISM.md](https://github.com/trickle-labs/pg-trickle/blob/main/plans/sql/PLAN_PARALLELISM.md) for the design.
 
-> **Note:** Parallel refresh is new in v0.4.0 and defaults to `off`. Enable
-> it via `pg_trickle.parallel_refresh_mode` after validating your workload.
+> **Note:** Parallel refresh has been the default (`on`) since v0.11.0. Use
+> `pg_trickle.parallel_refresh_mode = 'off'` to revert to sequential execution.
 
 ### pg_trickle.parallel_refresh_mode
 
@@ -1591,22 +1591,22 @@ background workers.
 | Property | Value |
 |---|---|
 | Type | `text` |
-| Default | `'off'` |
+| Default | `'on'` |
 | Values | `'off'`, `'dry_run'`, `'on'` |
 | Context | `SUSET` |
 | Restart Required | No |
 
-- **`off`** (default): Sequential execution. All stream tables are
-  refreshed one at a time in topological order by the single scheduler
-  background worker. This is the proven, stable default.
+- **`on`** (default as of v0.11.0): True parallel refresh. The coordinator builds an execution-unit
+  DAG, dispatches ready units to dynamic background workers, and respects
+  both the per-database cap (`max_concurrent_refreshes`) and the
+  cluster-wide cap (`max_dynamic_refresh_workers`).
 - **`dry_run`**: The scheduler computes execution units, logs dispatch
   decisions (unit keys, ready-queue contents, budget), but still executes
   refreshes inline. Useful for previewing parallel behaviour without
   actually spawning workers.
-- **`on`**: True parallel refresh. The coordinator builds an execution-unit
-  DAG, dispatches ready units to dynamic background workers, and respects
-  both the per-database cap (`max_concurrent_refreshes`) and the
-  cluster-wide cap (`max_dynamic_refresh_workers`).
+- **`off`**: Sequential execution. All stream tables are
+  refreshed one at a time in topological order by the single scheduler
+  background worker.
 
 ```sql
 -- Preview parallel dispatch decisions without changing runtime behaviour
@@ -3122,8 +3122,8 @@ pg_trickle.ivm_recursive_max_depth = 100
 pg_trickle.allow_circular = false                # master switch
 pg_trickle.max_fixpoint_iterations = 100         # convergence limit
 
-# Parallel refresh (v0.4.0+, default off)
-pg_trickle.parallel_refresh_mode = 'off'        # 'off' | 'dry_run' | 'on'
+# Parallel refresh (v0.11.0+, default 'on')
+pg_trickle.parallel_refresh_mode = 'on'         # 'off' | 'dry_run' | 'on'
 pg_trickle.max_dynamic_refresh_workers = 4       # cluster-wide worker cap
 pg_trickle.max_concurrent_refreshes = 4          # per-database dispatch cap
 pg_trickle.max_parallel_workers = 0              # user-facing parallel cap (0 = use automatic sizing)
