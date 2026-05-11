@@ -110,7 +110,10 @@ async fn test_multi_column_in_subquery_auto_rewrite() {
 
     // All rows match after the auto-rewrite, expect 2 results.
     let count: i64 = db.count("public.mc_in_st").await;
-    assert_eq!(count, 2, "Expected 2 rows from auto-rewritten multi-column IN");
+    assert_eq!(
+        count, 2,
+        "Expected 2 rows from auto-rewritten multi-column IN"
+    );
 }
 
 // ── Multi-column IN rewritten as EXISTS: positive test ─────────────────
