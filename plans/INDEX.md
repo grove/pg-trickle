@@ -12,6 +12,8 @@ new entries when creating documents.
 | File | Type | Status | Summary |
 |------|------|--------|---------|
 | [PLAN.md](PLAN.md) | PLAN | — | Master implementation plan (Phases 0–12) |
+| [PLAN_DOCUMENTATION_GAPS_1.md](PLAN_DOCUMENTATION_GAPS_1.md) | GAP | Proposed | Round 1 documentation gap analysis — structural stubs, SUMMARY.md, glossary, use-case gallery |
+| [PLAN_DOCUMENTATION_GAPS_2.md](PLAN_DOCUMENTATION_GAPS_2.md) | GAP | Proposed | Round 2 documentation gap analysis — accuracy audit, ERRORS.md completion, GUC_CATALOG fix, 7 new docs (v0.56.0–v0.57.0) |
 | [PLAN_EDGE_CASES.md](PLAN_EDGE_CASES.md) | PLAN | Proposed | Edge case catalogue with workarounds & prioritised remediation |
 | [PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md](PLAN_EDGE_CASES_TIVM_IMPL_ORDER.md) | PLAN | Proposed | Combined implementation order for PLAN_EDGE_CASES + PLAN_TRANSACTIONAL_IVM_PART_2 |
 | [PLAN_FEATURE_CLEANUP.md](PLAN_FEATURE_CLEANUP.md) | PLAN | In progress | Remove low-value surface before public release |

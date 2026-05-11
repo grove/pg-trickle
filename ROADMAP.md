@@ -130,6 +130,21 @@ before v1.0.
 | [v0.54.0](roadmap/v0.54.0.md) | DVM engine hardening: diff_node depth limit, DiffContext CTE cap (OOM guard), snapshot fingerprint caching, Expr::to_sql() caching, view inlining fixpoint + batched relkind, ST source frontier validation, O(V+E) diamond detection | ✅ Released | Large | [Full details](roadmap/v0.54.0.md-full.md) |
 | [v0.55.0](roadmap/v0.55.0.md) | Final pre-1.0 polish: GUC-configurable invalidation ring, api/mod.rs and monitor.rs module decomposition, serde_json NOTIFY payloads, multi-column IN rewrite to EXISTS, DVM parse metrics, reserved-prefix docs, GUC rationale comments, PR coverage gate | Planned | Large | [Full details](roadmap/v0.55.0.md-full.md) |
 
+### Documentation Excellence Arc (v0.56.x – v0.57.x)
+
+Driven by the findings in the Round 2 documentation audit
+([plans/PLAN_DOCUMENTATION_GAPS_2.md](plans/PLAN_DOCUMENTATION_GAPS_2.md),
+2026-05-11). The audit found 3 P0 blockers (corrupted GUC_CATALOG.md, 54%-complete
+ERRORS.md, wrong GUC default), 8 P1 items, 7 P2 items, 5 P3 items, and 7 new
+documents that should exist before v1.0. This two-release arc resolves all
+findings and delivers the world-class documentation standard planned for the
+stable release.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|-------------- |
+| [v0.56.0](roadmap/v0.56.0.md) | Documentation Foundation: fix GUC_CATALOG corruption, complete ERRORS.md (all 44 variants), correct parallel_refresh_mode default, complete SQL_REFERENCE outbox/inbox, add MENTAL_MODEL.md, LIMITATIONS.md, PERFORMANCE_CHEATSHEET.md | Planned | Large | [Full details](roadmap/v0.56.0.md-full.md) |
+| [v0.57.0](roadmap/v0.57.0.md) | Documentation Excellence: four new tutorials (first dashboard, event sourcing, backfill/migration, security hardening), P2/P3 quality polish, full 83-file consistency sweep | Planned | Large | [Full details](roadmap/v0.57.0.md-full.md) |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
@@ -209,6 +224,10 @@ v0.53    ─── Unit test depth: dag/scheduler/CDC/parser/config sweep, propt
 v0.54    ─── DVM hardening: diff_node depth limit, DiffContext OOM cap, snapshot fingerprint cache, view inlining fixpoint, O(V+E) diamond detection
     │
 v0.55    ─── Final pre-1.0 polish: configurable ring, module decomposition, serde_json NOTIFY, multi-column IN rewrite, DVM metrics, docs
+    │
+v0.56    ─── Documentation Foundation: GUC_CATALOG fix, ERRORS.md complete (44 variants), MENTAL_MODEL.md, LIMITATIONS.md, PERFORMANCE_CHEATSHEET.md
+    │
+v0.57    ─── Documentation Excellence: 4 new tutorials, P2/P3 polish, full 83-file consistency sweep
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
