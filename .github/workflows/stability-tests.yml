@@ -68,7 +68,15 @@ jobs:
         uses: ./.github/actions/setup-pgrx
 
       - name: Spin up Citus chaos cluster
-        run: docker compose -f docker/docker-compose.citus.yml up -d --wait
+        run: |
+          # Start persistent services and wait for them to be healthy.
+          # citus-init is excluded here because it exits after completion and
+          # docker compose --wait treats any exited container as failure.
+          docker compose -f docker/docker-compose.citus.yml up -d --wait \
+            coordinator worker-0 worker-1 worker-2
+          # Run the one-shot init container in the foreground; it waits for
+          # healthy deps via depends_on and exits 0 on success.
+          docker compose -f docker/docker-compose.citus.yml up citus-init
         timeout-minutes: 5
 
       - name: Build E2E Docker image
