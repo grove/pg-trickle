@@ -128,7 +128,7 @@ before v1.0.
 | [v0.52.0](roadmap/v0.52.0.md) | DVM hot-path performance: O(1) placeholder resolution (aho-corasick), thread-local volatility cache, lazy DiffContext allocations, O(1) template LRU eviction | ✅ Released | Large | [Full details](roadmap/v0.52.0.md-full.md) |
 | [v0.53.0](roadmap/v0.53.0.md) | Unit test depth sweep: dag, scheduler, CDC, parser, config — eleven modules with zero inline coverage — plus proptest extension and buffer-growth sleep removal | ✅ Released | Large | [Full details](roadmap/v0.53.0.md-full.md) |
 | [v0.54.0](roadmap/v0.54.0.md) | DVM engine hardening: diff_node depth limit, DiffContext CTE cap (OOM guard), snapshot fingerprint caching, Expr::to_sql() caching, view inlining fixpoint + batched relkind, ST source frontier validation, O(V+E) diamond detection | ✅ Released | Large | [Full details](roadmap/v0.54.0.md-full.md) |
-| [v0.55.0](roadmap/v0.55.0.md) | Final pre-1.0 polish: GUC-configurable invalidation ring, api/mod.rs and monitor.rs module decomposition, serde_json NOTIFY payloads, multi-column IN rewrite to EXISTS, DVM parse metrics, reserved-prefix docs, GUC rationale comments, PR coverage gate | Planned | Large | [Full details](roadmap/v0.55.0.md-full.md) |
+| [v0.55.0](roadmap/v0.55.0.md) | Final pre-1.0 polish: GUC-configurable invalidation ring, api/mod.rs and monitor.rs module decomposition, serde_json NOTIFY payloads, multi-column IN rewrite to EXISTS, DVM parse metrics, reserved-prefix docs, GUC rationale comments, PR coverage gate | ✅ Released | Large | [Full details](roadmap/v0.55.0.md-full.md) |
 
 ### Documentation Excellence Arc (v0.56.x – v0.57.x)
 

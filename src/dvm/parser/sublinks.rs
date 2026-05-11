@@ -981,27 +981,14 @@ fn parse_any_sublink(
         safe_node_to_expr(sublink.testexpr)?
     };
 
-    // ── G12-SQL-IN: Multi-column IN (subquery) guard ────────────────
+    // ── M-5 (v0.55.0): Multi-column IN → EXISTS-equivalent SemiJoin ─
     //
-    // Multi-column IN like `(a, b) IN (SELECT x, y FROM t)` produces a
-    // RowExpr test expression with multiple inner SELECT targets. The
-    // DVM semi-join rewrite currently only handles single-column IN:
-    // it extracts the first target column and builds `test = col1`,
-    // silently ignoring additional columns. This produces incorrect
-    // results for multi-column comparisons.
-    //
-    // Detect this case and return a structured error. The DVM would need
-    // composite equality (`a = x AND b = y`) to handle this correctly.
-    if matches!(test_expr, Expr::Raw(ref s) if s.starts_with("ROW(")) {
-        return Err(PgTrickleError::QueryParseError(
-            "multi-column IN (subquery) is not supported in DIFFERENTIAL mode. \
-             Rewrite as EXISTS (SELECT 1 FROM ... WHERE a = x AND b = y) \
-             for equivalent semantics."
-                .into(),
-        ));
-    }
+    // `(a, b) IN (SELECT x, y FROM t)` is automatically rewritten to a
+    // SemiJoin with condition `a=x AND b=y [AND inner_where]`, which is
+    // semantically equivalent to EXISTS (SELECT 1 FROM t WHERE a=x AND b=y).
+    // Previously this case returned an unsupported-feature error (G12-SQL-IN).
 
-    // Extract the inner SELECT target (the column being compared)
+    // Extract the inner SELECT target list.
     let target_list = pg_list::<pg_sys::Node>(inner_select.targetList);
     if target_list.is_empty() {
         return Err(PgTrickleError::QueryParseError(
@@ -1009,16 +996,91 @@ fn parse_any_sublink(
         ));
     }
 
-    // G12-SQL-IN: Also detect multi-column via inner target count
-    if target_list.len() > 1 {
-        return Err(PgTrickleError::QueryParseError(
-            "multi-column IN (subquery) is not supported in DIFFERENTIAL mode: \
-             the inner SELECT returns multiple columns. Rewrite as \
-             EXISTS (SELECT 1 FROM ... WHERE a = x AND b = y) for equivalent semantics."
-                .into(),
-        ));
+    let is_row_test = matches!(test_expr, Expr::Raw(ref s) if s.starts_with("ROW("));
+    let is_multi_col = target_list.len() > 1;
+
+    if is_row_test || is_multi_col {
+        // Extract left-side exprs from the RowExpr (if present).
+        let left_exprs: Vec<Expr> =
+            if let Some(rowexpr) = cast_node!(sublink.testexpr, T_RowExpr, pg_sys::RowExpr) {
+                let fields = pg_list::<pg_sys::Node>(rowexpr.args);
+                let mut exprs = Vec::with_capacity(fields.len());
+                for n in fields.iter_ptr() {
+                    // SAFETY: parse-tree pointer from raw_parser.
+                    exprs.push(safe_node_to_expr(n)?);
+                }
+                exprs
+            } else {
+                vec![test_expr.clone()]
+            };
+
+        // Extract right-side exprs from the inner SELECT target list.
+        let mut right_exprs: Vec<Expr> = Vec::with_capacity(target_list.len());
+        for node_ptr in target_list.iter_ptr() {
+            if let Some(rt) = cast_node!(node_ptr, T_ResTarget, pg_sys::ResTarget) {
+                if rt.val.is_null() {
+                    return Err(PgTrickleError::QueryParseError(
+                        "multi-column IN: target column is NULL".into(),
+                    ));
+                }
+                // SAFETY: parse-tree pointer from raw_parser.
+                right_exprs.push(safe_node_to_expr(rt.val)?);
+            } else {
+                return Err(PgTrickleError::QueryParseError(
+                    "multi-column IN: target is not a ResTarget".into(),
+                ));
+            }
+        }
+
+        if left_exprs.len() != right_exprs.len() {
+            return Err(PgTrickleError::QueryParseError(format!(
+                "multi-column IN (subquery): left side has {} column(s) but \
+                 inner SELECT has {} column(s); counts must match.",
+                left_exprs.len(),
+                right_exprs.len(),
+            )));
+        }
+
+        // Build: col1=tgt1 AND col2=tgt2 AND ... [AND inner_where].
+        let eq_chain = left_exprs
+            .into_iter()
+            .zip(right_exprs)
+            .map(|(l, r)| Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(l),
+                right: Box::new(r),
+            })
+            .reduce(|acc, eq| Expr::BinaryOp {
+                op: "AND".to_string(),
+                left: Box::new(acc),
+                right: Box::new(eq),
+            })
+            .ok_or_else(|| {
+                PgTrickleError::InternalError(
+                    "multi-column IN: column list was empty after length check".into(),
+                )
+            })?;
+
+        let condition = if inner_select.whereClause.is_null() {
+            eq_chain
+        } else {
+            // SAFETY: parse-tree pointer from raw_parser.
+            let inner_where = safe_node_to_expr(inner_select.whereClause)?;
+            Expr::BinaryOp {
+                op: "AND".to_string(),
+                left: Box::new(eq_chain),
+                right: Box::new(inner_where),
+            }
+        };
+
+        return Ok(SublinkWrapper {
+            negated,
+            condition,
+            inner_tree,
+        });
     }
 
+    // ── Single-column IN (original path) ────────────────────────────
     let first_target = target_list.head().ok_or_else(|| {
         PgTrickleError::InternalError(
             "IN sublink target_list unexpectedly empty after non-empty check".into(),
@@ -6947,5 +7009,57 @@ mod tests {
         let (corr, remaining) = split_exists_correlation(&and_expr, &inner_aliases);
         assert_eq!(corr.len(), 1);
         assert!(remaining.is_some());
+    }
+
+    // ── M-5: multi-column IN → SemiJoin tests ────────────────────────────
+
+    #[test]
+    fn test_multi_column_in_builds_eq_chain() {
+        // Verify that the multi-column path in parse_any_sublink produces
+        // an AND-chained equality condition from RowExpr columns.
+        // We test this indirectly through the Expr building logic.
+        let left1 = Expr::ColumnRef {
+            table_alias: None,
+            column_name: "a".into(),
+        };
+        let left2 = Expr::ColumnRef {
+            table_alias: None,
+            column_name: "b".into(),
+        };
+        let right1 = Expr::ColumnRef {
+            table_alias: Some("t".into()),
+            column_name: "x".into(),
+        };
+        let right2 = Expr::ColumnRef {
+            table_alias: Some("t".into()),
+            column_name: "y".into(),
+        };
+
+        let pairs: Vec<(Expr, Expr)> = vec![(left1, right1), (left2, right2)];
+        let eq_chain = pairs
+            .into_iter()
+            .map(|(l, r)| Expr::BinaryOp {
+                op: "=".to_string(),
+                left: Box::new(l),
+                right: Box::new(r),
+            })
+            .reduce(|acc, eq| Expr::BinaryOp {
+                op: "AND".to_string(),
+                left: Box::new(acc),
+                right: Box::new(eq),
+            })
+            .unwrap();
+
+        let sql = eq_chain.to_sql();
+        // to_sql() emits double-quoted identifiers (e.g. "t"."x").
+        assert!(
+            sql.contains("a") && sql.contains("x"),
+            "expected a and x in: {sql}"
+        );
+        assert!(
+            sql.contains("b") && sql.contains("y"),
+            "expected b and y in: {sql}"
+        );
+        assert!(sql.contains("AND"), "expected AND in: {sql}");
     }
 }

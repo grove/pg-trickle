@@ -1369,14 +1369,10 @@ fn emit_fuse_blown_reminder(st: &StreamTableMeta) {
                 monitor::AlertEvent::FuseBlownReminder,
                 &st.pgt_schema,
                 &st.pgt_name,
-                &format!(
-                    r#""blown_seconds":{:.0},"reason":"{}""#,
-                    secs,
-                    st.blow_reason
-                        .as_deref()
-                        .unwrap_or("unknown")
-                        .replace('"', r#"\""#),
-                ),
+                serde_json::json!({
+                    "blown_seconds": secs.round(),
+                    "reason": st.blow_reason.as_deref().unwrap_or("unknown"),
+                }),
                 st.pooler_compatibility_mode,
             );
         }
@@ -2003,7 +1999,7 @@ fn emit_frozen_tier_skip(st: &StreamTableMeta) {
                 monitor::AlertEvent::FrozenTierSkip,
                 &st.pgt_schema,
                 &st.pgt_name,
-                &format!(r#""frozen_seconds":{:.0}"#, secs),
+                serde_json::json!({ "frozen_seconds": secs.round() }),
                 st.pooler_compatibility_mode,
             );
         }

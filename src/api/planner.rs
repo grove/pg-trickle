@@ -292,12 +292,11 @@ pub fn check_predicted_sla_breach(meta: &StreamTableMeta) {
         crate::monitor::AlertEvent::PredictedSlaBreach,
         &meta.pgt_schema,
         &meta.pgt_name,
-        &format!(
-            r#""predicted_ms":{:.0},"sla_ms":{:.0},"pct_over":{:.1}"#,
-            predicted_ms,
-            deadline_ms,
-            (predicted_ms - deadline_ms) / deadline_ms * 100.0
-        ),
+        serde_json::json!({
+            "predicted_ms": predicted_ms.round(),
+            "sla_ms": deadline_ms.round(),
+            "pct_over": ((predicted_ms - deadline_ms) / deadline_ms * 100.0 * 10.0).round() / 10.0,
+        }),
         meta.pooler_compatibility_mode,
     );
 }

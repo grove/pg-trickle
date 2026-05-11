@@ -11,13 +11,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64};
 ///
 /// This is the **compile-time maximum** allocated in shared memory. The effective
 /// capacity is controlled at preload-time by the `pg_trickle.invalidation_ring_capacity`
-/// GUC (default 128, range 1–1024). Increasing the GUC above the default allows
+/// GUC (default 1,024, range 1–4,096). Increasing the GUC above the default allows
 /// clusters with many concurrent DDL events to avoid full DAG rebuilds.
 ///
 /// When more DDL changes arrive between scheduler ticks than the effective capacity,
 /// the overflow flag is set and the scheduler falls back to a full O(V+E) DAG
-/// rebuild. Raised to 1024 max in v0.45.0 to support `pg_trickle.invalidation_ring_capacity`.
-const INVALIDATION_RING_MAX_CAPACITY: usize = 1024;
+/// rebuild. Raised to 4,096 max in v0.55.0 to support larger DDL-burst environments.
+const INVALIDATION_RING_MAX_CAPACITY: usize = 4096;
 
 /// Shared state visible to both the scheduler and user backends.
 ///
@@ -246,6 +246,23 @@ pub static FRONTIER_HOLDBACK_AGE_SECS: PgAtomic<AtomicU64> =
 pub static IVM_LOCK_PARSE_ERRORS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_ivm_lock_parse_errors") };
 
+/// M-6 (v0.55.0): Cumulative time spent in the DVM parser (milliseconds).
+///
+/// Incremented by `increment_dvm_parse_ms()` each time a query is processed
+/// by the DVM parser.  Exposed as `pg_trickle_dvm_parse_ms` in the Prometheus
+/// metrics endpoint.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static DVM_PARSE_MS: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pg_trickle_dvm_parse_ms") };
+
+/// M-6 (v0.55.0): Cumulative size of generated delta SQL (bytes).
+///
+/// Incremented by `increment_delta_query_bytes()` each time delta SQL is
+/// generated.  Exposed as `pg_trickle_delta_query_size_bytes` in the
+/// Prometheus metrics endpoint.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static DELTA_QUERY_SIZE_BYTES: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_delta_query_bytes") };
+
 /// A35 (v0.36.0): Drain request epoch counter.
 ///
 /// When `pgtrickle.drain()` is called, this counter is incremented to signal
@@ -308,6 +325,9 @@ pub fn init_shared_memory() {
     pg_shmem_init!(DRAIN_REQUESTED);
     pg_shmem_init!(DRAIN_COMPLETED);
     pg_shmem_init!(CITUS_WORKER_FAILURE_TOTAL);
+    // M-6 (v0.55.0): DVM parse-time and delta SQL size metrics.
+    pg_shmem_init!(DVM_PARSE_MS);
+    pg_shmem_init!(DELTA_QUERY_SIZE_BYTES);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -364,6 +384,46 @@ pub fn read_ivm_lock_parse_errors() -> u64 {
         return 0;
     }
     IVM_LOCK_PARSE_ERRORS
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// M-6 (v0.55.0): Increment the DVM parser time counter by `ms` milliseconds.
+pub fn increment_dvm_parse_ms(ms: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    DVM_PARSE_MS
+        .get()
+        .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// M-6 (v0.55.0): Increment the delta query size counter by `bytes`.
+pub fn increment_delta_query_bytes(bytes: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    DELTA_QUERY_SIZE_BYTES
+        .get()
+        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// M-6 (v0.55.0): Read the DVM parse milliseconds counter.
+pub fn read_dvm_parse_ms() -> u64 {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    DVM_PARSE_MS
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// M-6 (v0.55.0): Read the delta query size bytes counter.
+pub fn read_delta_query_size_bytes() -> u64 {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    DELTA_QUERY_SIZE_BYTES
         .get()
         .load(std::sync::atomic::Ordering::Relaxed)
 }

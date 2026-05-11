@@ -2,8 +2,9 @@
 //!
 //! Verifies that:
 //! 1. Single-column IN (subquery) works correctly with DIFFERENTIAL mode
-//! 2. Multi-column IN (subquery) is detected and returns a structured error
-//!    with a rewrite suggestion to EXISTS
+//! 2. Multi-column IN (subquery) is automatically rewritten to AND-chained
+//!    equality (`a = x AND b = y`) by the M-5 sublinks rewrite (v0.55.0)
+//! 3. The equivalent manual EXISTS rewrite also works
 
 mod e2e;
 
@@ -65,10 +66,10 @@ async fn test_single_column_in_subquery_differential() {
     .await;
 }
 
-// ── Multi-column IN: structured error test ─────────────────────────────
+// ── Multi-column IN: M-5 auto-rewrite test ─────────────────────────────
 
 #[tokio::test]
-async fn test_multi_column_in_subquery_returns_error() {
+async fn test_multi_column_in_subquery_auto_rewrite() {
     let db = E2eDb::new().await.with_extension().await;
 
     db.execute(
@@ -94,29 +95,24 @@ async fn test_multi_column_in_subquery_returns_error() {
     db.execute("INSERT INTO mc_regions VALUES (10, 1), (20, 2)")
         .await;
 
-    // Multi-column IN subquery — should be rejected with a clear error
-    let result = db
-        .try_execute(
-            "SELECT pgtrickle.create_stream_table(\
-                'mc_in_st',\
-                $$SELECT id, amount FROM mc_orders \
-                  WHERE (cust_id, region_id) IN \
-                        (SELECT cust_id, region_id FROM mc_regions)$$,\
-                '24h', 'DIFFERENTIAL'\
-             )",
-        )
-        .await;
+    // M-5 (v0.55.0): Multi-column IN subquery is now automatically rewritten to
+    // AND-chained equality (a = x AND b = y) instead of returning an error.
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(\
+            'mc_in_st',\
+            $$SELECT id, amount FROM mc_orders \
+              WHERE (cust_id, region_id) IN \
+                    (SELECT cust_id, region_id FROM mc_regions)$$,\
+            '24h', 'DIFFERENTIAL'\
+         )",
+    )
+    .await;
 
-    let err = result
-        .expect_err("Multi-column IN should be rejected")
-        .to_string();
-    assert!(
-        err.contains("multi-column IN") || err.contains("not supported"),
-        "Expected structured error about multi-column IN, got: {err}"
-    );
-    assert!(
-        err.contains("EXISTS"),
-        "Error should suggest EXISTS rewrite, got: {err}"
+    // All rows match after the auto-rewrite, expect 2 results.
+    let count: i64 = db.count("public.mc_in_st").await;
+    assert_eq!(
+        count, 2,
+        "Expected 2 rows from auto-rewritten multi-column IN"
     );
 }
 
