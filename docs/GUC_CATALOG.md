@@ -38,7 +38,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_CONNECTION_POOLER_MODE)` | `Option\<std::ffi::CString` | `"off"` | Overrides the per-ST `pooler_compatibility_mode` for all stream tables. |
 | `(registration pending — PGS_COST_MODEL_SAFETY_MARGIN)` | `f64` | `0.8` | Default 0.8 — DIFFERENTIAL is chosen unless it's estimated to cost more than 80% of FULL. |
 | `(registration pending — PGS_DEEP_JOIN_L0_SCAN_THRESHOLD)` | `i32` | `4` | Default: 4 (matches the previously hardcoded `DEEP_JOIN_L0_SCAN_THRESHOLD`). |
-| `(registration pending — PGS_DEFAULT_SCHEDULE_SECONDS)` | `i32` | `1` | Default effective schedule (in seconds) for isolated CALCULATED stream tables that have no downstream dependents. |
+| `(registration pending — PGS_DEFAULT_SCHEDULE_SECONDS)` | `i32` | `1` | Default: 1 s. |
 | `(registration pending — PGS_DELTA_AMPLIFICATION_THRESHOLD)` | `f64` | `100.0` | Set to 0.0 to disable amplification detection. |
 | `(registration pending — PGS_DELTA_ENABLE_NESTLOOP)` | `bool` | `true` | When enabled, `SET LOCAL enable_nestloop = off` is applied inside `execute_delta_sql` before running the generated delta SQL. |
 | `(registration pending — PGS_DELTA_WORK_MEM)` | `i32` | `0` | Set to 0 (default) to inherit the session `work_mem`. |
@@ -66,8 +66,8 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_MATVIEW_POLLING)` | `bool` | `false` | When `true`, materialized views referenced in DIFFERENTIAL/IMMEDIATE defining queries will be supported via a snapshot-comparison approach (same mechanism as foreign table polling). |
 | `(registration pending — PGS_MAX_BUFFER_ROWS)` | `i32` | `1000000` | Set to 0 to disable the limit. |
 | `(registration pending — PGS_MAX_CHANGE_BUFFER_ALERT_ROWS)` | `i32` | `0` | Set to 0 to disable (default). |
-| `(registration pending — PGS_MAX_CONCURRENT_REFRESHES)` | `i32` | `4` | Maximum number of concurrent refresh workers. |
-| `(registration pending — PGS_MAX_CONSECUTIVE_ERRORS)` | `i32` | `3` | Maximum consecutive errors before auto-suspending a stream table. |
+| `(registration pending — PGS_MAX_CONCURRENT_REFRESHES)` | `i32` | `4` | Default: 4. |
+| `(registration pending — PGS_MAX_CONSECUTIVE_ERRORS)` | `i32` | `3` | Default: 3. |
 | `(registration pending — PGS_MAX_DELTA_ESTIMATE_ROWS)` | `i32` | `0` | Set to 0 to disable the estimation check (default). |
 | `(registration pending — PGS_MAX_DIFF_CTES)` | `i32` | `1000` | Complex queries with many operators, joins, and set operations can produce hundreds of CTEs. |
 | `(registration pending — PGS_MAX_DYNAMIC_REFRESH_WORKERS)` | `i32` | `4` | This is distinct from `pg_trickle.max_concurrent_refreshes`, which is the per-database dispatch cap. |
@@ -84,7 +84,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_MERGE_WORK_MEM_MB)` | `i32` | `64` | A higher value lets PostgreSQL use larger hash tables for the MERGE join, avoiding disk-spilling sort/merge strategies on large deltas. |
 | `(registration pending — PGS_METRICS_PORT)` | `i32` | `0` | Example: ```sql ALTER SYSTEM SET pg_trickle.metrics_port = 9188; SELECT pg_reload_conf(); ```. |
 | `(registration pending — PGS_METRICS_REQUEST_TIMEOUT_MS)` | `i32` | `5000` | Protects the scheduler from a slow client stalling the tick loop. |
-| `(registration pending — PGS_MIN_SCHEDULE_SECONDS)` | `i32` | `1` | Minimum allowed schedule in seconds. |
+| `(registration pending — PGS_MIN_SCHEDULE_SECONDS)` | `i32` | `1` | Default: 1 s. |
 | `(registration pending — PGS_NOTIFY_COALESCE_MS)` | `i32` | `250` | Default: 250 ms. |
 | `(registration pending — PGS_ONLINE_SCHEMA_EVOLUTION)` | `bool` | `false` | Default: `false` (standard ALTER QUERY reinit behaviour). |
 | `(registration pending — PGS_OTEL_ENDPOINT)` | `Option\<std::ffi::CString` | `None` | F10 (v0.37.0): OTLP/gRPC endpoint for OpenTelemetry span export. |
@@ -97,7 +97,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_PREDICTION_WINDOW)` | `i32` | `60` | The forecaster fits `duration_ms ~ delta_rows` over this many minutes of `pgt_refresh_history` data per stream table. |
 | `(registration pending — PGS_PUBLICATION_LAG_WARN_BYTES)` | `i32` | `0` | Set to 0 to disable subscriber lag tracking (default). |
 | `(registration pending — PGS_REFRESH_STRATEGY)` | `Option\<std::ffi::CString` | `"auto"` | This GUC is a cluster-wide override. |
-| `(registration pending — PGS_SCHEDULER_INTERVAL_MS)` | `i32` | `1000` | Scheduler wake interval in milliseconds. |
+| `(registration pending — PGS_SCHEDULER_INTERVAL_MS)` | `i32` | `1000` | Default: 1,000 ms (1 s). |
 | `(registration pending — PGS_SCHEDULE_ALERT_COOLDOWN_SECONDS)` | `i32` | `300` | Prevents alert spam when the cost model consistently predicts SLA breach. |
 | `(registration pending — PGS_SCHEDULE_RECOMMENDATION_MIN_SAMPLES)` | `i32` | `20` | When fewer samples are available, `confidence` is returned as 0.0 and the recommendation fields are NULL or conservative defaults. |
 | `(registration pending — PGS_SLA_WINDOW_HOURS)` | `i32` | `24` | Default: 24 hours. |
@@ -123,6 +123,6 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `(registration pending — PGS_WATERMARK_HOLDBACK_TIMEOUT)` | `i32` | `0` | Set to 0 to disable stuck-watermark detection (default). |
 | `(registration pending — PGS_WORKER_POOL_SIZE)` | `i32` | `0` | Set to 0 (default) to use the existing spawn-per-task model. |
 | `pg_trickle.enabled` | `i32` | `256` | Default: 256. |
-| `pg_trickle.enabled` | `i32` | `128` | Default: 128. |
+| `pg_trickle.enabled` | `i32` | `1024` | Default: 1024. |
 | `pg_trickle.enabled` | `bool` | `false` | Off by default — use static quotas. |
 | `pg_trickle.enabled` | `f64` | `0.20` | Default: 0.20. |
