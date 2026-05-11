@@ -2500,21 +2500,25 @@ Retries use exponential backoff (base 1s, max 60s, ±25% jitter, up to 5 retries
 ## Configuration Reference
 
 All pg_trickle settings are configured via PostgreSQL GUC parameters. The table
-below lists every available parameter with its type, default, and description.
+below lists the most-used parameters; for the complete reference see
+[CONFIGURATION.md](CONFIGURATION.md).
 
 | GUC | Type | Default | Description |
 |---|---|---|---|
-| `pg_trickle.enabled` | bool | `true` | Enable/disable the scheduler. Manual refreshes still work when `false`. |
-| `pg_trickle.scheduler_interval_ms` | int | `1000` | Scheduler wake interval in milliseconds (100–60000) |
-| `pg_trickle.min_schedule_seconds` | int | `60` | Minimum allowed schedule duration (1–86400) |
-| `pg_trickle.max_consecutive_errors` | int | `3` | Failures before auto-suspending (1–100) |
-| `pg_trickle.change_buffer_schema` | text | `pgtrickle_changes` | Schema for CDC buffer tables |
-| `pg_trickle.max_concurrent_refreshes` | int | `4` | Max parallel refresh workers (1–32) |
-| `pg_trickle.user_triggers` | text | `auto` | User trigger handling: `auto` (detect), `off` (suppress), `on` (deprecated alias for `auto`) |
-| `pg_trickle.differential_max_change_ratio` | float | `0.15` | Change ratio threshold for adaptive FULL fallback (0.0–1.0) |
-| `pg_trickle.cleanup_use_truncate` | bool | `true` | Use TRUNCATE instead of DELETE for buffer cleanup |
+| [`pg_trickle.enabled`](CONFIGURATION.md#pg_trickle-enabled) | bool | `true` | Enable/disable the scheduler. Manual refreshes still work when `false`. |
+| [`pg_trickle.scheduler_interval_ms`](CONFIGURATION.md#pg_trickle-scheduler_interval_ms) | int | `1000` | Scheduler wake interval in milliseconds (100–60000) |
+| [`pg_trickle.min_schedule_seconds`](CONFIGURATION.md#pg_trickle-min_schedule_seconds) | int | `60` | Minimum allowed schedule duration (1–86400) |
+| [`pg_trickle.max_consecutive_errors`](CONFIGURATION.md#pg_trickle-max_consecutive_errors) | int | `3` | Failures before auto-suspending (1–100) |
+| [`pg_trickle.change_buffer_schema`](CONFIGURATION.md#pg_trickle-change_buffer_schema) | text | `pgtrickle_changes` | Schema for CDC buffer tables |
+| [`pg_trickle.max_concurrent_refreshes`](CONFIGURATION.md#pg_trickle-max_concurrent_refreshes) | int | `4` | Max parallel refresh workers (1–32) |
+| [`pg_trickle.user_triggers`](CONFIGURATION.md#pg_trickle-user_triggers) | text | `auto` | User trigger handling: `auto` (detect), `off` (suppress), `on` (deprecated alias for `auto`) |
+| [`pg_trickle.differential_max_change_ratio`](CONFIGURATION.md#pg_trickle-differential_max_change_ratio) | float | `0.15` | Change ratio threshold for adaptive FULL fallback (0.0–1.0) |
+| [`pg_trickle.cleanup_use_truncate`](CONFIGURATION.md#pg_trickle-cleanup_use_truncate) | bool | `true` | Use TRUNCATE instead of DELETE for buffer cleanup |
 
-All GUCs are `SUSET` context (superuser SET) and take effect without restart, except `shared_preload_libraries` which requires a PostgreSQL restart.
+All GUCs are `SUSET` context (superuser SET) and take effect without restart,
+except `shared_preload_libraries` which requires a PostgreSQL restart.
+
+For SQL function signatures and descriptions see [SQL_REFERENCE.md](SQL_REFERENCE.md).
 
 ---
 

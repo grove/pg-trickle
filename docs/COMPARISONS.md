@@ -23,7 +23,7 @@ summary — strengths, weaknesses, and "use this instead if…".
 | [Materialize](https://materialize.com/) | ✕ (own engine) | ✅ | Whole new database | Cross-source streaming SQL |
 | [RisingWave](https://risingwave.com/) | ✕ (own engine) | ✅ | Whole new database | Streaming SQL with PostgreSQL wire compat |
 | [Apache Flink](https://flink.apache.org/) | ✕ | ✅ | JVM cluster + state backend | Stateful event processing at scale |
-| [Debezium](https://debezium.io/) + sink | ✕ | (CDC only) | Kafka + Connect | Replicating change events out of Postgres |
+| [Debezium](https://debezium.io/) + sink | ✕ | (CDC only) | Kafka + Connect | Replicating change events out of PostgreSQL |
 | [ksqlDB](https://ksqldb.io/) | ✕ | ✅ | Kafka cluster | Streaming SQL on top of Kafka |
 | [Snowflake Dynamic Tables](https://docs.snowflake.com/en/user-guide/dynamic-tables-about) | ✕ | ✅ | Snowflake | Auto-refreshing tables in Snowflake |
 | Custom cron + materialized view | ✅ | ✕ | ✕ | What teams build before they find pg_trickle |
@@ -89,7 +89,7 @@ inspiration for much of this space.
 | | Materialize | pg_trickle |
 |---|---|---|
 | Deployment | Separate cloud database (or self-hosted server) | Extension inside PostgreSQL |
-| Source coverage | Postgres, Kafka, S3, MySQL, … | PostgreSQL tables (incl. Citus, foreign tables) |
+| Source coverage | PostgreSQL, Kafka, S3, MySQL, … | PostgreSQL tables (incl. Citus, foreign tables) |
 | Latency | Streaming, sub-second | Sub-second with `1s` schedule; in-transaction with IMMEDIATE |
 | Joins / aggregates / recursion | Yes, very mature | Yes |
 | Pricing | Commercial cloud product | Open-source, runs anywhere PostgreSQL runs |
@@ -145,7 +145,7 @@ changes into a derived table.
 
 | | Debezium | pg_trickle |
 |---|---|---|
-| Captures changes from Postgres | ✅ | ✅ (built-in CDC) |
+| Captures changes from PostgreSQL | ✅ | ✅ (built-in CDC) |
 | Computes derived tables | ✕ (you write that) | ✅ |
 | Kafka required | ✅ | ✕ |
 | Downstream sinks | Many | Logical replication via [downstream publications](PUBLICATIONS.md) |

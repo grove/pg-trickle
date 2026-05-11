@@ -59,6 +59,10 @@ ratio.
 | **Application developer** | [5-Minute Quickstart](QUICKSTART_5MIN.md) → [Getting Started tutorial](GETTING_STARTED.md) → [Patterns](PATTERNS.md) → [SQL Reference](SQL_REFERENCE.md) |
 | **DBA / SRE** | [Pre-Deployment Checklist](PRE_DEPLOYMENT.md) → [Configuration](CONFIGURATION.md) → [Troubleshooting](TROUBLESHOOTING.md) → [Capacity Planning](CAPACITY_PLANNING.md) |
 | **Data / analytics engineer** | [Use Cases](USE_CASES.md) → [dbt integration](integrations/dbt.md) → [Migrating from materialized views](tutorials/MIGRATING_FROM_MATERIALIZED_VIEWS.md) |
+| **Building a dashboard backend** | [Real-Time Analytics Dashboard tutorial](tutorials/FIRST_DASHBOARD.md) |
+| **Event-sourced architecture** | [Event Sourcing / CQRS tutorial](tutorials/EVENT_SOURCING.md) |
+| **Migrating from REFRESH MATERIALIZED VIEW** | [Backfill and Migration tutorial](tutorials/BACKFILL_AND_MIGRATION.md) |
+| **Hardening a production deployment** | [Security Hardening tutorial](tutorials/SECURITY_HARDENING.md) → [Security Guide](SECURITY_GUIDE.md) |
 | **Confused by jargon** | [Glossary](GLOSSARY.md) |
 
 ---

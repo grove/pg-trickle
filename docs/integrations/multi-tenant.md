@@ -169,6 +169,6 @@ LISTEN pg_trickle_alert;
 
 ## See Also
 
-- [docs/SCALING.md](SCALING.md) — cluster-wide fairness and worker budgeting
-- [docs/CONFIGURATION.md](CONFIGURATION.md) — GUC reference
-- [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) — `cluster_worker_summary()` and `metrics_summary()` API
+- [docs/SCALING.md](../SCALING.md) — cluster-wide fairness and worker budgeting
+- [docs/CONFIGURATION.md](../CONFIGURATION.md) — GUC reference
+- [docs/SQL_REFERENCE.md](../SQL_REFERENCE.md) — `cluster_worker_summary()` and `metrics_summary()` API

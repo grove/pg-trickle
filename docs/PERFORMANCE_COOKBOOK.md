@@ -542,6 +542,156 @@ SET pg_trickle.delta_enable_nestloop = off;
 SET pg_trickle.analyze_before_delta = on;
 ```
 
+### Worked Example A — `max_diff_ctes` Hit and Recovery
+
+**Symptom:** `EXPLAIN ANALYZE` shows more than `pg_trickle.max_diff_ctes`
+(default 64) CTEs in the generated delta SQL, and the refresh falls back to
+FULL mode with a warning in `pgt_refresh_history`.
+
+**Diagnosis:**
+
+```sql
+-- Check the warning in the refresh history
+SELECT pgt_name, refresh_mode, rows_in_last_refresh, warning_message
+FROM pgtrickle.pgt_refresh_history
+WHERE pgt_name = 'my_complex_view'
+ORDER BY started_at DESC
+LIMIT 5;
+
+-- Inspect the generated delta SQL
+SELECT pgtrickle.explain_diff_sql('my_complex_view');
+-- Count the CTE blocks in the output
+```
+
+**Recovery steps:**
+
+```sql
+-- Option 1: Raise the limit (accept higher delta execution cost)
+ALTER SYSTEM SET pg_trickle.max_diff_ctes = 128;
+SELECT pg_reload_conf();
+
+-- Option 2: Simplify the query — split a complex view into two stream tables
+-- First level: join + filter
+SELECT pgtrickle.create_stream_table(
+    'orders_with_products',
+    'SELECT o.*, p.name AS product_name FROM orders o JOIN products p ON p.id = o.product_id',
+    '10s', 'DIFFERENTIAL'
+);
+-- Second level: aggregate over the first
+SELECT pgtrickle.create_stream_table(
+    'revenue_summary',
+    'SELECT product_name, SUM(amount) AS total FROM orders_with_products GROUP BY product_name',
+    '15s', 'DIFFERENTIAL'
+);
+
+-- Option 3: Force FULL mode for queries that genuinely exceed complexity budget
+SELECT pgtrickle.alter_stream_table('my_complex_view', refresh_mode => 'FULL');
+```
+
+### Worked Example B — Detecting When FULL Beats DIFFERENTIAL
+
+**Symptom:** The AUTO cost model keeps switching between FULL and DIFFERENTIAL
+every few cycles, or `diff_speedup` from `refresh_efficiency()` is below 1.5×.
+
+**Diagnosis using `recommend_refresh_mode()`:**
+
+```sql
+-- Get the weighted signal breakdown for the table
+SELECT
+    pgt_name,
+    current_mode,
+    recommended_mode,
+    confidence,
+    reason,
+    jsonb_pretty(signals) AS signals
+FROM pgtrickle.recommend_refresh_mode('my_table');
+```
+
+Examine the `signals` output.  Key indicators that FULL is better:
+
+| Signal | Value that favours FULL |
+|--------|-------------------------|
+| `change_ratio_avg` | > 0.30 (>30% of rows change per tick) |
+| `empirical_timing` | DIFF and FULL latency within 10% |
+| `latency_variance` | p95/p50 > 3 for DIFFERENTIAL |
+| `query_complexity` | Score < 0 (many joins / CTEs) |
+
+**Apply the recommendation:**
+
+```sql
+-- Switch to FULL when composite_score < -0.15
+SELECT pgtrickle.alter_stream_table('my_table', refresh_mode => 'FULL');
+
+-- Switch to AUTO and let the cost model decide going forward
+SELECT pgtrickle.alter_stream_table('my_table', refresh_mode => 'AUTO');
+
+-- Set the switching dead-zone wider to reduce oscillation
+ALTER SYSTEM SET pg_trickle.cost_model_safety_margin = 0.25;
+SELECT pg_reload_conf();
+```
+
+### Worked Example C — Deep-Join Chain and `max_differential_joins`
+
+**Symptom:** A stream table with a 6-way JOIN is slow in DIFFERENTIAL mode,
+even though individual tables are small.
+
+**Diagnosis:**
+
+```sql
+-- Enable delta SQL logging and trigger a refresh
+SET pg_trickle.log_delta_sql = on;
+SELECT pgtrickle.refresh_stream_table('deep_join_view');
+
+-- Check effective join count reported by the engine
+SELECT pgt_name, query_join_depth, last_refresh_mode_reason
+FROM pgtrickle.pgt_stream_tables
+WHERE pgt_name = 'deep_join_view';
+```
+
+**Understanding the GUC:**
+
+`pg_trickle.max_differential_joins` (default: 4) sets the maximum number of
+right-side scan expansions the delta engine will attempt before falling back
+to FULL mode.  Each additional join roughly doubles the number of delta CTE
+branches generated.
+
+**Tuning steps:**
+
+```sql
+-- Option 1: Allow deeper join differentiation (accept higher delta cost)
+ALTER SYSTEM SET pg_trickle.max_differential_joins = 6;
+SELECT pg_reload_conf();
+
+-- Option 2: Intermediate stream table to break the join chain
+-- Split a 6-way join into two 3-way steps:
+SELECT pgtrickle.create_stream_table(
+    'join_layer_1',
+    $$SELECT a.*, b.val AS b_val, c.val AS c_val
+      FROM table_a a
+      JOIN table_b b ON b.id = a.b_id
+      JOIN table_c c ON c.id = a.c_id$$,
+    '5s', 'DIFFERENTIAL'
+);
+SELECT pgtrickle.create_stream_table(
+    'join_layer_2',
+    $$SELECT l1.*, d.val AS d_val, e.val AS e_val, f.val AS f_val
+      FROM join_layer_1 l1
+      JOIN table_d d ON d.id = l1.d_id
+      JOIN table_e e ON e.id = l1.e_id
+      JOIN table_f f ON f.id = l1.f_id$$,
+    '10s', 'DIFFERENTIAL'
+);
+
+-- Option 3: Verify the deep-join fast-path is eligible for a given query
+SELECT pgtrickle.validate_query(
+    $$<your deep-join query>$$
+);
+```
+
+Breaking the join chain into two stream tables reduces each step to ≤3
+right-side expansions, well within the default `max_differential_joins = 4`
+limit.
+
 ---
 
 ## See Also

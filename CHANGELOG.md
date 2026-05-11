@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.57.0 — Documentation Excellence](#0570--documentation-excellence)
 - [0.56.0 — Documentation Foundation](#0560--documentation-foundation)
 - [0.55.0 — Final Pre-1.0 Polish](#0550--final-pre-10-polish)
 - [0.54.0 — DVM Engine Hardening](#0540--dvm-engine-hardening)
@@ -71,6 +72,79 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.57.0] — Documentation Excellence
+
+### What's New
+
+v0.57.0 completes the Documentation Excellence Arc. It delivers four new
+end-to-end tutorials, resolves all P2/P3 quality gaps from the Round 2
+documentation audit, and applies a full consistency pass across all 83
+documentation files.
+
+**New tutorials (P1):**
+- `docs/tutorials/FIRST_DASHBOARD.md` — Build a real-time analytics dashboard
+  backend over an e-commerce dataset: revenue by region, hourly order counts,
+  top-10 products chain, and optional Grafana integration.
+- `docs/tutorials/EVENT_SOURCING.md` — Stream tables as CQRS read-model
+  projections over an event-sourced write model: current order state, customer
+  lifetime value, and inventory levels maintained incrementally.
+- `docs/tutorials/BACKFILL_AND_MIGRATION.md` — Zero-downtime migration from
+  `REFRESH MATERIALIZED VIEW` to a stream table: pre-migration assessment,
+  `validate_query()` check, parallel running, verification, cutover, and
+  rollback.
+- `docs/tutorials/SECURITY_HARDENING.md` — Role separation, CDC trigger
+  ownership, change-buffer protection, and audit logging; copy-paste SQL
+  templates for all GRANT statements and a verification checklist.
+
+**Quality improvements (P2):**
+- `docs/SECURITY_GUIDE.md`: Added "Copy-Paste Templates" section with
+  `CREATE ROLE` and `GRANT` statements for `pgtrickle_admin`,
+  `pgtrickle_user`, and `pgtrickle_readonly`.
+- `docs/WHATS_NEW.md`: Backfilled user-impact summaries for v0.1 through
+  v0.7.
+- `docs/tutorials/HYBRID_SEARCH_PATTERNS.md`: Expanded patterns 2
+  (RLS-scoped) and 3 (tiered storage) to match quality of pattern 1;
+  documented `pg_trickle.enable_vector_agg` GUC.
+- `docs/tutorials/PER_TENANT_ANN_PATTERNS.md`: Documented
+  `partition_key => 'HASH:<col>:<buckets>'` syntax with a partition-count
+  guide; expanded patterns 2–3 with full step-by-step examples.
+- `docs/QUICKSTART_5MIN.md`: Fixed display-text inconsistency on
+  Installation link.
+- `docs/PERFORMANCE_COOKBOOK.md`: Added three worked examples to §13:
+  (a) `max_diff_ctes` hit and recovery, (b) detecting when FULL beats
+  DIFFERENTIAL via `recommend_refresh_mode()`, (c) deep-join chain and
+  `max_differential_joins`.
+- `docs/SECURITY_MODEL.md`: Resolved supply-chain TODO items — filled
+  current status or marked "Planned for v1.0" with implementation notes.
+
+**Polish (P3):**
+- `docs/FAQ.md`: Converted plain-text GUC cross-references to markdown
+  links pointing to `CONFIGURATION.md` anchors; added link to
+  `SQL_REFERENCE.md`.
+- `docs/DVM_OPERATORS.md`: Added quick-reference table at the top
+  (operator name, mode support, section anchor).
+- `docs/tutorials/VECTOR_RAG_STARTER.md`: Added full parameter breakdown
+  for `pgtrickle.embedding_stream_table()` with a parameter table and
+  examples.
+- `docs/tutorials/tuning-refresh-mode.md`: Added prose explanation of
+  composite score thresholds (+0.15/−0.15) and dead-zone tuning.
+- `docs/research/multi_db_refresh_broker.md`: Added implementation status
+  banner.
+
+**Consistency pass (DOC-CONS-28..31):**
+- Terminology sweep: enforced `stream table`, `differential refresh`,
+  `change buffer`, `refresh frontier`, `CDC`, `DVM`, `DAG` across all
+  83 docs files.
+- Capitalisation sweep: enforced `pg_trickle` lowercase, `PostgreSQL`
+  (not `Postgres`), `pgtrickle` schema, `pgrx` lowercase.
+- Code style sweep: SQL keywords uppercase; `pgtrickle.` prefix on all
+  function calls; language hints added to unlabelled code blocks.
+- Cross-link audit: verified all internal `[text](path.md)` links;
+  fixed 7 broken links (`USE_CASES.md`, `integrations/multi-tenant.md`,
+  and added `docs/ESSENCE.md` mdbook include).
 
 ---
 

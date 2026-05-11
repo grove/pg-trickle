@@ -1,6 +1,14 @@
 # Multi-Database Refresh Broker — Design Document
 
-**Status:** Design only (v0.31.0 SCAL-2). Implementation planned for v0.32.0+.
+> **Implementation Status:** Design only — not yet implemented.
+> This feature is planned for a future release after v1.0.
+> Track progress at [ROADMAP.md](../../ROADMAP.md).
+>
+> The design below is a stable reference for contributors and reviewers.
+> The API described here is aspirational and subject to change before
+> implementation begins.
+
+**Status:** Design only (v0.31.0 SCAL-2). Implementation planned for a future release.
 
 ---
 
