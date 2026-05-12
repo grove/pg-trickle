@@ -3547,6 +3547,7 @@ mod tests {
             reindex_drift_threshold: None,
             rows_changed_since_last_reindex: 0,
             last_reindex_at: None,
+            defining_query_hash: 0,
         }
     }
 

@@ -44,6 +44,8 @@ pub(crate) use update::*;
 pub fn execute_full_refresh(st: &StreamTableMeta) -> Result<(i64, i64), PgTrickleError> {
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("FULL");
+    // OBS-4: Increment the FULL refresh mode counter.
+    crate::shmem::record_refresh_mode(false);
 
     // EC-25/EC-26: Ensure the internal_refresh flag is set so DML guard
     // triggers allow the refresh executor to modify the storage table.
@@ -880,23 +882,19 @@ pub fn execute_differential_refresh(
     // Skip promotion for queries with non-monotonic operators (LEFT JOIN,
     // aggregates, anti-joins, etc.) where source INSERTs can produce delta
     // DELETEs — the append-only fast path would silently drop those DELETEs.
-    let cached_non_monotonic = MERGE_TEMPLATE_CACHE.with(|cache| {
+    // PERF-4: Extract both flags in a single `peek()` borrow to avoid
+    // two separate cache-lock acquisitions and spurious LRU promotions.
+    let (cached_non_monotonic, cached_is_deduplicated) = MERGE_TEMPLATE_CACHE.with(|cache| {
         cache
             .borrow()
             .peek(&st.pgt_id)
-            .map(|entry| has_non_monotonic_cte(&entry.merge_sql_template))
-            .unwrap_or(false) // no cache entry → allow promotion (A-3a guard catches it)
-    });
-    // Also check whether the delta is deduplicated. Non-deduplicated
-    // deltas (joins, aggregates) can produce phantom row_id collisions
-    // across refresh cycles that the append-only INSERT path cannot
-    // safely handle — those need the PH-D1 DELETE+INSERT path.
-    let cached_is_deduplicated = MERGE_TEMPLATE_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .peek(&st.pgt_id)
-            .map(|entry| entry.is_deduplicated)
-            .unwrap_or(true) // no cache → assume dedup (safe: first cycle has no phantoms)
+            .map(|entry| {
+                (
+                    has_non_monotonic_cte(&entry.merge_sql_template),
+                    entry.is_deduplicated,
+                )
+            })
+            .unwrap_or((false, true)) // no cache: allow promotion; assume dedup (safe)
     });
     if !is_append_only
         && !st.has_keyless_source
@@ -1342,7 +1340,11 @@ pub fn execute_differential_refresh(
     });
 
     // ── Try the MERGE template cache first ──────────────────────────
-    let query_hash = {
+    // PERF-2: Use hash pre-computed at CREATE/ALTER time; fall back only for
+    // pre-v0.59.0 rows where the stored hash is still 0.
+    let query_hash: u64 = if st.defining_query_hash != 0 {
+        st.defining_query_hash as u64
+    } else {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         st.defining_query.hash(&mut hasher);
@@ -1429,10 +1431,10 @@ pub fn execute_differential_refresh(
         ResolvedSql {
             merge_sql,
             source_oids: entry.source_oids.clone(),
-            parameterized_merge_sql: entry.parameterized_merge_sql.clone(),
-            trigger_delete_sql: entry.trigger_delete_template.clone(),
-            trigger_update_sql: entry.trigger_update_template.clone(),
-            trigger_insert_sql: entry.trigger_insert_template.clone(),
+            parameterized_merge_sql: entry.parameterized_merge_sql.as_ref().to_owned(),
+            trigger_delete_sql: entry.trigger_delete_template.as_ref().to_owned(),
+            trigger_update_sql: entry.trigger_update_template.as_ref().to_owned(),
+            trigger_insert_sql: entry.trigger_insert_template.as_ref().to_owned(),
             trigger_using_sql,
             resolved_delta_sql,
             is_all_algebraic: entry.is_all_algebraic,
@@ -1562,15 +1564,16 @@ pub fn execute_differential_refresh(
                     st.pgt_id,
                     CachedMergeTemplate {
                         defining_query_hash: query_hash,
-                        merge_sql_template: merge_template.clone(),
+                        // PERF-3: convert to Arc<str> for O(1) cache-hit clones.
+                        merge_sql_template: merge_template.clone().into(),
                         source_oids: source_oids.clone(),
-                        cleanup_sql_template: cleanup_template,
-                        parameterized_merge_sql: parameterized_merge_sql.clone(),
-                        trigger_delete_template: trigger_delete_template.clone(),
-                        trigger_update_template: trigger_update_template.clone(),
-                        trigger_insert_template: trigger_insert_template.clone(),
-                        trigger_using_template: template_using.clone(),
-                        delta_sql_template: delta_sql_template.clone(),
+                        cleanup_sql_template: cleanup_template.into(),
+                        parameterized_merge_sql: parameterized_merge_sql.clone().into(),
+                        trigger_delete_template: trigger_delete_template.clone().into(),
+                        trigger_update_template: trigger_update_template.clone().into(),
+                        trigger_insert_template: trigger_insert_template.clone().into(),
+                        trigger_using_template: template_using.clone().into(),
+                        delta_sql_template: delta_sql_template.clone().into(),
                         is_all_algebraic: delta_result.is_all_algebraic,
                         is_deduplicated: delta_result.is_deduplicated,
                     },
@@ -2849,6 +2852,8 @@ pub fn execute_differential_refresh(
 
     // G12-ERM-1: Record the effective mode for this execution path.
     set_effective_mode("DIFFERENTIAL");
+    // OBS-4: Increment the DIFFERENTIAL refresh mode counter.
+    crate::shmem::record_refresh_mode(true);
 
     // PART-WARN: After a successful refresh, warn if the default partition
     // of a partitioned stream table has accumulated rows.  This prompts the

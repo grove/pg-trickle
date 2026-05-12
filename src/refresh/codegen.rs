@@ -26,6 +26,8 @@ use std::collections::HashSet;
 #[allow(unused_imports)]
 use std::num::NonZeroUsize;
 #[allow(unused_imports)]
+use std::sync::Arc;
+#[allow(unused_imports)]
 use std::time::Instant;
 
 #[allow(unused_imports)]
@@ -45,36 +47,37 @@ pub(crate) struct CachedMergeTemplate {
     pub(crate) defining_query_hash: u64,
     /// MERGE SQL template with `__PGS_PREV_LSN_{oid}__` / `__PGS_NEW_LSN_{oid}__`
     /// placeholder tokens. Resolved to concrete LSN values before each execution.
-    pub(crate) merge_sql_template: String,
+    /// PERF-3: stored as Arc<str> so cache-hit clones are O(1) ref-count increments.
+    pub(crate) merge_sql_template: Arc<str>,
     /// Parameterized MERGE SQL with `$1`, `$2`, … for LSN values (D-2).
     /// Parameter order: for each source OID (in `source_oids` order),
     /// `$2i-1` = prev_lsn, `$2i` = new_lsn.
-    pub(crate) parameterized_merge_sql: String,
+    pub(crate) parameterized_merge_sql: Arc<str>,
     /// Source OIDs for LSN placeholder resolution.
     pub(crate) source_oids: Vec<u32>,
     /// Cleanup template with `__PGS_{PREV,NEW}_LSN_{oid}__` tokens.
-    pub(crate) cleanup_sql_template: String,
+    pub(crate) cleanup_sql_template: Arc<str>,
 
     // ── User-trigger explicit DML templates ──────────────────────────
     // These templates reference `__pgt_delta_{pgt_id}` (a temp table
     // materialized at execution time) and do NOT contain LSN placeholders.
     /// DELETE statement for the trigger-enabled DML path.
     /// Deletes rows where the delta action is 'D'.
-    pub(crate) trigger_delete_template: String,
+    pub(crate) trigger_delete_template: Arc<str>,
     /// UPDATE statement for the trigger-enabled DML path.
     /// Updates existing rows where the delta action is 'I' and values changed.
-    pub(crate) trigger_update_template: String,
+    pub(crate) trigger_update_template: Arc<str>,
     /// INSERT statement for the trigger-enabled DML path.
     /// Inserts genuinely new rows where the delta action is 'I'.
-    pub(crate) trigger_insert_template: String,
+    pub(crate) trigger_insert_template: Arc<str>,
     /// USING clause template with LSN placeholders (for materializing delta
     /// into a temp table in the user-trigger path).
-    pub(crate) trigger_using_template: String,
+    pub(crate) trigger_using_template: Arc<str>,
     /// A1-2: Raw delta SQL template with LSN placeholders.
     /// Used at refresh time to compute partition key range (MIN/MAX) for A1-3
     /// predicate injection. Only populated when `st_partition_key` is set,
     /// but stored for all STs to keep the struct layout consistent.
-    pub(crate) delta_sql_template: String,
+    pub(crate) delta_sql_template: Arc<str>,
     /// B-1: When true, all aggregates are algebraically invertible and the
     /// explicit DML fast-path can be used instead of MERGE.
     pub(crate) is_all_algebraic: bool,
@@ -2337,9 +2340,16 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
         .collect();
     let cleanup_template = cleanup_stmts.join(";");
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    st.defining_query.hash(&mut hasher);
-    let query_hash = hasher.finish();
+    // PERF-2: Use the hash pre-computed at CREATE/ALTER time and stored in the
+    // catalog.  Fall back to computing it if the stored value is 0 (e.g. rows
+    // that existed before the v0.59.0 upgrade and haven't been ALTERed yet).
+    let query_hash = if st.defining_query_hash != 0 {
+        st.defining_query_hash as u64
+    } else {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        st.defining_query.hash(&mut hasher);
+        hasher.finish()
+    };
 
     // D-2: Parameterize MERGE template for prepared-statement execution.
     let parameterized_merge_sql = parameterize_lsn_template(&merge_template, source_oids);
@@ -2375,15 +2385,16 @@ pub fn prewarm_merge_cache(st: &StreamTableMeta) {
             st.pgt_id,
             CachedMergeTemplate {
                 defining_query_hash: query_hash,
-                merge_sql_template: merge_template,
-                parameterized_merge_sql,
+                // PERF-3: convert to Arc<str> so cache-hit clones are O(1).
+                merge_sql_template: merge_template.into(),
+                parameterized_merge_sql: parameterized_merge_sql.into(),
                 source_oids: source_oids.clone(),
-                cleanup_sql_template: cleanup_template,
-                trigger_delete_template,
-                trigger_update_template,
-                trigger_insert_template,
-                trigger_using_template: using_clause.clone(),
-                delta_sql_template: delta_sql_template.clone(),
+                cleanup_sql_template: cleanup_template.into(),
+                trigger_delete_template: trigger_delete_template.into(),
+                trigger_update_template: trigger_update_template.into(),
+                trigger_insert_template: trigger_insert_template.into(),
+                trigger_using_template: using_clause.clone().into(),
+                delta_sql_template: delta_sql_template.clone().into(),
                 is_all_algebraic: delta_result.is_all_algebraic,
                 is_deduplicated: delta_result.is_deduplicated,
             },

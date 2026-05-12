@@ -312,6 +312,180 @@ pub fn increment_cdc_compact_contended() {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+// ── OBS-2 (v0.59.0): Parallel worker utilisation metrics ─────────────────
+
+/// OBS-2: Parallel refresh job queue depth.
+///
+/// Incremented when a job is enqueued in `pgt_scheduler_jobs`, decremented
+/// when a pool worker picks it up.  The difference gives the current backlog.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static PARALLEL_QUEUE_DEPTH: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_parallel_queue_depth") };
+
+/// OBS-2: Cumulative milliseconds pool workers have spent in the idle-wait loop.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static WORKER_IDLE_MS_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_worker_idle_ms") };
+
+// ── OBS-3 (v0.59.0): WAL decoder pending-record metric ───────────────────
+
+/// OBS-3: Number of logical-replication records buffered but not yet written
+/// to the CDC change buffer after the last WAL decoder poll cycle.
+///
+/// A sustained non-zero value means the decoder is falling behind the WAL
+/// stream.  Exposed as `pg_trickle_wal_decoder_pending_records`.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static WAL_DECODER_PENDING_RECORDS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_wal_pending") };
+
+// ── OBS-4 (v0.59.0): Refresh-mode ratio counters ─────────────────────────
+
+/// OBS-4: Total DIFFERENTIAL refresh cycles across all stream tables.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static REFRESH_MODE_DIFFERENTIAL_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_diff_refresh_total") };
+
+/// OBS-4: Total FULL refresh cycles across all stream tables.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static REFRESH_MODE_FULL_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_full_refresh_total") };
+
+// ── OBS-1 (v0.59.0): CDC lag percentile metrics ──────────────────────────
+
+/// Maximum number of lag samples in the rolling reservoir.
+const CDC_LAG_SAMPLES: usize = 256;
+
+/// OBS-1: Rolling reservoir of CDC lag samples (milliseconds, fixed 256 slots).
+///
+/// Samples are written in a round-robin fashion by updating the slot at
+/// `(sample_index % CDC_LAG_SAMPLES)`.  Percentiles are computed on metric
+/// scrape by sorting the current window.
+#[derive(Copy, Clone)]
+pub struct CdcLagSampler {
+    /// Fixed-size ring buffer of lag values in milliseconds.
+    pub samples: [u64; CDC_LAG_SAMPLES],
+    /// Next write slot (wraps at CDC_LAG_SAMPLES).
+    pub write_idx: u32,
+    /// Number of valid samples currently in the buffer (capped at CDC_LAG_SAMPLES).
+    pub sample_count: u32,
+}
+
+impl Default for CdcLagSampler {
+    fn default() -> Self {
+        Self {
+            samples: [0u64; CDC_LAG_SAMPLES],
+            write_idx: 0,
+            sample_count: 0,
+        }
+    }
+}
+
+// SAFETY: CdcLagSampler is Copy + Clone + Default with only primitive types.
+unsafe impl PGRXSharedMemory for CdcLagSampler {}
+
+/// OBS-1: Shared CDC lag sampler protected by a lightweight lock.
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static CDC_LAG_SAMPLER: PgLwLock<CdcLagSampler> =
+    unsafe { PgLwLock::new(c"pg_trickle_cdc_lag") };
+
+/// OBS-1: Record a CDC lag sample (age of a frontier advancement, in milliseconds).
+pub fn record_cdc_lag_ms(lag_ms: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut state = CDC_LAG_SAMPLER.exclusive();
+    let idx = (state.write_idx as usize) % CDC_LAG_SAMPLES;
+    state.samples[idx] = lag_ms;
+    state.write_idx = state.write_idx.wrapping_add(1);
+    if state.sample_count < CDC_LAG_SAMPLES as u32 {
+        state.sample_count += 1;
+    }
+}
+
+/// OBS-1: Read CDC lag percentiles (p50, p95, p99) in milliseconds.
+pub fn read_cdc_lag_percentiles() -> (u64, u64, u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return (0, 0, 0);
+    }
+    let state = CDC_LAG_SAMPLER.share();
+    let count = state.sample_count as usize;
+    if count == 0 {
+        return (0, 0, 0);
+    }
+    let mut sorted: Vec<u64> = state.samples[..count].to_vec();
+    sorted.sort_unstable();
+    let p50 = sorted[(count * 50 / 100).min(count - 1)];
+    let p95 = sorted[(count * 95 / 100).min(count - 1)];
+    let p99 = sorted[(count * 99 / 100).min(count - 1)];
+    (p50, p95, p99)
+}
+
+/// OBS-2: Increment the parallel job queue depth.
+pub fn increment_parallel_queue_depth() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    PARALLEL_QUEUE_DEPTH
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OBS-2: Decrement the parallel job queue depth (when a worker picks up a job).
+pub fn decrement_parallel_queue_depth() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    PARALLEL_QUEUE_DEPTH
+        .get()
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OBS-2: Add idle time (milliseconds) to the cumulative worker idle counter.
+pub fn add_worker_idle_ms(ms: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    WORKER_IDLE_MS_TOTAL
+        .get()
+        .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OBS-3: Set the WAL decoder pending-record count.
+pub fn set_wal_decoder_pending_records(count: u64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    WAL_DECODER_PENDING_RECORDS
+        .get()
+        .store(count, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// OBS-3: Read the WAL decoder pending-record count.
+pub fn read_wal_decoder_pending_records() -> u64 {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    WAL_DECODER_PENDING_RECORDS
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// OBS-4: Record a refresh mode selection.
+pub fn record_refresh_mode(is_differential: bool) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if is_differential {
+        REFRESH_MODE_DIFFERENTIAL_TOTAL
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        REFRESH_MODE_FULL_TOTAL
+            .get()
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Register shared memory allocations. Called from `_PG_init()`.
 pub fn init_shared_memory() {
     pg_shmem_init!(PGS_STATE);
@@ -349,6 +523,16 @@ pub fn init_shared_memory() {
     pg_shmem_init!(DELTA_QUERY_SIZE_BYTES);
     // COR-4 (v0.58.0): CDC compaction contention counter.
     pg_shmem_init!(CDC_COMPACT_CONTENDED_TOTAL);
+    // OBS-1 (v0.59.0): CDC lag percentile sampler.
+    pg_shmem_init!(CDC_LAG_SAMPLER);
+    // OBS-2 (v0.59.0): Parallel worker utilisation metrics.
+    pg_shmem_init!(PARALLEL_QUEUE_DEPTH);
+    pg_shmem_init!(WORKER_IDLE_MS_TOTAL);
+    // OBS-3 (v0.59.0): WAL decoder pending-record metric.
+    pg_shmem_init!(WAL_DECODER_PENDING_RECORDS);
+    // OBS-4 (v0.59.0): Refresh-mode ratio counters.
+    pg_shmem_init!(REFRESH_MODE_DIFFERENTIAL_TOTAL);
+    pg_shmem_init!(REFRESH_MODE_FULL_TOTAL);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 

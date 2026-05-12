@@ -70,6 +70,9 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
     // Connect to `postgres` — always available; used only for system catalog queries.
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
 
+    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+    let _ = pgrx::Spi::run("SET application_name = 'pg_trickle_launcher'");
+
     // Check for replica — launcher cannot spawn workers on standbys.
     let is_replica = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
         Spi::get_one::<bool>("SELECT pg_is_in_recovery()")
@@ -310,6 +313,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         extra.to_string()
     };
     BackgroundWorker::connect_worker_to_spi(Some(db_name.as_str()), None);
+
+    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+    let _ = pgrx::Spi::run("SET application_name = 'pg_trickle_scheduler'");
 
     // Exit cleanly if pg_trickle is not installed in this database.
     // The launcher will re-probe after its skip TTL (5 min) expires.

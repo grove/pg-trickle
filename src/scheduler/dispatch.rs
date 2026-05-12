@@ -112,6 +112,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
 
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
+    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+    let _ = pgrx::Spi::run("SET application_name = 'pg_trickle_dispatcher'");
+
     // Get our own PID for logging and job claiming.
     let my_pid = BackgroundWorker::transaction(AssertUnwindSafe(|| -> i32 {
         match Spi::get_one::<i32>("SELECT pg_backend_pid()") {
@@ -904,7 +907,11 @@ pub(super) fn parallel_dispatch_tick(
             scheduler_pid,
             1,
         ) {
-            Ok(id) => id,
+            Ok(id) => {
+                // OBS-2: A new job has been added to the parallel queue.
+                crate::shmem::increment_parallel_queue_depth();
+                id
+            }
             Err(e) => {
                 shmem::release_worker_token();
                 log!(

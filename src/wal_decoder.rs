@@ -828,8 +828,16 @@ fn write_decoded_change(
         let d_pk_hash_expr = build_pk_hash_from_values(pk_columns, &old_parsed);
         let i_pk_hash_expr = build_pk_hash_from_values(pk_columns, &parsed);
 
+        let num_columns = columns.len();
+        let pk_extra = if has_pk { 1 } else { 0 };
+
+        // PERF-5: Pre-allocate all column/value Vecs with known capacity to
+        // eliminate incremental heap reallocation per column.
+
         // col_names: INSERT column list (shared for both rows).
-        let mut col_names_u: Vec<String> = vec!["lsn".to_string(), "action".to_string()];
+        let mut col_names_u: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
+        col_names_u.push("lsn".to_string());
+        col_names_u.push("action".to_string());
         if has_pk {
             col_names_u.push("pk_hash".to_string());
         }
@@ -839,9 +847,12 @@ fn write_decoded_change(
         }
 
         // D-row params: $1=lsn, $2..=old column values.
-        let mut d_all_params: Vec<Option<String>> = vec![Some(lsn.to_string())];
+        let mut d_all_params: Vec<Option<String>> = Vec::with_capacity(1 + num_columns);
+        d_all_params.push(Some(lsn.to_string()));
         // D-row value expressions.
-        let mut d_vals: Vec<String> = vec!["$1::pg_lsn".to_string(), "'D'".to_string()];
+        let mut d_vals: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
+        d_vals.push("$1::pg_lsn".to_string());
+        d_vals.push("'D'".to_string());
         if has_pk {
             d_vals.push(d_pk_hash_expr);
         }
@@ -852,9 +863,11 @@ fn write_decoded_change(
 
         // I-row params: offset by d_all_params.len() (they follow D params in the SPI args).
         let d_len = d_all_params.len();
-        let mut i_all_params: Vec<Option<String>> = Vec::new();
+        let mut i_all_params: Vec<Option<String>> = Vec::with_capacity(num_columns);
         // I-row value expressions.
-        let mut i_vals: Vec<String> = vec!["$1::pg_lsn".to_string(), "'I'".to_string()];
+        let mut i_vals: Vec<String> = Vec::with_capacity(2 + pk_extra + num_columns);
+        i_vals.push("$1::pg_lsn".to_string());
+        i_vals.push("'I'".to_string());
         if has_pk {
             i_vals.push(i_pk_hash_expr);
         }
@@ -2004,6 +2017,9 @@ fn poll_source_changes(dep: &StDependency, change_schema: &str) -> Result<(), Pg
         &pk_columns,
         &columns,
     )?;
+
+    // OBS-3: Publish the count of records written in this poll cycle.
+    crate::shmem::set_wal_decoder_pending_records(count as u64);
 
     // Update the decoder confirmed LSN in the catalog
     if let Some(ref lsn) = last_lsn {

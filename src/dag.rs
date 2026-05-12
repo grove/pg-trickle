@@ -862,15 +862,23 @@ impl StDag {
             // Compare every pair of branches for shared ancestors.
             for i in 0..branch_ancestors.len() {
                 for j in (i + 1)..branch_ancestors.len() {
+                    // PERF-7: Use a lazy intersection iterator and break on
+                    // the first shared node (common case: no shared nodes).
+                    let has_shared = branch_ancestors[i]
+                        .1
+                        .intersection(&branch_ancestors[j].1)
+                        .next()
+                        .is_some();
+
+                    if !has_shared {
+                        continue;
+                    }
+
                     let shared: Vec<NodeId> = branch_ancestors[i]
                         .1
                         .intersection(&branch_ancestors[j].1)
                         .copied()
                         .collect();
-
-                    if shared.is_empty() {
-                        continue;
-                    }
 
                     // Intermediates = union of both branches minus
                     // the convergence node and the shared sources.

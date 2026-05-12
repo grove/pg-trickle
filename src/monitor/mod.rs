@@ -365,6 +365,105 @@ pub(crate) fn collect_metrics_text() -> String {
         "pg_trickle_cdc_compact_contended_total {compact_contended}\n"
     ));
 
+    // ── OBS-1 (v0.59.0): CDC lag percentile metrics ──────────────────────
+    let (lag_p50, lag_p95, lag_p99) = crate::shmem::read_cdc_lag_percentiles();
+    out.push_str(
+        "# HELP pg_trickle_cdc_lag_p50_seconds \
+         CDC lag 50th-percentile (rolling window)\n",
+    );
+    out.push_str("# TYPE pg_trickle_cdc_lag_p50_seconds gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_cdc_lag_p50_seconds {:.3}\n",
+        lag_p50 as f64 / 1000.0
+    ));
+    out.push_str(
+        "# HELP pg_trickle_cdc_lag_p95_seconds \
+         CDC lag 95th-percentile (rolling window)\n",
+    );
+    out.push_str("# TYPE pg_trickle_cdc_lag_p95_seconds gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_cdc_lag_p95_seconds {:.3}\n",
+        lag_p95 as f64 / 1000.0
+    ));
+    out.push_str(
+        "# HELP pg_trickle_cdc_lag_p99_seconds \
+         CDC lag 99th-percentile (rolling window)\n",
+    );
+    out.push_str("# TYPE pg_trickle_cdc_lag_p99_seconds gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_cdc_lag_p99_seconds {:.3}\n",
+        lag_p99 as f64 / 1000.0
+    ));
+
+    // ── OBS-2 (v0.59.0): Parallel worker utilisation metrics ─────────────
+    let queue_depth = if crate::shmem::is_shmem_available() {
+        crate::shmem::PARALLEL_QUEUE_DEPTH
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+    let worker_idle_ms = if crate::shmem::is_shmem_available() {
+        crate::shmem::WORKER_IDLE_MS_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+    out.push_str(
+        "# HELP pg_trickle_parallel_queue_depth \
+         Number of refresh jobs waiting for a worker\n",
+    );
+    out.push_str("# TYPE pg_trickle_parallel_queue_depth gauge\n");
+    out.push_str(&format!("pg_trickle_parallel_queue_depth {queue_depth}\n"));
+    out.push_str(
+        "# HELP pg_trickle_worker_idle_time_seconds_total \
+         Cumulative seconds workers have spent waiting for work\n",
+    );
+    out.push_str("# TYPE pg_trickle_worker_idle_time_seconds_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_worker_idle_time_seconds_total {:.3}\n",
+        worker_idle_ms as f64 / 1000.0
+    ));
+
+    // ── OBS-3 (v0.59.0): WAL decoder pending-record metric ───────────────
+    let wal_pending = crate::shmem::read_wal_decoder_pending_records();
+    out.push_str(
+        "# HELP pg_trickle_wal_decoder_pending_records \
+         Logical-replication records buffered but not yet written to the CDC change buffer\n",
+    );
+    out.push_str("# TYPE pg_trickle_wal_decoder_pending_records gauge\n");
+    out.push_str(&format!(
+        "pg_trickle_wal_decoder_pending_records {wal_pending}\n"
+    ));
+
+    // ── OBS-4 (v0.59.0): Refresh-mode ratio counters ─────────────────────
+    let diff_total = if crate::shmem::is_shmem_available() {
+        crate::shmem::REFRESH_MODE_DIFFERENTIAL_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+    let full_total = if crate::shmem::is_shmem_available() {
+        crate::shmem::REFRESH_MODE_FULL_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    };
+    out.push_str(
+        "# HELP pg_trickle_refresh_mode_total \
+         Total refresh cycles by mode (differential or full)\n",
+    );
+    out.push_str("# TYPE pg_trickle_refresh_mode_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_refresh_mode_total{{mode=\"differential\"}} {diff_total}\n"
+    ));
+    out.push_str(&format!(
+        "pg_trickle_refresh_mode_total{{mode=\"full\"}} {full_total}\n"
+    ));
+
     // OpenMetrics requires the exposition to end with # EOF
     out.push_str("# EOF\n");
     out

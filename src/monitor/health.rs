@@ -823,6 +823,11 @@ fn parallel_job_status(
 /// Called from the scheduler's periodic health-check tick. The caller
 /// maintains a per-source consecutive-cycle counter and calls
 /// `alert_change_buffer_backpressure` when the limit is reached.
+/// PERF-1: Batch check of CDC buffer sizes in a single SPI call.
+///
+/// Previous implementation issued one `SELECT count(*)` per source OID.
+/// This version builds a UNION ALL query that fans out across all CDC-enabled
+/// source tables and returns one row per source with its pending-row count.
 pub fn check_change_buffer_sizes() -> Vec<(u32, i64)> {
     let change_schema = crate::config::pg_trickle_change_buffer_schema();
     let threshold = crate::config::pg_trickle_buffer_alert_threshold();
@@ -844,25 +849,42 @@ pub fn check_change_buffer_sizes() -> Vec<(u32, i64)> {
         }
     });
 
-    let mut over_threshold = Vec::new();
-    for relid in sources {
-        let oid_u32 = relid as u32;
-        // v0.32.0+: buffer table uses stable hash name
-        let buf = crate::cdc::buffer_qualified_name_for_oid(
-            &change_schema,
-            pgrx::pg_sys::Oid::from(oid_u32),
-        );
-        // SAFETY: `buf` is constructed by buffer_qualified_name_for_oid from a
-        // PostgreSQL OID — it is never user input. PostgreSQL does not allow bind
-        // parameters as FROM-clause table references, so format! is required here.
-        let pending = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {buf}")) // nosemgrep: rust.spi.query.dynamic-format
-            .unwrap_or(Some(0))
-            .unwrap_or(0);
-        if pending > threshold {
-            over_threshold.push((oid_u32, pending));
-        }
+    if sources.is_empty() {
+        return Vec::new();
     }
-    over_threshold
+
+    // PERF-1: Build a single UNION ALL query covering all source OIDs.
+    // Each subquery returns (source_oid::bigint, count::bigint).
+    let union_parts: Vec<String> = sources
+        .iter()
+        .map(|&relid| {
+            let oid_u32 = relid as u32;
+            let buf = crate::cdc::buffer_qualified_name_for_oid(
+                &change_schema,
+                pgrx::pg_sys::Oid::from(oid_u32),
+            );
+            // SAFETY: buf is constructed from a PostgreSQL OID via buffer_qualified_name_for_oid;
+            // it is never user-supplied input.
+            format!("SELECT {oid_u32}::bigint AS oid, count(*)::bigint AS cnt FROM {buf}") // nosemgrep: rust.spi.query.dynamic-format
+        })
+        .collect();
+    let batched_sql = union_parts.join(" UNION ALL ");
+
+    Spi::connect(|client| match client.select(&batched_sql, None, &[]) {
+        Ok(result) => result
+            .into_iter()
+            .filter_map(|row| {
+                let oid = row.get::<i64>(1).ok().flatten()? as u32;
+                let cnt = row.get::<i64>(2).ok().flatten().unwrap_or(0);
+                if cnt > threshold {
+                    Some((oid, cnt))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    })
 }
 
 // ── A44-9: wal_source_status() per-source WAL CDC diagnostics ────────────
