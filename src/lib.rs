@@ -305,6 +305,8 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     last_reindex_at TIMESTAMPTZ,
     -- v0.36.0: column lineage metadata (F12)
     column_lineage  JSONB,
+    -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
+    defining_query_hash BIGINT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
