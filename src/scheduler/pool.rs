@@ -101,17 +101,20 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
 
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
-    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
-    let _ = pgrx::Spi::run(&format!(
-        "SET application_name = 'pg_trickle_pool_{}'",
-        worker_idx,
-    ));
-
     log!(
         "pg_trickle pool worker {}: started (db='{}')",
         worker_idx,
         db_name,
     );
+
+    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+    // Must be inside a transaction context in a background worker.
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        let _ = Spi::run(&format!(
+            "SET application_name = 'pg_trickle_pool_{}'",
+            worker_idx,
+        ));
+    }));
 
     // Acquire a worker token (shared with dynamic workers for the cluster budget).
     let max_workers = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
