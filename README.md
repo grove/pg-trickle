@@ -15,6 +15,8 @@
 
 > For a plain-language description of the problem pg_trickle solves, the differential dataflow approach, and the hybrid CDC architecture, read **[ESSENCE.md](ESSENCE.md)**.
 
+**Latest release: [v0.57.0](CHANGELOG.md#0570--documentation-excellence)** — four new end-to-end tutorials (real-time dashboard, event sourcing, zero-downtime migration, security hardening), world-class docs, and a full terminology consistency pass. See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
 ## Stream Tables for PostgreSQL 18
 
 pg_trickle brings declarative, automatically-refreshing materialized views to PostgreSQL, inspired by the [DBSP](https://arxiv.org/abs/2203.16684) differential dataflow framework ([comparison](docs/research/DBSP_COMPARISON.md)). Define a SQL query and a schedule; the extension handles the rest.
@@ -95,6 +97,9 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Transactional IVM** — `IMMEDIATE` mode maintains stream tables within the same transaction as the base-table DML, giving read-your-writes consistency with no background worker required.
 - **Change buffer compaction** — cancelling INSERT/DELETE pairs and sequential changes to the same row are collapsed automatically, reducing delta scan overhead 50–90% on high-churn tables.
 - **Adaptive fallback** — when change rate exceeds the `pg_trickle.adaptive_full_threshold` (default 50%), the engine switches to FULL automatically and switches back when the rate drops.
+- **DVM depth guard & CTE cap** — `diff_node()` enforces a configurable recursion depth limit (`pg_trickle.max_parse_depth`, default 64) and a CTE count cap (`pg_trickle.max_diff_ctes`, default 1000) to prevent stack overflows and OOM on pathological queries.
+- **O(V+E) diamond detection** — the DAG diamond-detection algorithm runs in linear time (single forward topological pass) for all graph sizes.
+- **Multi-column `IN` rewrite** — row expressions and multi-target sub-selects in `IN`/`NOT IN` predicates are automatically rewritten to AND-chained equality.
 
 ### SQL coverage
 
@@ -136,7 +141,9 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Crash-safe** — row-level locks prevent concurrent refreshes; in-flight refreshes are marked failed and resumed cleanly on recovery.
 - **Online ALTER QUERY** — schema changes are classified (same / compatible / incompatible), storage migrated, and the dependency graph updated without dropping and recreating the stream table.
 - **Self-healing repair** — `pgtrickle.repair_stream_table(name)` rebuilds any missing CDC triggers and change buffer tables, resets the refresh frontier, and clears fuse state — use after PITR restores or operator-level DDL.
-- **CNPG / Kubernetes ready** — purpose-built Docker images and CloudNativePG manifests included.
+- **CNPG / Kubernetes ready** — purpose-built Docker images and CloudNativePG manifests included; a `lifecycle.preStop` drain hook (`pgtrickle.drain(timeout_s => 120)`) ensures clean rolling upgrades.
+- **SQL-injection safe Citus paths** — all `dblink` call sites escape connection strings and queries via `pg_catalog.quote_literal`, eliminating injection risk through attacker-controlled hostnames or slot names.
+- **Supply-chain hardened Docker images** — all Dockerfiles pin `postgres:18.3-bookworm` to an exact SHA256 digest for reproducible builds; `scripts/update_base_image_digests.sh` automates quarterly refreshes.
 
 ### Observability
 
@@ -147,6 +154,7 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - `pgtrickle.dependency_tree()` — full DAG with topological order.
 - `pgtrickle.explain_st(name)` — the delta SQL pg_trickle will run on next refresh.
 - `pgtrickle.repair_stream_table(name)` — rebuild missing CDC triggers, recreate missing change buffers, and reset state after PITR or operator-level DDL.
+- `pgtrickle.reliability_counters()` — template cache stale evictions, DAG cycles detected, and hash-mismatch evictions as a single-row table; exposed via the Prometheus `/metrics` endpoint.
 - `NOTIFY`-based alerting, SCC status, watermark status, trigger inventory, diamond groups, and more.
 
 ## SQL Support
@@ -235,7 +243,7 @@ When no data has changed, the scheduler's per-cycle overhead is minimal:
 
 ### Where Time Is Spent
 
-Rust-side delta SQL generation takes **< 1%** of total refresh time (sub-microsecond to ~50 µs depending on operator complexity). PostgreSQL's MERGE execution dominates at **70–97%** of wall-clock time — the extension gets out of the way and lets the database do what it does best.
+Rust-side delta SQL generation takes **< 1%** of total refresh time (sub-microsecond to ~50 µs depending on operator complexity). PostgreSQL's MERGE execution dominates at **70–97%** of wall-clock time — the extension gets out of the way and lets the database do what it does best. Placeholder resolution uses a single-pass [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm) multi-pattern replacer (O(template_length) regardless of the number of source tables), and the volatility lookup cache eliminates repeated SPI round-trips per refresh cycle.
 
 **Tip:** Since MERGE dominates, standard PostgreSQL tuning applies: ensure the stream table has an index on its primary key (created automatically) and that source tables have indexes on any JOIN or WHERE columns in the defining query. Increasing `work_mem` and `maintenance_work_mem` can also reduce sort and hash costs within the MERGE plan.
 
@@ -360,7 +368,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.42.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.57.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -374,7 +382,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.42.0
+          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.57.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -483,7 +491,7 @@ The `dbt-pgtrickle` package provides a custom `stream_table` materialization for
 # packages.yml
 packages:
   - git: "https://github.com/trickle-labs/pg-trickle.git"
-    revision: v0.42.0
+    revision: v0.57.0
     subdirectory: "dbt-pgtrickle"
 ```
 
@@ -507,6 +515,7 @@ the plain-language overview, or jump straight to a topic below.
 | Document | Description |
 |---|---|
 | [What is pg_trickle?](ESSENCE.md) | Plain-language overview |
+| [Mental Model](docs/MENTAL_MODEL.md) | How IVM works — delta semantics, change capture, DAG chaining |
 | [Use Cases](docs/USE_CASES.md) | What people build with stream tables |
 | [Comparisons](docs/COMPARISONS.md) | vs. pg_ivm, Materialize, Flink, Debezium, … |
 | [Glossary](docs/GLOSSARY.md) | Decoder for every term used in the docs |
@@ -525,6 +534,8 @@ the plain-language overview, or jump straight to a topic below.
 |---|---|
 | [Patterns](docs/PATTERNS.md) | Bronze/Silver/Gold, SCDs, dashboards, outbox/inbox |
 | [Performance Cookbook](docs/PERFORMANCE_COOKBOOK.md) | Tuning recipes |
+| [Performance Cheatsheet](docs/PERFORMANCE_CHEATSHEET.md) | Three golden rules, top-10 GUC quick wins, single-page reference |
+| [Limitations](docs/LIMITATIONS.md) | Unsupported SQL, DIFFERENTIAL constraints, decision tree |
 | [SQL Reference](docs/SQL_REFERENCE.md) | Every function, view, and option |
 | [Configuration](docs/CONFIGURATION.md) | All GUC variables |
 | [Predictive Cost Model](docs/COST_MODEL.md) | How AUTO mode chooses |
@@ -544,6 +555,7 @@ the plain-language overview, or jump straight to a topic below.
 | [Security Guide](docs/SECURITY_GUIDE.md) | Roles, grants, RLS, auditing |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptoms → diagnosis → fix |
 | [Error Reference](docs/ERRORS.md) | Every PgTrickleError variant with SQLSTATE |
+| [GUC Catalog](docs/GUC_CATALOG.md) | All 115 configuration parameters with types and defaults |
 
 ### Distributed & streaming
 
@@ -562,6 +574,10 @@ the plain-language overview, or jump straight to a topic below.
 [UPDATE](docs/tutorials/WHAT_HAPPENS_ON_UPDATE.md) ·
 [DELETE](docs/tutorials/WHAT_HAPPENS_ON_DELETE.md) ·
 [TRUNCATE](docs/tutorials/WHAT_HAPPENS_ON_TRUNCATE.md) ·
+[Build Your First Dashboard](docs/tutorials/FIRST_DASHBOARD.md) ·
+[Event Sourcing & CQRS](docs/tutorials/EVENT_SOURCING.md) ·
+[Backfill & Zero-Downtime Migration](docs/tutorials/BACKFILL_AND_MIGRATION.md) ·
+[Security Hardening](docs/tutorials/SECURITY_HARDENING.md) ·
 [Tiered Scheduling](docs/tutorials/TIERED_SCHEDULING.md) ·
 [Fuse Circuit Breaker](docs/tutorials/FUSE_CIRCUIT_BREAKER.md) ·
 [Circular Dependencies](docs/tutorials/CIRCULAR_DEPENDENCIES.md) ·
@@ -583,6 +599,7 @@ the plain-language overview, or jump straight to a topic below.
 [Project History](docs/PROJECT_HISTORY.md) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [DVM Operators](docs/DVM_OPERATORS.md) ·
+[DVM Rewrite Rules](docs/DVM_REWRITE_RULES.md) ·
 [Benchmarks](docs/BENCHMARK.md)
 
 ## Known Limitations
