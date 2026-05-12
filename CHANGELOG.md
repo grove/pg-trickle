@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.58.0 — Security & Correctness Hardening](#0580--security--correctness-hardening)
 - [0.57.0 — Documentation Excellence](#0570--documentation-excellence)
 - [0.56.0 — Documentation Foundation](#0560--documentation-foundation)
 - [0.55.0 — Final Pre-1.0 Polish](#0550--final-pre-10-polish)
@@ -72,6 +73,67 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.58.0] — Security & Correctness Hardening
+
+### What's New
+
+v0.58.0 closes all HIGH-severity findings from the v0.57.0 overall assessment
+(Report 12).  No new SQL API surface is added — every change is a targeted
+security fix or correctness fix.
+
+#### SEC-1/2: Ownership Checks for Outbox and Publication APIs
+
+`attach_outbox()`, `detach_outbox()`, `attach_embedding_outbox()`,
+`stream_table_to_publication()`, and `drop_stream_table_publication()` now call
+`check_stream_table_ownership()` immediately after resolving stream table metadata.
+Previously, any role with `EXECUTE` on the `pgtrickle` schema could attach an
+outbox or create a publication for a stream table owned by a different role.
+Non-owner callers now receive `ERROR: must be owner of stream table`.
+
+#### COR-1: Multi-Column NOT IN + NULL Row Handling
+
+The v0.55.0 multi-column `IN` rewrite now detects `NULL` constants on either
+side of the row constructor in `NOT IN` expressions. When detected, the AntiJoin
+rewrite is skipped and the original subquery-based execution path is used,
+emitting a diagnostic `NOTICE`. See [LIMITATIONS.md](docs/LIMITATIONS.md) for
+details.
+
+#### COR-2: Recursive-CTE Depth Guard in DIFFERENTIAL Mode
+
+`pg_trickle.ivm_recursive_max_depth` GUC now applies consistently to both
+DIFFERENTIAL and IMMEDIATE modes. Previously only IMMEDIATE mode enforced the
+depth limit.
+
+#### COR-3: WAL Decoder TOCTOU Advisory Lock
+
+`poll_source_changes()` now acquires a `pg_advisory_xact_lock` keyed on the
+source OID before calling `poll_wal_changes()`, serialising the eligibility
+check and WAL consumption into an atomic unit.
+
+#### COR-4: Compact-Buffer Lock Contention Is Observable
+
+`compact_change_buffer()` now returns `CompactionResult::Contended` instead of
+`Ok(0)` when it cannot acquire the advisory lock, increments the new shared-memory
+counter `pg_trickle_cdc_compact_contended_total`, and exposes it via the
+Prometheus `/metrics` endpoint.
+
+#### SEC-3: DDL Hook Escalates on SPI Failure
+
+`handle_alter_table()` now retries `find_downstream_pgt_ids()` once on SPI error
+and, if the retry also fails, raises `pgrx::error!()` to block the originating
+ALTER TABLE rather than silently returning.
+
+#### SEC-4: Schema Identifier Quoted in CDC Buffer Names
+
+`buffer_qualified_name_for_oid()` now uses `sql_builder::qualified()` to properly
+quote the schema identifier in the change-buffer table path.
+
+### Upgrade Notes
+
+No SQL schema changes. No `ALTER EXTENSION` migration is required.
 
 ---
 

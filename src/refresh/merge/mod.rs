@@ -611,13 +611,22 @@ pub fn execute_differential_refresh(
     for &oid in &catalog_source_oids {
         let prev_lsn = prev_frontier.get_lsn(oid);
         let new_lsn = new_frontier.get_lsn(oid);
-        if let Err(e) = crate::cdc::compact_change_buffer(&change_schema, oid, &prev_lsn, &new_lsn)
-        {
-            pgrx::debug1!(
-                "[pg_trickle] C-4: compaction failed for changes_{}: {}",
-                oid,
-                e,
-            );
+        match crate::cdc::compact_change_buffer(&change_schema, oid, &prev_lsn, &new_lsn) {
+            Ok(crate::cdc::CompactionResult::Contended) => {
+                // COR-4: Lock was held by concurrent refresh — already counted in shmem.
+                pgrx::debug1!(
+                    "[pg_trickle] C-4: compaction contended for changes_{} (advisory lock busy)",
+                    oid,
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                pgrx::debug1!(
+                    "[pg_trickle] C-4: compaction failed for changes_{}: {}",
+                    oid,
+                    e,
+                );
+            }
         }
     }
 

@@ -23,6 +23,9 @@ fn stream_table_to_publication_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table) = parse_qualified_name(name);
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
 
+    // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
+    super::helpers::check_stream_table_ownership(meta.pgt_relid, &schema, &table)?;
+
     if meta.downstream_publication_name.is_some() {
         return Err(PgTrickleError::PublicationAlreadyExists(name.into()));
     }
@@ -79,6 +82,9 @@ fn drop_stream_table_publication(name: &str) {
 fn drop_stream_table_publication_impl(name: &str) -> Result<(), PgTrickleError> {
     let (schema, table) = parse_qualified_name(name);
     let meta = StreamTableMeta::get_by_name(&schema, &table)?;
+
+    // SEC-2: Ownership check — same guard as alter/drop/pause/resume.
+    super::helpers::check_stream_table_ownership(meta.pgt_relid, &schema, &table)?;
 
     let pub_name = match &meta.downstream_publication_name {
         Some(p) => p.clone(),

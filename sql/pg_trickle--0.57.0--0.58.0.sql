@@ -1,0 +1,24 @@
+-- pg_trickle 0.57.0 -> 0.58.0 upgrade migration
+--
+-- v0.58.0 — Security & Correctness Hardening
+--
+-- This release contains no SQL schema changes. All changes are
+-- targeted security fixes and correctness improvements in Rust code:
+--
+--   SEC-1: Add check_stream_table_ownership() to attach_outbox(),
+--          detach_outbox(), and attach_embedding_outbox()
+--   SEC-2: Add check_stream_table_ownership() to
+--          stream_table_to_publication() and drop_stream_table_publication()
+--   SEC-3: handle_alter_table() now retries on SPI error and escalates
+--          to pgrx::error!() to block the DDL rather than silently returning
+--   SEC-4: buffer_qualified_name_for_oid() now uses sql_builder::qualified()
+--          to properly quote the schema identifier
+--   COR-1: Multi-column NOT IN with nullable elements now falls back to
+--          subquery-based delta computation instead of an incorrect anti-join
+--   COR-2: pg_trickle.ivm_recursive_max_depth GUC now applies to both
+--          DIFFERENTIAL and IMMEDIATE modes (was IMMEDIATE only)
+--   COR-3: poll_source_changes() acquires pg_advisory_xact_lock keyed on
+--          the source OID to prevent TOCTOU race with slot drops
+--   COR-4: compact_change_buffer() returns CompactionResult::Contended
+--          (observable) instead of Ok(0) when lock cannot be acquired;
+--          new counter pg_trickle_cdc_compact_contended_total in Prometheus

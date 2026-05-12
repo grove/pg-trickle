@@ -1042,6 +1042,9 @@ fn parse_any_sublink(
         }
 
         // Build: col1=tgt1 AND col2=tgt2 AND ... [AND inner_where].
+        // COR-1: Save clones for the NULL-safety check applied after condition is built.
+        let left_exprs_for_null_check: Vec<Expr> = left_exprs.clone();
+        let right_exprs_for_null_check: Vec<Expr> = right_exprs.clone();
         let eq_chain = left_exprs
             .into_iter()
             .zip(right_exprs)
@@ -1072,6 +1075,31 @@ fn parse_any_sublink(
                 right: Box::new(inner_where),
             }
         };
+
+        // COR-1: NULL safety check for multi-column NOT IN.
+        // AntiJoin semantics differ from SQL NOT IN when NULL is involved:
+        // SQL NOT IN returns UNKNOWN (exclude row) when any comparison is NULL,
+        // but AntiJoin keeps the row on UNKNOWN correlation predicates.
+        // Skip the AntiJoin rewrite when any left-side or right-side element is
+        // a NULL constant — fall back to subquery-based delta computation instead.
+        if negated {
+            let left_has_null_literal = left_exprs_for_null_check
+                .iter()
+                .any(|e| matches!(e, Expr::Raw(s) if s.trim().eq_ignore_ascii_case("null")));
+            let right_has_null_literal = right_exprs_for_null_check
+                .iter()
+                .any(|e| matches!(e, Expr::Raw(s) if s.trim().eq_ignore_ascii_case("null")));
+            if left_has_null_literal || right_has_null_literal {
+                pgrx::notice!(
+                    "pg_trickle: multi-column NOT IN with nullable elements cannot be \
+                     rewritten to an anti-join; falling back to subquery-based delta computation."
+                );
+                return Err(PgTrickleError::UnsupportedOperator(
+                    "multi-column NOT IN with nullable elements cannot be rewritten to an anti-join"
+                        .into(),
+                ));
+            }
+        }
 
         return Ok(SublinkWrapper {
             negated,

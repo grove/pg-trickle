@@ -347,6 +347,24 @@ pub(crate) fn collect_metrics_text() -> String {
         "pg_trickle_delta_query_size_bytes {delta_bytes}\n"
     ));
 
+    // COR-4 (v0.58.0): CDC compaction contention counter.
+    let compact_contended = if crate::shmem::is_shmem_available() {
+        crate::shmem::CDC_COMPACT_CONTENDED_TOTAL
+            .get()
+            .load(std::sync::atomic::Ordering::Relaxed) as i64
+    } else {
+        0
+    };
+    out.push_str(
+        "# HELP pg_trickle_cdc_compact_contended_total \
+         Total times compact_change_buffer() could not acquire the advisory lock \
+         (indicates persistent contention with concurrent refreshes)\n",
+    );
+    out.push_str("# TYPE pg_trickle_cdc_compact_contended_total counter\n");
+    out.push_str(&format!(
+        "pg_trickle_cdc_compact_contended_total {compact_contended}\n"
+    ));
+
     // OpenMetrics requires the exposition to end with # EOF
     out.push_str("# EOF\n");
     out

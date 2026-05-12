@@ -722,15 +722,28 @@ fn handle_policy_change(cmd: &DdlCommand) {
 /// a ST storage table itself.
 fn handle_alter_table(objid: pg_sys::Oid, identity: &str) {
     // Check if this OID is an upstream source of any ST.
+    // SEC-3: Retry once on SPI error; escalate to pgrx::error!() on repeated failure
+    // so the originating ALTER TABLE is blocked rather than silently proceeding.
     let affected_pgt_ids = match find_downstream_pgt_ids(objid) {
         Ok(ids) => ids,
         Err(e) => {
             pgrx::warning!(
-                "pg_trickle_ddl_tracker: failed to query dependencies for {}: {}",
+                "pg_trickle_ddl_tracker: dependency query for {} failed ({}); retrying once",
                 identity,
                 e
             );
-            return;
+            match find_downstream_pgt_ids(objid) {
+                Ok(ids) => ids,
+                Err(e2) => {
+                    pgrx::error!(
+                        "pg_trickle: DDL hook could not inspect dependencies — \
+                         schema change blocked to prevent inconsistent state \
+                         (source: {}, error: {})",
+                        identity,
+                        e2
+                    );
+                }
+            }
         }
     };
 

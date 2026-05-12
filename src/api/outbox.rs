@@ -16,6 +16,7 @@
 
 use pgrx::prelude::*;
 
+use super::helpers::check_stream_table_ownership;
 use crate::catalog::StreamTableMeta;
 use crate::error::PgTrickleError;
 
@@ -97,6 +98,9 @@ fn attach_outbox_impl(
     let (schema, st_name) = resolve_st_name(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
 
+    // SEC-1: Ownership check — same guard as alter/drop/pause/resume.
+    check_stream_table_ownership(meta.pgt_relid, &schema, &st_name)?;
+
     // Check that pg_tide is installed.
     // `to_regprocedure` accepts argument-type lists; `to_regproc` does not.
     let pg_tide_present = Spi::get_one::<bool>(
@@ -168,6 +172,9 @@ pub fn detach_outbox(p_name: &str, p_if_exists: default!(bool, false)) {
 fn detach_outbox_impl(name: &str, if_exists: bool) -> Result<(), PgTrickleError> {
     let (schema, st_name) = resolve_st_name(name)?;
     let meta = StreamTableMeta::get_by_name(&schema, &st_name)?;
+
+    // SEC-1: Ownership check — same guard as alter/drop/pause/resume.
+    check_stream_table_ownership(meta.pgt_relid, &schema, &st_name)?;
 
     let deleted = Spi::get_one_with_args::<i64>(
         "WITH d AS (DELETE FROM pgtrickle.pgt_outbox_config \
