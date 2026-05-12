@@ -114,7 +114,8 @@ pub fn buffer_base_name_for_oid(source_oid: pg_sys::Oid) -> String {
 /// Return the schema-qualified change buffer table path for a source OID.
 pub fn buffer_qualified_name_for_oid(change_schema: &str, source_oid: pg_sys::Oid) -> String {
     let base = buffer_base_name_for_oid(source_oid);
-    format!("{change_schema}.{base}")
+    // SEC-4: Use sql_builder::qualified() to properly quote the schema identifier.
+    crate::sql_builder::qualified(change_schema, &base)
 }
 
 /// CITUS-4: Get the CDC object name suffix (stable_name or OID fallback) for a source.
@@ -942,16 +943,30 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
     Spi::get_one::<i64>(&sql).unwrap_or(Some(0)).unwrap_or(0)
 }
 
+/// COR-4: Result type for [`compact_change_buffer`].
+///
+/// Distinguishes between "rows deleted", "skipped below threshold", and
+/// "could not acquire advisory lock" — the last case is now observable
+/// via the `pg_trickle_cdc_compact_contended_total` counter.
+#[derive(Debug)]
+pub enum CompactionResult {
+    /// No compaction was attempted (buffer below threshold).
+    BelowThreshold,
+    /// Advisory lock was held by a concurrent refresh; compaction skipped.
+    Contended,
+    /// Compaction ran and deleted `n` rows (may be 0 if nothing to remove).
+    Compacted(i64),
+}
+
 /// C-4: Compact a change buffer by eliminating net-zero pk_hash groups
 /// (INSERT followed by DELETE that cancel out) and collapsing multi-change
 /// groups to retain only the first and last entries per pk_hash.
 ///
-/// Returns the number of rows deleted, or 0 if compaction was skipped
-/// (buffer below threshold or advisory lock unavailable).
+/// COR-4: Returns [`CompactionResult`] instead of `Result<i64>` so callers
+/// can distinguish "contended" from "nothing to compact".
 ///
 /// Uses `pg_try_advisory_xact_lock` to serialise with concurrent refresh
-/// operations — if the lock cannot be acquired, compaction is skipped
-/// rather than blocking.
+/// operations — if the lock cannot be acquired, returns `Contended`.
 ///
 /// **Safety:** Uses `change_id` (the BIGSERIAL primary key) for deletion,
 /// never `ctid` which is unstable under concurrent VACUUM.
@@ -960,10 +975,10 @@ pub fn compact_change_buffer(
     source_oid: u32,
     prev_lsn: &str,
     new_lsn: &str,
-) -> Result<i64, PgTrickleError> {
+) -> Result<CompactionResult, PgTrickleError> {
     let threshold = crate::config::pg_trickle_compact_threshold();
     if threshold <= 0 {
-        return Ok(0);
+        return Ok(CompactionResult::BelowThreshold);
     }
 
     // CITUS-4: Use stable buffer name (v0.32.0+).
@@ -984,7 +999,7 @@ pub fn compact_change_buffer(
     .unwrap_or(0);
 
     if pending_count <= threshold {
-        return Ok(0);
+        return Ok(CompactionResult::BelowThreshold);
     }
 
     // Advisory lock keyed on source OID to serialise with refresh.
@@ -1002,7 +1017,9 @@ pub fn compact_change_buffer(
             "[pg_trickle] C-4: skipping compaction for changes_{} (advisory lock busy)",
             source_oid,
         );
-        return Ok(0);
+        // COR-4: Return Contended instead of Ok(0) so callers can observe lock contention.
+        crate::shmem::increment_cdc_compact_contended();
+        return Ok(CompactionResult::Contended);
     }
 
     // Compact: remove net-zero groups (INSERT→DELETE) and intermediate rows.
@@ -1055,7 +1072,7 @@ pub fn compact_change_buffer(
         );
     }
 
-    Ok(deleted)
+    Ok(CompactionResult::Compacted(deleted))
 }
 
 /// DAG-5: Compact an ST change buffer (`changes_pgt_{pgt_id}`).

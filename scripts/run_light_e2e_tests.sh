@@ -389,6 +389,7 @@ start_shared_light_e2e_container() {
         -e POSTGRES_DB=postgres \
         -p 5432 \
         -v "${ext_dir}:/tmp/pg_ext:ro" \
+        --shm-size=512m \
         --label com.pgtrickle.test=true \
         --label com.pgtrickle.suite=light-e2e \
         --label "com.pgtrickle.run-id=${run_id}" \

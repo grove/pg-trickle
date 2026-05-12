@@ -293,6 +293,25 @@ pub static DRAIN_COMPLETED: PgAtomic<AtomicU64> =
 pub static CITUS_WORKER_FAILURE_TOTAL: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_citus_fail_total") };
 
+/// COR-4 (v0.58.0): Total number of times `compact_change_buffer()` could
+/// not acquire the advisory lock and returned `Contended`.
+///
+/// Exposed as `pg_trickle_cdc_compact_contended_total` via the Prometheus
+/// `/metrics` endpoint so operators can detect persistent lock contention.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static CDC_COMPACT_CONTENDED_TOTAL: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_cdc_compact_cnt") };
+
+/// COR-4: Increment the CDC compaction contention counter.
+pub fn increment_cdc_compact_contended() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    CDC_COMPACT_CONTENDED_TOTAL
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Register shared memory allocations. Called from `_PG_init()`.
 pub fn init_shared_memory() {
     pg_shmem_init!(PGS_STATE);
@@ -328,6 +347,8 @@ pub fn init_shared_memory() {
     // M-6 (v0.55.0): DVM parse-time and delta SQL size metrics.
     pg_shmem_init!(DVM_PARSE_MS);
     pg_shmem_init!(DELTA_QUERY_SIZE_BYTES);
+    // COR-4 (v0.58.0): CDC compaction contention counter.
+    pg_shmem_init!(CDC_COMPACT_CONTENDED_TOTAL);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 

@@ -1976,6 +1976,18 @@ fn poll_source_changes(dep: &StDependency, change_schema: &str) -> Result<(), Pg
         None => slot_name_for_source(dep.source_relid),
     };
 
+    // COR-3: Acquire a transaction-scoped advisory lock keyed on the source OID
+    // before consuming the replication slot.  This serialises the eligibility
+    // check (recheck_source_eligible_for_wal) and WAL consumption into an atomic
+    // unit, preventing a concurrent pg_drop_replication_slot() from invalidating
+    // the slot between the check and the first pg_logical_slot_get_changes() call.
+    let lock_key = dep.source_relid.to_u32() as i64;
+    Spi::run_with_args(
+        "SELECT pg_advisory_xact_lock($1::bigint)",
+        &[lock_key.into()],
+    )
+    .map_err(|e| PgTrickleError::SpiError(format!("COR-3: advisory lock acquire failed: {e}")))?;
+
     // Resolve qualified source table name for filtering test_decoding output
     let source_table_name = cdc::get_qualified_table_name(dep.source_relid)?;
 

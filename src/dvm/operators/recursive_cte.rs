@@ -666,24 +666,26 @@ fn generate_semi_naive_ins_only(
         columns,
     )?;
 
-    // ── Depth guard (IMMEDIATE mode only) ────────────────────────────
-    use crate::dvm::diff::DeltaSource;
-    let max_depth = if matches!(ctx.delta_source, DeltaSource::TransitionTable { .. }) {
-        crate::config::pg_trickle_ivm_recursive_max_depth()
-    } else {
-        None
-    };
+    // ── Depth guard (both DIFFERENTIAL and IMMEDIATE modes) ──────────
+    // COR-2: Guard is now unconditional — the GUC is applied to both modes.
+    #[cfg(not(test))]
+    let max_depth = crate::config::pg_trickle_ivm_recursive_max_depth();
+    #[cfg(test)]
+    let max_depth: Option<i32> = None;
 
     let (seed_from_base, seed_from_existing, propagation) = if let Some(depth_limit) = max_depth {
-        let depth_seed_suffix = ", 0::int AS __pgt_depth";
-        let sb = format!("{seed_from_base_raw}{depth_seed_suffix}");
-        let se = seed_from_existing_raw.map(|s| format!("{s}{depth_seed_suffix}"));
+        // Wrap each seed in a subquery so __pgt_depth is added as a new
+        // column in the SELECT list, not appended after a WHERE clause.
+        let sb =
+            format!("SELECT __seed.*, 0::int AS __pgt_depth FROM ({seed_from_base_raw}) __seed");
+        let se = seed_from_existing_raw
+            .map(|s| format!("SELECT __seed.*, 0::int AS __pgt_depth FROM ({s}) __seed"));
         let prop = match try_generate_propagation_with_depth(recursive, &delta_cte, depth_limit)? {
             Some(sql) => sql,
             None => {
-                pgrx::debug1!(
+                pgrx::warning!(
                     "[pg_trickle] recursive CTE '{}' (DRed ins): depth guard not supported \
-                     for this recursive term pattern.",
+                     for this recursive term pattern; falling back to unguarded propagation.",
                     alias,
                 );
                 generate_query_sql(recursive, Some(&delta_cte))?
@@ -1127,15 +1129,12 @@ fn generate_semi_naive_delta(
     // ── Depth guard (IMMEDIATE mode only) ────────────────────────────
     //
     // In IMMEDIATE mode (TransitionTable delta source), inject a
-    // `__pgt_depth` counter into seeds (0) and propagation (depth+1)
-    // to prevent infinite loops from cyclic data.  Bounded by the
-    // `pg_trickle.ivm_recursive_max_depth` GUC.
-    use crate::dvm::diff::DeltaSource;
-    let max_depth = if matches!(ctx.delta_source, DeltaSource::TransitionTable { .. }) {
-        crate::config::pg_trickle_ivm_recursive_max_depth()
-    } else {
-        None
-    };
+    // ── Depth guard (both DIFFERENTIAL and IMMEDIATE modes) ──────────
+    // COR-2: Guard is now unconditional — the GUC is applied to both modes.
+    #[cfg(not(test))]
+    let max_depth = crate::config::pg_trickle_ivm_recursive_max_depth();
+    #[cfg(test)]
+    let max_depth: Option<i32> = None;
 
     let (seed_from_base, seed_from_existing, propagation) = if let Some(depth_limit) = max_depth {
         // Wrap each seed in a subquery and add __pgt_depth = 0 in the
@@ -1150,9 +1149,9 @@ fn generate_semi_naive_delta(
             None => {
                 // Pattern not recognised — fall back to depth-unguarded propagation
                 // and strip the depth column from seeds to keep column counts consistent.
-                pgrx::debug1!(
+                pgrx::warning!(
                     "[pg_trickle] recursive CTE '{}': depth guard not supported for this \
-                     recursive term pattern; proceeding without depth limit.",
+                     recursive term pattern; falling back to unguarded propagation.",
                     alias,
                 );
                 let prop_plain = generate_query_sql(recursive, Some(&delta_cte))?;
