@@ -145,6 +145,27 @@ stable release.
 | [v0.56.0](roadmap/v0.56.0.md) | Documentation Foundation: fix GUC_CATALOG corruption, complete ERRORS.md (all 44 variants), correct parallel_refresh_mode default, complete SQL_REFERENCE outbox/inbox, add MENTAL_MODEL.md, LIMITATIONS.md, PERFORMANCE_CHEATSHEET.md | ✅ Released | Large | [Full details](roadmap/v0.56.0.md-full.md) |
 | [v0.57.0](roadmap/v0.57.0.md) | Documentation Excellence: four new tutorials (first dashboard, event sourcing, backfill/migration, security hardening), P2/P3 quality polish, full 83-file consistency sweep | ✅ Released | Large | [Full details](roadmap/v0.57.0.md-full.md) |
 
+### Assessment-Driven Hardening Arc (v0.58.x – v0.61.x)
+
+Driven by the findings in the v0.57.0 overall assessment
+([plans/PLAN_OVERALL_ASSESSMENT_12.md](plans/PLAN_OVERALL_ASSESSMENT_12.md)).
+The assessment found 0 critical, 4 HIGH, 23 MEDIUM, and 20 LOW findings across
+security (ownership bypass in outbox/publication APIs), correctness (recursive-CTE
+depth guard in DIFFERENTIAL mode, multi-column NOT IN + NULL semantics, WAL decoder
+TOCTOU race), performance (per-source SPI fan-out in monitor, merge-template clone
+overhead, WAL decoder allocation patterns), observability (missing CDC-lag
+percentiles, worker queue-depth, WAL decoder queue, refresh-mode ratio counters),
+code quality (scheduler log levels, codegen decomposition, cdc.rs split), and test
+coverage (refresh orchestrator, CDC, hooks, remaining fixed sleeps). This four-release
+arc resolves all findings before v1.0.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.58.0](roadmap/v0.58.0.md) | Security & Correctness Hardening: ownership checks for outbox/publication APIs, multi-column NOT IN + NULL fix, recursive CTE depth guard in DIFFERENTIAL mode, WAL decoder TOCTOU advisory lock, DDL hook escalation on SPI failure | Planned | Medium | [Full details](roadmap/v0.58.0.md-full.md) |
+| [v0.59.0](roadmap/v0.59.0.md) | Performance & Observability: batched monitor buffer-growth SPI, query-hash caching, Arc<str> merge templates, WAL decoder Vec pre-allocation, frontier borrow not clone, CDC-lag percentile metrics, worker queue-depth, WAL decoder queue, refresh-mode ratio counters, application_name in BGW, backup/restore docs | Planned | Large | [Full details](roadmap/v0.59.0.md-full.md) |
+| [v0.60.0](roadmap/v0.60.0.md) | Code Quality, Test Coverage & CI: scheduler log levels, codegen decomposition, cdc.rs 4-way split, refresh orchestrator/merge/CDC/hooks unit tests, differential idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered full E2E on PRs, Dockerfile non-root, codecov module thresholds | Planned | Large | [Full details](roadmap/v0.60.0.md-full.md) |
+| [v0.61.0](roadmap/v0.61.0.md) | DX, Documentation & Final Pre-1.0 Polish: health_check() foreign-owner row, SQL_REFERENCE completeness, snapshot cache secondary equality, cte_counter reset, outbox name collision fix, sublinks.rs decomposition, ctid invariant comment, 3 foundational ADRs, LIMITATIONS.md NOT IN + NULL section, SEARCH/CYCLE clear error, LATERAL+DIFFERENTIAL docs | Planned | Large | [Full details](roadmap/v0.61.0.md-full.md) |
+
 ### Beyond v1.0
 
 | Version | Theme | Status | Scope | Full details |
@@ -229,6 +250,14 @@ v0.56    ─── Documentation Foundation: GUC_CATALOG fix, ERRORS.md complete
     │
 v0.57    ─── Documentation Excellence: 4 new tutorials, P2/P3 polish, full 83-file consistency sweep
     │
+v0.58    ─── Security & correctness hardening: ownership checks (outbox/publication APIs), NOT IN + NULL fix, recursive CTE depth guard, WAL decoder TOCTOU lock, DDL hook escalation
+    │
+v0.59    ─── Performance & observability: batched monitor SPI, query-hash cache, Arc<str> templates, WAL decoder Vec pre-alloc, CDC-lag percentiles, worker queue metrics, app_name BGW, backup docs
+    │
+v0.60    ─── Code quality, test coverage & CI: cdc.rs split, codegen decompose, refresh/CDC/hooks unit tests, idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered E2E on PRs
+    │
+v0.61    ─── DX, docs & pre-1.0 polish: health_check foreign-owner row, SQL_REFERENCE complete, snapshot secondary equality, cte_counter reset, outbox name fix, sublinks decompose, 3 ADRs, LATERAL docs
+    │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
 
@@ -298,6 +327,19 @@ and WAL transition TOCTOU are all fixed. The project has transitioned from a
 capability problem to a coverage confidence problem. These three releases
 systematically close the remaining gaps across test reliability, performance,
 security hardening, operational polish, and documentation truth before v1.0.
+
+**v0.58.0 through v0.61.0 form the final assessment-driven hardening arc before
+v1.0**, driven by the findings in the v0.57.0 overall assessment
+(plans/PLAN_OVERALL_ASSESSMENT_12.md). The assessment found 0 critical findings,
+4 HIGH severity issues (ownership-check bypass in the outbox and publication APIs,
+recursive-CTE depth guard not applied in DIFFERENTIAL mode, multi-column NOT IN
+with NULL row semantics, and per-source SPI fan-out in the monitor health check),
+plus 23 MEDIUM and 20 LOW items spanning performance, observability, code quality,
+test coverage, and documentation. v0.58.0 closes all HIGH findings as a hard gate.
+v0.59.0 eliminates the performance and observability gaps. v0.60.0 completes the
+code quality and test coverage sweep. v0.61.0 delivers the final developer-experience
+and documentation polish, closing the last remaining items so that v1.0 is a clean,
+fully verified stable release.
 
 **v0.49.0 targets test infrastructure quality** — the single highest-risk
 category from the v10 assessment. All concurrency tests currently rely on
