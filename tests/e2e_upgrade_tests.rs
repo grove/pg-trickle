@@ -41,6 +41,7 @@ async fn test_upgrade_catalog_schema_stability() {
         ("created_at", "timestamp with time zone"),
         ("data_timestamp", "timestamp with time zone"),
         ("defining_query", "text"),
+        ("defining_query_hash", "bigint"),
         ("diamond_consistency", "text"),
         ("diamond_schedule_policy", "text"),
         ("downstream_publication_name", "text"),
