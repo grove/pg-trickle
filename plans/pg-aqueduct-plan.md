@@ -335,6 +335,21 @@ is not painful; the tool complexity of `pg_aqueduct` before any stream
 tables exist is real. **The honest recommendation is: use Atlas until
 you have your first stream table, then evaluate.**
 
+**Case C — `pg_ripple` knowledge graph, no user-defined stream tables:**
+`pg_ripple` is a PostgreSQL 18 RDF triple-store (SPARQL 1.1, SHACL,
+Datalog reasoning). It uses `pg_trickle` as an optional companion for
+specific features (incremental SPARQL views, ExtVP statistics, live
+auto-updating CONSTRUCT views, ER monitoring stream tables). If a
+`pg_ripple` deployment does **not** include user-defined incremental
+SPARQL views or custom analytics stream tables over VP tables, there
+is no stream-table DAG and therefore no value in `pg_aqueduct`.
+`pg_ripple`'s internal VP tables (one per RDF predicate) and its
+built-in ER monitoring tables are lifecycle-managed by `pg_ripple`
+itself — `pg_aqueduct` must not touch them. Scoping rule: **only
+user-authored `pg_trickle` stream tables in a `pg_ripple` deployment
+are in scope for `pg_aqueduct`.** See §7.3 for how VP tables appear
+as `owned = false` sources.
+
 **The real threshold:** `pg_aqueduct` earns its operational complexity
 the moment the first stream table exists and that stream table's
 defining query references a column that could change. Before that
@@ -347,6 +362,7 @@ moment, it is a solution to a future problem.
 | Tool | Relationship |
 |---|---|
 | **`pg_trickle`** | Runtime target. `aqueduct` calls its SQL API. |
+| **`pg_ripple`** | Knowledge graph companion. `pg_ripple`'s VP tables (per-predicate RDF storage) appear as `owned = false` sources. User-authored incremental SPARQL views and custom analytics nodes are in scope; `pg_ripple`-managed tables (ER monitoring, KGE embeddings, derivations) are excluded. See §5.8 Case C and §7.3. |
 | **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` *may* manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline when stream tables are also present. When `pg_tide` is used **without** any `pg_trickle` stream tables, Atlas is the better migration tool. See §5.8. |
 | **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
 | **Atlas / Liquibase / sqitch** | Complementary — they own general-purpose base-table schema migrations (`CREATE TABLE`, partitioning, index changes). `pg_aqueduct` owns *stream-adjacent* base-table changes — any ALTER to a column that is a source for at least one stream table. For those changes, aqueduct generates and executes the base-table ALTER **and** the downstream stream-table cascade in a single coordinated plan. For standalone base-table migrations, aqueduct can invoke Atlas/sqitch as a pre-step hook. |
@@ -465,7 +481,19 @@ The differ operates over three layers simultaneously:
    reads from. For `owned = false` sources, aqueduct tracks schema
    changes from `pg_attribute` and uses them for impact analysis only.
    For `owned = true` sources, it also generates base-table DDL.
+   **`pg_ripple` VP tables** (`_pg_ripple.*` per-predicate tables)
+   always appear as `owned = false` sources — aqueduct never generates
+   DDL for them, but it detects when a VP table gains or loses a
+   column and flags any downstream stream-table queries that reference
+   it. `pg_ripple`'s internal tables (`_pg_ripple.kge_embeddings`,
+   `_pg_ripple.derivations`, ER monitoring tables created by
+   `enable_er_monitoring()`, etc.) are excluded from the source layer
+   entirely; they are managed by `pg_ripple` and must not be tracked.
 2. **Stream-table DAG** — the nodes and edges managed by `pg_trickle`.
+   In a `pg_ripple` deployment this includes only **user-authored**
+   incremental SPARQL views and custom analytics nodes; not the
+   built-in ER monitoring stream tables that `pg_ripple` creates
+   internally.
 3. **Consumer layer** (v1.1+) — materialized views, API views, or
    export connectors that read from stream tables.
 
