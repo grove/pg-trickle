@@ -967,6 +967,146 @@ events are emitted periodically. The `apply` command also sets
 `aqueduct/<project>/<migration_id>` so that in-flight migrations
 are visible in `pg_stat_activity`.
 
+### 7.7 Pluggable executor architecture
+
+The planner (differ, classifier, plan renderer) is **target-system-agnostic**.
+It operates on abstract `StreamTableSpec` values and emits abstract `Plan`
+step sequences. All target-system knowledge lives in a thin `StreamExecutor`
+trait implementation that the planner calls at apply time. This boundary is
+designed explicitly so that `pg_aqueduct` can serve IVM systems beyond
+`pg_trickle` without restructuring any of the planning logic.
+
+#### The `StreamExecutor` trait
+
+```rust
+/// Implemented once per target system (pg_trickle, RisingWave, Materialize,
+/// Feldera, Snowflake, …). The planner is parameterised over this trait.
+pub trait StreamExecutor: Send + Sync {
+    // ── Lifecycle ──────────────────────────────────────────────────────────
+
+    /// Create a new stream table / materialized view on the target system.
+    fn create(
+        &self,
+        spec: &StreamTableSpec,
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    /// Apply an alteration to an existing stream table.
+    fn alter(
+        &self,
+        name: &QualifiedName,
+        change: &AlterChange,
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    /// Drop a stream table. `cascade` drops dependent objects.
+    fn drop(
+        &self,
+        name: &QualifiedName,
+        cascade: bool,
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    // ── Refresh ────────────────────────────────────────────────────────────
+
+    /// Trigger an explicit refresh of a single stream table.
+    fn refresh(
+        &self,
+        name: &QualifiedName,
+        mode: RefreshMode,
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    // ── Scheduler ─────────────────────────────────────────────────────────
+
+    /// Pause the refresh scheduler for the given nodes.
+    /// On systems that have no scheduler concept, may be a no-op.
+    fn pause_scheduler(
+        &self,
+        nodes: &[QualifiedName],
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    /// Resume the refresh scheduler for the given nodes.
+    fn resume_scheduler(
+        &self,
+        nodes: &[QualifiedName],
+        conn: &dyn ExecutorConnection,
+    ) -> Result<(), ExecutorError>;
+
+    // ── State introspection ────────────────────────────────────────────────
+
+    /// Read the live state of all stream tables managed by this project.
+    /// Used by the planner differ to build the "actual" side of the diff.
+    fn live_state(
+        &self,
+        conn: &dyn ExecutorConnection,
+    ) -> Result<Vec<StreamTableState>, ExecutorError>;
+
+    // ── Capability advertisement ───────────────────────────────────────────
+
+    /// Return the set of IVM capabilities this executor supports.
+    /// The planner uses this to gate migration classes it may emit
+    /// (e.g., it will not emit `PauseImmediate` for a system that lacks
+    /// IMMEDIATE mode, nor `ManageWalSlot` for a system without WAL CDC).
+    fn capabilities(&self) -> ExecutorCapabilities;
+}
+
+/// A bitmask of IVM capabilities exposed to the planner.
+bitflags! {
+    pub struct ExecutorCapabilities: u32 {
+        const DIFFERENTIAL_REFRESH   = 0b0000_0001;
+        const FULL_REFRESH           = 0b0000_0010;
+        const IMMEDIATE_MODE         = 0b0000_0100;
+        const TRIGGER_CDC            = 0b0000_1000;
+        const WAL_CDC                = 0b0001_0000;
+        const PAUSE_RESUME_SCHEDULER = 0b0010_0000;
+        const DIAMOND_CONSISTENCY    = 0b0100_0000;
+        const BLUE_GREEN_DEPLOY      = 0b1000_0000;
+    }
+}
+```
+
+The `ExecutorConnection` trait abstracts the network transport:
+`libpq`-style connections for PostgreSQL-wire-compatible targets (pg_trickle,
+RisingWave, Materialize); HTTP REST for Feldera; Snowflake connector for
+Snowflake. The planner never calls the connection directly — only the executor
+does.
+
+#### Crate layout for multi-executor support
+
+```
+aqueduct-core/
+└── src/
+    ├── executor/
+    │   ├── mod.rs            # StreamExecutor trait + ExecutorCapabilities
+    │   ├── connection.rs     # ExecutorConnection trait + libpq impl
+    │   ├── pg_trickle.rs     # built-in executor (v0.1)
+    │   ├── risingwave.rs     # RisingWave executor (future)
+    │   ├── materialize.rs    # Materialize executor (future)
+    │   ├── feldera.rs        # Feldera executor (future; HTTP REST)
+    │   └── snowflake.rs      # Snowflake Dynamic Tables executor (future)
+    ├── planner/              # DAG differ, classifier, plan builder
+    ├── renderer/             # human-readable + JSON + Markdown output
+    └── catalog/              # aqueduct.* catalog access
+```
+
+The executor is selected at runtime from the `[executor]` block in
+`aqueduct.toml`:
+
+```toml
+[executor]
+kind = "pg_trickle"    # pg_trickle | risingwave | materialize | feldera | snowflake
+# executor-specific settings follow:
+# [executor.feldera]
+# api_base_url = "https://my-feldera.example.com"
+# pipeline_name = "checkout-analytics"
+```
+
+`kind = "pg_trickle"` is the default and requires no additional keys — it
+targets the PostgreSQL cluster at the active `[targets.<name>]` DSN. See
+§10.24 for per-system capability matrices and connection details.
+
 ---
 
 ## 8. Implementation Plan
@@ -1206,8 +1346,23 @@ If `pg_aqueduct` is too tightly coupled to `pg_trickle`, it can never
 serve `pg_ivm`, Materialize, RisingWave, or future `pg_trickle` forks.
 The recommended posture: **the planner is generic, the executor is
 pluggable**. v0.1 ships only the `pg_trickle` executor; the trait
-boundary is designed so a `pg_ivm` executor can be added later without
-restructuring the planner.
+boundary (§7.7) is designed so additional executors can be added later
+without restructuring any planning logic.
+
+The hottest near-term candidates for non-`pg_trickle` executors are:
+
+| System | IVM paradigm | Protocol | Realistic timeline |
+|---|---|---|---|
+| **RisingWave** | Streaming SQL; always-on incremental MV | PostgreSQL wire | After v0.1 GA |
+| **Feldera** | Differential dataflow; pipeline-scoped | HTTP REST | After v0.1 GA |
+| **Materialize** | Streaming SQL; differential dataflow | PostgreSQL wire | After v0.1 GA |
+| **Snowflake** | Dynamic Tables; automatic incr/full | Snowflake connector | After v1.0 GA |
+
+These are **not** in scope for v0.1 or v1.0. They are design constraints that
+informed the trait boundary in §7.7 — the executor interface must be expressive
+enough that each of these systems can be implemented cleanly. See §10.24 for
+detailed capability matrices, connection models, and known gaps for each
+candidate system.
 
 ### 10.2 SQL parsing
 
@@ -1963,6 +2118,372 @@ wants to interrupt it). The command:
    scheduler).
 3. Prints a summary of what it released so the operator can verify
    the correct lock was removed.
+
+### 10.24 Pluggable executor profiles — RisingWave, Feldera, Materialize, Snowflake
+
+This section profiles each of the four hot-candidate executor targets listed in
+§10.1. It documents the SQL/API mapping, capability gaps, and open design
+questions for each system. None of these executors will be implemented before
+v1.0 — but they must not require a redesign of the §7.7 trait to land cleanly.
+
+#### 10.24.1 RisingWave
+
+**What it is.** A cloud-native streaming SQL database with full PostgreSQL
+wire-protocol compatibility. Stream tables are modelled as `CREATE MATERIALIZED
+VIEW` and refreshed continuously in a streaming fashion — there is no
+explicit refresh schedule; data propagates as upstream sources change.
+
+**SQL mapping.**
+
+| `pg_trickle` concept | RisingWave equivalent |
+|---|---|
+| `create_stream_table(name, query, refresh_mode='DIFFERENTIAL')` | `CREATE MATERIALIZED VIEW name AS query` |
+| `alter_stream_table(name, schedule=>...)` | No direct equivalent — refresh is always event-driven; schedule becomes a no-op or maps to connector's fetch interval |
+| `drop_stream_table(name)` | `DROP MATERIALIZED VIEW name` |
+| `refresh_stream_table(name)` | Not needed — refresh is continuous; emit a warning if called |
+| `pause_scheduler(nodes)` | `ALTER MATERIALIZED VIEW name SET STREAMING_PAUSE_FREQUENCY = MAX` (if supported) or suspend the upstream source |
+| `resume_scheduler(nodes)` | `ALTER MATERIALIZED VIEW name SET STREAMING_PAUSE_FREQUENCY = DEFAULT` |
+| CDC mode `'trigger'` | N/A — RisingWave has its own source connectors (PostgreSQL CDC via `CREATE SOURCE`) |
+| IMMEDIATE mode | N/A — RisingWave is always streaming; no synchronous within-transaction semantics |
+
+**Capabilities.**
+
+```
+DIFFERENTIAL_REFRESH   ✅  (always-on, continuous)
+FULL_REFRESH           ✅  (via REFRESH MATERIALIZED VIEW if supported)
+IMMEDIATE_MODE         ❌  (no synchronous in-transaction refresh)
+TRIGGER_CDC            ❌  (uses source connectors, not row-level triggers)
+WAL_CDC                ✅  (PostgreSQL CDC source via logical decoding)
+PAUSE_RESUME_SCHEDULER ⚠   (partial — depends on source connector)
+DIAMOND_CONSISTENCY    ❌  (eventual consistency across views)
+BLUE_GREEN_DEPLOY      ✅  (schema-swap pattern applies)
+```
+
+**Connection.** Standard PostgreSQL wire protocol over TLS. The
+`ExecutorConnection` libpq implementation works without modification.
+
+**Key gaps and open questions.**
+
+1. **Schedule semantics.** `pg_trickle` schedules are meaningful
+   (`30s`, `CALCULATED`). RisingWave has no schedule — refresh is
+   driven by upstream data arrival. The `aqueduct.toml` `schedule` key
+   should be silently ignored (with a linter warning) for RisingWave
+   targets, or mapped to the source connector's `scan.startup.mode` /
+   checkpoint interval for batch sources.
+2. **Source declarations.** RisingWave needs explicit `CREATE SOURCE`
+   DDL before any MV can reference a Kafka topic or upstream Postgres
+   table. The executor must translate `@aqueduct:kind = source` +
+   connector metadata into `CREATE SOURCE` calls. A new front-matter
+   directive `@aqueduct:source_connector` is likely needed.
+3. **`aqueduct import` from an existing RisingWave deployment.** Query
+   `rw_catalog.rw_materialized_views` (the RisingWave equivalent of
+   `pgtrickle.pgt_stream_tables`) to reconstruct the migrations
+   directory.
+4. **Blue/green schema-swap.** RisingWave supports schemas. The
+   rename-swap pattern from §10.10 applies directly.
+5. **No `pg_trickle` extension required.** The RisingWave executor
+   does not call any `pgtrickle.*` function. The `aqueduct` catalog
+   (`aqueduct.*` plain tables) is still created on the RisingWave
+   cluster directly.
+
+---
+
+#### 10.24.2 Feldera
+
+**What it is.** A standalone incremental computation engine built on
+differential dataflow (the same mathematical foundation as `pg_trickle`'s
+DVM). Users define SQL programs; Feldera compiles them into pipelines and
+executes them continuously. Unlike pg_trickle and RisingWave, Feldera is
+**not** a PostgreSQL extension or a PostgreSQL-wire-compatible server —
+its primary interface is a **REST API** over HTTP(S).
+
+**API mapping.**
+
+Feldera's unit of deployment is a *pipeline* (a compiled SQL program
+containing all views and sources). Unlike `pg_trickle`, you cannot add a
+single view to a running pipeline without recompiling the entire program.
+This fundamental difference means the executor must manage the whole DAG as
+a single Feldera pipeline artifact rather than issuing per-view SQL calls.
+
+| `pg_trickle` concept | Feldera equivalent |
+|---|---|
+| Create a stream table | Add a `CREATE VIEW` to the pipeline SQL program + `PUT /v0/pipelines/{name}` to redeploy |
+| Alter a stream table | Modify the pipeline SQL + redeploy |
+| Drop a stream table | Remove from pipeline SQL + redeploy |
+| Refresh (differential) | Continuous — no explicit refresh; data flows in from input connectors |
+| pause_scheduler | `POST /v0/pipelines/{name}/pause` |
+| resume_scheduler | `POST /v0/pipelines/{name}/start` |
+| live_state | `GET /v0/pipelines/{name}/views` |
+
+**Capabilities.**
+
+```
+DIFFERENTIAL_REFRESH   ✅  (Feldera is differential dataflow natively)
+FULL_REFRESH           ✅  (reset pipeline + replay inputs)
+IMMEDIATE_MODE         ❌  (no synchronous within-transaction semantics)
+TRIGGER_CDC            ❌  (uses REST input connectors)
+WAL_CDC                ⚠   (PostgreSQL input connector uses logical decoding)
+PAUSE_RESUME_SCHEDULER ✅  (pipeline-level pause/start via REST)
+DIAMOND_CONSISTENCY    ✅  (Feldera's differential dataflow handles diamonds correctly)
+BLUE_GREEN_DEPLOY      ⚠   (can run two pipelines in parallel; no atomic view-swap)
+```
+
+**Connection.** HTTP REST via `reqwest` (async). The `ExecutorConnection`
+trait needs a second implementation: `FelderaConnection { base_url, api_key }`.
+No `libpq`. This is the largest structural departure from the built-in
+executor.
+
+**Key gaps and open questions.**
+
+1. **Pipeline recompile on every change.** Each `create`, `alter`, or `drop`
+   requires redeploying the entire pipeline (compile + restart). For large
+   DAGs this can take seconds to minutes. The executor must batch all plan
+   steps that affect the SQL program into a single pipeline redeploy rather
+   than issuing per-step deploys.
+   
+   Concretely: the plan executor for Feldera runs a pre-pass that groups all
+   `CreateStreamTable`, `AlterStreamTable`, and `DropStreamTable` steps,
+   synthesises the new combined SQL program, and issues a single `PUT
+   /v0/pipelines/{name}` + stop + start cycle. `Free` steps (schedule,
+   refresh-mode metadata) that Feldera does not model are recorded only in
+   `aqueduct.dag_versions`.
+
+2. **No per-view schema.** Feldera's SQL program does not use PostgreSQL
+   schemas — all views are flat within a pipeline namespace. The `schema`
+   qualifier in `QualifiedName` must be mapped to a pipeline name + view
+   name pair, or the executor must enforce that all stream tables in a
+   Feldera target live in the same schema (mapped 1:1 to the pipeline).
+
+3. **`aqueduct import` from Feldera.** Use `GET /v0/pipelines/{name}` to
+   retrieve the program SQL, then parse it with `pg_query.rs` to reconstruct
+   `StreamTableSpec` values.
+
+4. **No `aqueduct` catalog on Feldera itself.** Feldera is not a general-purpose
+   relational store. The `aqueduct.*` catalog tables must live in a separate
+   PostgreSQL instance (or a SQLite file for local dev). The `aqueduct.toml`
+   requires a `catalog_dsn` key when `executor.kind = "feldera"`:
+   ```toml
+   [executor]
+   kind = "feldera"
+   [executor.feldera]
+   api_base_url   = "https://my-feldera.example.com"
+   pipeline_name  = "checkout-analytics"
+   catalog_dsn    = "${AQUEDUCT_CATALOG_DSN}"   # PostgreSQL/SQLite for aqueduct.* tables
+   ```
+
+5. **Blue/green.** Feldera supports running multiple named pipelines
+   simultaneously. Blue/green can be approximated by creating a second
+   pipeline (`checkout-analytics-green`) and swapping consumer input
+   connectors, but there is no atomic view-swap equivalent. This is a
+   known limitation for v0.1 Feldera support.
+
+---
+
+#### 10.24.3 Materialize
+
+**What it is.** A streaming SQL database built on differential dataflow
+(Timely Dataflow), with a PostgreSQL wire protocol interface. Stream tables
+map naturally to `CREATE MATERIALIZED VIEW`. Materialize is the closest
+conceptual peer to `pg_trickle` among the four candidates: it performs the
+same differential dataflow computation, exposes a PostgreSQL-compatible SQL
+interface, and is deployed as a managed cloud service.
+
+**SQL mapping.**
+
+| `pg_trickle` concept | Materialize equivalent |
+|---|---|
+| `create_stream_table(name, query, refresh_mode='DIFFERENTIAL')` | `CREATE MATERIALIZED VIEW name IN CLUSTER compute_cluster AS query` |
+| `alter_stream_table(name, schedule=>...)` | No schedule — refresh is always event-driven |
+| `drop_stream_table(name)` | `DROP MATERIALIZED VIEW name` |
+| `refresh_stream_table(name, mode=>'FULL')` | `REFRESH MATERIALIZED VIEW name` (if supported) |
+| `pause_scheduler` | No direct equivalent; can drop and recreate the source connection to halt ingestion |
+| `resume_scheduler` | Restore source connection |
+| CDC mode `'trigger'` | N/A — Materialize uses `CREATE SOURCE` (PostgreSQL CDC, Kafka, etc.) |
+| IMMEDIATE mode | N/A — always streaming |
+| `CLUSTER` resource assignment | Materialize-specific; maps to `@aqueduct:cluster` front-matter directive |
+
+**Capabilities.**
+
+```
+DIFFERENTIAL_REFRESH   ✅  (always-on differential dataflow)
+FULL_REFRESH           ⚠   (REFRESH MV exists but is rarely needed)
+IMMEDIATE_MODE         ❌  (no synchronous in-transaction refresh)
+TRIGGER_CDC            ❌  (uses source connectors)
+WAL_CDC                ✅  (PostgreSQL source via logical replication)
+PAUSE_RESUME_SCHEDULER ❌  (no per-view pause; would require source manipulation)
+DIAMOND_CONSISTENCY    ✅  (differential dataflow handles diamonds)
+BLUE_GREEN_DEPLOY      ✅  (schema-swap pattern applies; schemas are first-class)
+```
+
+**Connection.** PostgreSQL wire protocol. The libpq `ExecutorConnection`
+works without modification, subject to Materialize's dialect differences
+(no `pg_trickle` extension functions; no `pgtrickle.*` schema).
+
+**Key gaps and open questions.**
+
+1. **`CLUSTER` assignment.** Materialize separates compute clusters from
+   storage. Each MV must be assigned to a cluster. The executor needs a new
+   front-matter directive `@aqueduct:cluster = "compute_default"` and a
+   corresponding `aqueduct.toml` section:
+   ```toml
+   [executor.materialize]
+   default_cluster = "compute_default"
+   ```
+   The planner passes `cluster` to the executor as a `StreamTableSpec` field
+   with a sensible default.
+
+2. **No `pgtrickle.*` schema.** `live_state` must query Materialize's system
+   catalog (`mz_catalog.mz_materialized_views`) instead of
+   `pgtrickle.pgt_stream_tables`. The `aqueduct import` path needs a
+   Materialize-specific catalog reader.
+
+3. **`aqueduct` catalog placement.** Materialize supports `CREATE TABLE` for
+   append-only storage. The `aqueduct.*` tables can be created on a
+   Materialize cluster directly — but they must be plain tables, not
+   materialized views, and Materialize's transaction semantics for plain
+   tables differ from PostgreSQL's. The safest approach is to store the
+   `aqueduct.*` catalog on a companion PostgreSQL instance (same pattern as
+   Feldera §10.24.2) and use Materialize only for stream-table DDL.
+   Alternatively, if the Materialize deployment also includes a PostgreSQL
+   source cluster that hosts the base tables, the `aqueduct.*` catalog can
+   live there.
+
+4. **`pause_scheduler` gap.** Materialize does not expose per-view
+   pause/resume. The executor implements `pause_scheduler` as a no-op +
+   warning: "Materialize does not support per-view scheduling pauses; the
+   migration proceeds without pausing refresh." This is acceptable because
+   Materialize's refresh is event-driven (not scheduler-based), so there is
+   no scheduler to race with.
+
+5. **Permission model.** Materialize uses a role-based model similar to
+   PostgreSQL but with some differences (e.g., `USAGE` on clusters, object
+   ownership model). The `aqueduct_admin` role guidance from §10.20 needs
+   a Materialize-specific variant.
+
+---
+
+#### 10.24.4 Snowflake Dynamic Tables
+
+**What it is.** Snowflake's native incremental computation primitive,
+introduced in 2023. A Dynamic Table is declared with a `TARGET_LAG` that
+specifies how far behind the source data the table is allowed to be.
+Snowflake automatically chooses between incremental and full refresh based
+on the query plan. Dynamic Tables use a proprietary SQL dialect and a
+proprietary connection protocol (Snowflake JDBC/ODBC/connector) — there
+is no PostgreSQL wire compatibility.
+
+**SQL mapping.**
+
+| `pg_trickle` concept | Snowflake Dynamic Table equivalent |
+|---|---|
+| `create_stream_table(name, query, schedule=>'30s')` | `CREATE OR REPLACE DYNAMIC TABLE name TARGET_LAG = '30 seconds' WAREHOUSE = compute_wh AS query` |
+| `alter_stream_table(name, schedule=>'1m')` | `ALTER DYNAMIC TABLE name SET TARGET_LAG = '1 minute'` |
+| `drop_stream_table(name)` | `DROP DYNAMIC TABLE name` |
+| `refresh_stream_table(name, mode=>'FULL')` | `ALTER DYNAMIC TABLE name REFRESH` |
+| `refresh_stream_table(name, mode=>'DIFFERENTIAL')` | No explicit call needed — happens automatically at the next `TARGET_LAG` tick |
+| `pause_scheduler(nodes)` | `ALTER DYNAMIC TABLE name SUSPEND` |
+| `resume_scheduler(nodes)` | `ALTER DYNAMIC TABLE name RESUME` |
+| CDC mode (any) | N/A — Snowflake manages its own change tracking internally; no external CDC |
+| IMMEDIATE mode | N/A — Snowflake always refreshes asynchronously |
+| `refresh_mode = 'DIFFERENTIAL'` | Mapped to `INITIALIZE = ON_CREATE REFRESH_MODE = INCREMENTAL` (Snowflake chooses automatically) |
+| `refresh_mode = 'FULL'` | `REFRESH_MODE = FULL` |
+
+**Capabilities.**
+
+```
+DIFFERENTIAL_REFRESH   ✅  (INCREMENTAL mode; Snowflake decides per-run)
+FULL_REFRESH           ✅  (FULL mode or ALTER DYNAMIC TABLE ... REFRESH)
+IMMEDIATE_MODE         ❌  (always asynchronous)
+TRIGGER_CDC            ❌  (Snowflake handles change tracking internally)
+WAL_CDC                ❌  (not applicable outside PostgreSQL)
+PAUSE_RESUME_SCHEDULER ✅  (ALTER DYNAMIC TABLE ... SUSPEND / RESUME)
+DIAMOND_CONSISTENCY    ⚠   (Snowflake guarantees consistency within a pipeline
+                            topology but does not expose per-group atomicity)
+BLUE_GREEN_DEPLOY      ✅  (schema-swap or `SWAP WITH` DDL if available)
+```
+
+**Connection.** Snowflake connector for Rust (`snowflake-api` crate or
+`arrow-odbc` + Snowflake ODBC DSN). A new `SnowflakeConnection` implementation
+of `ExecutorConnection` is required. This is the most complex connection
+variant because Snowflake uses OAuth/key-pair authentication, not a plain
+password, and the connector is not `libpq`-compatible.
+
+**Key gaps and open questions.**
+
+1. **WAREHOUSE assignment.** Every Dynamic Table requires a `WAREHOUSE`
+   (compute resource). The executor needs a new front-matter directive
+   `@aqueduct:warehouse = "compute_wh"` and a `aqueduct.toml` default:
+   ```toml
+   [executor.snowflake]
+   default_warehouse = "compute_wh"
+   account           = "${SNOWFLAKE_ACCOUNT}"
+   user              = "${SNOWFLAKE_USER}"
+   private_key_path  = "${SNOWFLAKE_PRIVATE_KEY_PATH}"
+   ```
+
+2. **`TARGET_LAG` mapping.** `pg_trickle`'s `schedule` is a duration string
+   (`30s`, `1m`, `5m`). Snowflake's `TARGET_LAG` uses the same unit family.
+   Direct conversion is safe. `CALCULATED` schedule mode has no Snowflake
+   equivalent — the executor must resolve `CALCULATED` to a concrete duration
+   before emitting DDL (the planner already computes the resolved schedule
+   from the DAG topology for display; the executor uses this resolved value).
+   A linter warning is emitted if any node uses `CALCULATED` on a Snowflake
+   target.
+
+3. **`aqueduct` catalog placement.** The `aqueduct.*` catalog tables can be
+   created as regular Snowflake tables in a dedicated schema. Snowflake
+   supports `INSERT`, `UPDATE`, `SELECT FOR UPDATE` semantics (via `MERGE`)
+   — the catalog operations in §7.5 can be adapted. The `aqueduct.locks`
+   advisory-lock model has no direct Snowflake equivalent; the executor must
+   use an optimistic lock via `MERGE ON CONFLICT` + a heartbeat TASK (a
+   Snowflake scheduled task that updates `acquired_at` periodically).
+
+4. **In-place column-add.** Snowflake Dynamic Tables do not support
+   `ALTER ... ADD COLUMN` while the table is active — the table must be
+   recreated. This means the in-place migration class is largely unavailable
+   on Snowflake. The executor should report `ExecutorCapabilities` without
+   `DIFFERENTIAL_REFRESH` flags that depend on in-place alter, and the
+   classifier will fall back to Rebuild for column additions. This is a
+   significant limitation — the executor profile in the plan renderer should
+   display a prominent note: "In-place migrations are not supported for
+   Snowflake Dynamic Tables; all column changes require Rebuild class."
+
+5. **No `pgtrickle.*` schema.** `live_state` queries
+   `INFORMATION_SCHEMA.DYNAMIC_TABLES` (or `SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLES`
+   for historical data). The `aqueduct import` path needs a Snowflake-specific
+   catalog reader that maps Dynamic Table metadata to `StreamTableSpec`.
+
+6. **Timing.** The Snowflake executor is the most complex of the four
+   candidates: non-libpq connection, warehouse management, in-place
+   limitations, and advisory-lock adaptation. It is recommended as the last
+   of the four to implement, after the three PostgreSQL-wire-compatible
+   executors have validated the trait design.
+
+---
+
+#### 10.24.5 Trait stability requirements
+
+The four profiles above surface several areas where the `StreamExecutor`
+trait (§7.7) must be flexible enough to accommodate divergent semantics:
+
+| Requirement | Needed by |
+|---|---|
+| Batch DDL deploy (multiple changes in one call) | Feldera (pipeline recompile) |
+| Non-libpq `ExecutorConnection` | Feldera (HTTP REST), Snowflake (proprietary connector) |
+| External catalog DSN | Feldera, Materialize (optional) |
+| Executor-specific front-matter directives | Materialize (`cluster`), Snowflake (`warehouse`) |
+| Resolved schedule instead of `CALCULATED` | Snowflake |
+| Per-target `ExecutorCapabilities` bitflags | All four differ from pg_trickle |
+
+The trait in §7.7 as written accommodates all of these requirements:
+`ExecutorCapabilities` bitflags gate which plan steps the planner may emit;
+the `ExecutorConnection` trait is transport-agnostic; the `alter` call
+accepts a structured `AlterChange` enum that a batch executor can buffer and
+flush. The Feldera batch-deploy requirement may warrant an optional
+`fn batch_apply(&self, steps: &[PlanStep], conn: &dyn ExecutorConnection)` method
+with a default implementation that calls `create`/`alter`/`drop` sequentially
+(the default) and a Feldera override that batches them into a single pipeline
+redeploy.
 
 ---
 
