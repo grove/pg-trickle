@@ -792,6 +792,17 @@ CREATE TABLE aqueduct.migrations (
     status       text NOT NULL,            -- 'running' | 'committed' | 'failed' | 'rolled_back'
     plan         jsonb NOT NULL,
     progress     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- progress JSONB shape:
+    -- {
+    --   "completed_steps": [
+    --     {"index": 0, "step_type": "LockDag", "completed_at": "2026-05-14T02:01:00Z"},
+    --     {"index": 1, "step_type": "AlterBaseTable", "completed_at": "2026-05-14T02:01:01Z"}
+    --   ],
+    --   "current_step_index": 2,
+    --   "last_checkpoint_at": "2026-05-14T02:01:01Z"
+    -- }
+    -- On aqueduct apply --resume, the executor reads this field and skips
+    -- steps whose index appears in completed_steps.
     cli_version  text,                     -- diagnostic (see §10.13)
     plan_format_version int NOT NULL DEFAULT 1
 );
@@ -846,6 +857,24 @@ that cannot be replicated from outside the Postgres process:
    `SELECT * FROM aqueduct.plan_summary()`, `SELECT * FROM
    aqueduct.migration_history()` — useful in monitoring dashboards
    and psql sessions.
+
+The `aqueduct.ddl_log` table is created by the companion extension
+(not by `aqueduct init`) and has the following shape:
+
+```sql
+-- Created by the pg_aqueduct extension (not by the CLI).
+-- Existence of this table signals to the CLI that the extension is present.
+CREATE TABLE aqueduct.ddl_log (
+    id           bigserial PRIMARY KEY,
+    object_type  text      NOT NULL,  -- 'table', 'view', 'type', etc.
+    schema_name  text      NOT NULL,
+    object_name  text      NOT NULL,
+    command_tag  text      NOT NULL,  -- 'ALTER TABLE', 'DROP TABLE', etc.
+    command_text text,                -- full DDL text (if available via pg_event_trigger_ddl_commands())
+    recorded_at  timestamptz NOT NULL DEFAULT now(),
+    pg_role      text      NOT NULL DEFAULT current_role
+);
+```
 
 When the extension is absent, the CLI detects this and falls back to
 polling-based drift detection (comparing `pg_attribute` snapshots
@@ -926,8 +955,11 @@ and the lock expires after one `ttl` — at which point `aqueduct
 apply --resume` (from the same or another process) can take over.
 
 **Observability.** Every `aqueduct` command emits structured JSON
-logs to stderr (when `--log-format json` is set, default for CI
-environments). Each plan step emits a log line with:
+logs to stderr (when `--log-format json` is set, or when the
+`--log-format` flag is absent and any of `$CI`, `$GITHUB_ACTIONS`,
+`$GITLAB_CI`, or `$CIRCLECI` environment variables are set to a
+non-empty value — these are the standard CI environment markers).
+Each plan step emits a log line with:
 `{"step": "Backfill", "table": "order_totals", "status":
 "started", "elapsed_ms": 0}`. For long-running steps, progress
 events are emitted periodically. The `apply` command also sets
@@ -996,6 +1028,36 @@ Drift  DETECTED  (1 table)
      Run `aqueduct plan --to prod` to see the full plan.
 ```
 
+**`aqueduct plan` specimen output** (when there are actual changes):
+
+```
+$ aqueduct plan --to prod
+
+Project  checkout-analytics  v18 → v19
+Target   prod (pg_trickle 0.62, pg 18.3)
+
+Changes  3 nodes affected
+
+  ~ order_totals          [in-place]   add column discount_total (SUM)
+  + promo_summary         [create]     new stream table (DIFFERENTIAL, schedule 30s)
+  ! customer_ytd          [rebuild]    WHERE predicate changed → requires full rebuild
+
+Cost estimate (rebuild steps gated by maintenance window 02:00–04:00 UTC):
+
+  Step                           Rows (est)    Duration (est)    Class
+  ─────────────────────────────────────────────────────────────────────
+  ALTER stream order_totals           —             < 1s          in-place
+  BACKFILL order_totals            1.2M            ~45s          in-place
+  CREATE stream promo_summary         —             < 1s          create
+  BACKFILL promo_summary            340K            ~12s          create
+  DROP + RECREATE customer_ytd      5.8M            ~3m           rebuild ⏰
+
+⏰ Rebuild steps will be deferred to the maintenance window (02:00–04:00 UTC).
+   Pass --ignore-maintenance-window to run immediately.
+
+Run `aqueduct apply --to prod` to execute this plan.
+```
+
 Exit criteria: against a 20-node DAG on a Testcontainers Postgres,
 `aqueduct plan` produces a correct plan for the cartesian product of
 {add, drop, change SQL, change schedule, change refresh_mode}.
@@ -1011,7 +1073,7 @@ later apply failure.
 - `aqueduct apply --resume` resumes after a crash.
 - Pause/resume integration with `pg_trickle` scheduler.
 - `aqueduct rollback` (with lossless-window enforcement per §5.6).
-- `aqueduct import` — bootstrap from the live catalog (§10.21).
+- `aqueduct import` — bootstrap from the live catalog (§10.22).
   Ships alongside `apply` so early adopters can onboard immediately.
 - `RecreatePolicy` step: detect and re-apply RLS policies dropped
   during rebuild-class migrations.
@@ -1037,7 +1099,7 @@ schedule-change migration without any node going through `FULL`.
 ### Phase 4 — Blue/green, preview environments, and optional extension (3 weeks)
 
 - Blue/green deployer: builds the new DAG in a parallel schema,
-  backfills, swaps consumer views (see §10.9).
+  backfills, swaps consumer views (see §10.10).
 - `aqueduct preview --branch` integrations:
   - native: spin a scratch schema with sampled base data;
   - CloudNativePG: create a clone cluster (see
@@ -1074,7 +1136,13 @@ zero consumer-visible downtime.
 - Multi-environment promotion workflow (`aqueduct promote dev→prod`).
 - Encrypted secret handling (aligns with `pg_tide` and `pg_trickle`
   secret model).
-- `aqueduct status --watch` long-running drift watcher.
+- `aqueduct status --watch` long-running drift watcher: polls every
+  `--interval N` seconds (default 30s), emits a drift report on each
+  poll, exits on SIGINT or when `--max-drift-count K` consecutive
+  drift detections have been seen (default: never exits on drift).
+  In JSON log mode each poll emits a single structured event.
+  Useful as a background check in long-running CI jobs or as a
+  monitoring hook for alerting pipelines.
 - HA integration with Patroni & CloudNativePG primary-failover.
 - Fuzzing the planner against random DAG mutations.
 - Migration cookbook: 30 worked examples for the 30 most common
@@ -1675,7 +1743,8 @@ layer (v1.1+)" but does not define what this entails.
 **v1.0 scope — consumer views only:**
 
 Consumer views are the `CREATE OR REPLACE VIEW public.foo AS SELECT
-* FROM aqueduct_vN.foo` objects described in §10.9 (blue/green).
+* FROM {project}__vN.foo` objects described in §10.10 (blue/green
+atomicity — how do consumers cut over?).
 `aqueduct` creates and manages these views as part of every
 migration. They are the stable API that applications query.
 
