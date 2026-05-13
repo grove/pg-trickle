@@ -249,10 +249,10 @@ plan that:
 ### 5.3 Blue/green DAG deployment
 
 For a large structural change (a node is split into two; an aggregate
-key changes), `aqueduct deploy --strategy blue-green`:
+key changes), `aqueduct apply --strategy blue-green --to prod`:
 
 1. creates the new DAG nodes alongside the old, in a parallel schema
-   (`green_v17`);
+   (`{project}__green_v{N}` — see §10.10 for naming convention);
 2. backfills them in the background;
 3. atomically swaps consumer-facing views once the green DAG is caught
    up;
@@ -271,6 +271,17 @@ drift is detected.
 a scratch schema (or a scratch database / Neon branch / CloudNativePG
 clone) so that reviewers can `EXPLAIN` and benchmark a candidate
 change without touching prod.
+
+**Sampling and foreign-key handling.** When creating a sampled preview
+in the same database, base-table data is copied via `TABLESAMPLE`
+into the preview schema. Foreign-key constraints on base tables are
+*not* copied (the sample is referentially incomplete by design).
+Stream-table queries are run against the sampled base tables, not
+the production ones, so the preview refresh produces realistic query
+plans and row counts without referential-integrity violations. Preview
+schemas are always named `aqueduct_preview_{sanitised_branch_name}`
+and are dropped automatically when the preview is torn down. See Phase
+4 in §8 for the sampling configuration knobs.
 
 ### 5.6 Time-travel rollback
 
@@ -490,6 +501,33 @@ maintenance_window   = "02:00-04:00 UTC"
 allow_full_refresh   = false        # require online-evolution path
 default_strategy     = "in-place"   # or "blue-green"
 ```
+
+**`maintenance_window` semantics.** When set, `aqueduct apply`
+checks the current wall-clock time against the window before
+starting execution:
+- If the current time is *outside* the window and the plan contains
+  any `Rebuild` or `Blue/green` class steps, `aqueduct apply` exits
+  with a non-zero code and prints: "Plan contains rebuild-class steps
+  that are deferred to the maintenance window (02:00–04:00 UTC).
+  Run again during the window or pass `--ignore-maintenance-window`."
+- `Free` and `In-place` class plans execute immediately regardless
+  of the maintenance window by default.
+- The format is `HH:MM–HH:MM TZ` where `TZ` is any IANA timezone
+  name or UTC offset. An absent `maintenance_window` means no
+  restriction (the default for dev environments).
+- The `maintenance_window_applies_to` key (default:
+  `["rebuild", "blue-green"]`) controls which migration classes are
+  gated. Teams that want to restrict in-place migrations to the
+  window too can add `"in-place"` to the list.
+
+**`allow_full_refresh = false` semantics.** When set, `aqueduct
+plan` rejects any plan that would classify one or more stream
+tables as `Rebuild` class. The error message lists the affected
+tables and explains why each was classified as Rebuild, so the
+operator can either rewrite the query to be in-place-compatible or
+explicitly pass `aqueduct apply --allow-rebuild` to override for
+this run only. The flag does not affect `Blue/green` class plans
+(those are always opt-in via `--strategy blue-green`).
 
 ```sql
 -- migrations/streams/order_totals.sql
@@ -759,10 +797,13 @@ CREATE TABLE aqueduct.migrations (
 );
 
 CREATE TABLE aqueduct.locks (
-    project     text PRIMARY KEY,
-    holder      text NOT NULL,
-    acquired_at timestamptz NOT NULL,
-    ttl         interval NOT NULL
+    project      text PRIMARY KEY,
+    holder       text      NOT NULL,
+    acquired_at  timestamptz NOT NULL,
+    ttl          interval  NOT NULL,
+    paused_nodes jsonb     NOT NULL DEFAULT '[]'::jsonb
+    -- JSON array of stream-table names paused at lock acquisition;
+    -- used by aqueduct unlock to resume the scheduler on stale-lock cleanup
 );
 
 CREATE TABLE aqueduct.cluster_profile (
@@ -855,6 +896,20 @@ versions. The CLI handles this automatically:
   and no heartbeat update has arrived, `aqueduct apply` treats the
   existing lock as abandoned and may override it after operator
   confirmation (or with `--force-lock`).
+
+  **Initial lock row creation.** The lock row must exist before
+  `SELECT FOR UPDATE NOWAIT` can succeed. On `aqueduct init` and on
+  every `aqueduct apply` startup, the CLI runs:
+  ```sql
+  INSERT INTO aqueduct.locks (project, holder, acquired_at, ttl, paused_nodes)
+  VALUES ($1, $2, now(), $3, '[]')
+  ON CONFLICT (project) DO NOTHING;
+  ```
+  This is safe because the subsequent `SELECT FOR UPDATE NOWAIT`
+  provides the actual serialization. The `INSERT ON CONFLICT DO
+  NOTHING` just ensures the row exists; two concurrent inserts will
+  race harmlessly since only one will insert and both will then
+  compete on the `SELECT FOR UPDATE NOWAIT`.
 - **Cooperation with `pg_trickle` scheduling.** `aqueduct apply` calls
   `pgtrickle.pause_scheduler()` for affected nodes for the duration of
   the migration, restoring on success or failure.
@@ -1341,14 +1396,23 @@ in a single query, the result is silently wrong.
 **Recommendation: rename-swap behind stable views.**
 
 The consumer view pattern described below is also the foundation of
-consumer-layer management (§10.17). For non-blue/green migrations,
-the view layer is optional (see §10.21 for adoption path).
+consumer-layer management (§10.18). For non-blue/green migrations,
+the view layer is optional (see §10.22 for adoption path).
+
+**Versioned schema naming.** Materialized tables live in a schema
+named `{project_name}__v{dag_version}` (double underscore to avoid
+collision with user schemas). For a project named `checkout-analytics`
+at DAG version 17, the schema is `checkout_analytics__v17`. The double
+underscore and project prefix prevent collisions both across projects
+and with application schemas. The green schema during a blue/green
+migration is `checkout_analytics__v18` (the next version number)
+until cutover, at which point it becomes the current blue schema.
 
 1. Each stream table `foo` is consumed through a view `public.foo`
    (or whatever schema the consumer expects). The actual materialised
-   table lives in a versioned schema: `aqueduct_v17.foo`.
-2. Blue/green builds the green DAG in `aqueduct_v18.*`, backfills it,
-   and waits for it to converge.
+   table lives in a versioned schema: `checkout_analytics__v17.foo`.
+2. Blue/green builds the green DAG in `checkout_analytics__v18.*`,
+   backfills it, and waits for it to converge.
 3. The cutover is a single transaction that executes `ALTER VIEW
    public.foo SET SCHEMA ...` or `CREATE OR REPLACE VIEW public.foo
    AS SELECT * FROM aqueduct_v18.foo` for every node in the DAG. This
@@ -1824,8 +1888,10 @@ wants to interrupt it). The command:
    unlock` refuses — it will not steal a live lock.
 2. If the lock row is not actively held, deletes it and calls
    `pgtrickle.resume_scheduler(nodes => [...])` for any nodes that
-   were paused at the time the lock was acquired (recorded in the
-   most recent `aqueduct.migrations` row with `status = 'running'`).
+   were paused at the time the lock was acquired (read from the
+   `paused_nodes` column in `aqueduct.locks`, which is populated
+   by `aqueduct apply` when it acquires the lock and pauses the
+   scheduler).
 3. Prints a summary of what it released so the operator can verify
    the correct lock was removed.
 
