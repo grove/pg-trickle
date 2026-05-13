@@ -389,9 +389,28 @@ in scope: `pg_aqueduct` manages their migration lifecycle. This is
 the **primary `riverbank` use case** for `pg_aqueduct` — schema
 evolution of the IVM layer as the knowledge model matures.
 
----
+**`riverbank` programmatic creation pattern.** `riverbank` currently
+creates its IVM stream tables via Python code that calls
+`pgtrickle.create_stream_table()` directly — not via hand-authored
+SQL migration files. Two integration modes are available:
 
-## 6. Composition With Adjacent Tools
+1. **Managed mode (recommended for stable IVM schemas).** The team
+   writes SQL migration files for the IVM nodes and calls `aqueduct
+   apply` from `riverbank`'s deployment pipeline. `riverbank`'s Python
+   code no longer calls `create_stream_table()` directly; it reads
+   the catalog (`pgtrickle.pgt_stream_tables`) to discover which IVM
+   nodes are available. This is the correct long-term pattern once the
+   knowledge model is stable.
+2. **Import-only mode (acceptable for rapidly-evolving schemas).** The
+   team keeps `riverbank`'s Python creation code and runs `aqueduct
+   import` periodically to bring the migrations directory up to date
+   with what `riverbank` created. `pg_aqueduct` is then used only for
+   planned migrations (when the team wants a coordinated, tested schema
+   change) rather than as the authoritative creation tool. Drift
+   detection (`aqueduct status`) will report programmatically-created
+   tables as unmanaged until the next import.
+
+
 
 | Tool | Relationship |
 |---|---|
@@ -401,7 +420,7 @@ evolution of the IVM layer as the knowledge model matures.
 | **`moire`** | Completely out of scope. Pure Next.js frontend over SPARQL endpoints; creates no PostgreSQL objects. See §5.8 Case E. |
 | **`riverbank`** | Knowledge compiler (Python). Uses `pg_trickle` IVM nodes for quality scores, entity pages, and topic indices — those stream tables are in scope. `riverbank`'s own catalog (`_riverbank.*`, Alembic-managed) is out of scope. See §5.8 Case F. |
 | **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` *may* manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline when stream tables are also present. When `pg_tide` is used **without** any `pg_trickle` stream tables, Atlas is the better migration tool. See §5.8. |
-| **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
+| **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target target/` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
 | **Atlas / Liquibase / sqitch** | Complementary — they own general-purpose base-table schema migrations (`CREATE TABLE`, partitioning, index changes). `pg_aqueduct` owns *stream-adjacent* base-table changes — any ALTER to a column that is a source for at least one stream table. For those changes, aqueduct generates and executes the base-table ALTER **and** the downstream stream-table cascade in a single coordinated plan. For standalone base-table migrations, aqueduct can invoke Atlas/sqitch as a pre-step hook. |
 | **Terraform / Pulumi** | Outer — provisions the database; the operator embeds a `terraform_data` resource that calls `aqueduct apply` post-provision. |
 | **CloudNativePG / Patroni** | `aqueduct` understands HA: it locks against the primary, refuses to apply against a standby, and integrates with switchover events. |
@@ -573,6 +592,19 @@ This prevents `aqueduct plan` from producing a plan that `pg_trickle`
 will reject at apply time — the most confusing failure mode a
 migration tool can have.
 
+**`pg_eddy` Cypher sources:** A stream table sourced from a `pg_eddy`
+MATCH query is defined in Cypher, which `pg_eddy` translates to SQL at
+create time. The SQL stored in `pgtrickle.pgt_stream_tables` is the
+compiled SQL, not the user-written Cypher. `aqueduct import` captures
+the compiled SQL correctly. However, if a user edits the Cypher source
+and runs `aqueduct plan`, the pre-validation must validate the
+*compiled SQL translation* (which must be obtained by passing the new
+Cypher through `pg_eddy.cypher_to_sql(query)` before the parse and
+IVM-supportability checks run). The migration file for a pg_eddy-backed
+stream table should use a `@aqueduct:cypher_source` front-matter
+directive pointing to the `.cypher` file, so the planner knows to
+translate before validating.
+
 The classifier is the project's intellectual core. Many of the
 "in-place" cases require the **same delta-rule reasoning** that
 `pg_trickle`'s DVM operators already do — there is a real opportunity
@@ -595,6 +627,10 @@ A plan is an ordered list of *steps*; each step is one of:
 - `RunHook { name, statement }` (user-defined SQL pre/post)
 - `RecreatePolicy { name, policy_sql }` (restore RLS policies lost in rebuild)
 - `ValidateQuery { name, query }` (IVM-supportability pre-check; always first)
+- `DetachOutbox { stream_table, outbox_name }` (unhook pg_tide attachment before drop)
+- `ReattachOutbox { stream_table, outbox_name, retention_hours }` (restore after recreate)
+- `ManageWalSlot { stream_table, action }` (drop/recreate logical replication slot for
+  `cdc_mode = 'wal'` tables; action is one of `drop_before_rebuild` / `recreate_after_rebuild`)
 
 Execution is transactional where possible (most `ALTER` paths fit in
 one transaction); for steps that cannot be transactional (CONCURRENTLY
@@ -651,6 +687,20 @@ This is the same approach used by Atlas (`atlas_schema_revisions`),
 Flyway (`flyway_schema_history`), and Liquibase
 (`databasechangelog`). No `CREATE EXTENSION` is needed for core
 functionality.
+
+**Schema name collision.** `aqueduct` is a common English word and
+may already exist as a schema in a target database. `aqueduct init`
+fails with a clear error if the `aqueduct` schema already exists and is
+not owned by the connecting role. The `--schema` flag overrides the
+catalog schema name:
+
+```bash
+aqueduct init --schema my_aqueduct   # uses my_aqueduct.* instead of aqueduct.*
+```
+
+The chosen schema name is stored in `aqueduct.cluster_profile` (or
+`my_aqueduct.cluster_profile`) and re-read by every subsequent CLI
+command — the flag is only needed for `init`.
 
 #### The optional companion extension
 
@@ -803,7 +853,8 @@ zero consumer-visible downtime.
 
 - `aqueduct/plan-action` and `aqueduct/apply-action` GitHub Actions.
 - GitLab CI templates.
-- `aqueduct fmt` (canonicalise SQL + front-matter).
+- `aqueduct fmt` (canonicalise SQL + front-matter via `pg_query.rs`
+  parse-and-reprint; for formatting only, not semantic changes).
 - `aqueduct lint` (warns about `FULL`-only changes, missing
   `depends_on`, schedule too aggressive for cost class, etc.).
 - Pre-commit hook.
@@ -841,6 +892,34 @@ zero consumer-visible downtime.
 | `pg_trickle` exposes a stable JSON projection of a stream-table spec | needs design | ⚠ |
 | `pg_tide` extracted to its own repo | [PLAN_RELAY_STANDALONE.md](PLAN_RELAY_STANDALONE.md) | 🟡 in-flight (not a blocker for v0.1 — see §10.7) |
 | Shared `pg_trickle_calculus` crate for in-place classifier | future refactor | 🔴 later |
+
+**JSON projection interface.** The minimal JSON projection required by
+`aqueduct` for `import` and drift detection is:
+
+```json
+{
+  "name": "order_totals",
+  "schema": "public",
+  "query": "SELECT customer_id, sum(amount) FROM orders GROUP BY 1",
+  "refresh_mode": "DIFFERENTIAL",
+  "schedule": "30s",
+  "cdc_mode": "trigger",
+  "oid": 12345,
+  "diamond_group": null,
+  "attach_outbox": null,
+  "cdc_slot_name": null
+}
+```
+
+Required fields: `name`, `schema`, `query`, `refresh_mode`,
+`schedule`, `cdc_mode`, `oid`. Optional fields that `aqueduct` uses
+when present: `diamond_group` (null or group name), `attach_outbox`
+(null or outbox name — see DetachOutbox/ReattachOutbox step types),
+`cdc_slot_name` (null or slot name — see ManageWalSlot step type).
+The projection should be exposed as
+`pgtrickle.stream_table_spec(oid)` or equivalent. In the interim,
+`aqueduct` can reconstruct this from `pgtrickle.pgt_stream_tables`
+columns directly.
 
 `pg_aqueduct` does **not** need to wait for the `pg_trickle_calculus`
 extraction — Phase 3 can call into a vendored copy of the classification
@@ -912,6 +991,28 @@ unreferenced in any stream-table query, aqueduct defers; otherwise it
 classifies it as tier 1. The `--tier1-only` flag restricts the apply
 run to stream-adjacent changes only, for teams that want to keep
 base-table DDL in Atlas regardless.
+
+**Cross-project Tier 1 conflicts on shared base tables:** When two
+independent projects (each with their own `aqueduct.toml` and lock row)
+both declare the same base table as a source and both issue Tier 1
+ALTERs to it concurrently, two `ALTER TABLE` statements will race. The
+individual project-scoped locks in `aqueduct.locks` do not prevent this.
+Policy: **Tier 1 base-table ALTERs must be serialised by the operator**
+using one of two strategies:
+
+1. **Explicit base-table lock key.** If `allow_full_refresh` and a
+   shared base-table is listed in multiple projects, add a
+   `base_table_lock_keys = ["raw.orders"]` entry to each project's
+   `aqueduct.toml`. `aqueduct apply` acquires a PostgreSQL advisory
+   lock keyed on the base-table OID before running any Tier 1 ALTER on
+   that table. This prevents concurrent Tier 1 plans across projects
+   from racing.
+2. **Delegate to Atlas.** Declare the shared base table as `owned =
+   false` in all projects and manage its DDL exclusively through Atlas.
+   Each project's aqueduct plan then only owns the stream-table cascade
+   (not the base-table ALTER), eliminating the race entirely. This is
+   the recommended pattern for large organisations where multiple teams
+   share the same source tables.
 
 ### 10.6 Naming
 
@@ -1497,6 +1598,22 @@ This command:
 After `import`, the user's next `aqueduct plan` should produce an
 empty plan (desired state = actual state). From this point, all
 changes go through the normal plan/apply cycle.
+
+**`aqueduct import --exclude-pattern`.** When importing from a
+database that also hosts internal extension tables (`pg_ripple`,
+`pg_eddy`, `riverbank`), the user can skip them with glob patterns:
+
+```bash
+aqueduct import --from prod \
+  --exclude-pattern '_pg_ripple.*' \
+  --exclude-pattern '_pg_eddy.*'
+```
+
+The following patterns are **built-in exclusions** applied by default
+(can be disabled with `--no-default-exclusions`):
+- `_pg_ripple.*` — internal pg_ripple monitoring tables
+- `_pg_eddy.*` — internal pg_eddy storage tables
+- `_riverbank.*` — riverbank Alembic-managed catalog
 
 **The consumer view layer (\u00a710.10) is opt-in.** Existing users who
 query stream tables directly (`SELECT * FROM public.order_totals`)
