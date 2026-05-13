@@ -119,10 +119,14 @@ sample of base data) are unsupported.
 
 A **declarative migration and orchestration tool**, distributed as:
 
-- a **Rust CLI binary** (`aqueduct`) — the primary user surface;
-- a thin **Postgres extension** (`pg_aqueduct`) — owns its own catalog
-  (`aqueduct.migrations`, `aqueduct.locks`, `aqueduct.snapshots`,
-  `aqueduct.dag_versions`);
+- a **Rust CLI binary** (`aqueduct`) — the primary user surface and
+  the mandatory component. Works against any Postgres cluster that
+  has `pg_trickle` installed. No superuser required beyond what
+  `pg_trickle` itself already needs.
+- an **optional companion extension** (`pg_aqueduct`) — enables DDL
+  event triggers for passive drift detection and SQL-callable
+  diagnostic views. Not required for plan/apply/rollback. See §10.8
+  for the full analysis of whether an extension is the right choice.
 - a **TOML/YAML project format** plus a folder of `*.sql` files;
 - optional **GitHub / GitLab CI integrations** — `aqueduct plan` as a
   PR check, just like `terraform plan`.
@@ -131,7 +135,7 @@ The user-facing model is intentionally close to **Atlas** (for SQL
 schema) and **Terraform** (for infrastructure):
 
 ```
-$ aqueduct init                    # scaffold a project
+$ aqueduct init                    # scaffold a project + bootstrap catalog
 $ aqueduct plan --to prod          # diff desired vs actual; produce a plan
 $ aqueduct apply --to prod         # execute the plan, record migration
 $ aqueduct status --to prod        # show drift, last migration, lag
@@ -140,9 +144,9 @@ $ aqueduct preview --branch feat-x # spin up a preview DAG on a branch DB
 ```
 
 The CLI talks to PostgreSQL through a normal `libpq` connection (no
-custom protocol). The companion extension is required only for the
-*online* migration features (§4.4); the basic plan/apply loop works
-against any cluster that has `pg_trickle` installed.
+custom protocol). `aqueduct init` bootstraps the `aqueduct.` catalog
+schema directly (plain tables, no extension needed) — the same
+approach used by Atlas, Flyway, and Liquibase.
 
 ---
 
@@ -434,9 +438,28 @@ INDEX, large `FULL` refreshes), the planner emits a *resumable*
 sequence — the plan stores its progress in `aqueduct.migrations` so
 `aqueduct apply --resume` works after a crash.
 
-### 7.5 The companion extension
+### 7.5 The companion extension (optional)
 
-`aqueduct-extension` is a small pgrx extension that owns:
+`aqueduct-extension` is an **optional** pgrx extension. The CLI
+works fully without it; the extension enables two additional
+capabilities that cannot be replicated from outside the Postgres
+process:
+
+1. **DDL event triggers** — a `ddl_command_end` event trigger that
+   fires on every `ALTER TABLE` / `ALTER TYPE` and records the
+   change in `aqueduct.ddl_log`. The CLI polls this table during
+   `aqueduct status` to detect out-of-band schema changes without
+   the user having to explicitly run `aqueduct plan`.
+2. **SQL-callable diagnostics** — `SELECT * FROM aqueduct.drift()`,
+   `SELECT * FROM aqueduct.plan_summary()`, `SELECT * FROM
+   aqueduct.migration_history()` — useful in monitoring dashboards
+   and psql sessions.
+
+Everything else — the catalog tables, locking, plan execution,
+rollback, snapshots — lives in plain tables the CLI creates on
+`aqueduct init`. See §10.8 for the full architectural analysis.
+
+`aqueduct-extension` owns:
 
 ```sql
 CREATE SCHEMA aqueduct;
@@ -472,9 +495,11 @@ CREATE TABLE aqueduct.locks (
 
 It exposes a handful of SQL functions (`aqueduct.acquire_lock`,
 `aqueduct.release_lock`, `aqueduct.record_snapshot`,
-`aqueduct.list_drift`) but does **no orchestration of its own** — the
-CLI is the brain. Keeping the extension trivial keeps the upgrade
-story trivial and lets us version the CLI freely.
+`aqueduct.list_drift`) and a DDL event trigger, but does **no
+orchestration of its own** — the CLI is the brain. Keeping the
+extension trivial keeps the upgrade story trivial and lets us version
+the CLI independently. When the extension is absent, the CLI detects
+this and falls back to polling-based drift detection.
 
 ### 7.6 Locking & concurrency
 
@@ -681,7 +706,99 @@ small steady drip), `pg_ripple` (propagating outward), `pg_tide`
 a fitting metaphor for moving DAG state from one version, environment,
 or cluster to another. **Keep the name.**
 
-### 10.7 Ownership of the in-place evolution rules
+### 10.8 Does `pg_aqueduct` need to be a PostgreSQL extension?
+
+This is the most consequential early architecture decision. The
+answer is: **no, a PostgreSQL extension is not required — but an
+optional one buys meaningful capabilities**.
+
+#### Four possible approaches
+
+**A — Pure CLI, no extension (Atlas model)**
+
+The CLI bootstraps its own catalog (`aqueduct.` schema + plain
+tables) on first `aqueduct init`, exactly like Atlas, Flyway, and
+Liquibase manage `schema_migrations`. All locking uses PostgreSQL
+advisory locks or row locks. No `CREATE EXTENSION` required.
+
+| Pros | Cons |
+|---|---|
+| Works on RDS, Azure Database, Supabase, Neon, any managed Postgres where installing custom extensions is restricted or requires a support ticket | No DDL event triggers — can't passively observe out-of-band schema changes; must poll |
+| Single artifact to install and version — just the CLI binary | No SQL-callable diagnostics (no `SELECT * FROM aqueduct.drift()`) |
+| No pgrx build pipeline | No `\dx` visibility; catalog tables look like application tables |
+| No superuser required beyond what `pg_trickle` already needs | Cannot intercept `ALTER TABLE` automatically |
+| Fastest possible adoption path | |
+
+**B — CLI + optional companion extension (recommended)**
+
+The CLI works fully without the extension (option A). Installing
+`pg_aqueduct` additionally enables DDL event triggers and SQL-callable
+diagnostic views — a progressive-enhancement model. The CLI detects
+whether the extension is present and upgrades its behavior
+accordingly. This is the approach reflected in §7.5.
+
+| Pros | Cons |
+|---|---|
+| Maximum compatibility — works on every managed Postgres | Two artifacts to version; CLI must handle both code paths |
+| DDL event triggers available for teams that can install the extension | Extension availability on managed services is uneven |
+| SQL-callable diagnostics for dashboards and psql power users | pgrx build dependency adds CI complexity |
+| Clean `DROP EXTENSION CASCADE` for full uninstall | |
+| Progressive adoption: start with CLI, add extension when needed | |
+
+**C — Extension required for online features (original plan §7.5)**
+
+The extension is required for any *online* migration (in-place,
+blue/green). Without it, only rebuild-class migrations are available.
+
+| Pros | Cons |
+|---|---|
+| Clean capability boundary | Blocks adoption on managed services for the most valuable feature class |
+| Simpler CLI code (no fallback path) | Managed Postgres users would be limited to the weakest migration mode — perverse incentive |
+
+**D — Full extension, no separate CLI**
+
+All orchestration lives inside the Postgres process — background
+workers, shared memory, `pg_trickle`-style `pgtrickle.create_stream_table()`
+API. This is the model `pg_trickle` itself follows.
+
+| Pros | Cons |
+|---|---|
+| Deep Postgres integration | No file I/O, no git integration, no PR checks — all the things that make a migration tool useful |
+| One `CREATE EXTENSION` installs everything | Conflates runtime and migration tooling (see §4 for why this was rejected for `pg_trickle` itself) |
+
+#### Recommendation: Option B
+
+**Ship a pure CLI first. Make the extension optional from day one.**
+
+The core insight is that all the genuinely unique value of
+`pg_aqueduct` — the DAG differ, topological plan, cascade classifier,
+resumable executor, GitOps integration, CI checks — lives in the
+CLI binary and requires nothing but `libpq`. The extension only
+adds two capabilities that cannot be replicated from outside the
+process: DDL event triggers and SQL-callable views. Both are
+conveniences, not correctness requirements.
+
+Shipping option A first (pure CLI, no extension) means:
+- `pg_aqueduct` works on day one against every cloud Postgres
+  (RDS, Supabase, Neon, Azure, AlloyDB, CloudNativePG, Citus);
+- there is no pgrx build in the `pg_aqueduct` repository for v0.1
+  (dramatic CI simplification, especially for macOS cross-compile);
+- the extension can be added in Phase 4 as an enhancement, not
+  a prerequisite.
+
+The only things that *genuinely* require the extension:
+- Passive DDL drift detection (event trigger on `ALTER TABLE`)
+- SQL-callable diagnostic views exposed to dashboards / `psql`
+
+Both of these are useful-but-not-required for the core plan/apply
+cycle. Polling-based drift detection is a perfectly adequate fallback
+for v0.1.
+
+**Revised §8 Phase 0 note:** drop the pgrx scaffold from Phase 0.
+The extension becomes a Phase 4 deliverable, after the plan/apply/rollback
+cycle is solid. Phase 0 is just a Rust CLI workspace.
+
+### 10.9 Ownership of the in-place evolution rules
 
 If the evolution classifier lives in `pg_aqueduct`, it can drift from
 `pg_trickle`'s actual capabilities. If it lives in `pg_trickle`, the
@@ -711,12 +828,17 @@ vendored copy and add a CI job that diffs the two.
 ## 12. Recommendation
 
 Open the `trickle-labs/pg-aqueduct` repository now, but keep the work
-**unfunded** until two upstream items ship:
+**unfunded** until one upstream item ships:
 
-1. The `pg_tide` extraction lands and we have a known-good template
-   for "small companion extension + Rust binary".
-2. `pg_trickle` exposes a JSON-stable projection of a stream-table
+1. `pg_trickle` exposes a JSON-stable projection of a stream-table
    spec (small change, useful regardless).
+
+Note: **the `pg_tide` extraction is no longer a prerequisite** for
+`pg_aqueduct` v0.1. Per §10.8, the v0.1 CLI has no pgrx component —
+it is a pure Rust binary that bootstraps its own catalog over libpq,
+like Atlas. The pgrx companion extension arrives in Phase 4 and can
+borrow patterns from `pg_tide` at that point. Unblocking one item
+(JSON spec projection) instead of two cuts the lead time significantly.
 
 In the meantime, this document plus a stub README in the new
 repository is sufficient to:
