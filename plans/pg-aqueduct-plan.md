@@ -806,6 +806,350 @@ extension grows scope. The medium-term answer is a shared
 `pg_trickle_calculus` crate (§9). The short-term answer is to ship a
 vendored copy and add a CI job that diffs the two.
 
+### 10.10 Blue/green atomicity — how do consumers cut over?
+
+**Problem:** When a blue/green deployment swaps the DAG from version N
+to version N+1, consumer queries (application reads, dashboards,
+exports) must switch atomically from the blue stream tables to the
+green ones. If even one consumer reads a mix of blue and green tables
+in a single query, the result is silently wrong.
+
+**Recommendation: rename-swap behind stable views.**
+
+1. Each stream table `foo` is consumed through a view `public.foo`
+   (or whatever schema the consumer expects). The actual materialised
+   table lives in a versioned schema: `aqueduct_v17.foo`.
+2. Blue/green builds the green DAG in `aqueduct_v18.*`, backfills it,
+   and waits for it to converge.
+3. The cutover is a single transaction that executes `ALTER VIEW
+   public.foo SET SCHEMA ...` or `CREATE OR REPLACE VIEW public.foo
+   AS SELECT * FROM aqueduct_v18.foo` for every node in the DAG. This
+   is an `ACCESS EXCLUSIVE` lock on the views — not on the
+   underlying tables — so it is sub-millisecond.
+4. After a configurable grace period (`--blue-ttl 1h`), `aqueduct
+   apply --cleanup` drops the old versioned schema.
+
+This is the same pattern used by `pg_deploy`, `sqitch`, and
+large-scale zero-downtime migration tooling. The consumer-facing
+views are the stable API; the underlying tables are versioned
+implementation details.
+
+**Alternative considered and rejected:** `SET search_path` at the
+session level. This is fragile (every connection pool session must
+be reconfigured), incompatible with connection poolers that strip
+session state (PgBouncer in transaction mode), and does not provide
+atomicity across multiple consumers.
+
+### 10.11 Failure recovery and partial state
+
+**Problem:** A migration can crash at any point — after the base-table
+ALTER but before the stream-table cascade, after 3 of 7 stream tables
+are rebuilt, or during a large backfill. What's the recovery model?
+
+**Recommendation: checkpoint-based resumable execution.**
+
+Every plan step writes its outcome to `aqueduct.migrations.progress`
+(a JSONB column) before proceeding to the next step. On crash:
+
+```bash
+aqueduct apply --resume   # reads progress, skips completed steps
+```
+
+Three step categories with different recovery semantics:
+
+| Category | Examples | Recovery |
+|---|---|---|
+| **Transactional** | `AlterStreamTable`, `SwapView`, `RecordSnapshot` | Rolled back automatically on crash — step is retried |
+| **Idempotent** | `CreateStreamTable` (IF NOT EXISTS), `AlterBaseTable` (guarded by catalog check) | Safe to re-execute — step checks precondition before acting |
+| **Long-running** | `Backfill { mode: FULL }`, `WaitForRefresh` | Checkpointed by row-range or by table. On resume, `Backfill` restarts the affected table's full refresh (not the entire plan). `WaitForRefresh` simply re-polls |
+
+**Invariant:** no step may leave the database in a state where the
+*old* plan version and the *new* plan version are both partially
+applied without the checkpoint recording which steps completed.
+Violation of this invariant is a data-loss bug.
+
+**Worst case — unresumable state:** If the CLI cannot determine
+whether a step completed (e.g., connection lost mid-`ALTER TABLE`
+with no way to query the catalog), `aqueduct apply --resume` prints
+a diagnostic report and exits with a non-zero code. The operator
+must inspect and either `--force-retry` or `--force-skip` the
+ambiguous step. Automatic guessing is not acceptable — this is the
+"data loss is unacceptable" principle from `pg_trickle`'s AGENTS.md.
+
+### 10.12 Concurrency contract with the `pg_trickle` scheduler
+
+**Problem:** §7.6 says `aqueduct apply` calls
+`pgtrickle.pause_scheduler()`, but what if a refresh is already
+in-flight when the pause request arrives? What if pause fails?
+
+**Recommendation: drain-then-pause protocol.**
+
+1. `aqueduct apply` calls `pgtrickle.pause_scheduler(nodes => [...])`.
+   This sets a flag in `pg_trickle`'s shared memory that prevents the
+   scheduler from *starting* new refreshes for the listed nodes.
+2. The CLI then polls `pgtrickle.pgt_stream_tables` for
+   `refresh_status = 'running'` on the affected nodes, waiting up to
+   `lock_timeout` (from `aqueduct.toml`) for in-flight refreshes to
+   complete.
+3. If the drain deadline expires with a refresh still running, the
+   CLI aborts the migration cleanly (no changes applied) and reports
+   which node is blocking.
+4. On migration success *or* failure (including crash), the CLI calls
+   `pgtrickle.resume_scheduler(nodes => [...])`. If the CLI crashes
+   before resuming, the `aqueduct.locks` TTL expires and a subsequent
+   `aqueduct apply --resume` or `aqueduct unlock` call resumes the
+   scheduler.
+
+**Prerequisite for `pg_trickle`:** expose `pause_scheduler()` and
+`resume_scheduler()` SQL functions with per-node granularity. These
+do not exist today — file as a `pg_trickle` issue (already noted in
+§9).
+
+**Fallback if `pause_scheduler()` is unavailable (older
+`pg_trickle` versions):** the CLI sets each affected node's schedule
+to `'999d'` (effectively infinite), applies the migration, then
+restores the original schedule. This is racy but acceptable for
+v0.1 against older clusters.
+
+### 10.13 Cost estimation
+
+**Problem:** `aqueduct apply --dry-run --explain-cost` promises
+per-step estimated row counts and refresh duration, but how accurate
+can these be?
+
+**Recommendation: Postgres-native estimates + empirical calibration.**
+
+1. **Row count:** Run `EXPLAIN (FORMAT JSON)` against the stream
+   table's defining query with current statistics. Extract
+   `Plan Rows` from the top-level node. This is free (no actual
+   execution), available on every Postgres version, and accurate
+   enough for order-of-magnitude estimates.
+2. **Refresh duration:** For `FULL` rebuilds, estimate as
+   `estimated_rows × bytes_per_row / measured_write_throughput`.
+   The write-throughput constant is calibrated per-cluster: on
+   first `aqueduct init`, run a small benchmark (INSERT 10k rows
+   into a temp table, measure wall time). Store the result in
+   `aqueduct.cluster_profile`. This is crude but within 2–5×.
+3. **For `DIFFERENTIAL`:** estimate is "near-zero" (the existing
+   materialised state is preserved). Report the estimated change-
+   buffer size instead of duration.
+4. **For `IN-PLACE`:** estimate is "ALTER + incremental backfill".
+   Use the same row-count estimate but with a lower throughput
+   constant (ALTER + backfill is cheaper than full rebuild).
+
+**Display:** The plan renderer shows a summary table:
+
+```
+Step                          Rows (est)    Duration (est)    Class
+─────────────────────────────────────────────────────────────────────
+ALTER base raw.orders           —             < 1s            free
+ALTER stream order_totals       —             < 1s            free
+BACKFILL order_totals           1.2M          ~45s            rebuild
+ALTER stream customer_summary   —             < 1s            in-place
+BACKFILL customer_summary       340K          ~12s            in-place
+```
+
+**Non-goal:** sub-second accuracy. The purpose is to distinguish
+"this migration takes 2 seconds" from "this migration takes 2 hours"
+so the operator can decide whether to run it now or schedule it for
+the maintenance window.
+
+### 10.14 CLI upgrade mid-migration
+
+**Problem:** If the CLI binary is upgraded while a resumable migration
+is in-flight (e.g., operator deploys a new `aqueduct` version, then
+runs `aqueduct apply --resume`), can it safely resume?
+
+**Recommendation: plan format versioning + forward compatibility.**
+
+1. Every serialised plan in `aqueduct.migrations.plan` includes a
+   `plan_format_version` integer (starting at 1).
+2. A CLI binary can resume any plan whose `plan_format_version` is
+   ≤ its own compiled-in version. It refuses to resume a plan from a
+   *newer* CLI with a clear error message.
+3. Plan format changes are rare (they are structural, not cosmetic)
+   and are always backwards-compatible additions, never removals or
+   reinterpretations. If a breaking change is unavoidable, bump the
+   major format version and reject old plans.
+4. The CLI records its own version in
+   `aqueduct.migrations.cli_version` for diagnostic purposes.
+
+**Practical consequence:** upgrading the CLI mid-migration is safe
+as long as the new CLI is the same or newer major version. Downgrading
+is not supported (the old CLI may not understand new step types).
+
+### 10.15 HA / failover integration
+
+**Problem:** In an HA cluster (Patroni, CloudNativePG, Stolon), the
+primary can change at any time. If `aqueduct apply` is mid-migration
+when a failover happens, what occurs?
+
+**Recommendation: detect failover, abort cleanly, resume on new
+primary.**
+
+1. On `aqueduct apply` startup, the CLI records the current primary's
+   `system_identifier` + `timeline_id` (from `pg_control_system()`)
+   in the migration row.
+2. Between each plan step, the CLI re-checks that the connection is
+   still to the same primary. If the `system_identifier` or
+   `timeline_id` has changed (indicating a failover), the CLI:
+   - marks the migration as `status = 'interrupted'` with the
+     last completed step;
+   - exits with a clear error: "Failover detected. Re-run
+     `aqueduct apply --resume` against the new primary."
+3. The lock row in `aqueduct.locks` has a TTL. If the CLI process
+   dies in a failover, the lock expires and a fresh `aqueduct apply
+   --resume` can proceed on the new primary.
+4. `aqueduct apply` **refuses to run against a hot standby** (checks
+   `pg_is_in_recovery()`). This is a hard error, not a warning.
+
+**Patroni-specific:** The CLI can optionally accept a
+`--patroni-endpoint` flag and use the Patroni REST API to discover
+the current primary, avoiding stale DNS.
+
+**CloudNativePG-specific:** For Kubernetes deployments, the CLI
+can read the `cnpg.io/cluster` annotation to discover the current
+primary service endpoint.
+
+### 10.16 Schedule resolution during DAG restructuring
+
+**Problem:** If a downstream node has `schedule = 'calculated'` and
+its upstream dependencies are restructured (a new parent is added, a
+parent is removed, a parent's schedule changes), how is the
+calculated schedule resolved?
+
+**Recommendation: `pg_trickle` owns schedule resolution; `aqueduct`
+defers to it.**
+
+`pg_trickle`'s `CALCULATED` schedule mode already resolves the
+schedule from the DAG topology. `pg_aqueduct` does not need to
+reimplement this. The contract is:
+
+1. `aqueduct plan` reads the *current* calculated schedule from
+   `pgtrickle.pgt_stream_tables.schedule_resolved` for display
+   purposes.
+2. `aqueduct apply` calls `pgtrickle.alter_stream_table()` or
+   `pgtrickle.create_stream_table()` with `schedule => 'calculated'`.
+   `pg_trickle` resolves the schedule from the live DAG topology at
+   that point.
+3. If the restructuring changes which upstream nodes feed a
+   calculated node, `pg_trickle` recalculates automatically on the
+   next scheduler tick.
+4. The plan renderer shows the *predicted* new schedule (computed
+   by the CLI's DAG differ using the same algorithm), with a caveat:
+   "Actual calculated schedule will be resolved by pg_trickle at
+   apply time."
+
+**Edge case — circular calculated dependencies:** Impossible by
+construction. `pg_trickle` already prevents cycles in the DAG.
+`aqueduct plan` rejects any migration that would introduce a cycle
+(by running the same topological-sort + cycle-detection as
+`pg_trickle`'s `dag.rs`).
+
+### 10.17 Version compatibility matrix
+
+**Problem:** Which `pg_trickle` versions can a given `aqueduct` CLI
+target? How is this tested?
+
+**Recommendation: minimum-version pinning + CI matrix.**
+
+1. `aqueduct` declares a **minimum supported `pg_trickle` version**
+   in `aqueduct.toml` (default: the oldest version that exposes the
+   JSON spec projection — likely v0.60 or v1.0).
+2. On `aqueduct apply`, the CLI queries
+   `pgtrickle.pgt_extension_version()` and checks it against the
+   minimum. If the installed version is too old, it prints a clear
+   error listing the missing capabilities.
+3. The CLI is **forward-compatible by default:** it uses only the
+   stable SQL API (`create_stream_table`, `alter_stream_table`,
+   `drop_stream_table`, `refresh_stream_table`). It does not depend
+   on internal catalog column layouts or undocumented functions.
+4. CI runs the E2E test suite against a matrix of `pg_trickle`
+   versions: `{latest, latest-1, minimum_supported}`. This catches
+   regressions early.
+
+**Version skew policy:** `aqueduct` v0.x supports `pg_trickle`
+v0.{min}–v0.{latest}. After both projects reach 1.0, the policy
+tightens to `aqueduct` 1.x supports `pg_trickle` 1.x (same major
+version, any minor).
+
+### 10.18 Consumer-layer management
+
+**Problem:** §7.3 mentions a three-layer model with a "consumer
+layer (v1.1+)" but does not define what this entails.
+
+**Recommendation: v1.0 manages consumer views; v1.1+ manages sinks.**
+
+**v1.0 scope — consumer views only:**
+
+Consumer views are the `CREATE OR REPLACE VIEW public.foo AS SELECT
+* FROM aqueduct_vN.foo` objects described in §10.10 (blue/green).
+`aqueduct` creates and manages these views as part of every
+migration. They are the stable API that applications query.
+
+The migrations directory can declare consumer views explicitly:
+
+```sql
+-- migrations/consumers/api_orders.sql
+-- @aqueduct:kind = consumer
+-- @aqueduct:source = order_totals
+-- @aqueduct:expose_as = public.api_orders
+SELECT customer_id, total_amount FROM order_totals
+WHERE total_amount > 0;
+```
+
+This lets the migration tool track which application queries depend
+on which stream tables, and include them in impact analysis and
+blue/green swap.
+
+**v1.1+ scope — sinks (out of scope for v1.0):**
+
+Sinks are external consumers: reverse-ETL to Kafka, S3/Iceberg
+exports, webhook notifications, `pg_tide` outbox entries. Managing
+these requires understanding external system APIs and is a different
+problem class. Defer to `pg_tide` and purpose-built connectors.
+
+### 10.19 Project scope definition — what is a "project"?
+
+**Problem:** One migrations directory per project. But what is a
+project? One DAG? Multiple DAGs? If a company has 50 independent
+stream-table DAGs, are there 50 directories and 50 lock rows?
+
+**Recommendation: one project = one logically-connected DAG.**
+
+A project is the smallest set of stream tables where a change to any
+member *could* cascade to another member. In practice this means:
+
+1. **Connected component.** If stream table A depends (directly or
+   transitively) on stream table B, they belong to the same project.
+   Independent sub-DAGs that share no edges are separate projects.
+2. **One `aqueduct.toml` per project.** A monorepo can contain
+   multiple project directories, each with its own `aqueduct.toml`.
+3. **One lock row per project.** `aqueduct.locks` is keyed by
+   `project` name. Two independent projects can run `aqueduct apply`
+   concurrently without interference.
+4. **Shared base tables.** If two projects read from the same base
+   table but have no stream-table edges between them, they are still
+   separate projects. A base-table ALTER affects both projects
+   independently — each project's `aqueduct plan` reports its own
+   cascade.
+
+**Naming convention:** The project name defaults to the directory
+name but can be overridden in `aqueduct.toml`:
+
+```toml
+[project]
+name = "checkout-analytics"   # used as the lock key and version namespace
+```
+
+**Scale guidance:**
+
+| Team size | Typical pattern |
+|---|---|
+| Small (1–5 stream tables) | One project, one directory |
+| Medium (10–50) | 2–5 projects, grouped by domain (orders, inventory, analytics) |
+| Large (50–200+) | One project per bounded context; each project has its own `aqueduct.toml`, CI pipeline, and deployment cadence |
+
 ---
 
 ## 11. Non-Goals (v1.0)
