@@ -279,6 +279,41 @@ environment-scoped variables (`schedule = '5m'` in dev, `'30s'` in
 prod; `cdc_mode = 'trigger'` everywhere except a Citus-backed prod
 where it is `'wal'`). `pg_aqueduct` owns the substitution.
 
+### 5.8 When NOT to use `pg_aqueduct`
+
+The tool's value proposition is entirely dependent on the presence of
+a stream-table DAG. Without one, it adds complexity with no benefit.
+
+**Case A — Pure base-table schema, no stream tables, no `pg_tide`:**
+Use Atlas, sqitch, or Liquibase. They are mature, well-documented,
+and purpose-built for this exact problem. `pg_aqueduct`'s unique
+contributions — topological ordering, differential state preservation,
+DAG cascade analysis, CALCULATED schedule resolution — are
+meaningless here. Adopting `pg_aqueduct` for a pure-base-table schema
+is solving a problem that does not exist.
+
+**Case B — `pg_tide` outbox/inbox + base tables, no stream tables yet:**
+Atlas is still the right answer for the migration tooling. `pg_tide`
+tables (`tide.outbox`, `tide.inbox`, relay subscriptions) are normal
+application tables — they do not form a dependency DAG. `pg_aqueduct`
+has no analytical leverage over them.
+
+The *only* argument for `pg_aqueduct` in a `pg_tide`-only schema is
+the **gateway scenario**: a team that starts with `pg_tide` event
+patterns and has a concrete plan to add `pg_trickle` stream tables
+within the next few months. Starting with `pg_aqueduct` means the
+transition to a full stream-table DAG requires no tool switch — the
+migrations directory simply gains stream-table SQL files over time.
+This is a weak argument. The tool switch from Atlas to `pg_aqueduct`
+is not painful; the tool complexity of `pg_aqueduct` before any stream
+tables exist is real. **The honest recommendation is: use Atlas until
+you have your first stream table, then evaluate.**
+
+**The real threshold:** `pg_aqueduct` earns its operational complexity
+the moment the first stream table exists and that stream table's
+defining query references a column that could change. Before that
+moment, it is a solution to a future problem.
+
 ---
 
 ## 6. Composition With Adjacent Tools
@@ -286,7 +321,7 @@ where it is `'wal'`). `pg_aqueduct` owns the substitution.
 | Tool | Relationship |
 |---|---|
 | **`pg_trickle`** | Runtime target. `aqueduct` calls its SQL API. |
-| **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` may manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline. |
+| **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` *may* manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline when stream tables are also present. When `pg_tide` is used **without** any `pg_trickle` stream tables, Atlas is the better migration tool. See §5.8. |
 | **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
 | **Atlas / Liquibase / sqitch** | Complementary — they own general-purpose base-table schema migrations (`CREATE TABLE`, partitioning, index changes). `pg_aqueduct` owns *stream-adjacent* base-table changes — any ALTER to a column that is a source for at least one stream table. For those changes, aqueduct generates and executes the base-table ALTER **and** the downstream stream-table cascade in a single coordinated plan. For standalone base-table migrations, aqueduct can invoke Atlas/sqitch as a pre-step hook. |
 | **Terraform / Pulumi** | Outer — provisions the database; the operator embeds a `terraform_data` resource that calls `aqueduct apply` post-provision. |
@@ -1297,6 +1332,15 @@ project's DAG, catalog entries, and lock rows.
 
 ## 11. Non-Goals (v1.0)
 
+- **Pure base-table schema management without stream tables.** If there
+  are no `pg_trickle` stream tables in the schema, use Atlas, sqitch,
+  or Liquibase instead (see §5.8). `pg_aqueduct` adds no value in
+  this case.
+- **`pg_tide`-only schemas (no stream tables).** `pg_tide` outbox,
+  inbox, and relay subscription tables are normal application tables;
+  they do not form a dependency DAG. Atlas manages them fine. The
+  gateway scenario (§5.8) is a marginal exception, not a
+  recommendation.
 - A general-purpose schema migration tool. `pg_aqueduct` manages
   stream-adjacent base-table changes (§10.5 Tier 1) but defers
   standalone DDL (non-referenced columns, new tables, indexes,
