@@ -724,6 +724,7 @@ fn alter_stream_table_query(
              topk_order_by = $6, \
              topk_offset = $7, \
              needs_reinit = false, \
+             defining_query_hash = $10, \
              {} \
              {} \
              has_keyless_source = $8, \
@@ -741,6 +742,7 @@ fn alter_stream_table_query(
             topk_offset.into(),
             vq.has_keyless_source.into(),
             st.pgt_id.into(),
+            crate::catalog::compute_defining_query_hash(defining_query).into(),
         ],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;

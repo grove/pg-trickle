@@ -72,6 +72,9 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
 
     // Check for replica — launcher cannot spawn workers on standbys.
     let is_replica = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
+        // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+        // Must be inside a transaction context in a background worker.
+        let _ = Spi::run("SET application_name = 'pg_trickle_launcher'");
         Spi::get_one::<bool>("SELECT pg_is_in_recovery()")
             .unwrap_or(Some(false))
             .unwrap_or(false)
@@ -314,6 +317,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
     // Exit cleanly if pg_trickle is not installed in this database.
     // The launcher will re-probe after its skip TTL (5 min) expires.
     let is_installed = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
+        // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+        // Must be inside a transaction context in a background worker.
+        let _ = Spi::run("SET application_name = 'pg_trickle_scheduler'");
         Spi::get_one::<bool>(
             "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_trickle')",
         )

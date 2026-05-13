@@ -2167,7 +2167,11 @@ fn has_table_source_changes(st: &StreamTableMeta) -> bool {
 fn has_stream_table_source_changes(st: &StreamTableMeta) -> bool {
     let deps = crate::catalog::StDependency::get_for_st(st.pgt_id).unwrap_or_default();
     let change_schema = config::pg_trickle_change_buffer_schema();
-    let frontier = st.frontier.clone().unwrap_or_default();
+    // PERF-6: borrow frontier rather than cloning the entire HashMap.
+    let frontier = st
+        .frontier
+        .as_ref()
+        .unwrap_or_else(|| crate::version::Frontier::empty_ref());
 
     for dep in &deps {
         if dep.source_type != "STREAM_TABLE" {
@@ -3206,6 +3210,10 @@ fn execute_scheduled_refresh(
     // PB1: Row lock is released automatically when the transaction commits.
 
     let elapsed_ms = start_instant.elapsed().as_millis() as i64;
+
+    // OBS-1: Record CDC lag sample (refresh cycle duration approximates the
+    // end-to-end lag from change capture to view update completion).
+    crate::shmem::record_cdc_lag_ms(elapsed_ms as u64);
 
     // Record refresh completion and determine outcome
     let was_full_fallback = matches!(action, RefreshAction::Reinitialize);

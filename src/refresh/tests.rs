@@ -9,6 +9,7 @@ use crate::error::PgTrickleError;
 use crate::version::Frontier;
 #[allow(unused_imports)]
 use pgrx::prelude::*;
+use std::sync::Arc;
 
 // ── Functions moved to merge sub-modules (A16 split) — import for unit tests ─
 use crate::refresh::merge::columns::{
@@ -71,6 +72,7 @@ fn test_st(refresh_mode: RefreshMode, needs_reinit: bool) -> StreamTableMeta {
         reindex_drift_threshold: None,
         rows_changed_since_last_reindex: 0,
         last_reindex_at: None,
+        defining_query_hash: 0,
     }
 }
 
@@ -357,15 +359,15 @@ fn test_merge_template_cache_insert_and_retrieve() {
             42,
             CachedMergeTemplate {
                 defining_query_hash: 12345,
-                merge_sql_template: "MERGE INTO t ...".to_string(),
+                merge_sql_template: "MERGE INTO t ...".into(),
                 source_oids: vec![100, 200],
-                cleanup_sql_template: "DELETE FROM ...".to_string(),
-                parameterized_merge_sql: String::new(),
-                trigger_delete_template: String::new(),
-                trigger_update_template: String::new(),
-                trigger_insert_template: String::new(),
-                trigger_using_template: String::new(),
-                delta_sql_template: String::new(),
+                cleanup_sql_template: "DELETE FROM ...".into(),
+                parameterized_merge_sql: Arc::from(""),
+                trigger_delete_template: Arc::from(""),
+                trigger_update_template: Arc::from(""),
+                trigger_insert_template: Arc::from(""),
+                trigger_using_template: Arc::from(""),
+                delta_sql_template: Arc::from(""),
                 is_all_algebraic: false,
                 is_deduplicated: true,
             },
@@ -389,15 +391,15 @@ fn test_invalidate_merge_cache_removes_entry() {
             99,
             CachedMergeTemplate {
                 defining_query_hash: 0,
-                merge_sql_template: String::new(),
+                merge_sql_template: Arc::from(""),
                 source_oids: vec![],
-                cleanup_sql_template: String::new(),
-                parameterized_merge_sql: String::new(),
-                trigger_delete_template: String::new(),
-                trigger_update_template: String::new(),
-                trigger_insert_template: String::new(),
-                trigger_using_template: String::new(),
-                delta_sql_template: String::new(),
+                cleanup_sql_template: Arc::from(""),
+                parameterized_merge_sql: Arc::from(""),
+                trigger_delete_template: Arc::from(""),
+                trigger_update_template: Arc::from(""),
+                trigger_insert_template: Arc::from(""),
+                trigger_using_template: Arc::from(""),
+                delta_sql_template: Arc::from(""),
                 is_all_algebraic: false,
                 is_deduplicated: true,
             },

@@ -441,6 +441,58 @@ SET client_min_messages TO debug1;
 
 ---
 
+## Backup & Restore
+
+### Backing Up a pg_trickle-Enabled Database
+
+pg_trickle uses two schemas that must be included in any backup alongside your
+application schema:
+
+- **`pgtrickle`** — stream table catalog, dependency graph, and refresh history
+- **`pgtrickle_changes`** — change-buffer tables (one per CDC-enabled source)
+
+Include both schemas explicitly when using `pg_dump`:
+
+```bash
+pg_dump \
+  --schema=public \
+  --schema=pgtrickle \
+  --schema=pgtrickle_changes \
+  mydb > mydb_backup.sql
+```
+
+If your application data lives in schemas other than `public`, include those
+schemas too. Omitting `pgtrickle_changes` means any unprocessed CDC rows are
+lost on restore, forcing the next differential refresh to fall back to FULL mode.
+
+### Restoring
+
+Restore normally:
+
+```bash
+psql -d mydb_restored -f mydb_backup.sql
+```
+
+After restore, run the health check to validate catalog integrity:
+
+```sql
+SELECT * FROM pgtrickle.health_check();
+```
+
+### OID Re-assignment After Restore
+
+Change-buffer tables in `pgtrickle_changes` are named by storage-table OID (e.g.
+`changes_12345`). OIDs may differ after restore if tables were created in a
+different order. Run `pg_trickle_repair_stream_table()` on each stream table
+immediately after restore to reconcile any OID mismatches:
+
+```sql
+SELECT pgtrickle.repair_stream_table(pgt_schema || '.' || pgt_name)
+FROM pgtrickle.pgt_stream_tables;
+```
+
+---
+
 ## Next Steps
 
 - [Getting Started](docs/GETTING_STARTED.md) — Create your first stream table in 5 minutes

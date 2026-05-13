@@ -107,6 +107,15 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
         db_name,
     );
 
+    // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
+    // Must be inside a transaction context in a background worker.
+    BackgroundWorker::transaction(AssertUnwindSafe(|| {
+        let _ = Spi::run(&format!(
+            "SET application_name = 'pg_trickle_pool_{}'",
+            worker_idx,
+        ));
+    }));
+
     // Acquire a worker token (shared with dynamic workers for the cluster budget).
     let max_workers = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
     if !shmem::try_acquire_worker_token(max_workers) {
@@ -151,6 +160,8 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
 
         if !claimed {
             // No work available — sleep 100 ms.
+            // OBS-2: Accumulate idle time for the worker-utilisation metric.
+            crate::shmem::add_worker_idle_ms(100);
             let ok = BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(100)));
             if !ok {
                 // SIGTERM received during sleep.
@@ -191,7 +202,11 @@ fn execute_pool_worker_tick(db_name: &str, worker_idx: u32) -> bool {
             db = db_name.replace('\'', "''"),
         ))
     })) {
-        Ok(Some(id)) => id,
+        Ok(Some(id)) => {
+            // OBS-2: Job transitioned QUEUED → RUNNING; one fewer job in queue.
+            crate::shmem::decrement_parallel_queue_depth();
+            id
+        }
         _ => return false,
     };
 

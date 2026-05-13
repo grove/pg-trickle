@@ -101,6 +101,12 @@ impl Frontier {
         self.sources.is_empty()
     }
 
+    /// PERF-6: A zero-allocation empty frontier for use as a borrow default.
+    pub fn empty_ref() -> &'static Frontier {
+        static EMPTY: std::sync::LazyLock<Frontier> = std::sync::LazyLock::new(Frontier::new);
+        &EMPTY
+    }
+
     /// Serialize to JSON string for storage in the `frontier` JSONB column.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)

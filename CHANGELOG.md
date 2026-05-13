@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.59.0 — Performance & Observability](#0590--performance--observability)
 - [0.58.0 — Security & Correctness Hardening](#0580--security--correctness-hardening)
 - [0.57.0 — Documentation Excellence](#0570--documentation-excellence)
 - [0.56.0 — Documentation Foundation](#0560--documentation-foundation)
@@ -73,6 +74,118 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.59.0] — Performance & Observability
+
+### What's New
+
+v0.59.0 delivers seven hot-path performance improvements and six new
+observability features. No behaviour-visible SQL API changes are made; the only
+schema change is a new `defining_query_hash` catalog column used internally.
+
+#### PERF-1: Batched CDC Buffer-Growth Monitoring
+
+`check_change_buffer_sizes()` previously issued one `SELECT count(*)` SPI call
+per source table, proportional to the number of CDC-enabled stream tables.
+It now builds a single `UNION ALL` query and executes it in one SPI round-trip,
+reducing latency and lock overhead for deployments with many stream tables.
+
+#### PERF-2: Defining-Query Hash Cached in Catalog
+
+A new `defining_query_hash BIGINT` column on `pgtrickle.pgt_stream_tables` caches
+the Rust `DefaultHasher` digest of each stream table's defining query. Refresh
+cycles skip recomputing the hash; any ALTER that changes the query updates it
+atomically in the same SPI transaction.
+
+#### PERF-3: Arc<str> Shared Templates
+
+All eight SQL template fields inside `CachedMergeTemplate` were changed from
+`String` to `Arc<str>`. Cache reads now clone a reference-counted pointer
+instead of copying the string data, reducing heap allocations on every cache hit.
+
+#### PERF-4: Single MERGE_TEMPLATE_CACHE Borrow
+
+The two consecutive `MERGE_TEMPLATE_CACHE.with()` calls that were needed to
+check both the `non_monotonic` flag and the `is_deduplicated` flag have been
+merged into a single `peek()` call that returns both values in one borrow, halving
+the thread-local lock traffic on the hot cache-hit path.
+
+#### PERF-5: WAL Decoder UPDATE Vec Pre-Allocation
+
+The five `Vec` accumulators in the WAL decoder's UPDATE-row handler now call
+`Vec::with_capacity(num_columns)` up front, eliminating the incremental
+reallocations that previously occurred for each column.
+
+#### PERF-6: Frontier Borrow Instead of Clone
+
+`has_stream_table_source_changes()` cloned the entire `Frontier` (a
+`HashMap<Oid, Lsn>`) when no frontier was stored yet. It now borrows a static
+empty `Frontier` via `Frontier::empty_ref()`, avoiding the allocation on every
+scheduler tick for stream tables with no CDC sources.
+
+#### PERF-7: Diamond Detection Short-Circuit
+
+`detect_diamonds()` in the DAG module now performs a lazy `.next().is_some()`
+intersection check before collecting the full shared-ancestor list. Branches that
+share no ancestors — the common case — exit immediately without allocating the
+result `Vec`.
+
+#### OBS-1: CDC Lag Percentile Metrics
+
+A ring-buffer sampler (`CdcLagSampler`, 256 slots, protected by `PgLwLock`)
+records CDC-to-refresh lag in milliseconds. Three new Prometheus gauges expose
+rolling percentiles: `pg_trickle_cdc_lag_p50_seconds`,
+`pg_trickle_cdc_lag_p95_seconds`, and `pg_trickle_cdc_lag_p99_seconds`.
+
+#### OBS-2: Parallel Worker Utilisation Metrics
+
+Two new counters make pool-worker pressure visible:
+- `pg_trickle_parallel_queue_depth` — jobs currently waiting for a free worker
+- `pg_trickle_worker_idle_time_seconds_total` — cumulative idle time across all workers
+
+#### OBS-3: WAL Decoder Pending-Record Gauge
+
+`pg_trickle_wal_decoder_pending_records` reports the number of logical-replication
+records buffered in the last WAL poll that have not yet been written to the CDC
+change buffer, useful for detecting WAL consumer backpressure.
+
+#### OBS-4: Refresh Mode Ratio Counters
+
+`pg_trickle_refresh_mode_total{mode="differential"}` and
+`pg_trickle_refresh_mode_total{mode="full"}` count every refresh cycle by mode.
+The ratio surfaces differential-to-full degradation before it impacts latency.
+
+#### OBS-5: pg_stat_activity Application Names
+
+Every background-worker connection now sets `application_name` immediately after
+connecting to SPI, making pg_trickle workers trivially identifiable in
+`pg_stat_activity`:
+
+| Connection | `application_name` |
+|---|---|
+| Database-discovery launcher | `pg_trickle_launcher` |
+| Per-database scheduler | `pg_trickle_scheduler` |
+| Parallel refresh pool worker (N) | `pg_trickle_pool_N` |
+| Parallel refresh dispatcher | `pg_trickle_dispatcher` |
+
+#### OBS-6: Backup & Restore Documentation
+
+`INSTALL.md` now includes a dedicated **Backup & Restore** section explaining
+which schemas to include in `pg_dump`, how to validate catalog integrity after
+restore with `pgtrickle.health_check()`, and how to handle OID re-assignment
+with `repair_stream_table()`.
+
+### Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.59.0';
+```
+
+The upgrade script adds the `defining_query_hash` column with `DEFAULT 0`.
+Existing stream tables will recompute their hash on the next refresh and write
+it back via `ALTER STREAM TABLE` — no manual intervention is needed.
 
 ---
 

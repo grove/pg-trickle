@@ -6,10 +6,22 @@
 
 use pgrx::prelude::*;
 use pgrx::spi::{SpiHeapTupleData, SpiTupleTable};
+use std::hash::{Hash, Hasher};
 
 use crate::dag::{DiamondConsistency, DiamondSchedulePolicy, RefreshMode, StStatus};
 use crate::error::PgTrickleError;
 use crate::version::Frontier;
+
+/// PERF-2: Compute a deterministic hash of the defining query string.
+///
+/// Uses `DefaultHasher` (same algorithm used historically in codegen.rs) so
+/// that values stored in the catalog are consistent with those computed at
+/// refresh time.  The result is cast to `i64` for the BIGINT catalog column.
+pub fn compute_defining_query_hash(query: &str) -> i64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    query.hash(&mut hasher);
+    hasher.finish() as i64
+}
 
 /// Metadata for a stream table, mirrors `pgtrickle.pgt_stream_tables`.
 #[derive(Debug, Clone)]
@@ -149,6 +161,11 @@ pub struct StreamTableMeta {
     /// VP-2 (v0.47.0): Timestamp of the last REINDEX on this stream table.
     /// None means the stream table has never been REINDEXed.
     pub last_reindex_at: Option<TimestampWithTimeZone>,
+    /// PERF-2 (v0.59.0): Hash of the defining query, computed at CREATE/ALTER
+    /// and stored in the catalog.  Avoids recomputing DefaultHasher over the
+    /// full query string on every differential refresh.
+    /// 0 means not yet computed (triggers one-time cache rebuild).
+    pub defining_query_hash: i64,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -270,6 +287,10 @@ impl StreamTableMeta {
         // CORR-2/UX-3 (v0.36.0): columnar storage backend ("heap", "citus", "pg_mooncake")
         storage_backend: &str,
     ) -> Result<i64, PgTrickleError> {
+        // PERF-2: Compute hash of the defining query at INSERT time so that
+        // the refresh engine can skip the per-refresh DefaultHasher computation.
+        let query_hash = compute_defining_query_hash(defining_query);
+
         Spi::connect_mut(|client| {
             let row = client
                 .update(
@@ -279,9 +300,9 @@ impl StreamTableMeta {
                       diamond_consistency, diamond_schedule_policy, has_keyless_source, \
                       requested_cdc_mode, is_append_only, pooler_compatibility_mode, \
                       st_partition_key, max_differential_joins, max_delta_fraction, \
-                      temporal_mode, storage_backend) \
+                      temporal_mode, storage_backend, defining_query_hash) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                             $15, $16, $17, $18, $19, $20, $21, $22) \
+                             $15, $16, $17, $18, $19, $20, $21, $22, $23) \
                      RETURNING pgt_id",
                     None,
                     &[
@@ -307,6 +328,7 @@ impl StreamTableMeta {
                         max_delta_fraction.into(),
                         temporal_mode.into(),
                         storage_backend.into(),
+                        query_hash.into(),
                     ],
                 )
                 .map_err(|e: pgrx::spi::SpiError| PgTrickleError::SpiError(e.to_string()))?
@@ -342,7 +364,8 @@ impl StreamTableMeta {
                      COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -382,7 +405,8 @@ impl StreamTableMeta {
                      COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -427,7 +451,8 @@ impl StreamTableMeta {
                      COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -467,7 +492,8 @@ impl StreamTableMeta {
                      COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -511,7 +537,8 @@ impl StreamTableMeta {
                      COALESCE(post_refresh_action, 'none') AS post_refresh_action, \
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
-                     last_reindex_at \
+                     last_reindex_at, \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1301,6 +1328,7 @@ impl StreamTableMeta {
         let reindex_drift_threshold = table.get::<f64>(48).map_err(map_spi)?;
         let rows_changed_since_last_reindex = table.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = table.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
+        let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1353,6 +1381,7 @@ impl StreamTableMeta {
             reindex_drift_threshold,
             rows_changed_since_last_reindex,
             last_reindex_at,
+            defining_query_hash,
         })
     }
 
@@ -1478,6 +1507,7 @@ impl StreamTableMeta {
         let reindex_drift_threshold = row.get::<f64>(48).map_err(map_spi)?;
         let rows_changed_since_last_reindex = row.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = row.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
+        let defining_query_hash = row.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1530,6 +1560,7 @@ impl StreamTableMeta {
             reindex_drift_threshold,
             rows_changed_since_last_reindex,
             last_reindex_at,
+            defining_query_hash,
         })
     }
 }
