@@ -280,7 +280,7 @@ where it is `'wal'`). `pg_aqueduct` owns the substitution.
 | **`pg_trickle`** | Runtime target. `aqueduct` calls its SQL API. |
 | **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` may manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline. |
 | **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
-| **Atlas / Liquibase / sqitch** | Sibling — they migrate base-table schemas; `aqueduct` migrates the stream-table DAG. They can run in sequence (`atlas apply && aqueduct apply`). |
+| **Atlas / Liquibase / sqitch** | Complementary — they own general-purpose base-table schema migrations (`CREATE TABLE`, partitioning, index changes). `pg_aqueduct` owns *stream-adjacent* base-table changes — any ALTER to a column that is a source for at least one stream table. For those changes, aqueduct generates and executes the base-table ALTER **and** the downstream stream-table cascade in a single coordinated plan. For standalone base-table migrations, aqueduct can invoke Atlas/sqitch as a pre-step hook. |
 | **Terraform / Pulumi** | Outer — provisions the database; the operator embeds a `terraform_data` resource that calls `aqueduct apply` post-provision. |
 | **CloudNativePG / Patroni** | `aqueduct` understands HA: it locks against the primary, refuses to apply against a standby, and integrates with switchover events. |
 | **GitHub / GitLab Actions** | First-class CI integration: `aqueduct/plan-action`, `aqueduct/apply-action`. |
@@ -346,6 +346,28 @@ FROM raw.orders
 GROUP BY customer_id;
 ```
 
+Base tables that are *sources* for stream tables may also be declared
+in the migrations directory, so that `aqueduct plan` can compute the
+full impact of a base-table change on the downstream DAG:
+
+```sql
+-- migrations/sources/orders.sql
+-- @aqueduct:kind = source
+-- @aqueduct:owned = false    -- aqueduct tracks schema but does not create the table
+CREATE TABLE raw.orders (
+    id          bigint PRIMARY KEY,
+    customer_id bigint NOT NULL,
+    amount      numeric(12,2) NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+```
+
+`owned = false` (the default for sources) means `aqueduct apply` will
+never `CREATE` or `DROP` the base table — it only reads its schema to
+compute stream-table cascade plans. `owned = true` tells aqueduct it
+may emit base-table DDL as part of a coordinated migration (useful for
+full GitOps environments where the entire schema lives in one repo).
+
 The format is intentionally simple — a folder of SQL files with
 front-matter directives — so that diffs in PRs are readable and so
 that interop with dbt-compiled artefacts is trivial.
@@ -361,9 +383,22 @@ that interop with dbt-compiled artefacts is trivial.
 3. **Recorded history** — read `aqueduct.dag_versions` to know the
    *intended* current state (which may diverge from actual = drift).
 
-The differ is a structural diff over the DAG (nodes, edges, SQL ASTs,
-schedules, refresh modes, cdc modes). Each delta is classified into
-one of four migration kinds:
+The differ operates over three layers simultaneously:
+
+1. **Source layer** — base tables and views that the stream-table DAG
+   reads from. For `owned = false` sources, aqueduct tracks schema
+   changes from `pg_attribute` and uses them for impact analysis only.
+   For `owned = true` sources, it also generates base-table DDL.
+2. **Stream-table DAG** — the nodes and edges managed by `pg_trickle`.
+3. **Consumer layer** (v1.1+) — materialized views, API views, or
+   export connectors that read from stream tables.
+
+Changes at layer 1 cascade into layer 2 automatically. The key
+classification question is: *does this source-layer change affect any
+column referenced in a stream-table query?* If yes, aqueduct owns the
+full cascade plan. If no, it delegates to Atlas/sqitch/Liquibase.
+
+Each stream-table delta is classified into one of four migration kinds:
 
 | Class | Example | Cost |
 |---|---|---|
@@ -611,12 +646,32 @@ Multi-tenant Postgres (one cluster, many independent projects) needs a
 project-scoped lock, which §7.5 already provides — but the operator
 ergonomics need work.
 
-### 10.5 What about non-stream-table objects?
+### 10.5 Base-table migrations and non-stream-table objects
 
-Functions, types, indexes, GUCs that are part of the same logical
-deploy. Recommendation: **defer to Atlas/Liquibase/sqitch** for
-general schema, and let `aqueduct apply` invoke them as a pre-step
-hook. Do not build a generic schema migration tool.
+`pg_aqueduct` takes a two-tier stance:
+
+**Tier 1 — stream-adjacent base-table changes** (a column that appears
+in at least one stream-table query): `pg_aqueduct` owns the entire
+operation. It generates the base-table ALTER, computes the cascade
+impact on the downstream DAG, classifies each affected stream-table
+node (free / in-place / rebuild / blue-green), and executes the full
+sequence as a single resumable plan. This is non-negotiable: allowing
+two separate tools to split this coordination reintroduces the §1.3
+problem (silently broken queries).
+
+**Tier 2 — standalone base-table objects** (new tables, non-referenced
+columns, indexes, partitioning, types, GUCs): delegate to
+Atlas/Liquibase/sqitch. `aqueduct apply` can invoke a user-supplied
+pre/post hook that runs the delegate tool, then proceeds with its own
+stream-table plan. Do not build a general-purpose schema migration
+tool — that would be competing with Atlas on Atlas's home turf.
+
+The boundary between tier 1 and tier 2 is determined automatically by
+the query parser: if `pg_query.rs` can prove that a column is
+unreferenced in any stream-table query, aqueduct defers; otherwise it
+classifies it as tier 1. The `--tier1-only` flag restricts the apply
+run to stream-adjacent changes only, for teams that want to keep
+base-table DDL in Atlas regardless.
 
 ### 10.6 Naming
 
@@ -638,7 +693,10 @@ vendored copy and add a CI job that diffs the two.
 
 ## 11. Non-Goals (v1.0)
 
-- A general-purpose schema migration tool. Use Atlas or sqitch.
+- A general-purpose schema migration tool. `pg_aqueduct` manages
+  stream-adjacent base-table changes (§10.5 Tier 1) but defers
+  standalone DDL (non-referenced columns, new tables, indexes,
+  partitioning, types) to Atlas or sqitch.
 - A query authoring environment. Use dbt, Hex, or psql.
 - A monitoring / alerting product. Use `pg_trickle`'s monitoring views
   + Grafana.
