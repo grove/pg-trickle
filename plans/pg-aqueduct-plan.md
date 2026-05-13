@@ -148,6 +148,7 @@ $ aqueduct apply --to prod         # execute the plan, record migration
 $ aqueduct status --to prod        # show drift, last migration, lag
 $ aqueduct rollback --to prod      # revert to the previous DAG version
 $ aqueduct validate                # check migrations offline (no DB)
+$ aqueduct unlock --to prod        # release a stale lock (emergency)
 $ aqueduct preview --branch feat-x # spin up a preview DAG on a branch DB
 $ aqueduct destroy --to prod       # tear down the entire project's DAG
 ```
@@ -557,6 +558,20 @@ Directives must appear before the first non-comment, non-blank line.
 Unknown keys are a lint warning (not an error) to allow
 forward-compatibility with newer CLI versions.
 
+**Template variable substitution.** Values may embed variable
+references using the `{{ var.NAME }}` syntax. These are resolved by
+`aqueduct` *before* the TOML parser sees the value — the substitution
+happens at the string level, not inside the TOML grammar, so the
+grammar rule `value ::= toml-inline-value` applies after substitution.
+Variables are sourced from the `[targets.<name>] vars = { ... }` table
+in `aqueduct.toml` for the active target, merged with environment
+variables prefixed `AQUEDUCT_VAR_NAME` (env takes priority). If a
+variable is referenced but not defined, `aqueduct plan` and
+`aqueduct validate` both fail with a clear error listing the missing
+variable names. The `{{ }}` syntax was chosen to match dbt's
+convention; future versions may support additional template engines
+via a `template_engine = "jinja2"` field in `aqueduct.toml`.
+
 **Migration file ordering.** The migrations directory is
 *unordered* — there are no sequence numbers or timestamps in
 filenames. `aqueduct plan` derives execution order from the DAG
@@ -700,6 +715,11 @@ A plan is an ordered list of *steps*; each step is one of:
 - `ReattachOutbox { stream_table, outbox_name, retention_hours }` (restore after recreate)
 - `ManageWalSlot { stream_table, action }` (drop/recreate logical replication slot for
   `cdc_mode = 'wal'` tables; action is one of `drop_before_rebuild` / `recreate_after_rebuild`)
+- `UnlockDag { force }` (counterpart to `LockDag`; always the last step in any plan;
+  `force = true` allows an operator to clear a stale lock)
+- `PauseImmediate { name }` (temporarily switch an IMMEDIATE stream table to
+  DIFFERENTIAL during a rebuild; paired with a `ResumeImmediate` step at the end)
+- `ResumeImmediate { name }` (switch back to IMMEDIATE mode after rebuild completes)
 
 Execution is transactional where possible (most `ALTER` paths fit in
 one transaction); for steps that cannot be transactional (CONCURRENTLY
@@ -718,7 +738,7 @@ CREATE SCHEMA IF NOT EXISTS aqueduct;
 CREATE TABLE aqueduct.dag_versions (
     version    bigserial PRIMARY KEY,
     project    text      NOT NULL,
-    spec_hash  bytea     NOT NULL,
+    spec_hash  bytea     NOT NULL,  -- SHA-256 of spec_jsonb (canonical JSON, keys sorted)
     applied_at timestamptz NOT NULL DEFAULT now(),
     applied_by text      NOT NULL,
     plan_jsonb jsonb     NOT NULL,
@@ -824,8 +844,17 @@ versions. The CLI handles this automatically:
 
 ### 7.6 Locking & concurrency
 
-- **One project, one writer.** A row lock on `aqueduct.locks` (with
-  TTL + heartbeat) prevents two simultaneous `aqueduct apply` runs.
+- **One project, one writer.** `aqueduct.locks` serialises concurrent
+  `aqueduct apply` runs using a PostgreSQL row-level lock (`SELECT
+  FOR UPDATE NOWAIT` on the project's lock row). This is *not* an
+  advisory lock — it is a regular row lock that Postgres cleans up
+  automatically if the client disconnects, making it crash-safe
+  without requiring a separate lock-cleanup job. The `ttl` column
+  is used only as a *heartbeat deadline* for detecting stale locks
+  in multi-process scenarios: if `now() - acquired_at > ttl * 2`
+  and no heartbeat update has arrived, `aqueduct apply` treats the
+  existing lock as abandoned and may override it after operator
+  confirmation (or with `--force-lock`).
 - **Cooperation with `pg_trickle` scheduling.** `aqueduct apply` calls
   `pgtrickle.pause_scheduler()` for affected nodes for the duration of
   the migration, restoring on success or failure.
@@ -879,8 +908,7 @@ Goal: `aqueduct plan` is useful even without `apply`.
 - DAG differ producing a typed `Plan` value.
 - Human-readable plan renderer (text, JSON, markdown — the markdown
   output is what CI posts to PRs).
-- Drift report.
-
+- Drift report and `aqueduct status` output (see specimen output below).
 - `aqueduct validate` — offline check (no database connection):
   parses all migration files, validates front-matter syntax, checks
   SQL via `pg_query.rs`, detects dependency cycles in the declared
@@ -889,6 +917,29 @@ Goal: `aqueduct plan` is useful even without `apply`.
   IVM-supportability (that requires knowing `pg_trickle`'s exact
   capabilities, which vary by version — use `aqueduct plan` for
   that).
+
+**`aqueduct status` specimen output:**
+
+```
+Project   checkout-analytics    v18   applied 2m ago by ci@prod
+Database  prod (pg_trickle 0.62, pg 18.3)
+
+Stream tables  22 managed   0 drift   0 unmanaged
+Last migration 18→18 (no-op): 2026-05-13 09:01:12 UTC
+
+Drift          none detected  (polled 2m ago)
+Scheduler      running  (all 22 nodes active)
+Pending plan   none
+```
+
+When drift exists:
+
+```
+Drift  DETECTED  (1 table)
+  ⚠  order_totals: schedule changed out-of-band
+     catalog: '30s'  /  migrations: '{{ var.schedule }}' → '1m'
+     Run `aqueduct plan --to prod` to see the full plan.
+```
 
 Exit criteria: against a 20-node DAG on a Testcontainers Postgres,
 `aqueduct plan` produces a correct plan for the cartesian product of
@@ -1119,13 +1170,15 @@ individual project-scoped locks in `aqueduct.locks` do not prevent this.
 Policy: **Tier 1 base-table ALTERs must be serialised by the operator**
 using one of two strategies:
 
-1. **Explicit base-table lock key.** If `allow_full_refresh` and a
-   shared base-table is listed in multiple projects, add a
+1. **Explicit base-table lock key.** Add a
    `base_table_lock_keys = ["raw.orders"]` entry to each project's
-   `aqueduct.toml`. `aqueduct apply` acquires a PostgreSQL advisory
-   lock keyed on the base-table OID before running any Tier 1 ALTER on
-   that table. This prevents concurrent Tier 1 plans across projects
-   from racing.
+   `aqueduct.toml` that owns a shared base table. `aqueduct apply`
+   acquires a PostgreSQL advisory lock keyed on the base-table OID
+   before running any Tier 1 ALTER on that table. This prevents
+   concurrent Tier 1 plans across projects from racing. (Note: this
+   advisory lock is separate from the project-level row lock in
+   `aqueduct.locks` — it is a session-level `pg_advisory_xact_lock`
+   scoped to the duration of the Tier 1 ALTER transaction only.)
 2. **Delegate to Atlas.** Declare the shared base table as `owned =
    false` in all projects and manage its DDL exclusively through Atlas.
    Each project's aqueduct plan then only owns the stream-table cascade
@@ -1756,6 +1809,25 @@ project's DAG, catalog entries, and lock rows.
    may share it).
 5. Requires `--confirm` flag (or interactive prompt) — this is a
    destructive, irreversible operation.
+
+**`aqueduct unlock` — releasing a stale project lock.**
+
+`aqueduct unlock --to <target>` removes the lock row for the current
+project from `aqueduct.locks`. Use when a CLI process crashed without
+cleaning up its lock *and* the TTL has not yet expired (e.g., a
+long-running backfill locked the project for hours and the operator
+wants to interrupt it). The command:
+
+1. Checks that no `aqueduct apply` process is currently holding the
+   row lock (by attempting `SELECT FOR UPDATE NOWAIT` on the lock
+   row). If another process actively holds the lock, `aqueduct
+   unlock` refuses — it will not steal a live lock.
+2. If the lock row is not actively held, deletes it and calls
+   `pgtrickle.resume_scheduler(nodes => [...])` for any nodes that
+   were paused at the time the lock was acquired (recorded in the
+   most recent `aqueduct.migrations` row with `status = 'running'`).
+3. Prints a summary of what it released so the operator can verify
+   the correct lock was removed.
 
 ---
 
