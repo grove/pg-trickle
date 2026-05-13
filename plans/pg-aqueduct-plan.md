@@ -355,6 +355,40 @@ the moment the first stream table exists and that stream table's
 defining query references a column that could change. Before that
 moment, it is a solution to a future problem.
 
+**Case D — `pg_eddy` labelled-property-graph store, no user-authored MATCH views:**
+`pg_eddy` is a PostgreSQL 18 extension that provides a native LPG
+store with an OpenCypher query engine and a custom Table Access Method
+(adjacency-aware pages). It integrates with `pg_trickle` optionally
+for incrementally-maintained graph views (MATCH views, path aggregates).
+The same scoping rule as `pg_ripple` applies: `pg_eddy`'s internal
+node store, edge store, and property store tables are lifecycle-managed
+by `pg_eddy`'s custom AM — `pg_aqueduct` must not touch them.
+Scoping rule: **only user-authored `pg_trickle` stream tables that
+read from `pg_eddy` node/edge tables are in scope for
+`pg_aqueduct`.** If no such stream tables exist, `pg_aqueduct` has
+no role. See §7.3 for how `pg_eddy` storage tables appear as
+`owned = false` sources.
+
+**Case E — `moire` knowledge graph browser:**
+`moire` is a Next.js 15 frontend for faceted navigation over SPARQL
+endpoints (first-class support for `pg_ripple`). It holds no
+server-side state beyond browser session state. It creates no
+stream tables, no base tables, and no PostgreSQL objects of any kind.
+`pg_aqueduct` is **completely out of scope** for `moire`.
+
+**Case F — `riverbank` knowledge compiler:**
+`riverbank` is a Python worker that compiles raw documents into a
+governed RDF knowledge graph stored in `pg_ripple`. It uses
+`pg_trickle` for incremental view maintenance (quality scores, entity
+pages, topic indices, embedding centroids) and `pg_tide` for relaying
+compiled-knowledge change events to downstream systems. `riverbank`
+manages its own catalog (`_riverbank.*`) via Alembic — those tables
+are out of scope for `pg_aqueduct`. The `pg_trickle` stream tables
+that `riverbank` creates (IVM nodes over `pg_ripple` VP tables) are
+in scope: `pg_aqueduct` manages their migration lifecycle. This is
+the **primary `riverbank` use case** for `pg_aqueduct` — schema
+evolution of the IVM layer as the knowledge model matures.
+
 ---
 
 ## 6. Composition With Adjacent Tools
@@ -363,6 +397,9 @@ moment, it is a solution to a future problem.
 |---|---|
 | **`pg_trickle`** | Runtime target. `aqueduct` calls its SQL API. |
 | **`pg_ripple`** | Knowledge graph companion. `pg_ripple`'s VP tables (per-predicate RDF storage) appear as `owned = false` sources. User-authored incremental SPARQL views and custom analytics nodes are in scope; `pg_ripple`-managed tables (ER monitoring, KGE embeddings, derivations) are excluded. See §5.8 Case C and §7.3. |
+| **`pg_eddy`** | Labelled property graph store. `pg_eddy`'s node/edge/property AM tables appear as `owned = false` sources. User-authored MATCH-view stream tables over those tables are in scope; `pg_eddy`'s internal storage is excluded. See §5.8 Case D and §7.3. |
+| **`moire`** | Completely out of scope. Pure Next.js frontend over SPARQL endpoints; creates no PostgreSQL objects. See §5.8 Case E. |
+| **`riverbank`** | Knowledge compiler (Python). Uses `pg_trickle` IVM nodes for quality scores, entity pages, and topic indices — those stream tables are in scope. `riverbank`'s own catalog (`_riverbank.*`, Alembic-managed) is out of scope. See §5.8 Case F. |
 | **`pg_tide`** | Sibling — the relay, outbox, inbox. `aqueduct` *may* manage tide's catalog (relay subscriptions, inbox shapes) under the same migration discipline when stream tables are also present. When `pg_tide` is used **without** any `pg_trickle` stream tables, Atlas is the better migration tool. See §5.8. |
 | **dbt / dbt-pgtrickle** | Upstream authoring. `aqueduct ingest --from dbt-target` reads dbt's compiled `manifest.json` and produces an `aqueduct` migration. |
 | **Atlas / Liquibase / sqitch** | Complementary — they own general-purpose base-table schema migrations (`CREATE TABLE`, partitioning, index changes). `pg_aqueduct` owns *stream-adjacent* base-table changes — any ALTER to a column that is a source for at least one stream table. For those changes, aqueduct generates and executes the base-table ALTER **and** the downstream stream-table cascade in a single coordinated plan. For standalone base-table migrations, aqueduct can invoke Atlas/sqitch as a pre-step hook. |
@@ -489,6 +526,13 @@ The differ operates over three layers simultaneously:
    `_pg_ripple.derivations`, ER monitoring tables created by
    `enable_er_monitoring()`, etc.) are excluded from the source layer
    entirely; they are managed by `pg_ripple` and must not be tracked.
+   **`pg_eddy` storage tables** (node store, edge store, property store
+   — all using the custom adjacency AM) also always appear as
+   `owned = false` sources. Aqueduct never generates DDL for them;
+   it tracks schema changes for impact analysis only. `pg_eddy`'s
+   internal catalog tables are excluded entirely.
+   **`riverbank` catalog** (`_riverbank.*`, Alembic-managed) is
+   excluded from the source layer entirely.
 2. **Stream-table DAG** — the nodes and edges managed by `pg_trickle`.
    In a `pg_ripple` deployment this includes only **user-authored**
    incremental SPARQL views and custom analytics nodes; not the
