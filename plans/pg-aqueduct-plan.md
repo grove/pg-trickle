@@ -37,10 +37,11 @@
 > stream-table DAG what **Atlas** is to a relational schema and what
 > **Terraform** is to infrastructure.
 >
-> Estimated effort to a usable v0.1 (plan + apply + rollback):
-> **~5.5 weeks** for one engineer (Phases 0–2). v1.0 (online schema
-> evolution, blue/green deployments, drift detection, CI integrations,
-> optional extension) is a **~14 week** project (Phases 0–7).
+> Estimated effort to a usable v0.1 (plan + apply + rollback +
+> import): **~4 weeks** for one engineer (Phase 0 = 3 days, Phase 1
+> = 1.5 weeks, Phase 2 = 2 weeks). v1.0 (online schema evolution,
+> blue/green deployments, drift detection, CI integrations, optional
+> extension) is a **~14 week** project (Phases 0–7).
 
 ---
 
@@ -272,6 +273,31 @@ Every `apply` writes a snapshot of the prior DAG definition into
 `aqueduct.dag_versions`. `aqueduct rollback --to v17` reconstructs the
 prior topology and migrates back, preserving rows where possible.
 
+**Rollback semantics and lossless guarantee:**
+
+Rollback is only guaranteed lossless within the *current migration
+window*. The window closes at the next full refresh of any affected
+node. Specifically:
+
+- For **free** and **in-place** migrations (schedule change, column
+  add): rollback is always lossless — the prior schema is restored
+  and the materialized data conforms to both old and new schema.
+- For **rebuild** migrations: rollback is lossless only if no full
+  refresh has completed since the migration applied. Once the new
+  data has replaced the old, the prior rows are gone. `aqueduct
+  rollback` reports the lossless window expiry time (estimated from
+  the schedule of the slowest affected node) and requires
+  `--accept-data-loss` if the window has passed.
+- For **blue/green** deployments: the blue schema is retained until
+  `--blue-ttl` expires (default 1 hour). Rollback within this period
+  simply swaps the consumer views back to blue and drops green. After
+  expiry, rollback requires a new forward migration from the green
+  state.
+
+`aqueduct rollback` never rolls back base-table DDL (Tier 1 changes
+from §10.5). The operator must supply a compensating Atlas migration
+for any base-table changes.
+
 ### 5.7 Cross-environment promotion with parameterisation
 
 The same migration directory targets dev, staging, and prod with
@@ -457,6 +483,24 @@ Each stream-table delta is classified into one of four migration kinds:
 | **Rebuild** | Change `GROUP BY` keys, change a join condition | Drop + recreate + `FULL` refresh |
 | **Blue/green** | Restructure the topology of a sub-DAG | Build green alongside blue, swap atomically |
 
+**Query pre-validation:** Before classifying any new or changed
+stream-table query, `aqueduct plan` runs two validation passes:
+
+1. **Parse check** — `pg_query.rs` parses the SQL. A parse failure
+   is a plan error: the migration is rejected before any step is
+   emitted, with the parse error surfaced directly.
+2. **IVM-supportability check** — the same rules `pg_trickle` applies
+   at `create_stream_table` time (volatile functions, unsupported
+   aggregates, non-deterministic expressions). If the query is not
+   differentiable and `refresh_mode = 'DIFFERENTIAL'`, `aqueduct plan`
+   reports this as a **plan error** (not a warning). The `--auto-
+   downgrade-refresh-mode` flag allows the planner to automatically
+   reclassify to `FULL` in this case.
+
+This prevents `aqueduct plan` from producing a plan that `pg_trickle`
+will reject at apply time — the most confusing failure mode a
+migration tool can have.
+
 The classifier is the project's intellectual core. Many of the
 "in-place" cases require the **same delta-rule reasoning** that
 `pg_trickle`'s DVM operators already do — there is a real opportunity
@@ -477,6 +521,8 @@ A plan is an ordered list of *steps*; each step is one of:
 - `RecordSnapshot { version }`
 - `WaitForRefresh { name, deadline }`
 - `RunHook { name, statement }` (user-defined SQL pre/post)
+- `RecreatePolicy { name, policy_sql }` (restore RLS policies lost in rebuild)
+- `ValidateQuery { name, query }` (IVM-supportability pre-check; always first)
 
 Execution is transactional where possible (most `ALTER` paths fit in
 one transaction); for steps that cannot be transactional (CONCURRENTLY
@@ -553,6 +599,38 @@ When the extension is absent, the CLI detects this and falls back to
 polling-based drift detection (comparing `pg_attribute` snapshots
 between runs). See §10.7 for the full architectural analysis.
 
+#### Catalog self-migration ("migrate the migrator")
+
+The catalog schema (`aqueduct.*` tables) will evolve across CLI
+versions. The CLI handles this automatically:
+
+1. **Version tagging.** The `aqueduct.cluster_profile` table stores
+   the `aqueduct_catalog_version` key (an integer). This is set to
+   `0` on `aqueduct init` and incremented each time the catalog
+   schema is upgraded.
+2. **Auto-upgrade on startup.** Every CLI command begins by comparing
+   its compiled-in `CATALOG_SCHEMA_VERSION` constant against the
+   value in the database. If the database is behind, the CLI applies
+   the pending catalog migrations from its embedded SQL bundle — in
+   a single transaction — before doing anything else.
+3. **Embedded SQL bundle.** Catalog migrations live in
+   `aqueduct-core/src/catalog/migrations/V{N}__description.sql`.
+   They are embedded at compile time via `include_str!()` and
+   shipped inside the binary. No external files are needed at
+   runtime.
+4. **Backward-incompatible catalog changes.** Any migration that
+   removes a column or changes a type requires a `min_cli_version`
+   guard in the catalog migration SQL. The CLI refuses to apply
+   against a catalog version it does not understand and prints a
+   clear upgrade path.
+5. **Bootstrapping.** Because the CLI migrates its own catalog before
+   doing anything else, there is no chicken-and-egg problem: a fresh
+   `aqueduct init` runs all catalog migrations from `V0` onward,
+   and an upgrade run only applies the deltas since the last known
+   version.
+
+
+
 ### 7.6 Locking & concurrency
 
 - **One project, one writer.** A row lock on `aqueduct.locks` (with
@@ -596,6 +674,9 @@ Goal: `aqueduct plan` is useful even without `apply`.
 Exit criteria: against a 20-node DAG on a Testcontainers Postgres,
 `aqueduct plan` produces a correct plan for the cartesian product of
 {add, drop, change SQL, change schedule, change refresh_mode}.
+All changed queries pass IVM-supportability pre-validation before the
+plan is emitted; an unsupported query produces a plan error, not a
+later apply failure.
 
 ### Phase 2 — Apply (in-place + rebuild) (2 weeks)
 
@@ -604,7 +685,11 @@ Exit criteria: against a 20-node DAG on a Testcontainers Postgres,
 - Snapshot recording into `aqueduct.dag_versions`.
 - `aqueduct apply --resume` resumes after a crash.
 - Pause/resume integration with `pg_trickle` scheduler.
-- `aqueduct rollback`.
+- `aqueduct rollback` (with lossless-window enforcement per §5.6).
+- `aqueduct import` — bootstrap from the live catalog (§10.21).
+  Ships alongside `apply` so early adopters can onboard immediately.
+- `RecreatePolicy` step: detect and re-apply RLS policies dropped
+  during rebuild-class migrations.
 
 Exit criteria: a randomised property test that runs N random
 plan→apply→plan→apply cycles on a Testcontainers cluster and asserts
@@ -864,7 +949,43 @@ extension grows scope. The medium-term answer is a shared
 `pg_trickle_calculus` crate (§9). The short-term answer is to ship a
 vendored copy and add a CI job that diffs the two.
 
-### 10.9 Blue/green atomicity — how do consumers cut over?
+### 10.9 Diamond DAG consistency during migration
+
+**Problem:** `pg_trickle` supports `diamond_consistency = 'atomic'`
+— nodes that converge in a diamond topology are refreshed as an
+atomic group (SAVEPOINT-protected). If `aqueduct plan` produces a
+migration that touches nodes in such a diamond and assigns them
+*different* migration classes (one is "free", another is "rebuild"),
+the diamond's data consistency invariant can be violated: the free
+node updates while the rebuild node is momentarily empty.
+
+**Recommendation: diamond groups are always migrated as a unit.**
+
+1. `aqueduct plan` detects diamond groups by querying
+   `pgtrickle.pgt_stream_tables` for nodes that share
+   `diamond_consistency = 'atomic'` membership (or by traversing
+   the dependency graph for convergence nodes).
+2. All nodes in a diamond group are assigned the **highest migration
+   class** of any member. If one member is "rebuild", all members
+   are treated as "rebuild" — they are dropped and recreated
+   together. The plan renderer explains why: "node B upgraded to
+   rebuild class because it shares diamond group G with node A
+   (rebuild)."
+3. The group is migrated atomically: `LockDag`, alter/rebuild all
+   members, `RecordSnapshot`, `UnlockDag` — with no other nodes
+   refreshing in between (the scheduler is paused for all group
+   members simultaneously).
+4. `aqueduct plan` rejects any migration that would place diamond
+   group members into different schemas during a blue/green
+   deployment. Blue/green migrations that include a diamond must
+   move the entire diamond to the green schema together.
+
+**Implication for §10.5 Tier 1 (base-table changes):** A Tier 1
+alter to a column that feeds into a diamond node triggers the entire
+diamond group to be upgraded to the same class. This is conservative
+but safe.
+
+### 10.10 Blue/green atomicity — how do consumers cut over?
 
 **Problem:** When a blue/green deployment swaps the DAG from version N
 to version N+1, consumer queries (application reads, dashboards,
@@ -902,7 +1023,7 @@ be reconfigured), incompatible with connection poolers that strip
 session state (PgBouncer in transaction mode), and does not provide
 atomicity across multiple consumers.
 
-### 10.10 Failure recovery and partial state
+### 10.11 Failure recovery and partial state
 
 **Problem:** A migration can crash at any point — after the base-table
 ALTER but before the stream-table cascade, after 3 of 7 stream tables
@@ -938,7 +1059,7 @@ must inspect and either `--force-retry` or `--force-skip` the
 ambiguous step. Automatic guessing is not acceptable — this is the
 "data loss is unacceptable" principle from `pg_trickle`'s AGENTS.md.
 
-### 10.11 Concurrency contract with the `pg_trickle` scheduler
+### 10.12 Concurrency contract with the `pg_trickle` scheduler
 
 **Problem:** §7.6 says `aqueduct apply` calls
 `pgtrickle.pause_scheduler()`, but what if a refresh is already
@@ -973,7 +1094,7 @@ to `'999d'` (effectively infinite), applies the migration, then
 restores the original schedule. This is racy but acceptable for
 v0.1 against older clusters.
 
-### 10.12 Cost estimation
+### 10.13 Cost estimation
 
 **Problem:** `aqueduct apply --dry-run --explain-cost` promises
 per-step estimated row counts and refresh duration, but how accurate
@@ -1016,7 +1137,7 @@ BACKFILL customer_summary       340K          ~12s            in-place
 so the operator can decide whether to run it now or schedule it for
 the maintenance window.
 
-### 10.13 CLI upgrade mid-migration
+### 10.14 CLI upgrade mid-migration
 
 **Problem:** If the CLI binary is upgraded while a resumable migration
 is in-flight (e.g., operator deploys a new `aqueduct` version, then
@@ -1040,7 +1161,7 @@ runs `aqueduct apply --resume`), can it safely resume?
 as long as the new CLI is the same or newer major version. Downgrading
 is not supported (the old CLI may not understand new step types).
 
-### 10.14 HA / failover integration
+### 10.15 HA / failover integration
 
 **Problem:** In an HA cluster (Patroni, CloudNativePG, Stolon), the
 primary can change at any time. If `aqueduct apply` is mid-migration
@@ -1073,7 +1194,7 @@ the current primary, avoiding stale DNS.
 can read the `cnpg.io/cluster` annotation to discover the current
 primary service endpoint.
 
-### 10.15 Schedule resolution during DAG restructuring
+### 10.16 Schedule resolution during DAG restructuring
 
 **Problem:** If a downstream node has `schedule = 'calculated'` and
 its upstream dependencies are restructured (a new parent is added, a
@@ -1108,7 +1229,7 @@ construction. `pg_trickle` already prevents cycles in the DAG.
 (by running the same topological-sort + cycle-detection as
 `pg_trickle`'s `dag.rs`).
 
-### 10.16 Version compatibility matrix
+### 10.17 Version compatibility matrix
 
 **Problem:** Which `pg_trickle` versions can a given `aqueduct` CLI
 target? How is this tested?
@@ -1135,7 +1256,7 @@ v0.{min}–v0.{latest}. After both projects reach 1.0, the policy
 tightens to `aqueduct` 1.x supports `pg_trickle` 1.x (same major
 version, any minor).
 
-### 10.17 Consumer-layer management
+### 10.18 Consumer-layer management
 
 **Problem:** §7.3 mentions a three-layer model with a "consumer
 layer (v1.1+)" but does not define what this entails.
@@ -1171,7 +1292,7 @@ exports, webhook notifications, `pg_tide` outbox entries. Managing
 these requires understanding external system APIs and is a different
 problem class. Defer to `pg_tide` and purpose-built connectors.
 
-### 10.18 Project scope definition — what is a "project"?
+### 10.19 Project scope definition — what is a "project"?
 
 **Problem:** One migrations directory per project. But what is a
 project? One DAG? Multiple DAGs? If a company has 50 independent
@@ -1212,7 +1333,7 @@ name = "checkout-analytics"   # used as the lock key and version namespace
 | Medium (10–50) | 2–5 projects, grouped by domain (orders, inventory, analytics) |
 | Large (50–200+) | One project per bounded context; each project has its own `aqueduct.toml`, CI pipeline, and deployment cadence |
 
-### 10.19 Security model
+### 10.20 Security model
 
 **Problem:** `pg_aqueduct` connects to production databases with
 `ALTER TABLE`, `DROP`, and `CREATE` privileges. The CLI stores
@@ -1243,7 +1364,7 @@ roles, or audit logging.
    open read-only transactions (`SET TRANSACTION READ ONLY`) to
    guarantee they cannot accidentally modify data.
 
-### 10.20 IMMEDIATE mode stream tables during migration
+### 10.21 IMMEDIATE mode stream tables during migration
 
 **Problem:** Stream tables with `refresh_mode = 'IMMEDIATE'` use
 synchronous, in-transaction, statement-level triggers instead of
@@ -1274,7 +1395,7 @@ transaction.**
    temporarily downgrade an IMMEDIATE table, forcing the operator
    to schedule the migration during a maintenance window instead.
 
-### 10.21 Adoption path for existing `pg_trickle` users
+### 10.22 Adoption path for existing `pg_trickle` users
 
 **Problem:** Existing `pg_trickle` deployments have stream tables
 created via ad-hoc `SELECT pgtrickle.create_stream_table(...)` calls.
@@ -1311,7 +1432,7 @@ do not need to adopt the view indirection for non-blue/green
 migrations. The view layer is only introduced when the user first
 runs a blue/green deployment.
 
-### 10.22 `aqueduct destroy` — tearing down a project
+### 10.23 `aqueduct destroy` — tearing down a project
 
 **Problem:** There is no documented way to cleanly remove an entire
 project's DAG, catalog entries, and lock rows.
