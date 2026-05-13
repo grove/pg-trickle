@@ -38,10 +38,13 @@
 > **Terraform** is to infrastructure.
 >
 > Estimated effort to a usable v0.1 (plan + apply + rollback +
-> import): **~4 weeks** for one engineer (Phase 0 = 3 days, Phase 1
-> = 1.5 weeks, Phase 2 = 2 weeks). v1.0 (online schema evolution,
-> blue/green deployments, drift detection, CI integrations, optional
-> extension) is a **~14 week** project (Phases 0–7).
+> import): **4–8 weeks** for one engineer (Phase 0 = 3 days, Phase 1
+> = 1–2 weeks, Phase 2 = 2–4 weeks; range accounts for unforeseen
+> complexity in the differ and `pg_trickle` API gaps). v1.0 (online
+> schema evolution, blue/green deployments, drift detection, CI
+> integrations, optional extension) is a **14–22 week** project
+> (Phases 0–7; the upper bound covers Phase 3 classifier complexity
+> and Phase 4 blue/green atomicity edge cases).
 
 ---
 
@@ -144,6 +147,7 @@ $ aqueduct plan --to prod          # diff desired vs actual; produce a plan
 $ aqueduct apply --to prod         # execute the plan, record migration
 $ aqueduct status --to prod        # show drift, last migration, lag
 $ aqueduct rollback --to prod      # revert to the previous DAG version
+$ aqueduct validate                # check migrations offline (no DB)
 $ aqueduct preview --branch feat-x # spin up a preview DAG on a branch DB
 $ aqueduct destroy --to prod       # tear down the entire project's DAG
 ```
@@ -297,6 +301,16 @@ node. Specifically:
 `aqueduct rollback` never rolls back base-table DDL (Tier 1 changes
 from §10.5). The operator must supply a compensating Atlas migration
 for any base-table changes.
+
+**Multi-version rollback.** `aqueduct rollback --to-version v15`
+(when current is v18) computes a *forward migration plan* from the
+current state to the v15 state — it does not replay individual
+rollbacks in reverse. This is equivalent to `aqueduct plan` with
+the v15 spec as the desired state. The rollback is therefore always
+a single atomic operation, regardless of how many versions are being
+skipped. The intermediate versions (v16, v17) are never visited.
+This avoids the "cascading rollback" problem where each intermediate
+version must be applied and verified.
 
 ### 5.7 Cross-environment promotion with parameterisation
 
@@ -520,6 +534,48 @@ The format is intentionally simple — a folder of SQL files with
 front-matter directives — so that diffs in PRs are readable and so
 that interop with dbt-compiled artefacts is trivial.
 
+**Front-matter directive syntax.** Directives are SQL line comments
+with the prefix `@aqueduct:`. The grammar is:
+
+```
+directive ::= "-- @aqueduct:" key SP* "=" SP* value NL
+key       ::= [a-z_]+
+value     ::= toml-inline-value
+```
+
+Values use TOML inline syntax: strings in double quotes, arrays in
+brackets, booleans bare. Examples:
+
+```sql
+-- @aqueduct:depends_on    = ["raw.orders", "raw.customers"]
+-- @aqueduct:schedule      = "{{ var.schedule }}"
+-- @aqueduct:refresh_mode  = "DIFFERENTIAL"
+-- @aqueduct:owned         = false
+```
+
+Directives must appear before the first non-comment, non-blank line.
+Unknown keys are a lint warning (not an error) to allow
+forward-compatibility with newer CLI versions.
+
+**Migration file ordering.** The migrations directory is
+*unordered* — there are no sequence numbers or timestamps in
+filenames. `aqueduct plan` derives execution order from the DAG
+topology (dependency edges), not from file names or filesystem
+timestamps. This eliminates the merge-conflict problem that plagues
+timestamp-ordered migration tools (Flyway, Alembic) when two
+branches add migrations concurrently.
+
+Consequence: the file `order_totals.sql` can be created by PR A and
+`customer_summary.sql` by PR B independently. When both merge, the
+next `aqueduct plan` sees two new nodes and orders them by their
+dependency edges. If they have no edges between them, they are
+independent and can be created in either order (the planner picks
+a stable deterministic tiebreak: lexicographic by qualified name).
+
+The only ordering constraint is the one the user declares: SQL-level
+references (which the parser extracts automatically) and explicit
+`@aqueduct:depends_on` directives.
+
 ### 7.3 Diffing strategy
 
 `aqueduct plan` produces a plan by walking three sources of truth:
@@ -591,6 +647,19 @@ stream-table query, `aqueduct plan` runs two validation passes:
 This prevents `aqueduct plan` from producing a plan that `pg_trickle`
 will reject at apply time — the most confusing failure mode a
 migration tool can have.
+
+**`--auto-downgrade-refresh-mode` safety.** This flag allows the
+planner to automatically reclassify a `DIFFERENTIAL` stream table to
+`FULL` when the new query is not IVM-supportable. Because this has
+major performance implications (FULL refreshes can be orders of
+magnitude slower), the flag is **not** a silent default. When
+triggered, the plan renderer emits a prominent warning:
+"⚠ Stream table `foo` downgraded from DIFFERENTIAL to FULL — query
+is not IVM-supportable. This will increase refresh cost from ~0ms to
+~estimated_duration." The `aqueduct lint` command flags any migration
+file that would trigger a downgrade as a warning, suggesting that the
+user either fix the query to be IVM-compatible or explicitly set
+`refresh_mode = "FULL"` in the front-matter.
 
 **`pg_eddy` Cypher sources:** A stream table sourced from a `pg_eddy`
 MATCH query is defined in Cypher, which `pg_eddy` translates to SQL at
@@ -763,6 +832,25 @@ versions. The CLI handles this automatically:
 - **HA aware.** Refuses to apply against a hot standby; integrates
   with Patroni / CloudNativePG primary-promotion events.
 
+**Lock heartbeat protocol.** The `aqueduct.locks` row has a `ttl`
+column (default: `lock_timeout` from `aqueduct.toml`, typically 30s).
+During long-running migrations (backfills can take hours), the CLI
+runs a background task that updates `acquired_at` every `ttl / 3`.
+This prevents the lock from expiring while the migration is
+legitimately in progress. If the CLI crashes, the heartbeat stops,
+and the lock expires after one `ttl` — at which point `aqueduct
+apply --resume` (from the same or another process) can take over.
+
+**Observability.** Every `aqueduct` command emits structured JSON
+logs to stderr (when `--log-format json` is set, default for CI
+environments). Each plan step emits a log line with:
+`{"step": "Backfill", "table": "order_totals", "status":
+"started", "elapsed_ms": 0}`. For long-running steps, progress
+events are emitted periodically. The `apply` command also sets
+`application_name` on the Postgres connection to
+`aqueduct/<project>/<migration_id>` so that in-flight migrations
+are visible in `pg_stat_activity`.
+
 ---
 
 ## 8. Implementation Plan
@@ -792,6 +880,15 @@ Goal: `aqueduct plan` is useful even without `apply`.
 - Human-readable plan renderer (text, JSON, markdown — the markdown
   output is what CI posts to PRs).
 - Drift report.
+
+- `aqueduct validate` — offline check (no database connection):
+  parses all migration files, validates front-matter syntax, checks
+  SQL via `pg_query.rs`, detects dependency cycles in the declared
+  DAG, and reports errors. Useful in pre-commit hooks and CI jobs
+  where a DB connection is unavailable. Does *not* check
+  IVM-supportability (that requires knowing `pg_trickle`'s exact
+  capabilities, which vary by version — use `aqueduct plan` for
+  that).
 
 Exit criteria: against a 20-node DAG on a Testcontainers Postgres,
 `aqueduct plan` produces a correct plan for the cartesian product of
@@ -957,6 +1054,28 @@ Mitigation:
 - a `--strict` mode that refuses any unproven in-place path;
 - property-based tests that compare in-place result to from-scratch
   rebuild.
+
+**Specific classification rules (initial set):**
+
+| Change | Class | Rationale |
+|---|---|---|
+| Schedule, `cdc_mode`, `refresh_mode` DIFF→FULL | Free | Metadata-only; `alter_stream_table` handles it |
+| Add a non-aggregate passthrough column | In-place | Column appears in SELECT but not in GROUP BY or aggregate; backfill is incremental |
+| Widen a column type (`int → bigint`, `varchar(50) → varchar(200)`) | In-place | Type-compatible; existing rows remain valid |
+| Add a new aggregate column (SUM, COUNT, etc.) | In-place | New column is NULL for existing rows; backfill populates it |
+| Drop a column from SELECT | In-place | `ALTER ... DROP COLUMN` on the materialised table |
+| Rename a column | Rebuild | Cannot rename in-place without losing delta-state tracking |
+| Change GROUP BY keys | Rebuild | Entire aggregation structure changes |
+| Change a JOIN condition | Rebuild | Row membership changes unpredictably |
+| Add/remove a JOIN | Rebuild | Source set changes |
+| Change WHERE predicate | Rebuild | Row membership changes |
+| Switch `refresh_mode` FULL→DIFF | Rebuild | Must establish delta-tracking state from scratch |
+| Topology change (split/merge nodes) | Blue/green | Structural DAG change |
+
+These are initial conservative rules. The `pg_trickle_calculus`
+shared crate (§9) may eventually prove more changes safe for
+in-place migration by applying the same delta-rule reasoning that
+the DVM engine uses internally.
 
 ### 10.4 Single-writer assumption
 
