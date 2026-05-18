@@ -68,7 +68,7 @@ jobs:
 
       # ── Build E2E Docker image ───────────────────────────────────────────────
       - name: Build E2E Docker image
-        run: just build-e2e-image
+        run: ./tests/build_e2e_image.sh
         timeout-minutes: 30
 
       # ── Install cargo-nextest ────────────────────────────────────────────────
@@ -107,7 +107,7 @@ jobs:
 
       # ── Upload artifacts ─────────────────────────────────────────────────────
       - name: Upload EXPLAIN artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: tpch-explain-artifacts-sf${{ inputs.tpch_scale || '1.0' }}-${{ github.run_number }}
