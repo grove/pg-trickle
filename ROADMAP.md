@@ -171,7 +171,7 @@ arc resolves all findings before v1.0.
 Two releases targeting scheduler throughput: eliminating redundant change-buffer
 scans via fan-out, adding the `pause_scheduler` / `resume_scheduler` /
 `stream_table_spec` SQL API required by the planned `pg_aqueduct` migration tool
-([plans/pg-aqueduct-plan.md](plans/pg-aqueduct-plan.md)), and implementing
+([pg-aqueduct plan](https://github.com/trickle-labs/pg-aqueduct/blob/main/plans/pg-aqueduct-plan.md)), and implementing
 fused CTE refresh to reduce per-tick statement overhead for multi-node DAGs.
 
 | Version | Theme | Status | Scope | Full details |
