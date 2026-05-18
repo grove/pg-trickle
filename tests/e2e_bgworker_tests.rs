@@ -438,17 +438,14 @@ async fn test_auto_refresh_differential_with_cdc() {
     db.execute("INSERT INTO buf_src VALUES (3, 'c')").await;
 
     // Wait for auto-refresh to pick up the new rows
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(60);
-    loop {
-        if start.elapsed() > timeout {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if db.count("public.buf_st").await >= 3 {
-            break;
-        }
-    }
+    let _ = db
+        .wait_for_condition(
+            "buf_st has 3 rows",
+            "SELECT (SELECT count(*) FROM public.buf_st) >= 3",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
+        .await;
 
     assert_eq!(
         db.count("public.buf_st").await,
@@ -491,19 +488,15 @@ async fn test_scheduler_refreshes_multiple_healthy_sts() {
     db.execute("INSERT INTO h_src2 VALUES (2, 21)").await;
 
     // Wait for both to be refreshed (poll row counts)
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(60);
-    loop {
-        if start.elapsed() > timeout {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let c1 = db.count("public.h_st1").await;
-        let c2 = db.count("public.h_st2").await;
-        if c1 == 2 && c2 == 2 {
-            break;
-        }
-    }
+    let _ = db
+        .wait_for_condition(
+            "h_st1 and h_st2 both have 2 rows",
+            "SELECT (SELECT count(*) FROM public.h_st1) = 2 \
+             AND (SELECT count(*) FROM public.h_st2) = 2",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+        )
+        .await;
 
     assert_eq!(
         db.count("public.h_st1").await,

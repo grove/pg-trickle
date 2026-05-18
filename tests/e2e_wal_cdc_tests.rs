@@ -108,8 +108,7 @@ async fn test_explicit_wal_override_transitions_even_with_global_trigger() {
 
     db.execute("ALTER SYSTEM SET pg_trickle.cdc_mode = 'trigger'")
         .await;
-    db.execute("SELECT pg_reload_conf()").await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    db.reload_config_and_wait().await;
 
     db.execute("CREATE TABLE wal_override_src (id INT PRIMARY KEY, val TEXT)")
         .await;
@@ -276,7 +275,9 @@ async fn test_wal_cdc_captures_insert() {
     // use or backend SPI context recovering).  Wait for a few ticks to clear
     // before injecting DML so the DML changes are not in-flight when an error
     // counter could trigger premature fallback to trigger mode.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let _ = db
+        .wait_for_auto_refresh("wal_ins_st", Duration::from_secs(15))
+        .await;
 
     // Insert new rows — WAL decoder should capture them
     db.execute("INSERT INTO wal_ins VALUES (2, 'b'), (3, 'c')")

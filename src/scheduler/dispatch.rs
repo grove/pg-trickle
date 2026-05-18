@@ -137,11 +137,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         }
     }));
 
-    log!(
+    info!(
         "pg_trickle refresh worker: started (db='{}', job_id={}, pid={})",
-        db_name,
-        job_id,
-        my_pid,
+        db_name, job_id, my_pid,
     );
 
     // Claim the job: QUEUED → RUNNING
@@ -162,7 +160,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     }));
 
     if !claimed {
-        log!(
+        info!(
             "pg_trickle refresh worker: job {} already claimed or cancelled, exiting",
             job_id
         );
@@ -178,7 +176,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     let job = match job {
         Some(j) => j,
         None => {
-            log!(
+            warning!(
                 "pg_trickle refresh worker: job {} not found after claim, exiting",
                 job_id
             );
@@ -193,11 +191,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
     // Validate: DAG version hasn't become obsolete
     let current_dag_version = shmem::current_dag_version();
     if (current_dag_version as i64) > job.dag_version + 1 {
-        log!(
+        info!(
             "pg_trickle refresh worker: job {} dag_version={} is stale (current={}), cancelling",
-            job_id,
-            job.dag_version,
-            current_dag_version,
+            job_id, job.dag_version, current_dag_version,
         );
         BackgroundWorker::transaction(AssertUnwindSafe(|| {
             let _ = SchedulerJob::cancel(job_id, "DAG version obsolete");
@@ -246,7 +242,7 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
             // PostgreSQL, so we record the failure in a fresh transaction.
             let error_msg = extract_panic_message(&panic_payload);
 
-            log!(
+            warning!(
                 "pg_trickle refresh worker: job {} panicked (PG ERROR): {}",
                 job_id,
                 error_msg,
@@ -298,11 +294,9 @@ pub extern "C-unwind" fn pg_trickle_refresh_worker_main(_arg: pg_sys::Datum) {
         let _ = SchedulerJob::complete(job_id, status, panic_error_msg.as_deref(), retryable);
     }));
 
-    log!(
+    info!(
         "pg_trickle refresh worker: job {} finished with {} (db='{}')",
-        job_id,
-        status,
-        db_name,
+        job_id, status, db_name,
     );
 
     // Release the cluster-wide worker token
@@ -609,7 +603,7 @@ pub(super) fn parallel_dispatch_tick(
     // RUNNING job whose worker_pid is no longer in pg_stat_activity.
     let reaped = reap_dead_worker_jobs();
     if reaped > 0 {
-        log!(
+        info!(
             "pg_trickle: parallel dispatch — reaped {} orphaned job(s) with dead workers",
             reaped,
         );
@@ -627,10 +621,9 @@ pub(super) fn parallel_dispatch_tick(
 
         let shmem_count = shmem::active_worker_count();
         if shmem_count != live_workers {
-            log!(
+            info!(
                 "pg_trickle: parallel dispatch — correcting worker count: shmem={} → live={}",
-                shmem_count,
-                live_workers,
+                shmem_count, live_workers,
             );
             shmem::set_active_worker_count(live_workers);
             shmem::bump_reconcile_epoch();
@@ -648,7 +641,7 @@ pub(super) fn parallel_dispatch_tick(
         let job = match SchedulerJob::get_by_id(job_id) {
             Ok(Some(j)) => j,
             Ok(None) => {
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — job {} vanished, treating as failure",
                     job_id,
                 );
@@ -659,7 +652,7 @@ pub(super) fn parallel_dispatch_tick(
                 continue;
             }
             Err(e) => {
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — error polling job {}: {}",
                     job_id,
                     e,
@@ -702,7 +695,7 @@ pub(super) fn parallel_dispatch_tick(
                     }
                 }
 
-                log!(
+                info!(
                     "pg_trickle: parallel dispatch — unit completed (job {})",
                     job_id,
                 );
@@ -712,7 +705,7 @@ pub(super) fn parallel_dispatch_tick(
                     let retry = retry_states.entry(rpid).or_default();
                     let will_retry = retry.record_failure(retry_policy, now_ms);
                     if will_retry {
-                        log!(
+                        warning!(
                             "pg_trickle: parallel dispatch — job {} failed (retryable), backoff {}ms",
                             job_id,
                             retry_policy.backoff_ms(retry.attempts - 1),
@@ -723,7 +716,7 @@ pub(super) fn parallel_dispatch_tick(
                         // remain permanently blocked because the failed unit
                         // never sets succeeded=true and remaining_upstreams
                         // is never decremented.
-                        log!(
+                        warning!(
                             "pg_trickle: parallel dispatch — job {} retries exhausted, unblocking downstreams",
                             job_id,
                         );
@@ -743,7 +736,7 @@ pub(super) fn parallel_dispatch_tick(
                 if let Some(rpid) = root_pgt_id {
                     retry_states.entry(rpid).or_default().reset();
                 }
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — job {} failed permanently",
                     job_id,
                 );
@@ -798,7 +791,7 @@ pub(super) fn parallel_dispatch_tick(
     let topo_order = match eu_dag.topological_order() {
         Ok(order) => order,
         Err(e) => {
-            log!("pg_trickle: parallel dispatch — topo order failed: {}", e);
+            warning!("pg_trickle: parallel dispatch — topo order failed: {}", e);
             return;
         }
     };
@@ -842,7 +835,7 @@ pub(super) fn parallel_dispatch_tick(
             Ok(true) => continue,
             Ok(false) => {}
             Err(e) => {
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — inflight check error for {}: {}",
                     unit.label,
                     e,
@@ -881,7 +874,7 @@ pub(super) fn parallel_dispatch_tick(
         }
 
         if !shmem::try_acquire_worker_token(max_cluster) {
-            log!(
+            info!(
                 "pg_trickle: parallel dispatch — worker budget exhausted ({}/{})",
                 shmem::active_worker_count(),
                 max_cluster,
@@ -914,7 +907,7 @@ pub(super) fn parallel_dispatch_tick(
             }
             Err(e) => {
                 shmem::release_worker_token();
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — failed to enqueue job for {}: {}",
                     unit.label,
                     e,
@@ -929,11 +922,9 @@ pub(super) fn parallel_dispatch_tick(
         state.per_db_inflight += 1;
         pending_spawns.push((db_name.to_string(), job_id));
 
-        log!(
+        info!(
             "pg_trickle: parallel dispatch — enqueued {} (job_id={}, kind={})",
-            unit.label,
-            job_id,
-            unit.kind,
+            unit.label, job_id, unit.kind,
         );
     }
 
@@ -959,7 +950,7 @@ pub(super) fn parallel_dispatch_tick(
                 us.succeeded = false;
                 us.remaining_upstreams = eu_dag.get_upstream_units(uid).len();
             }
-            log!(
+            info!(
                 "pg_trickle: parallel dispatch — wave complete, reset {} unit(s)",
                 state.unit_states.len()
             );
@@ -1007,14 +998,14 @@ pub fn reconcile_parallel_state() {
     // Step 1: Cancel orphaned jobs
     match SchedulerJob::cancel_orphaned_jobs() {
         Ok(count) if count > 0 => {
-            log!(
+            info!(
                 "pg_trickle: parallel reconciliation — cancelled {} orphaned job(s)",
                 count
             );
         }
         Ok(_) => {}
         Err(e) => {
-            log!(
+            warning!(
                 "pg_trickle: parallel reconciliation — orphan cleanup error: {}",
                 e
             );
@@ -1033,10 +1024,9 @@ pub fn reconcile_parallel_state() {
     // Step 3: Correct shared-memory counter if needed
     let shmem_count = shmem::active_worker_count();
     if shmem_count != live_workers {
-        log!(
+        info!(
             "pg_trickle: parallel reconciliation — correcting worker count: shmem={} → live={}",
-            shmem_count,
-            live_workers,
+            shmem_count, live_workers,
         );
         shmem::set_active_worker_count(live_workers);
         shmem::bump_reconcile_epoch();
@@ -1045,14 +1035,14 @@ pub fn reconcile_parallel_state() {
     // Step 4: Prune old completed jobs (keep last 1 hour)
     match SchedulerJob::prune_completed(3600) {
         Ok(count) if count > 0 => {
-            log!(
+            info!(
                 "pg_trickle: parallel reconciliation — pruned {} old job(s)",
                 count
             );
         }
         Ok(_) => {}
         Err(e) => {
-            log!("pg_trickle: parallel reconciliation — prune error: {}", e);
+            warning!("pg_trickle: parallel reconciliation — prune error: {}", e);
         }
     }
 }

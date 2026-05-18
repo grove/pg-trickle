@@ -473,7 +473,7 @@ async fn test_upgrade_chain_new_functions_exist() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -557,7 +557,7 @@ async fn test_upgrade_chain_stream_tables_survive() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     // The .so binary is always the current version. Calling pg_trickle functions
     // requires the SQL catalog to match — skip when upgrading to an older version.
@@ -633,7 +633,7 @@ async fn test_upgrade_chain_views_queryable() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -676,7 +676,7 @@ async fn test_upgrade_chain_event_triggers_present() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     let db = E2eDb::new_without_extension().await;
     db.execute(&format!(
@@ -719,7 +719,7 @@ async fn test_upgrade_chain_version_consistency() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     // This assertion only holds when the SQL extension version being tested
     // matches the compiled binary version loaded in the container.
@@ -773,7 +773,7 @@ async fn test_upgrade_chain_function_parity_with_fresh_install() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     let db = E2eDb::new_without_extension().await;
 
@@ -841,7 +841,7 @@ async fn test_upgrade_schema_additions_from_sql() {
         return;
     }
     let from_version = std::env::var("PGS_UPGRADE_FROM").unwrap();
-    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.59.0".into());
+    let to_version = std::env::var("PGS_UPGRADE_TO").unwrap_or("0.60.0".into());
 
     let db = E2eDb::new_without_extension().await;
 

@@ -57,6 +57,20 @@ pub(crate) mod rebuild;
 /// Polling-based CDC for foreign tables and materialized views.
 pub(crate) mod polling;
 
+// ── QUAL-3 (v0.60.0): Further module decomposition ────────────────────────
+
+/// Trigger SQL builders and column-name escaping (QUAL-3).
+pub(crate) mod triggers;
+
+/// Change-buffer naming helpers (QUAL-3).
+pub(crate) mod buffer;
+
+/// Compaction result type (QUAL-3).
+pub(crate) mod compact;
+
+/// Buffer auto-promotion decision logic (QUAL-3).
+pub(crate) mod partition;
+
 // Re-export all public items from submodules to preserve the existing API.
 pub use polling::{
     poll_foreign_table_changes, poll_matview_changes, setup_foreign_table_polling,
@@ -71,26 +85,10 @@ pub use rebuild::{
     rebuild_cdc_trigger_function, trigger_exists,
 };
 
-// ── Reserved change-buffer column names ────────────────────────────────────
-
-/// Built-in CDC metadata column names that live at the top of every change-buffer
-/// table.  A source table column with any of these names would collide with the
-/// metadata column in a flat (A44-10 D+I) change-buffer schema.
-const RESERVED_CB_COLS: &[&str] = &["change_id", "lsn", "action", "pk_hash", "changed_cols"];
-
-/// Map a *source* column name to its change-buffer storage name.
-///
-/// When a source column name matches one of [`RESERVED_CB_COLS`], the column is
-/// stored in the change buffer as `__usr_{name}` to prevent a
-/// `column "…" specified more than once` error in PostgreSQL.
-/// All other names pass through unchanged.
-pub fn cb_col_name(name: &str) -> String {
-    if RESERVED_CB_COLS.contains(&name) {
-        format!("__usr_{name}")
-    } else {
-        name.to_string()
-    }
-}
+// ── Reserved change-buffer column names ─────────────────────────────────────
+// Moved to src/cdc/triggers.rs (QUAL-3). Re-exported here for API compatibility.
+pub use triggers::build_changed_cols_bitmask_expr;
+pub use triggers::cb_col_name;
 
 // ── CITUS-4: Stable buffer naming helpers ──────────────────────────────────
 
@@ -430,65 +428,31 @@ pub fn drop_change_trigger(
 ///
 /// `columns` contains the source table column definitions as
 /// `(column_name, sql_type_name)` pairs from `resolve_source_column_defs()`.
-/// WB-1: Build the PL/pgSQL expression for the `changed_cols` VARBIT bitmask.
-///
-/// Bit at position `i` (leftmost = 0) is B'1' when
-/// `NEW.col_i IS DISTINCT FROM OLD.col_i`, allowing the scan delta to
-/// determine which columns were actually modified by an UPDATE.
-/// VARBIT supports tables with arbitrarily many columns — one bit per column.
-///
-/// Returns `None` for keyless tables (`pk_columns` empty): all columns
-/// contribute to the content hash and must always be present.
-///
-/// For INSERT and DELETE rows `changed_cols` is stored as `NULL`, indicating
-/// that all new_*/old_* column values are populated (backward-compatible).
-pub fn build_changed_cols_bitmask_expr(
-    pk_columns: &[String],
-    columns: &[(String, String)],
-) -> Option<String> {
-    if pk_columns.is_empty() {
-        return None; // keyless: must always write all columns
-    }
-    let parts: Vec<String> = columns
-        .iter()
-        .map(|(col_name, type_name)| {
-            let qcol = col_name.replace('"', "\"\"");
-            // pgvector types (vector, halfvec, sparsevec) do not define an '='
-            // operator, so IS DISTINCT FROM (which uses '=') would fail.
-            // Cast to text for comparison — text always supports equality.
-            let base_type = type_name.split('(').next().unwrap_or("").trim();
-            let is_pgvector = matches!(base_type, "vector" | "halfvec" | "sparsevec");
-            if is_pgvector {
-                format!(
-                    "(CASE WHEN NEW.\"{qcol}\"::text IS DISTINCT FROM OLD.\"{qcol}\"::text \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            } else {
-                format!(
-                    "(CASE WHEN NEW.\"{qcol}\" IS DISTINCT FROM OLD.\"{qcol}\" \
-                     THEN B'1' ELSE B'0' END)::varbit"
-                )
-            }
-        })
-        .collect();
-    Some(parts.join(" ||\n        "))
-}
-
 /// CDC-2 (v0.24.0): Check if a partitioned source table's publication needs
 /// rebuilding to include `publish_via_partition_root = true`.
 ///
-/// Returns `true` if the source is a partitioned table (`relkind = 'p'`) and
-/// the publication either doesn't exist or doesn't have
-/// `publish_via_partition_root` enabled.
+/// Returns `true` when either:
+/// 1. The source is a partitioned table (`relkind = 'p'`) and the publication
+///    either doesn't exist or doesn't have `publish_via_partition_root` enabled.
+/// 2. (COR-6) The source OID has appeared in `pg_inherits.inhrelid` — i.e. a
+///    previously plain table has been attached as a partition of another table.
+///    This case requires a publication rebuild with `publish_via_partition_root`
+///    to prevent a silent CDC freeze.
 pub fn needs_publication_rebuild(source_relid: pg_sys::Oid) -> Result<bool, PgTrickleError> {
-    let is_partitioned = Spi::get_one_with_args::<bool>(
-        "SELECT relkind = 'p' FROM pg_catalog.pg_class WHERE oid = $1",
-        &[(source_relid.to_u32() as i64).into()],
+    let oid_val = source_relid.to_u32() as i64;
+
+    // COR-6: Also detect table-became-partition (appeared in pg_inherits.inhrelid).
+    let is_partitioned_or_child = Spi::get_one_with_args::<bool>(
+        "SELECT \
+            (relkind = 'p') OR \
+            EXISTS(SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid = $1) \
+         FROM pg_catalog.pg_class WHERE oid = $1",
+        &[oid_val.into()],
     )
     .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
     .unwrap_or(false);
 
-    if !is_partitioned {
+    if !is_partitioned_or_child {
         return Ok(false);
     }
 
@@ -943,20 +907,8 @@ pub fn count_downstream_st_consumers(pgt_id: i64) -> i64 {
     Spi::get_one::<i64>(&sql).unwrap_or(Some(0)).unwrap_or(0)
 }
 
-/// COR-4: Result type for [`compact_change_buffer`].
-///
-/// Distinguishes between "rows deleted", "skipped below threshold", and
-/// "could not acquire advisory lock" — the last case is now observable
-/// via the `pg_trickle_cdc_compact_contended_total` counter.
-#[derive(Debug)]
-pub enum CompactionResult {
-    /// No compaction was attempted (buffer below threshold).
-    BelowThreshold,
-    /// Advisory lock was held by a concurrent refresh; compaction skipped.
-    Contended,
-    /// Compaction ran and deleted `n` rows (may be 0 if nothing to remove).
-    Compacted(i64),
-}
+// QUAL-3: CompactionResult moved to src/cdc/compact.rs.
+pub use compact::CompactionResult;
 
 /// C-4: Compact a change buffer by eliminating net-zero pk_hash groups
 /// (INSERT followed by DELETE that cancel out) and collapsing multi-change
@@ -2302,23 +2254,8 @@ pub fn delete_consumed_changes(
 /// 1. `mode` is `"auto"`
 /// 2. The buffer is not already partitioned
 /// 3. `pending_count > threshold` and `threshold > 0`
-fn should_promote_inner(
-    pending_count: i64,
-    already_partitioned: bool,
-    mode: &str,
-    threshold: i64,
-) -> bool {
-    if already_partitioned {
-        return false;
-    }
-    if mode != "auto" {
-        return false;
-    }
-    if threshold <= 0 {
-        return false;
-    }
-    pending_count > threshold
-}
+// QUAL-3: should_promote_inner moved to src/cdc/partition.rs.
+use partition::should_promote_inner;
 
 /// Should an unpartitioned buffer be promoted to RANGE(lsn) partitioned mode?
 ///

@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.60.0 — Code Quality, Test Coverage & CI](#0600--code-quality-test-coverage--ci)
 - [0.59.0 — Performance & Observability](#0590--performance--observability)
 - [0.58.0 — Security & Correctness Hardening](#0580--security--correctness-hardening)
 - [0.57.0 — Documentation Excellence](#0570--documentation-excellence)
@@ -74,6 +75,57 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.60.0] — Code Quality, Test Coverage & CI
+
+### What's New
+
+This release focuses on engineering quality across three areas: code
+maintainability, test depth, and CI reliability.  There are no schema
+changes — all improvements are pure Rust.
+
+**Correctness fixes (COR-5, COR-6)**
+
+- **WAL decoder OID-based table filter (COR-5):** `poll_wal_changes` now
+  resolves canonical table names via `pg_class` and `pg_inherits` once per
+  poll cycle instead of string-matching against a user-supplied name.  This
+  correctly handles quoted identifiers, search-path-sensitive names, and
+  partition routing where a child table appears in `test_decoding` output.
+
+- **Publication rebuild detects table-becomes-partition (COR-6):** The
+  `needs_publication_rebuild` check now also detects when a plain source
+  table has been attached to a parent as a partition (`pg_inherits.inhrelid`).
+  Previously this condition was silently missed, causing CDC to freeze.
+
+**Code quality (QUAL-1–3)**
+
+- Scheduler log levels standardised: routine operational messages use
+  `info!()`, leaving `warning!()` and `error!()` for actionable conditions.
+- `refresh/codegen.rs` decomposed: pure SQL-fragment helpers moved into
+  `refresh/sql_fragments.rs` for independent testability.
+- `src/cdc.rs` decomposed into a proper module tree (`cdc/triggers.rs`,
+  `cdc/buffer.rs`, `cdc/compact.rs`, `cdc/partition.rs`).
+
+**Test coverage (TEST-1–5)**
+
+- Refresh orchestrator: 8 adaptive-threshold and cost-model unit tests.
+- CDC pure-logic: 13 unit tests across the new cdc/ submodules.
+- DDL hook classification: 14-case table-driven test.
+- Fixed brittle `sleep()` in 4 E2E tests — replaced with
+  `wait_for_condition` / `wait_for_auto_refresh` polling loops.
+- DVM differential engine: 4 property tests via `proptest`.
+
+**CI improvements (CI-1–3)**
+
+- Path-filtered full E2E job on PRs: the `full-e2e-on-dvm-change` job
+  automatically triggers the full E2E suite when a PR touches
+  `src/dvm/`, `src/refresh/`, or `src/cdc/`.
+- `tests/Dockerfile.e2e` now sets `USER postgres` — containers run as
+  the unprivileged OS user instead of root.
+- Codecov per-module thresholds added for `src/cdc/`, `src/hooks.rs`,
+  and `src/wal_decoder.rs` (50%, 40%, 40% patch coverage gates).
 
 ---
 

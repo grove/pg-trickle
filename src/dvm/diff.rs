@@ -1551,6 +1551,81 @@ mod tests {
     }
 }
 
+// ── TEST-5: Differential idempotence proptest ────────────────────────────────
+
+/// Property tests for differential pure-logic helpers.
+///
+/// These tests verify algebraic invariants of the quoting and column-list
+/// helpers used throughout the DVM SQL generation pipeline.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(1000))]
+
+        /// quote_ident idempotence: applying quote_ident twice to an already-
+        /// quoted identifier does NOT produce the original — the outer layer adds
+        /// a second pair of quotes.  What IS idempotent is that a round-trip
+        /// through unquoting and re-quoting returns the original identifier.
+        ///
+        /// Invariant: `quote_ident(s)` always starts and ends with `"`.
+        #[test]
+        fn prop_quote_ident_always_double_quoted(
+            name in "[a-zA-Z_][a-zA-Z0-9_]{0,30}",
+        ) {
+            let q = quote_ident(&name);
+            prop_assert!(q.starts_with('"'), "must start with double-quote: {q}");
+            prop_assert!(q.ends_with('"'), "must end with double-quote: {q}");
+        }
+
+        /// quote_ident must escape any embedded double-quotes by doubling them.
+        ///
+        /// Invariant: `quote_ident(name_with_quote)` contains `""` for every `"` in input.
+        #[test]
+        fn prop_quote_ident_doubles_embedded_quotes(
+            prefix in "[a-z]{1,10}",
+            suffix in "[a-z]{1,10}",
+        ) {
+            let name = format!("{prefix}\"{suffix}");
+            let q = quote_ident(&name);
+            // The escaped form must appear inside the outer quotes
+            prop_assert!(
+                q.contains("\"\""),
+                "embedded quote must be doubled: input={name:?}, output={q:?}"
+            );
+        }
+
+        /// col_list round-trip: the number of comma separators equals cols.len() - 1.
+        #[test]
+        fn prop_col_list_comma_count(
+            cols in proptest::collection::vec("[a-z]{1,15}", 1..=10usize),
+        ) {
+            let list = col_list(&cols);
+            let comma_count = list.matches(", ").count();
+            let expected = cols.len().saturating_sub(1);
+            prop_assert_eq!(comma_count, expected);
+        }
+
+        /// prefixed_col_list: each quoted column name appears in the output.
+        #[test]
+        fn prop_prefixed_col_list_contains_all_columns(
+            prefix in "[a-z]{1,8}",
+            cols in proptest::collection::vec("[a-z]{1,15}", 1..=8usize),
+        ) {
+            let list = prefixed_col_list(&prefix, &cols);
+            for col in &cols {
+                let quoted = quote_ident(col);
+                prop_assert!(
+                    list.contains(&quoted),
+                    "col {quoted:?} not found in prefixed list: {list:?}"
+                );
+            }
+        }
+    }
+}
+
 /// Public test helpers for property tests and integration tests.
 ///
 /// These expose internal aggregate merge/delta functions so external

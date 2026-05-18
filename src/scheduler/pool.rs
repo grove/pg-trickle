@@ -70,7 +70,7 @@ pub(crate) fn spawn_persistent_pool_workers(db_name: &str) {
             .load_dynamic()
         {
             Ok(_) => {
-                log!("pg_trickle: spawned pool worker {} for db '{}'", i, db_name);
+                info!("pg_trickle: spawned pool worker {} for db '{}'", i, db_name);
             }
             Err(_) => {
                 warning!("pg_trickle: failed to register pool worker {i} for db '{db_name}'");
@@ -101,10 +101,9 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
 
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
-    log!(
+    info!(
         "pg_trickle pool worker {}: started (db='{}')",
-        worker_idx,
-        db_name,
+        worker_idx, db_name,
     );
 
     // OBS-5: Tag this connection so it is identifiable in pg_stat_activity.
@@ -119,7 +118,7 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
     // Acquire a worker token (shared with dynamic workers for the cluster budget).
     let max_workers = config::pg_trickle_max_dynamic_refresh_workers().max(1) as u32;
     if !shmem::try_acquire_worker_token(max_workers) {
-        log!(
+        warning!(
             "pg_trickle pool worker {}: could not acquire token — cluster budget exhausted, exiting",
             worker_idx,
         );
@@ -171,10 +170,9 @@ pub extern "C-unwind" fn pg_trickle_pool_worker_main(_arg: pg_sys::Datum) {
     }
 
     shmem::release_worker_token();
-    log!(
+    info!(
         "pg_trickle pool worker {}: exiting (db='{}')",
-        worker_idx,
-        db_name,
+        worker_idx, db_name,
     );
 }
 
@@ -210,10 +208,9 @@ fn execute_pool_worker_tick(db_name: &str, worker_idx: u32) -> bool {
         _ => return false,
     };
 
-    log!(
+    info!(
         "pg_trickle pool worker {}: executing job_id={}",
-        worker_idx,
-        job_id,
+        worker_idx, job_id,
     );
 
     // Load the job.

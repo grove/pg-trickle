@@ -2026,4 +2026,67 @@ mod tests {
             SchemaChangeKind::AddColumnOnly,
         );
     }
+
+    // ── TEST-3: Table-driven DDL classification tests ─────────────────────────
+
+    #[test]
+    fn test_ddl_command_kind_from_event_table_driven() {
+        // 14 cases covering every DdlCommandKind variant and key unknowns.
+        let cases: &[(&str, &str, DdlCommandKind)] = &[
+            ("table", "ALTER TABLE", DdlCommandKind::AlterTable),
+            ("table", "CREATE TABLE", DdlCommandKind::CreateTable),
+            ("view", "CREATE VIEW", DdlCommandKind::ViewChange),
+            ("view", "CREATE OR REPLACE VIEW", DdlCommandKind::ViewChange),
+            ("view", "ALTER VIEW", DdlCommandKind::ViewChange),
+            ("trigger", "CREATE TRIGGER", DdlCommandKind::CreateTrigger),
+            (
+                "function",
+                "CREATE FUNCTION",
+                DdlCommandKind::FunctionChange,
+            ),
+            (
+                "function",
+                "CREATE OR REPLACE FUNCTION",
+                DdlCommandKind::FunctionChange,
+            ),
+            ("function", "ALTER FUNCTION", DdlCommandKind::FunctionChange),
+            ("type", "ALTER TYPE", DdlCommandKind::TypeChange),
+            ("domain", "ALTER DOMAIN", DdlCommandKind::DomainChange),
+            ("domain", "CREATE DOMAIN", DdlCommandKind::DomainChange),
+            ("policy", "CREATE POLICY", DdlCommandKind::PolicyChange),
+            (
+                "extension",
+                "CREATE EXTENSION",
+                DdlCommandKind::ExtensionChange,
+            ),
+        ];
+
+        for (object_type, command_tag, expected) in cases {
+            assert_eq!(
+                DdlCommandKind::from_event(object_type, command_tag),
+                *expected,
+                "failed for object_type={object_type:?}, command_tag={command_tag:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_ddl_command_kind_ignored_cases() {
+        // Non-reactive DDL must map to Ignored.
+        let ignored_cases: &[(&str, &str)] = &[
+            ("index", "CREATE INDEX"),
+            ("table", "DROP TABLE"),
+            ("function", "DROP FUNCTION"),
+            ("sequence", "CREATE SEQUENCE"),
+            ("view", "DROP VIEW"),
+        ];
+
+        for (object_type, command_tag) in ignored_cases {
+            assert_eq!(
+                DdlCommandKind::from_event(object_type, command_tag),
+                DdlCommandKind::Ignored,
+                "expected Ignored for {object_type:?} / {command_tag:?}",
+            );
+        }
+    }
 }
