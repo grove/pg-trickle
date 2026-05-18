@@ -28,6 +28,10 @@
 ARG BASE_IMAGE=pg_trickle_e2e:latest
 FROM ${BASE_IMAGE}
 
+# CI-2: The base image runs as 'postgres'; restore root for build steps that
+# write to /usr/share/postgresql/18/extension/.
+USER root
+
 ARG FROM_VERSION=0.6.0
 ARG TO_VERSION=0.7.0
 
@@ -75,5 +79,8 @@ RUN rm -f /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
 RUN echo "=== Extension files for upgrade testing ===" && \
     ls -la /usr/share/postgresql/18/extension/pg_trickle* && \
     echo "==========================================="
+
+# CI-2: Drop back to unprivileged postgres user for runtime.
+USER postgres
 
 EXPOSE 5432
