@@ -113,6 +113,12 @@ pub fn cleanup_cross_cycle_phantoms(
 
     // Step 2: delete surplus ST rows (multiset-aware on user-content sig).
     //
+    // INVARIANT: The `ctid` values captured by the preceding CTE are stable
+    // within this transaction's snapshot (no concurrent VACUUM or HOT chain
+    // updates).  Do NOT split this DELETE into a separate transaction or
+    // sub-transaction — if the snapshot isolation guarantee is lost, use
+    // __pgt_row_id-based deletion instead.
+    //
     // ctid is read directly from the ST (NOT through a subquery, which
     // would strip the system column).
     let delete_sql = format!(

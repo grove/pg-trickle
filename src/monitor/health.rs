@@ -326,6 +326,68 @@ fn health_check() -> TableIterator<
             };
             rows.push(("job_queue".to_string(), sev, detail));
         }
+
+        // ── DX-1 (v0.61.0): Attachment owner check ──────────────────────────
+        // Find any stream table with an outbox or publication attached by a
+        // role that differs from the stream table's owner.
+        let owner_mismatches: Vec<String> = client
+            .select(
+                "SELECT \
+                     st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
+                     'outbox'::text AS attachment_type, \
+                     oc.attached_by, \
+                     st.pgt_owner \
+                 FROM pgtrickle.pgt_outbox_config oc \
+                 JOIN pgtrickle.pgt_stream_tables st \
+                   ON st.pgt_id = oc.stream_table_oid \
+                 WHERE oc.attached_by IS DISTINCT FROM st.pgt_owner \
+                 UNION ALL \
+                 SELECT \
+                     st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
+                     'publication'::text AS attachment_type, \
+                     pc.attached_by, \
+                     st.pgt_owner \
+                 FROM pgtrickle.pgt_publication_config pc \
+                 JOIN pgtrickle.pgt_stream_tables st \
+                   ON st.pgt_id = pc.stream_table_oid \
+                 WHERE pc.attached_by IS DISTINCT FROM st.pgt_owner \
+                 ORDER BY 1",
+                None,
+                &[],
+            )
+            .map(|r| {
+                r.map(|row| {
+                    let fqn = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+                    let typ = row.get::<String>(2).unwrap_or(None).unwrap_or_default();
+                    let attached_by = row.get::<String>(3).unwrap_or(None).unwrap_or_default();
+                    let owned_by = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+                    format!(
+                        "ST \"{fqn}\" has a {typ} attached by role \"{attached_by}\" \
+                         but owned by \"{owned_by}\""
+                    )
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+
+        let (sev, detail) = if owner_mismatches.is_empty() {
+            (
+                "OK".to_string(),
+                "No outbox/publication ownership mismatches".to_string(),
+            )
+        } else {
+            (
+                "WARNING".to_string(),
+                format!(
+                    "{} attachment(s) created by non-owner: {}. \
+                     Review outbox/publication created by non-owner; \
+                     consider re-attaching as owner or granting explicit permissions.",
+                    owner_mismatches.len(),
+                    owner_mismatches.join("; ")
+                ),
+            )
+        };
+        rows.push(("attachment_owner_check".to_string(), sev, detail));
     });
 
     TableIterator::new(rows)

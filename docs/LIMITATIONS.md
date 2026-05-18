@@ -239,6 +239,64 @@ NULL-producing expressions in the row constructor.
 
 ---
 
+## Multi-Column NOT IN with Nullable Columns (DOC-2, v0.61.0)
+
+When using a multi-column `NOT IN` subquery where any of the left-hand side
+columns or the subquery's corresponding output columns can be `NULL` at
+runtime, the DVM parser cannot safely rewrite the predicate to an anti-join.
+
+```sql
+-- Example: order_items.category_id or product.category_id may be NULL
+SELECT *
+FROM orders
+WHERE (customer_id, category_id) NOT IN (
+    SELECT customer_id, category_id FROM blocked_combinations
+)
+```
+
+In this case, pg_trickle falls back to subquery-based delta computation, which
+is **correct** but uses a full subquery evaluation on every refresh cycle
+rather than an incremental anti-join.  For large subqueries this can be
+significantly slower.
+
+**To restore anti-join performance**, add explicit `IS NOT NULL` predicates on
+both sides of the comparison to guarantee that `NULL` values are excluded
+before the join is evaluated:
+
+```sql
+SELECT *
+FROM orders
+WHERE customer_id IS NOT NULL
+  AND category_id IS NOT NULL
+  AND (customer_id, category_id) NOT IN (
+      SELECT customer_id, category_id
+      FROM blocked_combinations
+      WHERE customer_id IS NOT NULL
+        AND category_id IS NOT NULL
+  )
+```
+
+With these guards in place, the DVM parser can safely use an anti-join rewrite
+for both `IN` and `NOT IN` forms, restoring incremental performance.
+
+**Alternatively**, rewrite using `NOT EXISTS`:
+
+```sql
+SELECT *
+FROM orders o
+WHERE NOT EXISTS (
+    SELECT 1 FROM blocked_combinations b
+    WHERE b.customer_id = o.customer_id
+      AND b.category_id = o.category_id
+)
+```
+
+`NOT EXISTS` with a correlated subquery always rewrites to an anti-join
+regardless of nullability, because `NOT EXISTS` uses `FALSE` (not `UNKNOWN`)
+when the subquery returns no rows.
+
+---
+
 ## Known Future Improvements
 
 | Limitation | Planned in |
@@ -247,6 +305,30 @@ NULL-producing expressions in the row constructor.
 | `WITH RECURSIVE` support | v1.2+ |
 | `STRING_AGG` / `ARRAY_AGG` incremental maintenance | Researching |
 | Cross-database stream tables (without foreign tables) | Not planned |
+| Nested `LATERAL` (LATERAL inside LATERAL) | v1.1+ |
+
+---
+
+## LATERAL Joins in DIFFERENTIAL Mode (FEAT-2, v0.61.0)
+
+Most `LATERAL` patterns are supported in `DIFFERENTIAL` mode.  The following
+patterns have known limitations:
+
+| LATERAL pattern | Status | Notes |
+|----------------|--------|-------|
+| `LATERAL` volatile SRF | ❌ Falls back to FULL | `random()`, `clock_timestamp()`, etc. cannot be differentiated |
+| Nested `LATERAL` (LATERAL inside LATERAL) | ❌ Falls back to FULL | Not yet implemented in delta rules |
+| `LEFT JOIN LATERAL` with correlated aggregate | ⚠️ Supported (suboptimal) | Re-scans sub-table for each changed outer row; see note below |
+
+### Correlated Aggregate Performance Note
+
+For `LEFT JOIN LATERAL` patterns that include a correlated aggregate, pg_trickle
+correctly maintains the stream table but the per-cycle cost scales with the
+number of changed outer rows × the size of the inner subquery.  For high-write
+workloads, materialise the aggregate as a separate stream table.
+
+See [DVM_OPERATORS.md](DVM_OPERATORS.md#lateral-joins-and-differential-mode) for
+the full compatibility table and workaround guidance.
 
 ---
 

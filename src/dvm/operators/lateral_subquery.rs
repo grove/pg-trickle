@@ -1156,7 +1156,13 @@ mod tests {
 
         // Scoped EXISTS should NOT have LIMIT 1 — it uses correlation join
         // The only place LIMIT could appear is in the subquery SQL itself
-        let inner_branch = sql.split("lat_sq_changed").nth(1).unwrap_or("");
+        let parts: Vec<&str> = sql.splitn(2, "lat_sq_changed").collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "expected 'lat_sq_changed' marker in generated SQL\nSQL:\n{sql}"
+        );
+        let inner_branch = parts[1];
         // The inner-change EXISTS should use correlation, not LIMIT 1
         // D+I flat schema: flat column "fk" is used, not "new_fk"/"old_fk"
         assert!(
@@ -1277,7 +1283,13 @@ mod tests {
         // EXISTS on OID 1), not be skipped.
         assert_sql_contains(&sql, "changes_1");
         // The changed_sources CTE should have UNION ALL for the inner branch
-        let changed_cte = sql.split("lat_sq_changed").nth(1).unwrap_or("");
+        let parts: Vec<&str> = sql.splitn(2, "lat_sq_changed").collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "expected 'lat_sq_changed' marker in generated SQL\nSQL:\n{sql}"
+        );
+        let changed_cte = parts[1];
         assert!(
             changed_cte.contains("UNION ALL"),
             "Shared-OID inner branch should produce UNION ALL in changed_sources.\nSQL:\n{sql}"
