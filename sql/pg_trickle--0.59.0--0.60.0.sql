@@ -1,0 +1,6 @@
+-- pg_trickle 0.59.0 -> 0.60.0 upgrade migration
+--
+-- v0.60.0 — Code Quality, Test Coverage & CI
+--
+-- All v0.60.0 changes are pure Rust (QUAL-1..3, TEST-1..5, COR-5, COR-6,
+-- CI-1..3). No SQL schema migration is required.

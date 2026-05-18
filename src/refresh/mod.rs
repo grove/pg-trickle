@@ -28,6 +28,7 @@ pub(crate) mod codegen;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
 pub(crate) mod phd1;
+pub(crate) mod sql_fragments;
 
 // SCAL-2 (v0.30.0): Explicit re-export lists enforce module boundary discipline.
 // Adding a new public symbol to a sub-module no longer silently promotes it;

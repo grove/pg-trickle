@@ -563,6 +563,11 @@ pub fn poll_wal_changes(
     let mut count: i64 = 0;
     let mut last_lsn: Option<String> = None;
 
+    // COR-5: Resolve canonical qualified names for WAL filter matching once per
+    // poll cycle. This handles case-sensitive quoted identifiers, search-path-
+    // sensitive names, and partition routing (child table arrives instead of root).
+    let filter_names = resolve_wal_filter_names(source_oid, source_table_name)?;
+
     Spi::connect(|client| {
         let result = client
             .select(&poll_sql, None, &[])
@@ -578,14 +583,16 @@ pub fn poll_wal_changes(
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or_default();
 
-            // Parse the test_decoding data and determine if it's relevant to our source.
-            // test_decoding decodes ALL tables, so filter by matching the
-            // qualified table name (e.g. "table public.orders: INSERT: ...").
-            let table_prefix = format!("table {}: ", source_table_name);
-            if !data.starts_with(&table_prefix) {
-                // Row is for a different table — skip but still track LSN
-                last_lsn = Some(lsn);
-                continue;
+            // COR-5: OID-based filter via pre-resolved canonical names set.
+            // test_decoding decodes ALL tables; skip rows not belonging to our source
+            // (including partition children not tracked by this source OID).
+            match extract_table_name_from_test_decoding(&data) {
+                Some(name) if filter_names.contains(name) => {} // our table — process
+                _ => {
+                    // Not our table — skip but still track LSN
+                    last_lsn = Some(lsn);
+                    continue;
+                }
             }
 
             if let Some(action) = parse_pgoutput_action(&data) {
@@ -624,6 +631,67 @@ pub fn poll_wal_changes(
     })?;
 
     Ok((count, last_lsn))
+}
+
+/// COR-5: Extract the qualified table name from a `test_decoding` output line.
+///
+/// Handles lines of the form:
+/// `table schema.table: ACTION: col[type]:val ...`
+///
+/// Returns the slice `schema.table` (the substring between `"table "` and
+/// the first `": "` separator).  Returns `None` for non-DML lines (`BEGIN`,
+/// `COMMIT`, etc.) that do not start with `"table "`.
+///
+/// This is a pure function — it can be unit-tested without a PostgreSQL backend.
+pub(crate) fn extract_table_name_from_test_decoding(data: &str) -> Option<&str> {
+    let rest = data.strip_prefix("table ")?;
+    let colon_pos = rest.find(": ")?;
+    Some(&rest[..colon_pos])
+}
+
+/// COR-5: Resolve the set of canonical qualified table names to match against
+/// WAL filter output during a poll cycle.
+///
+/// Queries `pg_class` and `pg_inherits` ONCE to obtain:
+/// 1. The canonical `schema.table` for `source_oid` itself.
+/// 2. Canonical names for all immediate partition children, so that changes
+///    routed to a child partition are also accepted.
+///
+/// The `fallback_name` (caller-supplied qualified name) is always inserted so
+/// the common case is handled even if the catalog query finds nothing.
+fn resolve_wal_filter_names(
+    source_oid: pg_sys::Oid,
+    fallback_name: &str,
+) -> Result<std::collections::HashSet<String>, PgTrickleError> {
+    let oid_val = source_oid.to_u32() as i64;
+    let mut names = std::collections::HashSet::new();
+    names.insert(fallback_name.to_string());
+
+    let extra = Spi::connect(|client| {
+        let sql = "\
+            SELECT n.nspname::text || '.' || c.relname::text \
+            FROM pg_catalog.pg_class c \
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+            WHERE c.oid = $1 \
+            UNION ALL \
+            SELECT n.nspname::text || '.' || c.relname::text \
+            FROM pg_catalog.pg_class c \
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+            JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid \
+            WHERE i.inhparent = $1";
+        let rows = client
+            .select(sql, None, &[oid_val.into()])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let mut resolved: Vec<String> = Vec::new();
+        for row in rows {
+            if let Ok(Some(name)) = row.get::<String>(1) {
+                resolved.push(name);
+            }
+        }
+        Ok::<Vec<String>, PgTrickleError>(resolved)
+    })?;
+    names.extend(extra);
+    Ok(names)
 }
 
 /// Parse the action type from a pgoutput data string.
@@ -2225,12 +2293,13 @@ pub fn write_worker_changes_to_buffer(
 
     let mut count: i64 = 0;
 
+    // COR-5: Pre-resolve canonical names for OID-based filter (same approach as poll_wal_changes).
+    let filter_names = resolve_wal_filter_names(source_oid, source_table_name)?;
+
     Spi::connect(|client| {
         let result = client
             .select(&select_sql, None, &[])
             .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
-
-        let table_prefix = format!("table {}: ", source_table_name);
 
         for row in result {
             let lsn = row
@@ -2242,9 +2311,10 @@ pub fn write_worker_changes_to_buffer(
                 .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
                 .unwrap_or_default();
 
-            // Filter to rows for this source table (test_decoding decodes all tables).
-            if !data.starts_with(&table_prefix) {
-                continue;
+            // COR-5: OID-based filter via pre-resolved canonical names set.
+            match extract_table_name_from_test_decoding(&data) {
+                Some(name) if filter_names.contains(name) => {} // our table — process
+                _ => continue,
             }
 
             if let Some(action) = parse_pgoutput_action(&data) {
@@ -2299,6 +2369,49 @@ mod tests {
     #[test]
     fn test_quote_ident_with_quotes() {
         assert_eq!(quote_ident("my\"slot"), "\"my\"\"slot\"");
+    }
+
+    // ── COR-5: extract_table_name_from_test_decoding tests ────────
+
+    #[test]
+    fn test_extract_table_name_insert() {
+        let data = "table public.orders: INSERT: id[integer]:1";
+        assert_eq!(
+            extract_table_name_from_test_decoding(data),
+            Some("public.orders")
+        );
+    }
+
+    #[test]
+    fn test_extract_table_name_update() {
+        let data = "table myschema.events: UPDATE: id[integer]:7 name[text]:'X'";
+        assert_eq!(
+            extract_table_name_from_test_decoding(data),
+            Some("myschema.events")
+        );
+    }
+
+    #[test]
+    fn test_extract_table_name_partition_child() {
+        // partition child name — OID filter accepts it if inhparent matches
+        let data = "table public.orders_2024: INSERT: id[integer]:2";
+        assert_eq!(
+            extract_table_name_from_test_decoding(data),
+            Some("public.orders_2024")
+        );
+    }
+
+    #[test]
+    fn test_extract_table_name_begin_returns_none() {
+        assert_eq!(extract_table_name_from_test_decoding("BEGIN 12345"), None);
+    }
+
+    #[test]
+    fn test_extract_table_name_commit_returns_none() {
+        assert_eq!(
+            extract_table_name_from_test_decoding("COMMIT 12345 (at ...)"),
+            None
+        );
     }
 
     // ── parse_pgoutput_action tests ────────────────────────────────

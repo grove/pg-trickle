@@ -124,4 +124,7 @@ RUN ls -la /usr/share/postgresql/18/extension/pg_trickle* && \
 RUN echo "CREATE EXTENSION IF NOT EXISTS pg_trickle CASCADE;" \
     > /docker-entrypoint-initdb.d/00-create-pg-trickle.sql
 
+# CI-2: Run container as the unprivileged postgres OS user (non-root).
+USER postgres
+
 EXPOSE 5432

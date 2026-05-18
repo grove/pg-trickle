@@ -386,3 +386,80 @@ pub fn execute_reinitialize_refresh(st: &StreamTableMeta) -> Result<(i64, i64), 
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── compute_adaptive_threshold tests (TEST-1) ────────────────────────────
+
+    #[test]
+    fn test_adaptive_threshold_incr_slower_than_90pct_lowers_aggressively() {
+        // INCR ~= FULL → lower threshold by 20%
+        let result = compute_adaptive_threshold(0.50, 950.0, 1000.0);
+        assert!((result - 0.40).abs() < 1e-9, "expected 0.40, got {result}");
+    }
+
+    #[test]
+    fn test_adaptive_threshold_incr_between_70_and_90pct_lowers_moderately() {
+        // ratio = 0.80 → lower by 10%
+        let result = compute_adaptive_threshold(0.50, 800.0, 1000.0);
+        assert!((result - 0.45).abs() < 1e-9, "expected 0.45, got {result}");
+    }
+
+    #[test]
+    fn test_adaptive_threshold_incr_faster_than_30pct_raises_threshold() {
+        // ratio = 0.20 → raise by 10%
+        let result = compute_adaptive_threshold(0.50, 200.0, 1000.0);
+        assert!((result - 0.55).abs() < 1e-9, "expected 0.55, got {result}");
+    }
+
+    #[test]
+    fn test_adaptive_threshold_middle_range_unchanged() {
+        // ratio = 0.50 → no change
+        let result = compute_adaptive_threshold(0.50, 500.0, 1000.0);
+        assert!((result - 0.50).abs() < 1e-9, "expected 0.50, got {result}");
+    }
+
+    #[test]
+    fn test_adaptive_threshold_clamps_to_minimum_0_01() {
+        // Extreme INCR slowness → repeated 20% reductions → clamps at 0.01
+        let result = compute_adaptive_threshold(0.01, 999.0, 1000.0);
+        assert!(result >= 0.01, "must not go below 0.01: {result}");
+    }
+
+    #[test]
+    fn test_adaptive_threshold_clamps_to_maximum_0_80() {
+        // Very fast INCR + already near max → clamps at 0.80
+        let result = compute_adaptive_threshold(0.79, 10.0, 1000.0);
+        assert!(result <= 0.80, "must not exceed 0.80: {result}");
+    }
+
+    // ── cost_model_prefers_full tests (TEST-1) ───────────────────────────────
+
+    #[test]
+    fn test_cost_model_prefers_full_when_diff_expensive() {
+        // avg_ms_per_delta=1.0, delta_rows=1000 → diff_est=1000 ms
+        // full=500ms*1.2 margin=600ms → 1000 >= 600 → prefer FULL
+        assert!(cost_model_prefers_full(
+            1.0,
+            500.0,
+            1000,
+            QueryComplexityClass::Scan,
+            1.2
+        ));
+    }
+
+    #[test]
+    fn test_cost_model_prefers_diff_when_delta_small() {
+        // avg_ms_per_delta=0.1, delta_rows=10 → diff_est=1 ms
+        // full=500ms → 1 < 500 → prefer DIFF
+        assert!(!cost_model_prefers_full(
+            0.1,
+            500.0,
+            10,
+            QueryComplexityClass::Scan,
+            1.0
+        ));
+    }
+}

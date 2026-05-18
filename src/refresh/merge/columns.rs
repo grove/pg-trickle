@@ -297,3 +297,74 @@ pub(crate) fn warn_default_partition_growth(schema: &str, name: &str) {
         Err(_) => {} // Silently skip on any other error.
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── pg_quote_literal tests (TEST-1) ────────────────────────────────────
+
+    #[test]
+    fn test_pg_quote_literal_simple() {
+        assert_eq!(pg_quote_literal("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_pg_quote_literal_escapes_single_quote() {
+        assert_eq!(pg_quote_literal("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn test_pg_quote_literal_empty_string() {
+        assert_eq!(pg_quote_literal(""), "''");
+    }
+
+    // ── parse_hash_bound_spec tests (TEST-1) ────────────────────────────────
+
+    #[test]
+    fn test_parse_hash_bound_spec_basic() {
+        let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 4, remainder 2)").unwrap();
+        assert_eq!(m, 4);
+        assert_eq!(r, 2);
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_single_shard() {
+        let (m, r) = parse_hash_bound_spec("FOR VALUES WITH (modulus 1, remainder 0)").unwrap();
+        assert_eq!(m, 1);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_missing_modulus_errors() {
+        assert!(parse_hash_bound_spec("FOR VALUES WITH (remainder 2)").is_err());
+    }
+
+    #[test]
+    fn test_parse_hash_bound_spec_missing_remainder_errors() {
+        assert!(parse_hash_bound_spec("FOR VALUES WITH (modulus 4)").is_err());
+    }
+
+    // ── extract_keyword_int tests (TEST-1) ─────────────────────────────────
+
+    #[test]
+    fn test_extract_keyword_int_finds_value() {
+        assert_eq!(
+            extract_keyword_int("MODULUS 8, REMAINDER 3", "MODULUS").unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn test_extract_keyword_int_missing_keyword_errors() {
+        assert!(extract_keyword_int("REMAINDER 3", "MODULUS").is_err());
+    }
+
+    #[test]
+    fn test_extract_keyword_int_handles_large_value() {
+        assert_eq!(
+            extract_keyword_int("MODULUS 1024, REMAINDER 0", "MODULUS").unwrap(),
+            1024
+        );
+    }
+}

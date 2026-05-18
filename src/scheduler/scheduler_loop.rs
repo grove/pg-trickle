@@ -80,7 +80,7 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
             .unwrap_or(false)
     }));
     if is_replica {
-        log!("pg_trickle launcher: running on read replica, sleeping until promotion");
+        info!("pg_trickle launcher: running on read replica, sleeping until promotion");
         loop {
             let ok = BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(30)));
             if !ok {
@@ -97,7 +97,7 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
         }
     }
 
-    log!("pg_trickle launcher started");
+    info!("pg_trickle launcher started");
 
     // Track the DAG rebuild signal so we can detect CREATE EXTENSION in any
     // database and immediately re-probe, rather than waiting for skip_ttl.
@@ -238,7 +238,7 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
                 .load_dynamic()
             {
                 Ok(_) => {
-                    log!(
+                    info!(
                         "pg_trickle launcher: spawned scheduler for database '{}'",
                         db
                     );
@@ -274,7 +274,7 @@ pub extern "C-unwind" fn pg_trickle_launcher_main(_arg: pg_sys::Datum) {
         }
 
         if !should_continue {
-            log!("pg_trickle launcher shutting down");
+            info!("pg_trickle launcher shutting down");
             break;
         }
     }
@@ -327,7 +327,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         .unwrap_or(false)
     }));
     if !is_installed {
-        log!(
+        info!(
             "pg_trickle scheduler: pg_trickle not installed in database '{}', exiting",
             db_name
         );
@@ -348,7 +348,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             .unwrap_or(false)
     }));
     if is_replica {
-        log!(
+        info!(
             "pg_trickle scheduler: running on a read replica (pg_is_in_recovery() = true). \
              Scheduler will sleep until promotion."
         );
@@ -358,7 +358,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             let should_continue =
                 BackgroundWorker::wait_latch(Some(std::time::Duration::from_secs(30)));
             if !should_continue {
-                log!("pg_trickle scheduler shutting down (replica)");
+                info!("pg_trickle scheduler shutting down (replica)");
                 return;
             }
             let still_replica = BackgroundWorker::transaction(AssertUnwindSafe(|| -> bool {
@@ -367,13 +367,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     .unwrap_or(false)
             }));
             if !still_replica {
-                log!("pg_trickle scheduler: replica promoted — starting normal operation");
+                info!("pg_trickle scheduler: replica promoted — starting normal operation");
                 break;
             }
         }
     }
 
-    log!(
+    info!(
         "pg_trickle scheduler started (interval={}ms)",
         config::pg_trickle_scheduler_interval_ms(),
     );
@@ -550,7 +550,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
         if !should_continue {
             // SIGTERM received — shut down gracefully.
-            log!("pg_trickle scheduler shutting down");
+            info!("pg_trickle scheduler shutting down");
             crate::shmem::set_scheduler_meta(0, false, 0);
             break;
         }
@@ -585,7 +585,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             .unwrap_or(false)
         }));
         if !still_installed {
-            log!(
+            info!(
                 "pg_trickle scheduler: pg_trickle was dropped from database '{}', exiting",
                 db_name
             );
@@ -611,7 +611,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     pending_slots = result.pending_slots;
                     pending_aborts = result.pending_aborts;
                 }
-                Err(e) => log!("pg_trickle: WAL transition phase 1 error: {}", e),
+                Err(e) => warning!("pg_trickle: WAL transition phase 1 error: {}", e),
             }
             // NOTE: check_slot_health_and_alert() is intentionally NOT called
             // here.  Phase 1's WAL poll for a missing/invalid replication slot
@@ -655,7 +655,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             monitor::alert_change_buffer_backpressure(
                                 *oid, *pending, *cnt, threshold,
                             );
-                            pgrx::log!(
+                            pgrx::info!(
                                 "[pg_trickle] SCAL-1: back-pressure alert for source OID {} \
                                  — {} rows over threshold {} for {} consecutive cycles",
                                 oid,
@@ -688,7 +688,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 BackgroundWorker::transaction(AssertUnwindSafe(|| {
                     let purged = crate::template_cache::purge_stale_entries(max_age_hours);
                     if purged > 0 {
-                        pgrx::log!(
+                        pgrx::info!(
                             "[pg_trickle] STAB-3: purged {} stale template cache entries \
                              older than {} hours",
                             purged,
@@ -801,10 +801,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         }
                     }
                     if total_deleted > 0 {
-                        log!(
+                        info!(
                             "pg_trickle: history cleanup — deleted {} rows older than {} days (batched)",
-                            total_deleted,
-                            retention_days,
+                            total_deleted, retention_days,
                         );
                     }
                 }
@@ -865,11 +864,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             BackgroundWorker::transaction(AssertUnwindSafe(|| {
                 match wal_decoder::create_replication_slot_pristine(&slot_name) {
                     Ok(lsn) => {
-                        log!("pg_trickle: created replication slot '{}'", slot_name);
+                        info!("pg_trickle: created replication slot '{}'", slot_name);
                         slot_lsn = Some(lsn);
                     }
                     Err(e) => {
-                        log!(
+                        warning!(
                             "pg_trickle: failed to create replication slot '{}': {}",
                             slot_name,
                             e
@@ -886,7 +885,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
         if !created_slots.is_empty() {
             BackgroundWorker::transaction(AssertUnwindSafe(|| {
                 if let Err(e) = wal_decoder::advance_wal_transitions_phase3(&created_slots) {
-                    log!("pg_trickle: WAL transition phase 3 error: {}", e);
+                    warning!("pg_trickle: WAL transition phase 3 error: {}", e);
                 }
             }));
         }
@@ -947,15 +946,14 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                                 config::pg_trickle_default_schedule_seconds(),
                             ) {
                                 Ok(()) => {
-                                    log!(
+                                    info!(
                                         "pg_trickle: DAG incrementally updated for pgt_ids {:?} (version={})",
-                                        ids,
-                                        current_version,
+                                        ids, current_version,
                                     );
                                     true
                                 }
                                 Err(e) => {
-                                    log!(
+                                    warning!(
                                         "pg_trickle: incremental DAG rebuild failed ({}), falling back to full rebuild",
                                         e,
                                     );
@@ -970,7 +968,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     }
                 } else {
                     // Overflow → full rebuild
-                    log!("pg_trickle: DAG invalidation overflow → full rebuild");
+                    info!("pg_trickle: DAG invalidation overflow → full rebuild");
                     false
                 };
 
@@ -978,10 +976,10 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     match StDag::build_from_catalog(config::pg_trickle_default_schedule_seconds()) {
                         Ok(new_dag) => {
                             dag = Some(new_dag);
-                            log!("pg_trickle: DAG rebuilt (version={})", current_version);
+                            info!("pg_trickle: DAG rebuilt (version={})", current_version);
                         }
                         Err(e) => {
-                            log!("pg_trickle: failed to rebuild DAG: {}", e);
+                            warning!("pg_trickle: failed to rebuild DAG: {}", e);
                             return;
                         }
                     }
@@ -1004,7 +1002,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                 };
 
                 if stale_snapshot_detected {
-                    log!(
+                    info!(
                         "pg_trickle: DAG rebuild used stale snapshot — some invalidated pgt_ids \
                          not yet visible (version={}); triggering full rebuild next tick",
                         current_version
@@ -1045,7 +1043,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // cycles outright. Cyclic SCCs are handled by fixpoint iteration.
             let allow_circular = config::pg_trickle_allow_circular();
             if !allow_circular && let Err(e) = dag_ref.topological_order() {
-                log!("pg_trickle: DAG has cycles: {}", e);
+                warning!("pg_trickle: DAG has cycles: {}", e);
                 return;
             }
 
@@ -1057,11 +1055,11 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
                         load_st_by_id(pgt_id).map(|st| st.refresh_mode)
                     });
-                    log!(
+                    info!(
                         "pg_trickle: parallel refresh (dry_run): {}",
                         eu_dag.summary()
                     );
-                    log!("{}", eu_dag.dry_run_log());
+                    info!("{}", eu_dag.dry_run_log());
                     // Fall through to sequential refresh.
                 }
                 config::ParallelRefreshMode::On => {
@@ -1071,7 +1069,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         let eu_dag = ExecutionUnitDag::build_from_st_dag(dag_ref, |pgt_id| {
                             load_st_by_id(pgt_id).map(|st| st.refresh_mode)
                         });
-                        log!(
+                        info!(
                             "pg_trickle: parallel dispatch — EU DAG rebuilt: {}",
                             eu_dag.summary()
                         );
@@ -1339,10 +1337,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     // BOOT-4: Skip if any source is gated.
                     let gated_oids = load_gated_source_oids();
                     if is_any_source_gated(pgt_id, &gated_oids) {
-                        log!(
+                        info!(
                             "pg_trickle: skipping {}.{} in atomic group — source gated",
-                            st.pgt_schema,
-                            st.pgt_name,
+                            st.pgt_schema, st.pgt_name,
                         );
                         log_gated_skip(&st);
                         continue;
@@ -1352,11 +1349,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let (wm_misaligned, wm_reason) = is_watermark_misaligned(pgt_id);
                     if wm_misaligned {
                         let reason = wm_reason.as_deref().unwrap_or("watermark misaligned");
-                        log!(
+                        info!(
                             "pg_trickle: skipping {}.{} in atomic group — {}",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            reason,
+                            st.pgt_schema, st.pgt_name, reason,
                         );
                         log_watermark_skip(&st, reason);
                         continue;
@@ -1366,11 +1361,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     let (wm_stuck, wm_stuck_reason) = is_watermark_stuck(pgt_id);
                     if wm_stuck {
                         let reason = wm_stuck_reason.as_deref().unwrap_or("watermark stuck");
-                        log!(
+                        info!(
                             "pg_trickle: skipping {}.{} in atomic group — {}",
-                            st.pgt_schema,
-                            st.pgt_name,
-                            reason,
+                            st.pgt_schema, st.pgt_name, reason,
                         );
                         log_watermark_skip(&st, reason);
                         continue;
@@ -1390,10 +1383,9 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
 
                     // FUSE-5: Check fuse circuit breaker.
                     if evaluate_fuse(&st) {
-                        log!(
+                        info!(
                             "pg_trickle: {}.{} fuse blown — skipping in diamond group",
-                            st.pgt_schema,
-                            st.pgt_name,
+                            st.pgt_schema, st.pgt_name,
                         );
                         continue;
                     }
@@ -1409,7 +1401,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             refreshed_ids.push(pgt_id);
                         }
                         RefreshOutcome::RetryableFailure | RefreshOutcome::PermanentFailure => {
-                            log!(
+                            warning!(
                                 "pg_trickle: diamond group rollback — member {}.{} failed",
                                 st.pgt_schema,
                                 st.pgt_name,
@@ -1433,7 +1425,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         let retry = retry_states.entry(*id).or_default();
                         retry.record_failure(&retry_policy, now_ms);
                     }
-                    log!(
+                    warning!(
                         "pg_trickle: diamond group rolled back ({} members)",
                         group.members.len(),
                     );
@@ -1467,7 +1459,7 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                         break;
                     }
                 }
-                log!(
+                warning!(
                     "pg_trickle: parallel dispatch — failed to spawn worker for job {}: {}",
                     job_id,
                     e,

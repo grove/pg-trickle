@@ -163,7 +163,7 @@ arc resolves all findings before v1.0.
 |---------|-------|--------|-------|--------------|
 | [v0.58.0](roadmap/v0.58.0.md) | Security & Correctness Hardening: ownership checks for outbox/publication APIs, multi-column NOT IN + NULL fix, recursive CTE depth guard in DIFFERENTIAL mode, WAL decoder TOCTOU advisory lock, DDL hook escalation on SPI failure | ✅ Released | Medium | [Full details](roadmap/v0.58.0.md-full.md) |
 | [v0.59.0](roadmap/v0.59.0.md) | Performance & Observability: batched monitor buffer-growth SPI, query-hash caching, Arc<str> merge templates, WAL decoder Vec pre-allocation, frontier borrow not clone, CDC-lag percentile metrics, worker queue-depth, WAL decoder queue, refresh-mode ratio counters, application_name in BGW, backup/restore docs | ✅ Released | Large | [Full details](roadmap/v0.59.0.md-full.md) |
-| [v0.60.0](roadmap/v0.60.0.md) | Code Quality, Test Coverage & CI: scheduler log levels, codegen decomposition, cdc.rs 4-way split, refresh orchestrator/merge/CDC/hooks unit tests, differential idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered full E2E on PRs, Dockerfile non-root, codecov module thresholds | Planned | Large | [Full details](roadmap/v0.60.0.md-full.md) |
+| [v0.60.0](roadmap/v0.60.0.md) | Code Quality, Test Coverage & CI: scheduler log levels, codegen decomposition, cdc.rs 4-way split, refresh orchestrator/merge/CDC/hooks unit tests, differential idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered full E2E on PRs, Dockerfile non-root, codecov module thresholds | ✅ Released | Large | [Full details](roadmap/v0.60.0.md-full.md) |
 | [v0.61.0](roadmap/v0.61.0.md) | DX, Documentation & Final Pre-1.0 Polish: health_check() foreign-owner row, SQL_REFERENCE completeness, snapshot cache secondary equality, cte_counter reset, outbox name collision fix, sublinks.rs decomposition, ctid invariant comment, 3 foundational ADRs, LIMITATIONS.md NOT IN + NULL section, SEARCH/CYCLE clear error, LATERAL+DIFFERENTIAL docs | Planned | Large | [Full details](roadmap/v0.61.0.md-full.md) |
 
 ### Scheduler Throughput Arc (v0.62.x – v0.63.x)
@@ -178,6 +178,7 @@ fused CTE refresh to reduce per-tick statement overhead for multi-node DAGs.
 |---------|-------|--------|-------|--------------|
 | [v0.62.0](roadmap/v0.62.0.md) | Scheduler throughput: change-buffer fan-out (O(N)→O(1) scans for multi-consumer DAGs), `pause_scheduler` / `resume_scheduler` per-node SQL functions, `stream_table_spec(oid)` stable JSON projection | Planned | Medium | [Full details](roadmap/v0.62.0.md-full.md) |
 | [v0.63.0](roadmap/v0.63.0.md) | Fused multi-node refresh: CTE-chain composition of per-node delta SQL in a single statement, correctness property test, benchmark regression gate (≥ 20 % wall-time reduction on TPC-H 22-node DAG) | Planned | Large | [Full details](roadmap/v0.63.0.md-full.md) |
+
 
 ### Beyond v1.0
 
@@ -270,10 +271,6 @@ v0.59    ─── Performance & observability: batched monitor SPI, query-hash 
 v0.60    ─── Code quality, test coverage & CI: cdc.rs split, codegen decompose, refresh/CDC/hooks unit tests, idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered E2E on PRs
     │
 v0.61    ─── DX, docs & pre-1.0 polish: health_check foreign-owner row, SQL_REFERENCE complete, snapshot secondary equality, cte_counter reset, outbox name fix, sublinks decompose, 3 ADRs, LATERAL docs
-    │
-v0.62    ─── Scheduler throughput: change-buffer fan-out (O(N)→O(1)), pause/resume_scheduler SQL API, stream_table_spec() stable JSON projection
-    │
-v0.63    ─── Fused multi-node refresh: CTE-chain composition across ready nodes, ≥ 20 % wall-time reduction on TPC-H 22-node DAG
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
