@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.62.0 — Scheduler Throughput & pg_aqueduct Prerequisites](#0620--scheduler-throughput--pg_aqueduct-prerequisites)
 - [0.61.0 — DX, Documentation & Final Pre-1.0 Polish](#0610--dx-documentation--final-pre-10-polish)
 - [0.60.0 — Code Quality, Test Coverage & CI](#0600--code-quality-test-coverage--ci)
 - [0.59.0 — Performance & Observability](#0590--performance--observability)
@@ -76,6 +77,45 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.62.0] — Scheduler Throughput & pg_aqueduct Prerequisites
+
+### What's New
+
+v0.62.0 delivers a change-buffer fan-out optimisation that eliminates redundant
+scans in multi-consumer DAGs, and three SQL API additions required by the
+planned `pg_aqueduct` migration tool.
+
+**PERF-1: Change-Buffer Fan-Out**
+
+The scheduler now scans each source's change buffer **once per tick** and routes
+the resulting delta to every dependent stream table, rather than each dependent
+node re-scanning the buffer independently.  For a DAG with N consumers of the
+same source table this reduces change-buffer I/O from O(N) to O(1).  Controlled
+by a new GUC `pg_trickle.enable_change_buffer_fanout` (default: `true`).
+
+**API-1 & API-2: `pgtrickle.pause_scheduler` / `pgtrickle.resume_scheduler`**
+
+New SQL functions `pgtrickle.pause_scheduler(nodes text[])` and
+`pgtrickle.resume_scheduler(nodes text[])` allow operators and migration tools
+to pause and resume the differential refresh scheduler for specific stream tables.
+In-flight refreshes are drained before `pause_scheduler` returns, with a
+configurable timeout (`pg_trickle.scheduler_drain_timeout`, default 30 s).
+
+**API-3: `pgtrickle.stream_table_spec(relid oid | qualified_name text)`**
+
+Returns a stable JSON projection of a single stream table's specification,
+including query, refresh mode, schedule, CDC mode, and outbox attachment.
+The canonical representation needed by `pg_aqueduct` for import, drift detection,
+and spec-hash computation.  Also available by qualified name.
+
+### Upgrade Notes
+
+No breaking changes.  The fan-out optimisation is transparent; set
+`pg_trickle.enable_change_buffer_fanout = false` to revert to per-node scan
+behaviour.  New functions are additive.
 
 ---
 

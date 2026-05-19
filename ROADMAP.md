@@ -176,7 +176,7 @@ fused CTE refresh to reduce per-tick statement overhead for multi-node DAGs.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
-| [v0.62.0](roadmap/v0.62.0.md) | Scheduler throughput: change-buffer fan-out (O(N)→O(1) scans for multi-consumer DAGs), `pause_scheduler` / `resume_scheduler` per-node SQL functions, `stream_table_spec(oid)` stable JSON projection | Planned | Medium | [Full details](roadmap/v0.62.0.md-full.md) |
+| [v0.62.0](roadmap/v0.62.0.md) | Scheduler throughput: change-buffer fan-out (O(N)→O(1) scans for multi-consumer DAGs), `pause_scheduler` / `resume_scheduler` per-node SQL functions, `stream_table_spec(oid)` stable JSON projection | ✅ Released | Medium | [Full details](roadmap/v0.62.0.md-full.md) |
 | [v0.63.0](roadmap/v0.63.0.md) | Fused multi-node refresh: CTE-chain composition of per-node delta SQL in a single statement, correctness property test, benchmark regression gate (≥ 20 % wall-time reduction on TPC-H 22-node DAG) | Planned | Large | [Full details](roadmap/v0.63.0.md-full.md) |
 
 
