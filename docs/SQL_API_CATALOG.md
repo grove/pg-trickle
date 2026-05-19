@@ -4,7 +4,7 @@
 
 # SQL API Reference — pg_trickle
 
-**117 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
+**121 SQL-callable functions** discovered via `#[pg_extern]` in `src/`.
 
 See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 
@@ -69,6 +69,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.migrate()` | `pgtrickle` | `String` | This is a convenience function for users who upgrade the extension without using `ALTER EXTENSION pg_trickle UPDATE` — it ensures the catalog schema matches the library expectations. |
 | `pgtrickle.parallel_job_status()` | `pgtrickle` | `` | Exposed as `pgtrickle.parallel_job_status(max_age_seconds)`. |
 | `pgtrickle.parse_duration_seconds()` | `pgtrickle` | `Option<i64>` | Used by SQL views to compare schedule. |
+| `pgtrickle.pause_scheduler()` | `pgtrickle` | `&'static str` | Example: ```sql SELECT pgtrickle.pause_scheduler(ARRAY['public.my_view', 'analytics.summary']); ```. |
 | `pgtrickle.pg_trickle_hash()` | `pgtrickle` | `i64` | NULL input is mapped to a deterministic sentinel (`\x00NULL\x00`) — the same encoding used by [`pg_trickle_hash_multi`] — so that rows with NULL-valued group keys receive a non-NULL `__pgt_row_id`. |
 | `pgtrickle.pg_trickle_hash_multi()` | `pgtrickle` | `i64` | The hash output is identical to the previous xxh64-based implementation **except** that it now uses xxh3 which produces different numeric values. |
 | `pgtrickle.pg_trickle_on_ddl_end()` | `pgtrickle` | `` | Registered via `extension_sql!()` in lib.rs as: ```sql CREATE FUNCTION pgtrickle._on_ddl_end() RETURNS event_trigger . |
@@ -92,6 +93,7 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.reset_fuse()` | `pgtrickle` | `` | Returns nothing on success; raises an ERROR if the stream table does not exist or the fuse is not blown. |
 | `pgtrickle.restore_from_snapshot()` | `pgtrickle` | `` | The stream table must already be registered. |
 | `pgtrickle.restore_stream_tables()` | `pgtrickle` | `Result<(), crate::error::PgTrickleError>` | During a `pg_restore`, `pg_dump` will restore the base storage tables and the `pgtrickle.pgt_stream_tables` catalog, but the necessary CDC triggers and internal wiring will be missing. |
+| `pgtrickle.resume_scheduler()` | `pgtrickle` | `&'static str` | Example: ```sql SELECT pgtrickle.resume_scheduler(ARRAY['public.my_view']); ```. |
 | `pgtrickle.resume_stream_table()` | `pgtrickle` | `` | Resume a suspended stream table, clearing its consecutive error count and re-enabling automated and manual refreshes. |
 | `pgtrickle.schedule_recommendations()` | `pgtrickle` | `TableIterator<` | PLAN-2 (v0.27.0): Return one schedule recommendation row per registered stream table, sortable by `delta_pct DESC`. |
 | `pgtrickle.scheduler_overhead()` | `pgtrickle` | `TableIterator<` | Computes busy-time ratio, queue depth, avg dispatch latency, and the fraction of CPU spent on self-monitoring STs vs user STs from refresh history. |
@@ -108,6 +110,8 @@ See [docs/SQL_REFERENCE.md](SQL_REFERENCE.md) for full signatures and examples.
 | `pgtrickle.st_auto_threshold()` | `pgtrickle` | `Option<f64>` | Returns the per-ST `auto_threshold` if set, otherwise the global `pg_trickle.differential_max_change_ratio` GUC. |
 | `pgtrickle.st_refresh_stats()` | `pgtrickle` | `TableIterator<` | This is the primary monitoring function, exposed as `pgtrickle.st_refresh_stats()`. |
 | `pgtrickle.stream_table_lineage()` | `pgtrickle` | `TableIterator<` | # Example ```sql SELECT * FROM pgtrickle.stream_table_lineage('public.revenue_summary'); ```. |
+| `pgtrickle.stream_table_spec()` | `pgtrickle` | `Option<pgrx::JsonB>` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'::regclass); ```. |
+| `pgtrickle.stream_table_spec_by_name()` | `pgtrickle` | `Option<pgrx::JsonB>` | Example: ```sql SELECT pgtrickle.stream_table_spec('public.my_view'); ```. |
 | `pgtrickle.stream_table_to_publication()` | `pgtrickle` | `` | Creates a PostgreSQL publication exposing the named stream table so that Kafka Connect, Debezium, and other logical replication subscribers can receive change events without a separate replication slot. |
 | `pgtrickle.subscribe()` | `pgtrickle` | `Result<(), PgTrickleError>` | The subscription is stored in `pgtrickle.pgt_subscriptions` and survives restarts. |
 | `pgtrickle.subscribe_distance()` | `pgtrickle` | `Result<(), PgTrickleError>` | The subscription is stored in `pgtrickle.pgt_distance_subscriptions` and survives restarts. |
