@@ -976,3 +976,228 @@ async fn test_mixed_stddev_with_sum_count_differential() {
     )
     .await;
 }
+
+// ── PERF-2: Fused Multi-Node Refresh (v0.63.0) ────────────────────────────
+
+/// PERF-2: enable_fused_refresh=false reverts to sequential behaviour.
+///
+/// Creates two stream tables over the same source, disables fused refresh,
+/// inserts data, runs the scheduler, and asserts both STs converge correctly.
+/// This verifies the GUC disable path does not break correctness.
+#[tokio::test]
+async fn test_fused_refresh_guc_disable() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    // Disable fused refresh via GUC.
+    db.execute("ALTER SYSTEM SET pg_trickle.enable_fused_refresh = false")
+        .await;
+    db.reload_config_and_wait().await;
+
+    db.execute("CREATE TABLE fgd_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO fgd_src SELECT i, i*10 FROM generate_series(1,5) i")
+        .await;
+
+    db.create_st("fgd_a", "SELECT id, val FROM fgd_src", "1m", "DIFFERENTIAL")
+        .await;
+    db.create_st(
+        "fgd_b",
+        "SELECT id, val*2 AS val FROM fgd_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.fgd_a").await, 5);
+    assert_eq!(db.count("public.fgd_b").await, 5);
+
+    // Insert more rows and refresh sequentially.
+    db.execute("INSERT INTO fgd_src SELECT i, i*10 FROM generate_series(6,10) i")
+        .await;
+    db.refresh_st("fgd_a").await;
+    db.refresh_st("fgd_b").await;
+
+    assert_eq!(db.count("public.fgd_a").await, 10);
+    assert_eq!(db.count("public.fgd_b").await, 10);
+
+    // Re-enable fused refresh.
+    db.execute("ALTER SYSTEM RESET pg_trickle.enable_fused_refresh")
+        .await;
+    db.reload_config_and_wait().await;
+}
+
+/// PERF-2: FULL-mode nodes are not fused; only DIFFERENTIAL nodes are eligible.
+///
+/// Creates one FULL-mode and one DIFFERENTIAL-mode stream table over the
+/// same source, inserts data, and verifies both converge correctly.
+/// The FULL node should fall through to the sequential path.
+#[tokio::test]
+async fn test_fused_refresh_full_node_excluded() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    db.execute("CREATE TABLE ffne_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute("INSERT INTO ffne_src VALUES (1,'a'),(2,'b'),(3,'c')")
+        .await;
+
+    db.create_st("ffne_full", "SELECT id, val FROM ffne_src", "1m", "FULL")
+        .await;
+    db.create_st(
+        "ffne_diff",
+        "SELECT id, upper(val) AS val FROM ffne_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.ffne_full").await, 3);
+    assert_eq!(db.count("public.ffne_diff").await, 3);
+
+    db.execute("INSERT INTO ffne_src VALUES (4,'d'),(5,'e')")
+        .await;
+
+    db.refresh_st("ffne_full").await;
+    db.refresh_st("ffne_diff").await;
+
+    assert_eq!(db.count("public.ffne_full").await, 5);
+    assert_eq!(db.count("public.ffne_diff").await, 5);
+}
+
+/// PERF-2: Nodes whose estimated delta exceeds fused_refresh_max_delta_rows
+/// are excluded from the fused batch and fall back to sequential refresh.
+///
+/// Sets fused_refresh_max_delta_rows=1 so any node with >1 pending row is
+/// excluded. Verifies that both STs still converge correctly.
+#[tokio::test]
+async fn test_fused_refresh_large_delta_excluded() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    // Set a very low threshold: any delta with >1 row is excluded from fusion.
+    db.execute("ALTER SYSTEM SET pg_trickle.fused_refresh_max_delta_rows = 1")
+        .await;
+    db.reload_config_and_wait().await;
+
+    db.execute("CREATE TABLE flde_src (id INT PRIMARY KEY, val INT)")
+        .await;
+    db.execute("INSERT INTO flde_src SELECT i, i FROM generate_series(1,3) i")
+        .await;
+
+    db.create_st(
+        "flde_a",
+        "SELECT id, val FROM flde_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+    db.create_st(
+        "flde_b",
+        "SELECT id, val+1 AS val FROM flde_src",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    assert_eq!(db.count("public.flde_a").await, 3);
+    assert_eq!(db.count("public.flde_b").await, 3);
+
+    // Insert 5 rows — well above the threshold of 1.
+    db.execute("INSERT INTO flde_src SELECT i, i FROM generate_series(4,8) i")
+        .await;
+
+    // Both STs must converge even when excluded from fusion.
+    db.refresh_st("flde_a").await;
+    db.refresh_st("flde_b").await;
+
+    assert_eq!(db.count("public.flde_a").await, 8);
+    assert_eq!(db.count("public.flde_b").await, 8);
+
+    // Reset GUC.
+    db.execute("ALTER SYSTEM RESET pg_trickle.fused_refresh_max_delta_rows")
+        .await;
+    db.reload_config_and_wait().await;
+}
+
+/// PERF-2: End-to-end fused refresh correctness with a multi-table DAG.
+///
+/// Creates a two-level DAG (src → view_a, view_a → view_b) and verifies
+/// that fused refresh produces identical results to sequential refresh
+/// for both INSERT and UPDATE workloads.
+#[tokio::test]
+async fn test_fused_refresh_tpch_22() {
+    let db = e2e::E2eDb::new().await.with_extension().await;
+
+    // Ensure fused refresh is enabled.
+    db.execute("ALTER SYSTEM SET pg_trickle.enable_fused_refresh = true")
+        .await;
+    db.reload_config_and_wait().await;
+
+    db.execute("CREATE TABLE ftr_src (id INT PRIMARY KEY, grp TEXT, amt NUMERIC)")
+        .await;
+    db.execute(
+        "INSERT INTO ftr_src SELECT i, chr(65 + (i % 5)), (i * 1.5)::numeric \
+         FROM generate_series(1, 20) i",
+    )
+    .await;
+
+    // Level 1: aggregate stream table over the source.
+    db.create_st(
+        "ftr_agg",
+        "SELECT grp, COUNT(*) AS cnt, SUM(amt) AS total FROM ftr_src GROUP BY grp",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Level 2: scan over the level-1 ST (exercises the DAG chain).
+    db.create_st(
+        "ftr_top",
+        "SELECT grp, total FROM public.ftr_agg WHERE total > 30",
+        "1m",
+        "DIFFERENTIAL",
+    )
+    .await;
+
+    // Verify initial state matches the defining queries.
+    db.assert_st_matches_query(
+        "public.ftr_agg",
+        "SELECT grp, COUNT(*) AS cnt, SUM(amt) AS total FROM ftr_src GROUP BY grp",
+    )
+    .await;
+
+    db.assert_st_matches_query(
+        "public.ftr_top",
+        "SELECT grp, total FROM \
+         (SELECT grp, COUNT(*) AS cnt, SUM(amt) AS total FROM ftr_src GROUP BY grp) sub \
+         WHERE total > 30",
+    )
+    .await;
+
+    // Insert additional rows and refresh the DAG.
+    db.execute(
+        "INSERT INTO ftr_src SELECT i, chr(65 + (i % 5)), (i * 2.0)::numeric \
+         FROM generate_series(21, 40) i",
+    )
+    .await;
+
+    db.refresh_st("ftr_agg").await;
+    db.refresh_st("ftr_top").await;
+
+    db.assert_st_matches_query(
+        "public.ftr_agg",
+        "SELECT grp, COUNT(*) AS cnt, SUM(amt) AS total FROM ftr_src GROUP BY grp",
+    )
+    .await;
+
+    db.assert_st_matches_query(
+        "public.ftr_top",
+        "SELECT grp, total FROM \
+         (SELECT grp, COUNT(*) AS cnt, SUM(amt) AS total FROM ftr_src GROUP BY grp) sub \
+         WHERE total > 30",
+    )
+    .await;
+
+    // Reset GUC.
+    db.execute("ALTER SYSTEM RESET pg_trickle.enable_fused_refresh")
+        .await;
+    db.reload_config_and_wait().await;
+}

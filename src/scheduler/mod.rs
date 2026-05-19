@@ -678,6 +678,314 @@ fn execute_worker_cyclic_scc(job: &SchedulerJob) -> RefreshOutcome {
     RefreshOutcome::PermanentFailure
 }
 
+/// PERF-2 (v0.63.0): Attempt fused differential refresh for a subset of
+/// chain members.
+///
+/// Identifies fusion-eligible nodes from `member_pgt_ids` (DIFFERENTIAL mode,
+/// non-paused, delta below `fused_refresh_max_delta_rows`, template cache warm),
+/// composes their delta SQL into a single `WITH … MERGE` statement using
+/// [`refresh::fuse_diff_batch`], and executes it in one SPI call.
+///
+/// Returns the set of `pgt_id`s that were successfully fused and had their
+/// frontiers saved.  The caller must skip these nodes in the subsequent
+/// sequential loop.  Returns an empty `Vec` when fusion was not attempted or
+/// did not produce a valid batch.
+fn try_fused_chain_refresh(
+    member_pgt_ids: &[i64],
+    tick_watermark: Option<&str>,
+    gated_oids: &std::collections::HashSet<pgrx::pg_sys::Oid>,
+) -> Vec<i64> {
+    if !crate::config::pg_trickle_enable_fused_refresh() {
+        return vec![];
+    }
+
+    let max_delta_rows = crate::config::pg_trickle_fused_refresh_max_delta_rows();
+    let change_schema = crate::config::pg_trickle_change_buffer_schema().replace('"', "\"\"");
+
+    // Phase 1: Identify eligible nodes and gather their NodeSpec data.
+    struct NodeData {
+        pgt_id: i64,
+        st: StreamTableMeta,
+        new_frontier: version::Frontier,
+        node_spec: refresh::NodeSpec,
+    }
+    let mut eligible: Vec<NodeData> = Vec::new();
+
+    for &pgt_id in member_pgt_ids {
+        // Load fresh ST metadata.
+        let st = match load_st_by_id(pgt_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Only active STs in DIFFERENTIAL mode.
+        if st.status != crate::dag::StStatus::Active {
+            continue;
+        }
+        if !st.is_populated {
+            continue;
+        }
+
+        // Skip if any source is gated.
+        if is_any_source_gated(pgt_id, gated_oids) {
+            continue;
+        }
+
+        // Check watermark alignment.
+        let (wm_misaligned, _) = is_watermark_misaligned(pgt_id);
+        if wm_misaligned {
+            continue;
+        }
+
+        // Need an existing frontier for differential refresh.
+        match &st.frontier {
+            Some(f) if !f.is_empty() => {}
+            _ => continue,
+        };
+
+        // Acquire the catalog row lock (SKIP LOCKED — skip if another session holds it).
+        let got_lock = Spi::get_one_with_args::<i64>(
+            "SELECT pgt_id FROM pgtrickle.pgt_stream_tables \
+             WHERE pgt_id = $1 FOR UPDATE SKIP LOCKED",
+            &[pgt_id.into()],
+        )
+        .unwrap_or(None)
+        .is_some();
+        if !got_lock {
+            continue;
+        }
+
+        // TOCTOU: reload after locking.
+        let st = match load_st_by_id(pgt_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let prev_frontier = match &st.frontier {
+            Some(f) if !f.is_empty() => f.clone(),
+            _ => continue,
+        };
+
+        // Compute the new frontier.
+        let source_oids = get_source_oids_for_st(pgt_id);
+        let mut slot_positions = cdc::get_slot_positions(&source_oids).unwrap_or_default();
+        if let Some(wm) = tick_watermark {
+            for lsn in slot_positions.values_mut() {
+                if version::lsn_gt(lsn, wm) {
+                    *lsn = wm.to_string();
+                }
+            }
+        }
+        let data_ts_str = version::select_target_data_timestamp(
+            st.schedule
+                .as_ref()
+                .and_then(|s| crate::api::parse_duration(s).ok())
+                .map(|s| s as u64),
+            &[],
+        );
+        let mut new_frontier = version::compute_new_frontier(&slot_positions, &data_ts_str);
+
+        // Augment with upstream ST source positions.
+        let change_schema_for_st = crate::config::pg_trickle_change_buffer_schema()
+            .trim_matches('"')
+            .to_string();
+        let st_dep_ids: Vec<i64> = crate::catalog::StDependency::get_for_st(pgt_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.source_type == "STREAM_TABLE")
+            .filter_map(|d| crate::catalog::StreamTableMeta::pgt_id_for_relid(d.source_relid))
+            .collect();
+        for upstream_id in &st_dep_ids {
+            let lsn = Spi::get_one::<String>(&format!(
+                "SELECT COALESCE(MAX(lsn), '0/0') \
+                 FROM \"{change_schema_for_st}\".changes_pgt_{upstream_id}"
+            ))
+            .unwrap_or(None)
+            .unwrap_or_else(|| "0/0".to_string());
+            new_frontier.set_st_source(*upstream_id, lsn, data_ts_str.clone());
+        }
+
+        // Determine refresh action.
+        let has_changes = has_table_source_changes(&st) || has_stream_table_source_changes(&st);
+        let action = refresh::determine_refresh_action(&st, has_changes);
+        if action != RefreshAction::Differential {
+            continue;
+        }
+
+        // Check delta size against fused_refresh_max_delta_rows.
+        if let Some(max_rows) = max_delta_rows {
+            let dep_oids: Vec<u32> = crate::catalog::StDependency::get_for_st(pgt_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| {
+                    d.source_type == "TABLE"
+                        || d.source_type == "FOREIGN_TABLE"
+                        || d.source_type == "MATVIEW"
+                })
+                .map(|d| d.source_relid.to_u32())
+                .collect();
+            let total_changes: i64 = dep_oids
+                .iter()
+                .map(|&oid| {
+                    let buf_name =
+                        crate::cdc::buffer_base_name_for_oid(pgrx::pg_sys::Oid::from(oid));
+                    Spi::get_one::<i64>(&format!(
+                        "SELECT count(*)::bigint FROM \"{change_schema}\".{buf_name}"
+                    ))
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0)
+                })
+                .sum();
+            if total_changes > max_rows {
+                continue;
+            }
+        }
+
+        // Check template cache: we need the delta SQL template for this node.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        st.defining_query.hash(&mut hasher);
+        let query_hash = hasher.finish();
+
+        let (delta_tmpl, src_oids, _is_dedup) =
+            match refresh::get_fused_refresh_template(pgt_id, query_hash) {
+                Some(t) => t,
+                None => {
+                    // Template not warm — skip this node; the sequential path will warm it.
+                    continue;
+                }
+            };
+
+        // Resolve LSN placeholders to get the final delta SQL.
+        let empty_zero_oids = std::collections::HashSet::new();
+        let delta_sql = match refresh::resolve_lsn_placeholders(
+            &delta_tmpl,
+            &src_oids,
+            &prev_frontier,
+            &new_frontier,
+            &empty_zero_oids,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                pgrx::debug1!(
+                    "[pg_trickle] PERF-2: fused refresh LSN resolution failed for pgt_id={}: {}",
+                    pgt_id,
+                    e
+                );
+                continue;
+            }
+        };
+
+        // Build NodeSpec.
+        let user_cols = refresh::get_st_user_columns(&st);
+        if user_cols.is_empty() {
+            continue; // cannot build MERGE without columns
+        }
+        let quoted_table = format!(
+            "\"{}\".\"{}\"",
+            st.pgt_schema.replace('"', "\"\""),
+            st.pgt_name.replace('"', "\"\""),
+        );
+        let node_spec = refresh::NodeSpec {
+            pgt_id,
+            quoted_table,
+            delta_sql,
+            user_cols,
+            has_partition_key: st.st_partition_key.is_some(),
+        };
+
+        eligible.push(NodeData {
+            pgt_id,
+            st,
+            new_frontier,
+            node_spec,
+        });
+    }
+
+    if eligible.len() < 2 {
+        // Not enough nodes for fusion to be worthwhile.
+        return vec![];
+    }
+
+    // Phase 2: Compose the fused SQL.
+    let node_specs: Vec<refresh::NodeSpec> = eligible.iter().map(|n| n.node_spec.clone()).collect();
+    let fused = match refresh::fuse_diff_batch(&node_specs) {
+        Ok(f) => f,
+        Err(e) => {
+            pgrx::debug1!("[pg_trickle] PERF-2: fuse_diff_batch failed: {}", e);
+            return vec![];
+        }
+    };
+
+    pgrx::log!(
+        "[pg_trickle] PERF-2: executing fused refresh for {} nodes (job nodes: {:?})",
+        fused.node_count,
+        eligible.iter().map(|n| n.pgt_id).collect::<Vec<_>>(),
+    );
+
+    // Phase 3: Execute the fused SQL.
+    if let Err(e) = Spi::run(&fused.sql) {
+        pgrx::warning!(
+            "[pg_trickle] PERF-2: fused refresh SQL failed: {}; falling back to sequential",
+            e
+        );
+        return vec![];
+    }
+
+    // Phase 4: Post-execution — store frontiers and record completions.
+    let mut fused_pgt_ids: Vec<i64> = Vec::with_capacity(eligible.len());
+    let now = Spi::get_one::<pgrx::datum::TimestampWithTimeZone>("SELECT now()").unwrap_or(None);
+
+    for nd in &eligible {
+        if let Err(e) = StreamTableMeta::store_frontier(nd.pgt_id, &nd.new_frontier) {
+            pgrx::warning!(
+                "[pg_trickle] PERF-2: failed to store frontier for pgt_id={}: {}",
+                nd.pgt_id,
+                e
+            );
+        }
+
+        // Record the fused refresh in the audit log.
+        if let Some(ts) = now {
+            let freshness_deadline = compute_freshness_deadline(&nd.st);
+            let refresh_id = RefreshRecord::insert(
+                nd.pgt_id,
+                ts,
+                "DIFFERENTIAL",
+                "RUNNING",
+                0,
+                0,
+                None,
+                Some("SCHEDULER_FUSED"),
+                freshness_deadline,
+                0,
+                None,
+                false,
+                tick_watermark,
+            );
+            if let Ok(rid) = refresh_id {
+                let _ = RefreshRecord::complete(
+                    rid,
+                    "COMPLETED",
+                    0, // row counts not individually tracked in fused mode
+                    0,
+                    None,
+                    0,
+                    Some("DIFFERENTIAL"),
+                    false,
+                );
+            }
+        }
+
+        fused_pgt_ids.push(nd.pgt_id);
+    }
+
+    pgrx::log!(
+        "[pg_trickle] PERF-2: fused refresh completed for {} node(s)",
+        fused_pgt_ids.len(),
+    );
+    fused_pgt_ids
+}
+
 /// DAG-4: Execute a fused chain of stream tables in a single worker.
 ///
 /// Members are refreshed sequentially in topological order.  For each
@@ -712,10 +1020,21 @@ fn execute_worker_fused_chain(job: &SchedulerJob) -> RefreshOutcome {
     // Ensure bypass tables are clean at the start.
     crate::refresh::clear_all_st_bypass();
 
+    // PERF-2 (v0.63.0): Attempt fused differential refresh for eligible nodes.
+    // Nodes that are successfully fused are skipped in the sequential loop below.
+    let fused_pgt_ids =
+        try_fused_chain_refresh(&job.member_pgt_ids, tick_watermark.as_deref(), &gated_oids);
+    let fused_set: std::collections::HashSet<i64> = fused_pgt_ids.into_iter().collect();
+
     let member_count = job.member_pgt_ids.len();
-    let mut refreshed_count: usize = 0;
+    let mut refreshed_count: usize = fused_set.len();
 
     for (idx, &pgt_id) in job.member_pgt_ids.iter().enumerate() {
+        // PERF-2: Skip nodes already handled by the fused path.
+        if fused_set.contains(&pgt_id) {
+            continue;
+        }
+
         let st = match load_st_by_id(pgt_id) {
             Some(st) => st,
             None => continue,
