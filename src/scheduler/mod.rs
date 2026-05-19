@@ -795,12 +795,15 @@ fn try_fused_chain_refresh(
             .filter_map(|d| crate::catalog::StreamTableMeta::pgt_id_for_relid(d.source_relid))
             .collect();
         for upstream_id in &st_dep_ids {
-            let lsn = Spi::get_one::<String>(&format!(
+            // nosemgrep: rust.spi.query.dynamic-format — schema from GUC (server-controlled),
+            // upstream_id is i64 pgt_id (not user input).
+            let lsn_sql = format!(
                 "SELECT COALESCE(MAX(lsn), '0/0') \
                  FROM \"{change_schema_for_st}\".changes_pgt_{upstream_id}"
-            ))
-            .unwrap_or(None)
-            .unwrap_or_else(|| "0/0".to_string());
+            );
+            let lsn = Spi::get_one::<String>(&lsn_sql)
+                .unwrap_or(None)
+                .unwrap_or_else(|| "0/0".to_string());
             new_frontier.set_st_source(*upstream_id, lsn, data_ts_str.clone());
         }
 
@@ -828,11 +831,13 @@ fn try_fused_chain_refresh(
                 .map(|&oid| {
                     let buf_name =
                         crate::cdc::buffer_base_name_for_oid(pgrx::pg_sys::Oid::from(oid));
-                    Spi::get_one::<i64>(&format!(
-                        "SELECT count(*)::bigint FROM \"{change_schema}\".{buf_name}"
-                    ))
-                    .unwrap_or(Some(0))
-                    .unwrap_or(0)
+                    // nosemgrep: rust.spi.query.dynamic-format — schema from GUC (server-controlled),
+                    // buf_name derived from numeric OID (not user input).
+                    let count_sql =
+                        format!("SELECT count(*)::bigint FROM \"{change_schema}\".{buf_name}");
+                    Spi::get_one::<i64>(&count_sql)
+                        .unwrap_or(Some(0))
+                        .unwrap_or(0)
                 })
                 .sum();
             if total_changes > max_rows {
