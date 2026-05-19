@@ -179,6 +179,20 @@ fused CTE refresh to reduce per-tick statement overhead for multi-node DAGs.
 | [v0.62.0](roadmap/v0.62.0.md) | Scheduler throughput: change-buffer fan-out (O(N)→O(1) scans for multi-consumer DAGs), `pause_scheduler` / `resume_scheduler` per-node SQL functions, `stream_table_spec(oid)` stable JSON projection | Planned | Medium | [Full details](roadmap/v0.62.0.md-full.md) |
 | [v0.63.0](roadmap/v0.63.0.md) | Fused multi-node refresh: CTE-chain composition of per-node delta SQL in a single statement, correctness property test, benchmark regression gate (≥ 20 % wall-time reduction on TPC-H 22-node DAG) | Planned | Large | [Full details](roadmap/v0.63.0.md-full.md) |
 
+### DuckLake Ecosystem Arc (v0.64.x)
+
+Phase 1 of the [DuckLake integration plan](plans/ecosystem/PLAN_DUCKLAKE.md): publish
+tutorials and reference architectures that demonstrate pg_trickle working with
+DuckLake's PostgreSQL catalog today — zero new code required. This establishes
+pg_trickle as the incremental view maintenance layer for data lakes, creates
+thought leadership ahead of the v1.0 stable release, and seeds demand signals
+that will guide whether Phase 2 (DuckLake-optimized change feed polling) is
+worth engineering investment.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|-------------- |
+| [v0.64.0](roadmap/v0.64.0.md) | DuckLake ecosystem: blog posts and tutorials showing pg_trickle + DuckLake working together — foreign table sources, metadata monitoring, one-box data stack reference architecture | Planned | Small | [Full details](plans/ecosystem/PLAN_DUCKLAKE.md) |
+
 
 ### Beyond v1.0
 
@@ -271,6 +285,8 @@ v0.59    ─── Performance & observability: batched monitor SPI, query-hash 
 v0.60    ─── Code quality, test coverage & CI: cdc.rs split, codegen decompose, refresh/CDC/hooks unit tests, idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered E2E on PRs
     │
 v0.61    ─── DX, docs & pre-1.0 polish: health_check foreign-owner row, SQL_REFERENCE complete, snapshot secondary equality, cte_counter reset, outbox name fix, sublinks decompose, 3 ADRs, LATERAL docs
+    │
+v0.64    ─── DuckLake Phase 1: tutorials + reference architectures (pg_trickle as IVM layer for data lakes)
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
