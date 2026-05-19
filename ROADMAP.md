@@ -179,6 +179,35 @@ fused CTE refresh to reduce per-tick statement overhead for multi-node DAGs.
 | [v0.62.0](roadmap/v0.62.0.md) | Scheduler throughput: change-buffer fan-out (O(N)→O(1) scans for multi-consumer DAGs), `pause_scheduler` / `resume_scheduler` per-node SQL functions, `stream_table_spec(oid)` stable JSON projection | Planned | Medium | [Full details](roadmap/v0.62.0.md-full.md) |
 | [v0.63.0](roadmap/v0.63.0.md) | Fused multi-node refresh: CTE-chain composition of per-node delta SQL in a single statement, correctness property test, benchmark regression gate (≥ 20 % wall-time reduction on TPC-H 22-node DAG) | Planned | Large | [Full details](roadmap/v0.63.0.md-full.md) |
 
+### DuckLake Ecosystem Arc (v0.64.x)
+
+Phase 1 of the [DuckLake integration plan](plans/ecosystem/PLAN_DUCKLAKE.md): publish
+tutorials, blog posts, containerised demos, and reference architectures that
+demonstrate pg_trickle working with DuckLake's PostgreSQL catalog today — zero new
+extension code required. This establishes pg_trickle as the incremental view
+maintenance layer for data lakes, creates thought leadership ahead of the v1.0
+stable release, and seeds demand signals that will guide whether Phase 2
+(DuckLake-optimised change-feed polling) is worth engineering investment.
+Community outreach to named DuckLake production users (PostHog, Windmill,
+Ascend.io, Sliplane, locals.com, Media Cluster Norway) is explicitly part of this
+release.
+
+Nine deliverables, all documentation / community / demo:
+
+1. **Tutorial: "Real-Time Dashboards on Your Data Lake"** — DuckDB writes events to DuckLake; pg_trickle stream tables compute per-minute aggregations; Grafana dashboard powered by PostgreSQL.
+2. **Tutorial: "The Modern Data Stack in One Box"** — OLTP in PostgreSQL + pg_trickle aggregations + DuckLake for historical analytics + DuckDB for ad-hoc queries, all from one instance and an S3 bucket — no Kafka, no Airflow.
+3. **Tutorial: "Monitoring Your DuckLake with pg_trickle"** — stream tables over DuckLake's 28 metadata tables; real-time alerts for small-file proliferation, snapshot rate spikes, and storage growth.
+4. **Blog post: "Why pg_trickle + DuckLake Is the Missing Piece for Lakehouse IVM"** — thought-leadership post for Hacker News / r/dataengineering positioning pg_trickle as the IVM layer DuckLake's v2.0 roadmap explicitly calls for.
+5. **Blog post: "DuckLake's `table_changes()` Meets pg_trickle's DVM Engine"** — technical deep-dive on how DuckLake's change-feed format maps directly to pg_trickle's change-buffer model; builds credibility with the systems-programming audience.
+6. **Docs: DuckLake examples in `foreign-table-sources.md`** — concrete code samples for using DuckLake-backed foreign tables as stream table sources.
+7. **Demo A: "Five-Second Funnel"** — self-contained `docker-compose up` demo that streams fake e-commerce events into DuckLake and displays a live pg_trickle-powered funnel dashboard; shareable for conference talks and social media.
+8. **Demo D: "DuckLake Observability in a Box"** — pre-packaged Grafana dashboard powered by stream tables over DuckLake metadata; five minutes from `git clone` to operational visibility.
+9. **Community: Named-user outreach + DuckCon/PGConf talk submission** — direct pitches to the named DuckLake production users identified in research, plus CFP submissions to DuckCon and PGConf EU.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|-------------- |
+| [v0.64.0](roadmap/v0.64.0.md) | DuckLake ecosystem (Phase 1): 3 tutorials + 2 blog posts + docs + 2 containerised demos + community outreach — no extension code changes | Planned | Small | [Full details](plans/ecosystem/PLAN_DUCKLAKE.md) |
+
 
 ### Beyond v1.0
 
@@ -271,6 +300,8 @@ v0.59    ─── Performance & observability: batched monitor SPI, query-hash 
 v0.60    ─── Code quality, test coverage & CI: cdc.rs split, codegen decompose, refresh/CDC/hooks unit tests, idempotence proptest, sleep removal, WAL OID filter, partition-attach rebuild, path-filtered E2E on PRs
     │
 v0.61    ─── DX, docs & pre-1.0 polish: health_check foreign-owner row, SQL_REFERENCE complete, snapshot secondary equality, cte_counter reset, outbox name fix, sublinks decompose, 3 ADRs, LATERAL docs
+    │
+v0.64    ─── DuckLake Phase 1: 3 tutorials + 2 blog posts + 2 containerised demos + named-user outreach (no extension code)
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
