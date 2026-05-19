@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.63.0 — Fused Multi-Node Refresh](#0630--fused-multi-node-refresh)
 - [0.62.0 — Scheduler Throughput & pg_aqueduct Prerequisites](#0620--scheduler-throughput--pg_aqueduct-prerequisites)
 - [0.61.0 — DX, Documentation & Final Pre-1.0 Polish](#0610--dx-documentation--final-pre-10-polish)
 - [0.60.0 — Code Quality, Test Coverage & CI](#0600--code-quality-test-coverage--ci)
@@ -77,6 +78,50 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.63.0] — Fused Multi-Node Refresh
+
+### What's New
+
+v0.63.0 introduces CTE-fused multi-node refresh: the scheduler now composes the
+delta SQL for an entire topological batch of stream-table nodes into a **single**
+`WITH … MERGE; MERGE; …` statement, reducing per-node SPI round-trips and giving
+the PostgreSQL planner visibility across the entire batch.
+
+**PERF-2: CTE-Fused Multi-Node Refresh**
+
+In v0.62.0 and earlier the scheduler issued one SPI call per node per tick.
+For a DAG with N DIFFERENTIAL nodes sharing source tables, this meant N
+sequential `Spi::run` calls.  v0.63.0 introduces `fuse_diff_batch`, which:
+
+- Parses each node's delta SQL into its constituent CTEs.
+- Renumbers CTE names across nodes (node *k* gets counter offset *k × 100*)
+  to prevent collisions.
+- Deduplicates source-scan CTEs whose SQL bodies are byte-identical (same
+  source OID, same LSN bounds), so each change-buffer range is scanned at
+  most once across the entire batch.
+- Wraps each node's final MERGE in a named `_apply_<pgt_id>` CTE so all
+  intermediate results are available to subsequent nodes in the chain.
+- Emits a single SQL string and executes it in **one** `Spi::run` call.
+
+The fused path is active by default.  Two new GUCs give operators fine-grained
+control:
+
+| GUC | Default | Description |
+|-----|---------|-------------|
+| `pg_trickle.enable_fused_refresh` | `true` | Enable/disable CTE fusion globally. Set to `false` to revert to v0.62.0 sequential-per-node behaviour. |
+| `pg_trickle.fused_refresh_max_delta_rows` | `500000` | Nodes whose estimated pending-row count exceeds this threshold are excluded from the fused batch and refreshed sequentially. Set to `0` to disable the size gate. |
+
+Nodes in `FULL` refresh mode are always excluded from fusion (they use
+a different code path with no delta SQL).
+
+### Upgrading
+
+No schema migration is required.  The `pg_trickle--0.62.0--0.63.0.sql` upgrade
+script is included and contains no SQL changes; the new GUCs are registered
+automatically by the shared library.
 
 ---
 

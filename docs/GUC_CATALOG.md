@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**117 configuration parameters** extracted from `src/config.rs`.
+**119 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -48,6 +48,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
+| `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
@@ -57,6 +58,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.frontier_holdback_mode` | `text` | `"xmin"` | \| Value \| Meaning \| \|-------\|---------\| \| `"xmin"` (default) \| Probe `pg_stat_activity` + `pg_prepared_xacts` once per tick and cap the frontier to the safe upper bound. |
 | `pg_trickle.frontier_holdback_warn_seconds` | `int4` | `60` | Set to 0 to disable the warning (not recommended for production). |
 | `pg_trickle.fuse_default_ceiling` | `int4` | `0` | Set to 0 to disable the global default ceiling (per-ST ceiling only). |
+| `pg_trickle.fused_refresh_max_delta_rows` | `int4` | `500000` | Default: 500 000. |
 | `pg_trickle.history_prune_interval_seconds` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.history_retention_days` | `int4` | `90` | The scheduler runs a daily cleanup that deletes rows from `pgtrickle.pgt_refresh_history` older than this many days. |
 | `pg_trickle.invalidation_ring_capacity` | `int4` | `1024` | Default: 1024. |

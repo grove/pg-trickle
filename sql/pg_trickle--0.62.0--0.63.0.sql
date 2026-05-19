@@ -1,0 +1,28 @@
+-- pg_trickle 0.62.0 -> 0.63.0 upgrade migration
+--
+-- v0.63.0 — Fused Multi-Node Refresh
+--
+-- Changes in this release:
+--
+--   PERF-2: CTE-fused multi-node refresh.
+--     The scheduler can now compose the delta SQL for multiple stream-table
+--     nodes in a single topological batch into one `WITH … MERGE` statement,
+--     reducing per-node SPI round-trips and giving the PostgreSQL planner
+--     visibility across the entire batch.
+--
+--     The feature is controlled by two new GUCs:
+--
+--       pg_trickle.enable_fused_refresh (bool, default on)
+--         Enable CTE-fused multi-node refresh.  Set to off to revert to the
+--         v0.62.0 sequential-per-node behaviour.
+--
+--       pg_trickle.fused_refresh_max_delta_rows (int, default 500000)
+--         A node whose estimated pending-row count exceeds this threshold is
+--         excluded from the fused batch and refreshed sequentially.  Set to 0
+--         to disable the size gate (all DIFFERENTIAL nodes are always eligible).
+--
+--     No SQL schema changes are required; the fused path is purely an
+--     execution-engine optimisation within the scheduler background workers.
+--
+-- No SQL schema changes in this release.
+-- All v0.63.0 changes are in the Rust extension binary (GUCs + scheduler).

@@ -25,6 +25,7 @@
 //!   cross-cycle phantom cleanup (EC01-2)
 
 pub(crate) mod codegen;
+pub(crate) mod fused;
 pub(crate) mod merge;
 pub(crate) mod orchestrator;
 pub(crate) mod phd1;
@@ -41,6 +42,7 @@ pub(crate) mod sql_fragments;
 // Precedence: explicit `pub use` overrides the `pub(crate) use *` glob for
 // the same name, giving those items public (not just crate) visibility.
 pub(crate) use codegen::*;
+pub(crate) use fused::{NodeSpec, fuse_diff_batch};
 pub(crate) use orchestrator::*;
 
 // ── External public API surface ─────────────────────────────────────────
