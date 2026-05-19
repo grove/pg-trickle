@@ -1,0 +1,39 @@
+-- pg_trickle 0.63.0 -> 0.64.0 upgrade migration
+--
+-- v0.64.0 — DuckLake Ecosystem Phase 1
+--
+-- Changes in this release:
+--
+--   This is a pure documentation, demo, and community release.
+--   No changes to the extension schema, SQL functions, GUCs, or Rust code.
+--
+--   Deliverables in v0.64.0:
+--
+--   T-1: Tutorial — "Real-Time Dashboards on Your Data Lake"
+--        blog/ducklake-real-time-dashboards.md
+--
+--   T-2: Tutorial — "The Modern Data Stack in One Box"
+--        blog/ducklake-modern-data-stack.md
+--
+--   T-3: Tutorial — "Monitoring Your DuckLake with pg_trickle"
+--        blog/ducklake-monitoring.md
+--
+--   B-1: Blog — "Why pg_trickle + DuckLake Is the Missing Piece for Lakehouse IVM"
+--        blog/ducklake-ivm-missing-piece.md
+--
+--   B-2: Blog — "DuckLake's table_changes() Meets pg_trickle's DVM Engine"
+--        blog/ducklake-table-changes-dvm.md
+--
+--   D-1: Docs — DuckLake examples added to blog/foreign-table-sources.md
+--
+--   Demo A: "The Five-Second Funnel" self-contained docker-compose demo
+--           demos/ducklake-funnel/
+--
+--   Demo D: "DuckLake Observability in a Box" docker-compose dashboard
+--           demos/ducklake-observability/
+--
+--   C-1/C-2/C-3: Community outreach plan
+--                docs/DUCKLAKE_COMMUNITY_OUTREACH.md
+--
+-- No SQL schema changes in this release.
+-- All v0.64.0 additions are documentation, demos, and community resources.

@@ -206,7 +206,7 @@ Nine deliverables, all documentation / community / demo:
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|-------------- |
-| [v0.64.0](roadmap/v0.64.0.md) | DuckLake ecosystem (Phase 1): 3 tutorials + 2 blog posts + docs + 2 containerised demos + community outreach — no extension code changes | Planned | Small | [Full details](plans/ecosystem/PLAN_DUCKLAKE.md) |
+| [v0.64.0](roadmap/v0.64.0.md) | DuckLake ecosystem (Phase 1): 3 tutorials + 2 blog posts + docs + 2 containerised demos + community outreach — no extension code changes | ✅ Released | Small | [Full details](roadmap/v0.64.0.md-full.md) |
 
 
 ### Beyond v1.0

@@ -219,3 +219,136 @@ Materialize into a local table first when:
 - The foreign table changes infrequently relative to local tables
 
 Either way, pg_trickle handles the rest. Foreign or local, the delta rules are the same.
+
+---
+
+## DuckLake Sources
+
+[DuckLake](https://ducklake.select/) (v1.0, April 2026) is a lakehouse format
+that stores its entire catalog in PostgreSQL. When you run DuckLake on the same
+PostgreSQL instance as pg_trickle, DuckLake tables become a first-class source
+for stream tables.
+
+### The Bridge-Table Pattern (Works Today)
+
+DuckLake's "data inlining" feature writes small DuckDB inserts directly into
+regular PostgreSQL tables. For large writes, DuckDB stores rows in Parquet on
+S3 and records file metadata in the PostgreSQL catalog. The bridge-table pattern
+works for both:
+
+```sql
+-- Create a bridge table that receives DuckLake data
+-- (populated by DuckDB writes via the inlined-data path,
+--  or via a periodic postgres_query() sync from DuckDB)
+CREATE TABLE events_bridge (
+    event_id    BIGINT PRIMARY KEY,
+    user_id     INT,
+    product_id  INT,
+    event_type  TEXT,
+    revenue_usd NUMERIC(10,2),
+    occurred_at TIMESTAMPTZ
+);
+
+-- pg_trickle watches events_bridge with trigger-based CDC (sub-millisecond)
+SELECT pgtrickle.create_stream_table(
+    name         => 'revenue_by_minute',
+    query        => $$
+        SELECT
+            date_trunc('minute', occurred_at) AS minute,
+            product_id,
+            SUM(revenue_usd)   AS total_revenue,
+            COUNT(*)           AS purchase_count
+        FROM events_bridge
+        WHERE event_type = 'purchase'
+        GROUP BY date_trunc('minute', occurred_at), product_id
+    $$,
+    schedule     => '5s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+### DuckLake Metadata Tables as Sources
+
+DuckLake's ~28 metadata tables live in PostgreSQL and are excellent stream
+table sources for operational monitoring. These tables record every snapshot,
+every data file, every schema change, and every compaction event:
+
+```sql
+-- Stream table: small-file count per DuckLake table (compaction alerts)
+SELECT pgtrickle.create_stream_table(
+    name         => 'ducklake_small_file_counts',
+    query        => $$
+        SELECT
+            dt.schema_name,
+            dt.table_name,
+            COUNT(*)                    AS small_file_count,
+            SUM(df.file_size_bytes)     AS total_small_file_bytes
+        FROM ducklake_data_file df
+        JOIN ducklake_table dt ON dt.table_id = df.table_id
+        WHERE df.file_size_bytes < 10 * 1024 * 1024
+          AND df.deleted_snapshot_id IS NULL
+        GROUP BY dt.schema_name, dt.table_name
+    $$,
+    schedule     => '1m',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+See [Monitoring Your DuckLake with pg_trickle](ducklake-monitoring.md) for the
+full set of monitoring stream tables.
+
+### Foreign-Table Path (Alternative for Large Tables)
+
+For large DuckLake tables where the full Parquet content must be read, use the
+`duckdb_fdw` or `parquet_fdw` path with polling-based CDC:
+
+```sql
+-- Install a Parquet-aware FDW
+CREATE EXTENSION parquet_fdw;
+CREATE SERVER duckdb_server FOREIGN DATA WRAPPER parquet_fdw;
+
+-- Map the DuckLake-managed Parquet files as a foreign table
+CREATE FOREIGN TABLE ducklake_events (
+    user_id     INT,
+    event_type  TEXT,
+    revenue_usd NUMERIC(10,2),
+    occurred_at TIMESTAMPTZ
+) SERVER duckdb_server
+  OPTIONS (filename 's3://my-lake/data/*.parquet');
+
+-- Enable foreign-table polling
+SET pg_trickle.foreign_table_polling = on;
+
+SELECT pgtrickle.create_stream_table(
+    name         => 'events_per_user',
+    query        => $$
+        SELECT user_id, COUNT(*) AS event_count
+        FROM ducklake_events
+        GROUP BY user_id
+    $$,
+    schedule     => '30s',
+    refresh_mode => 'DIFFERENTIAL'
+);
+```
+
+**Performance note:** The foreign-table path requires a full Parquet scan on
+each refresh cycle. For frequently updated DuckLake tables, prefer the
+bridge-table or DuckLake inlined-data paths.
+
+### What's Coming: Native DuckLake Change-Feed Adapter
+
+DuckLake provides a `table_changes(table, from_snapshot, to_snapshot)` function
+that returns a signed-multiset delta stream — the exact format pg_trickle's DVM
+engine consumes. A native adapter (planned for v0.65.0) will use this function
+to eliminate polling entirely, enabling true O(Δ) incremental maintenance over
+large DuckLake tables without any full scans.
+
+See [DuckLake's `table_changes()` Meets pg_trickle's DVM Engine](ducklake-table-changes-dvm.md)
+for the technical deep-dive.
+
+---
+
+*DuckLake tutorials:*
+- [Real-Time Dashboards on Your Data Lake](ducklake-real-time-dashboards.md)
+- [The Modern Data Stack in One Box](ducklake-modern-data-stack.md)
+- [Monitoring Your DuckLake with pg_trickle](ducklake-monitoring.md)

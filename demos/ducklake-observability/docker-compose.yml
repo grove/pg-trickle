@@ -1,0 +1,38 @@
+version: "3.9"
+
+# DuckLake Observability in a Box
+#
+# This compose file starts only Grafana — it connects to your EXISTING
+# DuckLake PostgreSQL catalog.  Run init_monitoring.sql against that catalog
+# first to install the stream tables.
+#
+# Usage:
+#   cp .env.example .env && $EDITOR .env
+#   psql "$DATABASE_URL" -f init_monitoring.sql
+#   docker compose up -d grafana
+#   open http://localhost:3100
+
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ducklake_observability_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Pass the target PostgreSQL connection through to the datasource provisioning
+      PG_HOST: "${PG_HOST:-localhost}"
+      PG_PORT: "${PG_PORT:-5432}"
+      PG_DATABASE: "${PG_DATABASE:-lake_catalog}"
+      PG_USER: "${PG_USER:-postgres}"
+      PG_PASSWORD: "${PG_PASSWORD:-postgres}"
+    ports:
+      - "${GRAFANA_PORT:-3100}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  grafana_data:
