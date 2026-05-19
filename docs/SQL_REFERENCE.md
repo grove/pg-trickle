@@ -5009,3 +5009,109 @@ SELECT id, sum(amount) AS __pgt_count FROM orders GROUP BY id;
 SELECT id, sum(amount) AS order_total FROM orders GROUP BY id;
 ```
 
+
+---
+
+### pgtrickle.pause_scheduler
+
+Pauses the differential refresh scheduler for the listed stream tables.
+Prevents the scheduler from starting new refreshes for those nodes until
+`pgtrickle.resume_scheduler()` is called. In-flight refreshes are drained
+before the function returns, up to `pg_trickle.scheduler_drain_timeout`
+(default 30 s).
+
+```sql
+pgtrickle.pause_scheduler(nodes text[]) → text
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `nodes` | `text[]` | Array of schema-qualified stream table names to pause. |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.pause_scheduler(ARRAY['public.order_totals', 'public.customer_summary']);
+```
+
+**Notes:**
+
+- Raises `ERROR` if any name in `nodes` does not exist in `pgtrickle.pgt_stream_tables`.
+- Safe to call on already-paused nodes (idempotent).
+- Returns `'OK'` on success.
+
+---
+
+### pgtrickle.resume_scheduler
+
+Resumes the differential refresh scheduler for the listed stream tables.
+Restores normal scheduling for nodes previously paused with `pause_scheduler`.
+
+```sql
+pgtrickle.resume_scheduler(nodes text[]) → text
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `nodes` | `text[]` | Array of schema-qualified stream table names to resume. |
+
+**Example:**
+
+```sql
+SELECT pgtrickle.resume_scheduler(ARRAY['public.order_totals', 'public.customer_summary']);
+```
+
+**Notes:**
+
+- Safe to call on nodes that are not paused (idempotent).
+- Returns `'OK'` on success.
+
+---
+
+### pgtrickle.stream_table_spec
+
+Returns a stable JSON projection of a single stream table's specification.
+Useful for drift detection, import, and configuration auditing.
+
+```sql
+pgtrickle.stream_table_spec(relid oid)           → jsonb
+pgtrickle.stream_table_spec(qualified_name text) → jsonb
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `relid` | `oid` | OID of the stream table relation. |
+| `qualified_name` | `text` | Schema-qualified name (e.g. `'public.order_totals'`). |
+
+**Returns:**
+
+```json
+{
+  "name": "order_totals",
+  "schema": "public",
+  "query": "SELECT customer_id, sum(amount) FROM orders GROUP BY 1",
+  "refresh_mode": "DIFFERENTIAL",
+  "schedule": "30s",
+  "cdc_mode": "trigger",
+  "oid": 12345,
+  "diamond_group": null,
+  "attach_outbox": null,
+  "cdc_slot_name": null
+}
+```
+
+Returns `NULL` if `relid` / `qualified_name` is not a managed stream table.
+All fields in the v0.62.0 response are stable across future minor releases.
+
+**Example:**
+
+```sql
+SELECT pgtrickle.stream_table_spec('public.order_totals');
+SELECT pgtrickle.stream_table_spec('public.order_totals'::regclass::oid);
+```
