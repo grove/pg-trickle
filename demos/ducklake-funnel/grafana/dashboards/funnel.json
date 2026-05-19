@@ -1,0 +1,78 @@
+{
+  "title": "Five-Second Funnel — pg_trickle + DuckLake",
+  "uid": "ducklake-funnel-demo",
+  "version": 1,
+  "schemaVersion": 38,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Revenue per Minute",
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT minute AS time, SUM(total_revenue) AS \"Revenue (USD)\" FROM revenue_by_minute WHERE $__timeFilter(minute) GROUP BY minute ORDER BY minute",
+          "format": "time_series"
+        }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total Purchases (last 15 min)",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(purchase_count) AS \"Purchases\" FROM revenue_by_minute WHERE minute >= now() - interval '15 minutes'",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Revenue (last 15 min)",
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 4 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(SUM(total_revenue), 2) AS \"Revenue (USD)\" FROM revenue_by_minute WHERE minute >= now() - interval '15 minutes'",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Conversion Funnel (All Products)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT 'Views' AS stage, SUM(views) AS count FROM funnel_by_product UNION ALL SELECT 'Add to Cart', SUM(add_to_cart) FROM funnel_by_product UNION ALL SELECT 'Purchases', SUM(purchases) FROM funnel_by_product ORDER BY 2 DESC",
+          "format": "table"
+        }
+      ],
+      "options": { "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Top 10 Products by Conversion Rate",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": "PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT product_id AS \"Product\", views AS \"Views\", add_to_cart AS \"Cart\", purchases AS \"Purchases\", conversion_pct AS \"Conv %\" FROM funnel_by_product WHERE views > 0 ORDER BY conversion_pct DESC LIMIT 10",
+          "format": "table"
+        }
+      ]
+    }
+  ]
+}

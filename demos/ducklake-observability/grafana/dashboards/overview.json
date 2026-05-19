@@ -1,0 +1,112 @@
+{
+  "title": "DuckLake Observability — Overview",
+  "uid": "ducklake-observability-overview",
+  "version": 1,
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Tables with Small-File Warning",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS \"Tables\" FROM ducklake_small_file_counts WHERE small_file_count > 50",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "thresholds": {
+          "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 5 }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total Active Parquet Files",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(active_file_count) AS \"Files\" FROM ducklake_storage_growth",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Storage (GB)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(SUM(active_bytes) / 1073741824.0, 2) AS \"GB\" FROM ducklake_storage_growth",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Snapshots (last hour)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(snapshots_in_minute) AS \"Commits\" FROM ducklake_snapshot_rate WHERE minute >= now() - interval '1 hour'",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Snapshot Rate per Minute",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT minute AS time, schema_name || '.' || table_name AS table_name, snapshots_in_minute AS \"Commits/min\" FROM ducklake_snapshot_rate WHERE $__timeFilter(minute) ORDER BY 1, 2",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Small-File Alert Table",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT schema_name AS \"Schema\", table_name AS \"Table\", small_file_count AS \"Small Files\", ROUND(total_small_file_bytes / 1048576.0, 1) AS \"Total MB\" FROM ducklake_small_file_counts WHERE small_file_count > 0 ORDER BY small_file_count DESC",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Storage by Table",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": "DuckLake PostgreSQL",
+      "targets": [
+        {
+          "rawSql": "SELECT schema_name AS \"Schema\", table_name AS \"Table\", active_file_count AS \"Files\", active_row_count AS \"Rows\", ROUND(active_bytes / 1073741824.0, 3) AS \"GB\" FROM ducklake_storage_growth ORDER BY active_bytes DESC",
+          "format": "table"
+        }
+      ]
+    }
+  ]
+}

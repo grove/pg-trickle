@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: DuckLake PostgreSQL
+    type: postgres
+    url: "${PG_HOST:-localhost}:${PG_PORT:-5432}"
+    database: "${PG_DATABASE:-lake_catalog}"
+    user: "${PG_USER:-postgres}"
+    secureJsonData:
+      password: "${PG_PASSWORD:-postgres}"
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 2
+      postgresVersion: 1800
+      timescaledb: false
+    isDefault: true

@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.64.0 — DuckLake Ecosystem Phase 1](#0640--ducklake-ecosystem-phase-1)
 - [0.63.0 — Fused Multi-Node Refresh](#0630--fused-multi-node-refresh)
 - [0.62.0 — Scheduler Throughput & pg_aqueduct Prerequisites](#0620--scheduler-throughput--pg_aqueduct-prerequisites)
 - [0.61.0 — DX, Documentation & Final Pre-1.0 Polish](#0610--dx-documentation--final-pre-10-polish)
@@ -78,6 +79,108 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.64.0] — DuckLake Ecosystem Phase 1
+
+### What's New
+
+v0.64.0 is a pure documentation, demo, and community release — no changes to
+the extension binary, SQL schema, or GUCs. It launches pg_trickle as a
+recognised first-class participant in the DuckLake ecosystem and demonstrates
+that pg_trickle is the incremental view maintenance engine that every
+PostgreSQL-backed DuckLake deployment has been waiting for.
+
+DuckLake v1.0 (released April 2026) stores all its bookkeeping in a standard
+SQL database — most commonly PostgreSQL. pg_trickle lives in that same database.
+DuckLake's own public roadmap lists "Materialized views and incremental
+maintenance" as a future item tagged *"looking for funding."* This release
+plants the flag: pg_trickle already does this, it works today, and here is how.
+
+**Tutorial T-1: Real-Time Dashboards on Your Data Lake**
+(`blog/ducklake-real-time-dashboards.md`)
+
+DuckDB writes synthetic events into a DuckLake table. pg_trickle stream tables
+compute per-minute revenue and funnel aggregations incrementally. Grafana
+displays the results live with a five-second auto-refresh. Step-by-step setup
+from DuckLake PostgreSQL catalog to live dashboard.
+
+**Tutorial T-2: The Modern Data Stack in One Box**
+(`blog/ducklake-modern-data-stack.md`)
+
+Replaces the classic seven-system Debezium-Kafka-Flink-Iceberg pipeline with
+a single PostgreSQL instance plus an S3 bucket. OLTP in PostgreSQL, pg_trickle
+stream tables for real-time aggregations, DuckLake for historical Parquet
+storage, DuckDB for ad-hoc queries. Includes a system comparison table and an
+honest discussion of the limitations.
+
+**Tutorial T-3: Monitoring Your DuckLake with pg_trickle**
+(`blog/ducklake-monitoring.md`)
+
+DuckLake's ~28 metadata tables live in PostgreSQL and are rich with operational
+signals. This tutorial builds five monitoring stream tables:
+- `ducklake_small_file_counts` — compaction alerts
+- `ducklake_snapshot_rate` — commit rate spikes
+- `ducklake_storage_growth` — capacity planning
+- `ducklake_tenant_activity` — per-tenant billing / quota
+- `ducklake_compaction_events` — compaction audit trail
+
+Includes Grafana dashboard definitions and alert thresholds.
+
+**Blog B-1: Why pg_trickle + DuckLake Is the Missing Piece for Lakehouse IVM**
+(`blog/ducklake-ivm-missing-piece.md`)
+
+Thought-leadership post for Hacker News / r/dataengineering. Frames the
+IVM gap in existing lakehouse formats, explains why DuckLake's SQL-catalog
+architecture changes the equation, and shows how pg_trickle fills the gap
+with zero external infrastructure. References DuckLake's own roadmap item.
+
+**Blog B-2: DuckLake's `table_changes()` Meets pg_trickle's DVM Engine**
+(`blog/ducklake-table-changes-dvm.md`)
+
+Technical deep-dive for the systems-programming audience. Maps DuckLake's
+change-feed output format row-by-row to pg_trickle's internal change-buffer
+schema (signed-multiset weights, `pgt_weight` column). Covers the `rowid`
+advantage, the inlined-data sub-millisecond path, snapshot IDs as frontier
+values, and the Phase 2 adapter roadmap.
+
+**Documentation D-1: DuckLake section in foreign-table-sources.md**
+(`blog/foreign-table-sources.md` — updated)
+
+Added a dedicated "DuckLake Sources" section with three integration paths:
+bridge-table (works today, trigger CDC), metadata-table monitoring, and
+foreign-table polling. Preview of the Phase 2 `table_changes()` adapter.
+
+**Demo A: The Five-Second Funnel**
+(`demos/ducklake-funnel/`)
+
+Self-contained `docker compose up` demo with PostgreSQL + pg_trickle, a Python
+event generator (50 events/second), Grafana (live funnel and revenue panels),
+and MinIO (S3-compatible storage). Configurable via `.env`. Runs on any
+developer laptop.
+
+**Demo D: DuckLake Observability in a Box**
+(`demos/ducklake-observability/`)
+
+Attaches to an **existing** DuckLake PostgreSQL catalog. Run `init_monitoring.sql`
+to install five stream tables, then `docker compose up grafana` for a
+production-quality observability dashboard. Five minutes from `git clone` to
+live operational visibility. Includes `teardown_monitoring.sql` for clean removal.
+
+**Community Outreach Plan**
+(`docs/DUCKLAKE_COMMUNITY_OUTREACH.md`)
+
+Documented outreach plan for six named DuckLake production users (PostHog,
+Windmill, locals.com, Ascend.io, Sliplane, Media Cluster Norway). Complete CFP
+submission texts for DuckCon, PGConf EU, and PGCon. GitHub Discussion draft for
+`duckdb/ducklake`. All scripts and tracking in a single document.
+
+### Upgrading
+
+No migration required. The upgrade script `pg_trickle--0.63.0--0.64.0.sql`
+contains only documentation comments. The extension binary and SQL schema are
+unchanged.
 
 ---
 
