@@ -127,8 +127,12 @@ From the DuckLake public roadmap, under "Future Features":
 
 DuckLake's team knows this feature is needed. They have not yet built it because
 doing IVM correctly is genuinely hard and expensive to maintain. pg_trickle has
-been working on this problem for over two years. The implementation is
-production-ready.
+tackled exactly this problem across more than 60 incremental releases: a
+differential dataflow engine with operator-by-operator differentiation rules,
+frontier-based version tracking, a full CDC pipeline, and a DAG scheduler —
+all battle-tested across more than 1,300 test cases and validated against the
+TPC-H benchmark suite. The project is pre-1.0 and actively advancing toward its stable release, and
+the IVM engine is substantially complete.
 
 The natural conclusion: for PostgreSQL-backed DuckLake deployments, pg_trickle
 is the IVM engine DuckLake's roadmap is pointing at.

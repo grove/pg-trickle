@@ -71,7 +71,7 @@ missing piece they have been waiting for already exists.**
   - [INT-7: Hybrid OLTP/OLAP Pipeline (One-Box Modern Stack)](#int-7-hybrid-oltpolap-pipeline-one-box-modern-stack)
   - [INT-8: Stream Tables Surfaced as DuckLake Views](#int-8-stream-tables-surfaced-as-ducklake-views)
   - [INT-9: Row-Lineage-Driven Differential Refresh](#int-9-row-lineage-driven-differential-refresh)
-  - [INT-10: pgtrickle-relay DuckLake Backend](#int-10-pgtrickle-relay-ducklake-backend)
+  - [INT-10: pg-tide DuckLake Integration (Already Available)](#int-10-pg-tide-ducklake-integration-already-available)
   - [INT-11: Snapshot Provenance & Audit Trails](#int-11-snapshot-provenance--audit-trails)
 - [Feature Ideas for pg_trickle](#feature-ideas-for-pg_trickle)
 - [Blog Post & Tutorial Ideas](#blog-post--tutorial-ideas)
@@ -689,31 +689,67 @@ engine's row-identity column rather than recomputing it.
 
 **Effort:** Folds naturally into INT-3.
 
-### INT-10: pgtrickle-relay DuckLake Backend
+### INT-10: pg-tide DuckLake Integration (Already Available)
 
-The repository already includes `pgtrickle-relay`, a standalone Rust sidecar
-that bridges pg_trickle outbox and inbox tables with external messaging systems
-like Kafka, NATS, Redis Streams, SQS, RabbitMQ, and HTTP webhooks. Adding
-DuckLake as both a sink and a source backend slots in naturally.
+**This integration already exists.** The relay functionality that was originally
+part of this repository has been extracted into a fully independent project,
+[pg-tide](https://github.com/trickle-labs/pg-tide) (`trickle-labs/pg-tide`),
+which is a standalone PostgreSQL extension plus a `pg-tide` relay binary for
+transactional outbox, idempotent inbox, and relay pipelines. Crucially,
+pg-tide's relay already ships with **DuckLake as a named sink backend** in its
+object-storage connector tier (alongside Apache Iceberg v2 and Delta Lake v2).
 
-- **Forward (sink) mode**: the relay reads from pg_trickle's outbox, batches
-  rows, writes Parquet, and commits a DuckLake snapshot. This is essentially
-  the INT-4 architecture, but extracted into a sidecar for users who want to
-  keep the Parquet writer and S3 client out of the PostgreSQL process.
-- **Reverse (source) mode**: the relay polls DuckLake's `table_changes()` and
-  writes rows into a pg_trickle inbox table, where they appear to downstream
-  stream tables exactly like CDC events. This is the INT-3 architecture
-  packaged as an opt-in external process.
+The integration story is therefore not a future engineering project — it is a
+configuration exercise that can be demonstrated today:
 
-The sidecar form has two distinct advantages over the in-extension forms.
-First, it isolates expensive operations (Parquet encoding, S3 uploads, network
-retries) from the PostgreSQL backend, where they would otherwise tie up
-connection slots and memory. Second, it gives the user a clean horizontal scale
-unit — they can run more relay replicas as throughput demands grow, without
-touching their PostgreSQL configuration.
+- **Forward (sink) mode**: use `pgtrickle.attach_outbox()` (available from
+  pg_trickle ≥ v0.46.0) to wire a stream table's delta to a pg-tide outbox,
+  then configure a pg-tide relay pipeline with the DuckLake sink backend.
+  The relay batches rows, writes Parquet to object storage, and commits a
+  DuckLake snapshot — all without a single line of custom code.
+- **Reverse (source) mode**: configure a pg-tide pipeline pointing at a
+  DuckLake source. The relay polls `table_changes()`, transforms the deltas
+  into pg-tide's wire format, and delivers them into a pg_trickle inbox table,
+  where they are indistinguishable from any other CDC event.
 
-**Effort:** Medium — re-uses the existing relay framework, adds a DuckLake
-backend module and a Parquet writer dependency.
+The sidecar architecture retains the two key advantages noted in the original
+design. First, expensive operations — Parquet encoding, S3 uploads, network
+retries — run in the pg-tide process rather than inside PostgreSQL, so they
+cannot affect the shared memory budget or connection pool. Second, the relay
+is a clean horizontal scale unit: more throughput means running more pg-tide
+replicas, not reconfiguring the database.
+
+The pg-tide project also brings capabilities that the original embedded-relay
+concept did not contemplate: OpenTelemetry spans, per-pipeline Prometheus
+metrics with tenant labels, a Grafana dashboard, schema-evolution guards with
+configurable policies, a dead-letter queue with replay workbench, and an
+AsyncAPI 3.0 export for documenting the pipeline contract. All of these are
+automatically available to any pg_trickle × DuckLake pipeline that uses pg-tide
+as its relay layer.
+
+```sql
+-- Wire up the pg_trickle × DuckLake pipeline in four SQL calls:
+CREATE EXTENSION pg_tide;
+CREATE EXTENSION pg_trickle;
+
+-- 1. Attach an outbox to the stream table
+SELECT pgtrickle.attach_outbox('revenue_by_region', retention_hours => 48);
+
+-- 2. Configure the DuckLake sink pipeline
+SELECT tide.relay_set_outbox(
+    'revenue-to-lake',
+    'revenue_by_region',
+    'ducklake',
+    '{"catalog_db": "ducklake_catalog",
+      "data_path": "s3://analytics-lake/stream_tables/",
+      "table_name": "revenue_by_region"}'::jsonb
+);
+-- Start the relay binary:
+-- pg-tide --postgres-url "postgres://user:pass@localhost:5432/mydb"
+```
+
+**Status:** Works today via pg-tide v0.22.0+. **Effort:** Documentation only —
+configuration guide plus an end-to-end tutorial.
 
 ### INT-11: Snapshot Provenance & Audit Trails
 
@@ -1035,7 +1071,7 @@ useful to the community.
 | F-9: Encryption key pass-through | Feature | 1 week |
 | S3 / object-store upload integration | Feature | 1 week |
 | DuckLake catalog transaction writer | Feature | 1 week |
-| INT-10: pgtrickle-relay DuckLake backend (parallel) | Feature | 2 weeks |
+| INT-10: pg-tide DuckLake pipeline tutorial (already works) | Tutorial | 2 days |
 | INT-11: Snapshot provenance | Feature | 2 days |
 | Tutorial 3: "Modern data stack in one box" | Tutorial | 2 days |
 | Tutorial 4: "Streaming PG to data lake without Kafka" | Tutorial | 2 days |
@@ -1063,7 +1099,7 @@ useful to the community.
    normally requires a DuckDB process. Our options, in increasing order of
    independence: use `duckdb_fdw` (exists but maturity varies); embed DuckDB in
    a background worker via the C API (complex but doable); run an external
-   sidecar process (this is the relay path, INT-10); or — most elegantly —
+   sidecar process via pg-tide (see INT-10, already available); or — most elegantly —
    query the DuckLake metadata tables directly with pure SQL, since they all
    live in the same Postgres instance. The pure-SQL path is the most attractive
    long-term answer because it minimises the dependency surface.
