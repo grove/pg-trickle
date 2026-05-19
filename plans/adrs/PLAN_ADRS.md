@@ -1,8 +1,8 @@
 # Plan: Architecture Decision Records
 
 Date: 2026-02-24
-Status: PROPOSED
-Last Updated: 2026-02-25
+Status: ACTIVE
+Last Updated: 2026-07-01 (v0.61.0 — ADR-001, ADR-002, ADR-003 promoted to ACTIVE files)
 
 ---
 
@@ -58,24 +58,45 @@ These ADRs document technical choices that have been implemented. The decisions
 are settled; the ADR documents capture the rationale so future contributors
 understand the "why."
 
-### ADR-001: Row-Level Triggers as Default CDC Mechanism
+### ADR-001: Trigger-Based CDC over Logical Replication
 
 | Field | Value |
 |-------|-------|
-| **Status** | Accepted |
+| **Status** | ✅ Accepted — see [ADR-001.md](ADR-001.md) |
 | **Category** | CDC |
-| **Sources** | `plans/sql/REPORT_TRIGGERS_VS_REPLICATION.md` |
+| **Implemented** | v0.61.0 (promoted from implied decision) |
 
-**Decision:** Use row-level AFTER triggers as the default change-data-capture
-mechanism, avoiding the `pg_create_logical_replication_slot()` write-context
-restriction that prevents slot creation inside DDL transactions.
+**Decision:** Use row/statement-level AFTER triggers as the default CDC
+mechanism (WAL-based CDC as opt-in `REFRESH MODE WAL`).  Single-transaction
+atomicity and simpler failure modes justify the write-amplification trade-off.
 
-**Key points:**
-- Triggers can be created in the same transaction as `CREATE TABLE` — atomic
-  stream table creation
-- No `wal_level = logical` requirement for basic operation
-- Changes are visible in buffer tables as soon as the source transaction commits
-- Trade-off: write-side overhead (~5-15% per DML on tracked tables)
+---
+
+### ADR-002: Z-Set / Multiset Formalism
+
+| Field | Value |
+|-------|-------|
+| **Status** | ✅ Accepted — see [ADR-002.md](ADR-002.md) |
+| **Category** | DVM Engine |
+| **Implemented** | v0.61.0 (promoted from implied decision) |
+
+**Decision:** The differential engine uses Z-sets (signed integer
+multiplicities).  Negative multiplicities represent deletions; all stream-table
+rows settle to multiplicity 0 (absent) or 1 (present) after each refresh.
+
+---
+
+### ADR-003: EC-01 Join-Correctness Invariant and the PHD1 Cleanup Pass
+
+| Field | Value |
+|-------|-------|
+| **Status** | ✅ Accepted — see [ADR-003.md](ADR-003.md) |
+| **Category** | Correctness |
+| **Implemented** | v0.38.0 (R₀ snapshot-splitting); v0.61.0 (ctid invariant documented) |
+
+**Decision:** Outer-join delta rules use split R₀ snapshots (EC-01); the PHD1
+cleanup pass corrects residual phantom rows after each differential refresh of
+outer-join stream tables.
 
 ---
 

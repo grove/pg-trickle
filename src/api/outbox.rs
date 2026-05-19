@@ -41,11 +41,20 @@ fn resolve_st_name(name: &str) -> Result<(String, String), PgTrickleError> {
 }
 
 /// Derive the tide outbox name from a stream table name.
-/// Convention: `outbox_<st_name>` truncated to 63 bytes.
+/// Convention: `outbox_<st_name>` truncated to 63 bytes, with hash suffix
+/// to prevent collisions when the name is long enough to require truncation.
 pub(crate) fn outbox_table_name_for(st_name: &str) -> String {
     let raw = format!("outbox_{}", st_name);
-    // PostgreSQL identifier limit is 63 bytes; truncate safely.
-    raw.chars().take(63).collect()
+    // PostgreSQL identifier limit is 63 bytes.
+    if raw.len() <= 63 {
+        raw
+    } else {
+        // SEC-5: Use xxh64 hash suffix to avoid name collisions on truncation.
+        const SEED: u64 = 0x517cc1b727220a95;
+        let hash = xxhash_rust::xxh64::xxh64(st_name.as_bytes(), SEED);
+        let suffix = &format!("{:016x}", hash)[..8];
+        format!("{}_{}", &raw[..54], suffix)
+    }
 }
 
 /// Check whether the outbox is attached for a given stream table OID.

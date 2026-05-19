@@ -3,6 +3,22 @@
 //! Handles EXISTS, ANY/IN, ALL, and scalar sublinks by converting them
 //! into joins (SEMI JOIN, ANTI JOIN, LATERAL JOIN) that the DVM engine
 //! can differentiate.
+//!
+//! ## Module Structure (QUAL-4 v0.61.0)
+//!
+//! This module is split into focused sub-modules:
+//! - [`having`] — HAVING aggregate rewrites (`rewrite_having_expr`, `is_star_only`)
+//! - [`exists`] — EXISTS/NOT EXISTS → SemiJoin/AntiJoin
+//! - [`in_list`] — IN/NOT IN → SemiJoin/AntiJoin, multi-column NULL-safety
+//! - [`scalar`] — Scalar SubLink hoisting and subquery-to-SQL deparsing
+
+pub mod exists;
+pub mod having;
+pub mod in_list;
+pub mod scalar;
+
+// Re-export having functions so callers can use `sublinks::rewrite_having_expr`.
+pub(crate) use having::{is_star_only, rewrite_having_expr};
 
 use super::*;
 use crate::error::PgTrickleError;
@@ -3069,6 +3085,25 @@ unsafe fn extract_cte_map_with_recursive(
         let col_aliases = extract_cte_def_colnames(cte)?;
         if !col_aliases.is_empty() {
             def_aliases_map.insert(cte_name.clone(), col_aliases.clone());
+        }
+
+        // FEAT-1 (v0.61.0): Detect SEARCH ... FIRST BY and CYCLE ... SET ... USING
+        // clauses — these are not yet supported in DIFFERENTIAL mode.
+        if !cte.search_clause.is_null() {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "SEARCH clause (SEARCH BREADTH/DEPTH FIRST BY) is not yet \
+                 supported in differential mode (planned for v1.1.0). CTE: '{cte_name}'. \
+                 Remove the SEARCH clause from the recursive CTE definition, or use \
+                 REFRESH MODE FULL if the query requires it."
+            )));
+        }
+        if !cte.cycle_clause.is_null() {
+            return Err(PgTrickleError::UnsupportedOperator(format!(
+                "CYCLE clause (CYCLE ... SET ... USING) is not yet \
+                 supported in differential mode (planned for v1.1.0). CTE: '{cte_name}'. \
+                 Remove the CYCLE clause from the recursive CTE definition, or use \
+                 REFRESH MODE FULL if the query requires it."
+            )));
         }
 
         // Detect recursive CTEs: In PG18's raw_parser output,
@@ -6590,62 +6625,6 @@ unsafe fn target_alias_for_res_target(rt: &pg_sys::ResTarget, ordinal: usize) ->
     }
 
     format!("col_{ordinal}")
-}
-
-/// Rewrite aggregate function calls in a HAVING predicate to their output column aliases.
-///
-/// The aggregate CTE already has the final aggregate values computed under the alias
-/// names from the SELECT list (e.g., `SUM(amount) AS total` → column `total`).  When
-/// the HAVING clause references `SUM(amount)`, we rewrite it to `total` so the
-/// generated Filter SQL references the already-computed column instead of trying to
-/// re-invoke the aggregate function.
-pub(crate) fn rewrite_having_expr(expr: &Expr, aggregates: &[AggExpr]) -> Expr {
-    match expr {
-        Expr::FuncCall { func_name, args } => {
-            let name_lower = func_name.to_lowercase();
-            for agg in aggregates {
-                let agg_name = agg.function.sql_name().to_lowercase();
-                if name_lower != agg_name {
-                    continue;
-                }
-                // Match by argument SQL representation.
-                // COUNT(*) is represented as FuncCall { args: [Raw("*")] } when parsed
-                // from a HAVING clause, but as argument = None in the target-list AggExpr.
-                let args_match = match &agg.argument {
-                    None => {
-                        args.is_empty()
-                            || (args.len() == 1 && matches!(&args[0], Expr::Raw(s) if s == "*"))
-                    }
-                    Some(agg_arg) => args.len() == 1 && args[0].to_sql() == agg_arg.to_sql(),
-                };
-                if args_match {
-                    return Expr::ColumnRef {
-                        table_alias: None,
-                        column_name: agg.alias.clone(),
-                    };
-                }
-            }
-            // No match – keep as-is but recurse into args.
-            Expr::FuncCall {
-                func_name: func_name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| rewrite_having_expr(a, aggregates))
-                    .collect(),
-            }
-        }
-        Expr::BinaryOp { op, left, right } => Expr::BinaryOp {
-            op: op.clone(),
-            left: Box::new(rewrite_having_expr(left, aggregates)),
-            right: Box::new(rewrite_having_expr(right, aggregates)),
-        },
-        _ => expr.clone(),
-    }
-}
-
-/// Check if expressions are just `*` (select all).
-pub(crate) fn is_star_only(exprs: &[Expr]) -> bool {
-    exprs.len() == 1 && matches!(exprs[0], Expr::Star { table_alias: None })
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────────

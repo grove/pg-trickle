@@ -1,0 +1,7 @@
+-- pg_trickle 0.60.0 -> 0.61.0 upgrade migration
+--
+-- v0.61.0 — DX, Documentation & Final Pre-1.0 Polish
+--
+-- All v0.61.0 changes are pure Rust or documentation (DX-1, DX-2, COR-7,
+-- COR-8, COR-9, SEC-5, QUAL-4, QUAL-5, FEAT-1, FEAT-2, DOC-1, DOC-2).
+-- No SQL schema migration is required.

@@ -326,6 +326,78 @@ fn health_check() -> TableIterator<
             };
             rows.push(("job_queue".to_string(), sev, detail));
         }
+
+        // ── DX-1 (v0.61.0): Attachment owner check ──────────────────────────
+        // Find any stream table whose downstream publication owner or whose
+        // tide outbox table owner differs from the stream table relation owner.
+        // Uses pg_catalog to infer ownership rather than a stored "attached_by"
+        // column (not part of the schema pre-v0.61.0).
+        let owner_mismatches: Vec<String> = client
+            .select(
+                "SELECT \
+                     st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
+                     'publication'::text AS attachment_type, \
+                     pub_role.rolname AS attachment_owner, \
+                     st_role.rolname  AS table_owner \
+                 FROM pgtrickle.pgt_stream_tables st \
+                 JOIN pg_catalog.pg_publication pub \
+                   ON pub.pubname = st.downstream_publication_name \
+                 JOIN pg_catalog.pg_class    cls      ON cls.oid     = st.pgt_relid \
+                 JOIN pg_catalog.pg_roles    st_role  ON st_role.oid = cls.relowner \
+                 JOIN pg_catalog.pg_roles    pub_role ON pub_role.oid = pub.pubowner \
+                 WHERE st.downstream_publication_name IS NOT NULL \
+                   AND pub_role.rolname IS DISTINCT FROM st_role.rolname \
+                 UNION ALL \
+                 SELECT \
+                     st.pgt_schema || '.' || st.pgt_name AS st_fqn, \
+                     'outbox'::text AS attachment_type, \
+                     ob_role.rolname AS attachment_owner, \
+                     st_role.rolname AS table_owner \
+                 FROM pgtrickle.pgt_outbox_config oc \
+                 JOIN pgtrickle.pgt_stream_tables st \
+                   ON st.pgt_id = oc.stream_table_oid::bigint \
+                 JOIN pg_catalog.pg_class  st_cls  ON st_cls.oid  = st.pgt_relid \
+                 JOIN pg_catalog.pg_roles  st_role ON st_role.oid = st_cls.relowner \
+                 JOIN pg_catalog.pg_class  ob_cls  ON ob_cls.relname = oc.tide_outbox_name \
+                 JOIN pg_catalog.pg_roles  ob_role ON ob_role.oid    = ob_cls.relowner \
+                 WHERE ob_role.rolname IS DISTINCT FROM st_role.rolname \
+                 ORDER BY 1",
+                None,
+                &[],
+            )
+            .map(|r| {
+                r.map(|row| {
+                    let fqn = row.get::<String>(1).unwrap_or(None).unwrap_or_default();
+                    let typ = row.get::<String>(2).unwrap_or(None).unwrap_or_default();
+                    let attached_by = row.get::<String>(3).unwrap_or(None).unwrap_or_default();
+                    let owned_by = row.get::<String>(4).unwrap_or(None).unwrap_or_default();
+                    format!(
+                        "ST \"{fqn}\" has a {typ} attached by role \"{attached_by}\" \
+                         but owned by \"{owned_by}\""
+                    )
+                })
+                .collect()
+            })
+            .unwrap_or_default();
+
+        let (sev, detail) = if owner_mismatches.is_empty() {
+            (
+                "OK".to_string(),
+                "No outbox/publication ownership mismatches".to_string(),
+            )
+        } else {
+            (
+                "WARNING".to_string(),
+                format!(
+                    "{} attachment(s) created by non-owner: {}. \
+                     Review outbox/publication created by non-owner; \
+                     consider re-attaching as owner or granting explicit permissions.",
+                    owner_mismatches.len(),
+                    owner_mismatches.join("; ")
+                ),
+            )
+        };
+        rows.push(("attachment_owner_check".to_string(), sev, detail));
     });
 
     TableIterator::new(rows)

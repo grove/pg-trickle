@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.61.0 — DX, Documentation & Final Pre-1.0 Polish](#0610--dx-documentation--final-pre-10-polish)
 - [0.60.0 — Code Quality, Test Coverage & CI](#0600--code-quality-test-coverage--ci)
 - [0.59.0 — Performance & Observability](#0590--performance--observability)
 - [0.58.0 — Security & Correctness Hardening](#0580--security--correctness-hardening)
@@ -75,6 +76,90 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.61.0] — DX, Documentation & Final Pre-1.0 Polish
+
+### What's New
+
+This release focuses on developer experience improvements, documentation
+completeness, and final correctness hardening before the 1.0 milestone.
+There are no schema changes — all improvements are pure Rust or documentation.
+
+**Developer experience (DX-1, DX-2)**
+
+- **Foreign-owner attachment detection (DX-1):** `pgtrickle.health_check()`
+  now includes a ninth check — `attachment_owner_check` — that detects when
+  `pgtrickle.pgt_outbox_config` or `pgtrickle.pgt_publication_config` rows are
+  owned by a role different from the current session's role.  Returns a WARNING
+  with actionable detail text.
+
+- **SQL reference completeness check (DX-2):** New `scripts/gen_sql_reference.py`
+  script compares `#[pg_extern]` symbols in source against `docs/SQL_REFERENCE.md`
+  and fails with a diff when a new public function is added without documentation.
+  Wired into the `upgrade-check` CI job so every PR is validated.
+
+**Correctness hardening (COR-7, COR-8, COR-9)**
+
+- **ctid invariant comment (COR-7):** Added explicit `// INVARIANT:` comment
+  before the `ctid`-based deletion CTE in `src/refresh/phd1.rs` documenting
+  the snapshot-stability guarantee that makes `ctid` deletion safe.
+
+- **Snapshot cache secondary equality check (COR-8):** `get_or_register_snapshot_cte()`
+  now performs a secondary canonical-string comparison when a hash hit occurs.
+  On collision, the cached entry is evicted and `pg_trickle_snapshot_cache_collisions_total`
+  (a new shared-memory counter) is incremented.
+
+- **DiffContext cte_counter reset (COR-9):** `differentiate()` now resets
+  `self.cte_counter = 0` at the start of each invocation, preventing stale CTE
+  name reuse across separate calls on the same `DiffContext` instance.
+
+**Security (SEC-5)**
+
+- **Outbox table name collision prevention (SEC-5):** `outbox_table_name_for()`
+  now appends an 8-hex-character xxh64 hash suffix when the stream table's
+  identifier exceeds 63 bytes.  This prevents silent name truncation from
+  causing two distinct stream tables to map to the same outbox table.
+
+**Code quality (QUAL-4, QUAL-5)**
+
+- **`sublinks.rs` decomposition (QUAL-4):** The 7 000-line `sublinks.rs`
+  monolith has been split into a `sublinks/` directory with focused sub-modules:
+  `having.rs` (HAVING rewrites), `exists.rs`, `in_list.rs`, `scalar.rs`.
+
+- **Brittle `split().nth()` test fix (QUAL-5):** Two test patterns in
+  `lateral_subquery.rs` that used `sql.split("marker").nth(1).unwrap_or("")`
+  were rewritten to `splitn(2, …).collect()` with an explicit assertion, so
+  test failures emit a diff rather than silently passing on an empty string.
+
+**Features (FEAT-1, FEAT-2)**
+
+- **SEARCH/CYCLE clause clear error (FEAT-1):** `extract_cte_map_with_recursive()`
+  now detects `SEARCH BREADTH FIRST BY` and `CYCLE … SET … USING` clauses and
+  returns `UnsupportedOperator` with a clear hint message instead of silently
+  producing incorrect output.
+
+- **LATERAL + DIFFERENTIAL documentation (FEAT-2):** New "LATERAL Joins and
+  DIFFERENTIAL Mode" table in `docs/DVM_OPERATORS.md` and `docs/LIMITATIONS.md`
+  documenting which LATERAL patterns are fully supported, which have caveats, and
+  which fall back to FULL refresh with guidance for each.
+
+**Documentation (DOC-1, DOC-2)**
+
+- **Three foundational ADRs (DOC-1):** Created `plans/adrs/ADR-001.md`
+  (Trigger-Based CDC), `ADR-002.md` (Z-Set Formalism), and `ADR-003.md`
+  (EC-01 Join-Correctness Invariant) capturing the architectural rationale
+  for core design decisions.  `PLAN_ADRS.md` updated to ACTIVE.
+
+- **Multi-column NOT IN + NULL documentation (DOC-2):** New subsection in
+  `docs/LIMITATIONS.md` explaining when `(col1, col2) NOT IN (SELECT …)` falls
+  back to subquery-based computation (nullable columns) and how to restore
+  anti-join performance with `IS NOT NULL` guards or a `NOT EXISTS` rewrite.
+
+### Upgrade Notes
+
+No SQL schema changes.  `ALTER EXTENSION pg_trickle UPDATE` is sufficient.
 
 ---
 

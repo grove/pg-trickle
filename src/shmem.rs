@@ -350,6 +350,16 @@ pub static REFRESH_MODE_DIFFERENTIAL_TOTAL: PgAtomic<AtomicU64> =
 pub static REFRESH_MODE_FULL_TOTAL: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_full_refresh_total") };
 
+/// COR-8 (v0.61.0): Snapshot CTE cache hash collisions detected.
+///
+/// Incremented when `get_or_register_snapshot_cte()` finds a hash hit but
+/// the stored canonical fingerprint does not match the current subtree.
+/// A non-zero value indicates a DefaultHasher collision in the snapshot
+/// cache key computation. Should be zero under normal operation.
+// SAFETY: PgAtomic::new requires a static CStr name.
+pub static SNAPSHOT_CACHE_COLLISIONS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pg_trickle_snapshot_cache_collisions_total") };
+
 // ── OBS-1 (v0.59.0): CDC lag percentile metrics ──────────────────────────
 
 /// Maximum number of lag samples in the rolling reservoir.
@@ -533,6 +543,8 @@ pub fn init_shared_memory() {
     // OBS-4 (v0.59.0): Refresh-mode ratio counters.
     pg_shmem_init!(REFRESH_MODE_DIFFERENTIAL_TOTAL);
     pg_shmem_init!(REFRESH_MODE_FULL_TOTAL);
+    // COR-8 (v0.61.0): Snapshot cache collision counter.
+    pg_shmem_init!(SNAPSHOT_CACHE_COLLISIONS);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -629,6 +641,26 @@ pub fn read_delta_query_size_bytes() -> u64 {
         return 0;
     }
     DELTA_QUERY_SIZE_BYTES
+        .get()
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// COR-8 (v0.61.0): Increment the snapshot cache collision counter.
+pub fn increment_snapshot_cache_collisions() {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    SNAPSHOT_CACHE_COLLISIONS
+        .get()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// COR-8 (v0.61.0): Read the snapshot cache collision counter.
+pub fn read_snapshot_cache_collisions() -> u64 {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    SNAPSHOT_CACHE_COLLISIONS
         .get()
         .load(std::sync::atomic::Ordering::Relaxed)
 }

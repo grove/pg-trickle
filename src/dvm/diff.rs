@@ -211,20 +211,27 @@ pub struct DiffContext {
     /// cached CTE name, eliminating redundant inline evaluations.
     /// For a 6-table join, this deduplicates 3–10× redundant EXCEPT ALL
     /// evaluations per leaf.
-    snapshot_cte_cache: HashMap<String, String>,
+    ///
+    /// COR-8 (v0.61.0): The value is `(canonical_fingerprint, cte_name)`.
+    /// On a hash hit, the canonical fingerprint is compared for equality;
+    /// a mismatch indicates a DefaultHasher collision and causes eviction.
+    snapshot_cte_cache: HashMap<String, (String, String)>,
     /// P-4 (v0.54.0): Cache of structural fingerprints for OpTree nodes.
     ///
     /// `snapshot_cache_key()` traverses the full OpTree recursively to
     /// compute a fingerprint. For queries with deeply shared subtrees,
     /// the same subtree may be passed to `get_or_register_snapshot_cte()`
     /// multiple times. This cache maps raw pointer address (as `usize`)
-    /// to the computed fingerprint string, so the O(tree-size) traversal
-    /// only happens once per unique subtree per differentiation call.
+    /// to the computed `(hash_hex, canonical_string)` pair, so the O(tree-size)
+    /// traversal only happens once per unique subtree per differentiation call.
+    ///
+    /// COR-8 (v0.61.0): Also stores the canonical string for secondary equality
+    /// check in `get_or_register_snapshot_cte()`.
     ///
     /// Safety: The cache is valid for the lifetime of the DiffContext
     /// (a single differentiation call). OpTree is borrowed immutably and
     /// never reallocated during differentiation.
-    snapshot_fingerprint_cache: HashMap<usize, String>,
+    snapshot_fingerprint_cache: HashMap<usize, (String, String)>,
     /// DI-2: Source table OIDs whose delta fraction exceeds
     /// `max_delta_fraction` for the current refresh cycle.
     ///
@@ -268,9 +275,11 @@ pub struct DiffContext {
 /// recursively.  Two structurally different subtrees always produce
 /// different keys even when they share identical leaf aliases.
 ///
-/// The fingerprint is a `u64` FNV-1a hash of a canonical string
-/// representation, formatted as a hex string for the cache map.
-fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> String {
+/// Returns `(hash_hex, canonical_string)` where `hash_hex` is a compact
+/// 16-char hex key (suitable as a HashMap key) and `canonical_string` is
+/// the full structural representation used for secondary equality checking
+/// (COR-8: hash collision detection).
+fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> (String, String) {
     use crate::dvm::parser::{Expr, OpTree};
     use std::hash::{Hash, Hasher};
 
@@ -541,7 +550,7 @@ fn snapshot_cache_key(op: &crate::dvm::parser::OpTree) -> String {
     // Hash the canonical string to a compact 16-char hex key.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     buf.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    (format!("{:016x}", hasher.finish()), buf)
 }
 
 impl DiffContext {
@@ -725,6 +734,7 @@ impl DiffContext {
     /// Returns the final SQL `WITH ... SELECT ...` query string.
     /// The output has columns: `__pgt_row_id`, `__pgt_action`, plus user columns.
     pub fn differentiate(&mut self, op: &OpTree) -> Result<String, PgTrickleError> {
+        self.cte_counter = 0; // COR-9: reset per differentiation call
         let result = self.diff_node(op)?;
         Ok(self.build_with_query(&result.cte_name))
     }
@@ -895,17 +905,25 @@ impl DiffContext {
     pub fn get_or_register_snapshot_cte(&mut self, op: &crate::dvm::parser::OpTree) -> String {
         // P-4: Fast path — check fingerprint cache by pointer identity first.
         let ptr_key = op as *const _ as usize;
-        let cache_key = if let Some(key) = self.snapshot_fingerprint_cache.get(&ptr_key) {
-            key.clone()
-        } else {
-            // Slow path — compute the structural fingerprint (O(tree-size)) once.
-            let key = snapshot_cache_key(op);
-            self.snapshot_fingerprint_cache.insert(ptr_key, key.clone());
-            key
-        };
+        let (cache_key, canonical) =
+            if let Some(pair) = self.snapshot_fingerprint_cache.get(&ptr_key) {
+                pair.clone()
+            } else {
+                // Slow path — compute the structural fingerprint (O(tree-size)) once.
+                let pair = snapshot_cache_key(op);
+                self.snapshot_fingerprint_cache
+                    .insert(ptr_key, pair.clone());
+                pair
+            };
 
-        if let Some(cte_name) = self.snapshot_cte_cache.get(&cache_key) {
-            return cte_name.clone();
+        if let Some((stored_canonical, cte_name)) = self.snapshot_cte_cache.get(&cache_key) {
+            // COR-8: Secondary equality check to detect DefaultHasher collisions.
+            if stored_canonical == &canonical {
+                return cte_name.clone();
+            }
+            // Hash collision detected — evict the stale entry and fall through.
+            crate::shmem::increment_snapshot_cache_collisions();
+            self.snapshot_cte_cache.remove(&cache_key);
         }
 
         let snapshot_sql = crate::dvm::operators::join_common::build_pre_change_snapshot_sql(
@@ -920,7 +938,8 @@ impl DiffContext {
         self.add_cte(cte_name.clone(), format!("SELECT * FROM {snapshot_sql}"));
         self.mark_cte_not_materialized(&cte_name);
 
-        self.snapshot_cte_cache.insert(cache_key, cte_name.clone());
+        self.snapshot_cte_cache
+            .insert(cache_key, (canonical, cte_name.clone()));
         cte_name
     }
 
@@ -1426,7 +1445,7 @@ mod tests {
         let key1 = snapshot_cache_key(&join1);
         let key2 = snapshot_cache_key(&join2);
         assert_ne!(
-            key1, key2,
+            key1.0, key2.0,
             "joins with different predicates must produce distinct cache keys"
         );
     }
@@ -1453,7 +1472,7 @@ mod tests {
         let key_inner = snapshot_cache_key(&inner);
         let key_left = snapshot_cache_key(&left);
         assert_ne!(
-            key_inner, key_left,
+            key_inner.0, key_left.0,
             "INNER and LEFT joins must produce distinct cache keys"
         );
     }
@@ -1477,7 +1496,7 @@ mod tests {
         let key1 = snapshot_cache_key(&join1);
         let key2 = snapshot_cache_key(&join2);
         assert_eq!(
-            key1, key2,
+            key1.0, key2.0,
             "identical subtrees must produce equal cache keys"
         );
     }
@@ -1502,7 +1521,7 @@ mod tests {
         let key_2 = snapshot_cache_key(&t1_t2);
         let key_3 = snapshot_cache_key(&t1_t2_t3);
         assert_ne!(
-            key_2, key_3,
+            key_2.0, key_3.0,
             "2-table and 3-table joins must produce distinct cache keys"
         );
     }
@@ -1518,7 +1537,7 @@ mod tests {
         let key1 = snapshot_cache_key(&s1);
         let key2 = snapshot_cache_key(&s2);
         assert_ne!(
-            key1, key2,
+            key1.0, key2.0,
             "scans with different OIDs but same alias must produce distinct cache keys"
         );
     }

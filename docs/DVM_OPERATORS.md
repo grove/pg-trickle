@@ -1154,6 +1154,63 @@ The tree is then traversed bottom-up during delta generation: each operator's `g
 
 ---
 
+## LATERAL Joins and DIFFERENTIAL Mode (FEAT-2, v0.61.0)
+
+The following table summarises which LATERAL patterns are supported in
+`DIFFERENTIAL` mode and what behaviour to expect for each:
+
+| LATERAL pattern | DIFFERENTIAL support | Notes |
+|----------------|---------------------|-------|
+| `LATERAL` SRF (set-returning function, e.g. `jsonb_array_elements`) | ✅ Full | Delta applied via `LateralFunction` operator |
+| `LATERAL` subquery with simple correlated filter | ✅ Full | `LateralSubquery` operator; correlated columns from outer row |
+| `, LATERAL (SELECT … WHERE ref = t.col)` comma syntax | ✅ Full | Rewritten to inner join semantics internally |
+| `LEFT JOIN LATERAL (…) ON true` | ✅ Full (with EC-01 semantics) | Outer row preserved when subquery returns no rows; R₀ snapshot used for left side |
+| `LEFT JOIN LATERAL` with outer-applied correlated aggregate | ⚠️ Supported with caveat | Aggregate re-evaluated over R₀ snapshot; see note below |
+| `LATERAL` referencing a volatile SRF | ❌ Falls back to FULL | Detected at parse time via volatility check; `UnsupportedOperator` hint emitted |
+| Nested `LATERAL` (LATERAL inside LATERAL) | ❌ Falls back to FULL | Not yet supported in delta rules |
+
+### EC-01 Semantics for LEFT JOIN LATERAL
+
+When the outer side of a `LEFT JOIN LATERAL` changes (e.g., a row is updated
+that previously had a match in the lateral subquery), the DVM engine applies
+the EC-01 snapshot-splitting rule:
+
+1. The pre-update outer row is joined against the *current* (pre-delta) lateral
+   result → generates a deletion delta.
+2. The post-update outer row is joined against the *post-delta* lateral
+   result → generates an insertion delta.
+
+This ensures that phantom NULL-padded output rows from the previous refresh
+cycle are correctly cancelled before the new rows are inserted.
+
+### Correlated Aggregate Note
+
+For patterns like:
+
+```sql
+SELECT p.id, lat.total
+FROM products p
+LEFT JOIN LATERAL (
+    SELECT SUM(quantity) AS total
+    FROM order_items oi
+    WHERE oi.product_id = p.id
+) lat ON true
+```
+
+The `total` aggregate is re-evaluated over the R₀ snapshot of `order_items`
+for every outer row affected by the delta.  This is correct but involves a
+full sub-scan of `order_items` for each changed `p.id`.  For large datasets
+with many product changes per cycle, consider materialising the aggregate as a
+separate stream table and joining against it instead:
+
+```sql
+-- Preferred for high-cardinality aggregates:
+SELECT pgt_order_totals.product_id, pgt_order_totals.total
+FROM pgt_order_totals   -- a separate stream table over order_items
+```
+
+---
+
 ## Further Reading
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — System-wide component overview
