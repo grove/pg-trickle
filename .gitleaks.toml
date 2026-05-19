@@ -24,6 +24,5 @@ paths = [
     '''docker-compose.*\.yml''',
     '''monitoring/.*''',
     '''cnpg/.*''',
-    '''pgtrickle-relay/examples/.*''',
     '''\.github/.*''',
 ]

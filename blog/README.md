@@ -89,6 +89,16 @@
 | [Publishing Stream Tables via Logical Replication](logical-replication-publishing.md) | Stream tables as standard publication sources for downstream PostgreSQL instances. Replication identity, multi-region distribution, and feeding Debezium/Kafka with clean aggregated events. |
 | [One PostgreSQL, Five Databases, One Worker Pool](multi-database.md) | Multi-database architecture: one launcher per server, one scheduler per database, shared worker pool with per-database quotas. Failure isolation and the database-per-tenant SaaS pattern. |
 
+### DuckLake Integration
+
+| Post | Summary |
+|------|---------|
+| [Why pg_trickle + DuckLake Is the Missing Piece for Lakehouse IVM](ducklake-ivm-missing-piece.md) | DuckLake's catalog-in-SQL architecture makes pg_trickle a natural fit for lakehouse IVM — filling the gap DuckLake's own roadmap acknowledges. How incremental aggregations over Iceberg-formatted data work without recomputing from scratch. |
+| [The Modern Data Stack in One Box](ducklake-modern-data-stack.md) | Replace Debezium + Kafka + Flink + Iceberg + Polaris + an orchestrator with one PostgreSQL instance and an S3 bucket — pg_trickle for incremental aggregations, DuckLake for lake storage. No JVM, no separate orchestration. |
+| [Real-Time Dashboards on Your Data Lake](ducklake-real-time-dashboards.md) | End-to-end Grafana dashboard tutorial: DuckLake stores events in PostgreSQL, pg_trickle maintains per-minute revenue and purchase counts incrementally inside the same database, Grafana visualises live with no Kafka or Flink. |
+| [Monitoring Your DuckLake with pg_trickle](ducklake-monitoring.md) | DuckLake's ~28 metadata tables record every snapshot, file, schema change, and compaction event. Build live alerts and pre-computed monitoring views over them with stream tables — turning expensive multi-table scans into instant reads. |
+| [DuckLake's `table_changes()` Meets pg_trickle's DVM Engine](ducklake-table-changes-dvm.md) | Wire-level mapping of DuckLake's change-feed format (`insert`/`delete`/`update_preimage`/`update_postimage`) to pg_trickle's internal change-buffer model — and the Phase 2 DuckLake adapter design. |
+
 ### pgvector Integration
 
 | Post | Summary |
