@@ -1567,6 +1567,30 @@ pub static PGS_LAG_AWARE_SCHEDULING: GucSetting<bool> = GucSetting::<bool>::new(
 /// Default: 0.20. Range: 0.01–1.0.
 pub static PGS_REINDEX_DRIFT_THRESHOLD: GucSetting<f64> = GucSetting::<f64>::new(0.20);
 
+// ── v0.62.0 GUCs ──────────────────────────────────────────────────────────
+
+/// PERF-1 (v0.62.0): Deduplicate change-buffer scans across all stream tables
+/// that share the same source within a single scheduler tick.
+///
+/// When `true` (default), the scheduler builds a per-tick cache of source OIDs
+/// that have pending changes and uses it for every `has_table_source_changes`
+/// call within that tick. This eliminates redundant SPI round-trips when many
+/// stream tables share the same source table.
+///
+/// Disable only if the shared cache is producing incorrect change-detection
+/// results (should not occur in practice).
+pub static PGS_ENABLE_CHANGE_BUFFER_FANOUT: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// API-1/2 (v0.62.0): Maximum seconds to wait for in-flight refreshes to drain
+/// when `pgtrickle.pause_scheduler(nodes)` is called.
+///
+/// After setting the pause flag for a node, `pause_scheduler` polls the refresh
+/// status every 100 ms. If the node has not stopped refreshing within this many
+/// seconds, the call returns without waiting further and logs a WARNING.
+///
+/// Default: 30 seconds. Range: 1–3600.
+pub static PGS_SCHEDULER_DRAIN_TIMEOUT: GucSetting<i32> = GucSetting::<i32>::new(30);
+
 /// Register all GUC variables. Called from `_PG_init()`.
 pub fn register_gucs() {
     GucRegistry::define_bool_guc(
@@ -3056,6 +3080,45 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.62.0 GUCs ───────────────────────────────────────────────────────
+
+    // PERF-1: Change-buffer fan-out deduplication.
+    GucRegistry::define_bool_guc(
+        c"pg_trickle.enable_change_buffer_fanout",
+        c"PERF-1: Deduplicate change-buffer scans across STs sharing a source (v0.62.0).",
+        c"When true (default), the scheduler maintains a per-tick cache of which source \
+          OIDs have pending changes and reuses it across all has_table_source_changes \
+          calls within the same tick. Eliminates redundant SPI round-trips when many \
+          stream tables share the same source. Disable only for troubleshooting.",
+        &PGS_ENABLE_CHANGE_BUFFER_FANOUT,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // API-1/2: Pause scheduler drain timeout.
+    GucRegistry::define_int_guc(
+        c"pg_trickle.scheduler_drain_timeout",
+        c"API-1/2: Seconds to wait for in-flight refreshes when pause_scheduler() is called.",
+        c"After setting the pause flag, pause_scheduler() polls every 100 ms. \
+          If the node has not finished refreshing within this many seconds, \
+          the call returns and logs a WARNING. Default: 30. Range: 1–3600.",
+        &PGS_SCHEDULER_DRAIN_TIMEOUT,
+        1,     // min
+        3_600, // max (1 hour)
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+}
+
+/// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.
+pub fn pg_trickle_enable_change_buffer_fanout() -> bool {
+    PGS_ENABLE_CHANGE_BUFFER_FANOUT.get()
+}
+
+/// API-1/2 (v0.62.0): Returns the pause_scheduler drain timeout in seconds.
+pub fn pg_trickle_scheduler_drain_timeout() -> i32 {
+    PGS_SCHEDULER_DRAIN_TIMEOUT.get()
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────

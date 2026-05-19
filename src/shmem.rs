@@ -360,7 +360,90 @@ pub static REFRESH_MODE_FULL_TOTAL: PgAtomic<AtomicU64> =
 pub static SNAPSHOT_CACHE_COLLISIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pg_trickle_snapshot_cache_collisions_total") };
 
-// ── OBS-1 (v0.59.0): CDC lag percentile metrics ──────────────────────────
+// ── API-1/2 (v0.62.0): Scheduler per-node pause state ───────────────────
+
+/// Maximum number of simultaneously paused stream table nodes.
+const MAX_PAUSED_NODES: usize = 256;
+
+/// API-1/2 (v0.62.0): Shared set of paused stream table pgt_ids.
+///
+/// Protected by `PAUSED_NODES_STATE` lightweight lock. When a node's pgt_id
+/// is present in this set, the scheduler skips dispatching refreshes for it.
+/// Zero slots are unused (pgt_ids are always > 0).
+#[derive(Copy, Clone)]
+pub struct PausedNodesState {
+    /// Sorted fixed-size array of paused pgt_ids. 0 = empty slot.
+    node_ids: [i64; MAX_PAUSED_NODES],
+    /// Number of occupied slots.
+    count: u16,
+}
+
+impl Default for PausedNodesState {
+    fn default() -> Self {
+        Self {
+            node_ids: [0i64; MAX_PAUSED_NODES],
+            count: 0,
+        }
+    }
+}
+
+// SAFETY: PausedNodesState is Copy + Clone + Default with only primitive types.
+unsafe impl PGRXSharedMemory for PausedNodesState {}
+
+/// Lightweight-lock–protected pause set for per-node scheduler control.
+// SAFETY: PgLwLock::new requires a static CStr name.
+pub static PAUSED_NODES_STATE: PgLwLock<PausedNodesState> =
+    unsafe { PgLwLock::new(c"pg_trickle_paused_nodes") };
+
+/// API-1 (v0.62.0): Mark a stream table node as paused.
+///
+/// The scheduler will skip dispatching refreshes for this node until
+/// `resume_node` is called. No-op if already paused or if the pause set
+/// is full (`MAX_PAUSED_NODES` reached).
+pub fn pause_node(pgt_id: i64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut state = PAUSED_NODES_STATE.exclusive();
+    let count = state.count as usize;
+    // Already paused?
+    if state.node_ids[..count].contains(&pgt_id) {
+        return;
+    }
+    if count < MAX_PAUSED_NODES {
+        state.node_ids[count] = pgt_id;
+        state.count = (count + 1) as u16;
+    }
+}
+
+/// API-2 (v0.62.0): Remove a stream table node from the paused set.
+///
+/// The scheduler will resume dispatching refreshes for this node on the
+/// next tick. No-op if the node was not paused.
+pub fn resume_node(pgt_id: i64) {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut state = PAUSED_NODES_STATE.exclusive();
+    let count = state.count as usize;
+    if let Some(pos) = state.node_ids[..count].iter().position(|&id| id == pgt_id) {
+        // Swap-remove to keep the array compact.
+        let last = count - 1;
+        state.node_ids[pos] = state.node_ids[last];
+        state.node_ids[last] = 0;
+        state.count = last as u16;
+    }
+}
+
+/// API-1/2 (v0.62.0): Check whether a stream table node is currently paused.
+pub fn is_node_paused(pgt_id: i64) -> bool {
+    if !SHMEM_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let state = PAUSED_NODES_STATE.share();
+    let count = state.count as usize;
+    state.node_ids[..count].contains(&pgt_id)
+}
 
 /// Maximum number of lag samples in the rolling reservoir.
 const CDC_LAG_SAMPLES: usize = 256;
@@ -545,6 +628,8 @@ pub fn init_shared_memory() {
     pg_shmem_init!(REFRESH_MODE_FULL_TOTAL);
     // COR-8 (v0.61.0): Snapshot cache collision counter.
     pg_shmem_init!(SNAPSHOT_CACHE_COLLISIONS);
+    // API-1/2 (v0.62.0): Per-node pause state.
+    pg_shmem_init!(PAUSED_NODES_STATE);
     SHMEM_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 

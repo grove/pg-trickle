@@ -31,13 +31,14 @@ use super::dispatch::{
 };
 use super::watermark::compute_coordinator_tick_watermark;
 use super::{
-    RefreshOutcome, SubTransaction, check_cdc_transition_health, check_extension_version_match,
-    check_schedule, check_skip_needed, check_upstream_changes, current_epoch_ms,
-    emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh, group_schedule_policy,
-    has_table_source_changes, is_any_source_gated, is_group_due, is_watermark_misaligned,
-    is_watermark_stuck, iterate_to_fixpoint, load_gated_source_oids, load_st_by_id, log_gated_skip,
-    log_watermark_skip, recover_from_crash, refresh_single_st, self_monitoring_auto_apply_tick,
-    sla_tier_adjustment_tick, update_backoff_factor, upstream_change_state,
+    RefreshOutcome, SubTransaction, batched_has_source_changes, check_cdc_transition_health,
+    check_extension_version_match, check_schedule, check_skip_needed, check_upstream_changes,
+    current_epoch_ms, emit_stale_alert_if_needed, evaluate_fuse, execute_scheduled_refresh,
+    group_schedule_policy, has_table_source_changes, is_any_source_gated, is_group_due,
+    is_watermark_misaligned, is_watermark_stuck, iterate_to_fixpoint, load_gated_source_oids,
+    load_st_by_id, log_gated_skip, log_watermark_skip, recover_from_crash, refresh_single_st,
+    self_monitoring_auto_apply_tick, sla_tier_adjustment_tick, update_backoff_factor,
+    upstream_change_state,
 };
 
 /// Register the launcher background worker.
@@ -1150,17 +1151,69 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
             // Step C: Compute consistency groups and refresh group-by-group
             let groups = dag_ref.compute_consistency_groups();
 
+            // PERF-1 (v0.62.0): Build a per-tick change-buffer fanout cache.
+            //
+            // When `pg_trickle.enable_change_buffer_fanout` is true (default),
+            // we issue ONE batched EXISTS query across ALL stream tables at
+            // once instead of one per stream table per group.  This eliminates
+            // O(N) redundant SPI round-trips for deployments where many stream
+            // tables share the same source table.
+            //
+            // If fanout is disabled we fall back to the per-group per-member
+            // path used in earlier versions.
+            let fanout_cache: Option<std::collections::HashSet<i64>> =
+                if config::pg_trickle_enable_change_buffer_fanout() {
+                    // Collect all active STs referenced in the consistency groups.
+                    let all_pgt_ids: Vec<i64> = groups
+                        .iter()
+                        .flat_map(|g| g.members.iter())
+                        .filter_map(|m| {
+                            if let NodeId::StreamTable(id) = m {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+
+                    let sts: Vec<_> = all_pgt_ids
+                        .iter()
+                        .filter_map(|&id| load_st_by_id(id))
+                        .collect();
+
+                    Some(batched_has_source_changes(&sts))
+                } else {
+                    None
+                };
+
             for group in &groups {
-                let initial_table_changes: HashMap<i64, bool> = group
-                    .members
-                    .iter()
-                    .filter_map(|member| match member {
-                        NodeId::StreamTable(id) => {
-                            load_st_by_id(*id).map(|st| (*id, has_table_source_changes(&st)))
-                        }
-                        _ => None,
-                    })
-                    .collect();
+                // PERF-1: Use the per-tick fanout cache when available; otherwise
+                // fall back to per-member has_table_source_changes calls (legacy path).
+                let initial_table_changes: HashMap<i64, bool> = match &fanout_cache {
+                    Some(cache) => group
+                        .members
+                        .iter()
+                        .filter_map(|member| {
+                            if let NodeId::StreamTable(id) = member {
+                                Some((*id, cache.contains(id)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    None => group
+                        .members
+                        .iter()
+                        .filter_map(|member| match member {
+                            NodeId::StreamTable(id) => {
+                                load_st_by_id(*id).map(|st| (*id, has_table_source_changes(&st)))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                };
 
                 if group.is_singleton() {
                     // Fast path: no SAVEPOINT overhead for non-diamond STs.
@@ -1170,6 +1223,12 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                     };
                     // Skip SCC members already handled by fixpoint iteration.
                     if scc_member_ids.contains(&pgt_id) {
+                        continue;
+                    }
+                    // API-1/2 (v0.62.0): Skip nodes that are paused via
+                    // pgtrickle.pause_scheduler().
+                    if crate::shmem::is_node_paused(pgt_id) {
+                        log!("pg_trickle scheduler: skipping {pgt_id} — node is paused");
                         continue;
                     }
                     // P3-5: Auto-backoff — skip this tick if the backoff
@@ -1261,6 +1320,13 @@ pub extern "C-unwind" fn pg_trickle_scheduler_main(_arg: pg_sys::Datum) {
                             NodeId::StreamTable(id) => *id,
                             _ => continue,
                         };
+                        // API-1/2 (v0.62.0): Skip paused nodes.
+                        if crate::shmem::is_node_paused(pgt_id) {
+                            log!(
+                                "pg_trickle scheduler: skipping {pgt_id} — node is paused (group)"
+                            );
+                            continue;
+                        }
                         let mut entry = drift_counters.entry(pgt_id).or_insert(0);
                         refresh_single_st(
                             pgt_id,

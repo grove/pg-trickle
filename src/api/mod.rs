@@ -22,6 +22,8 @@ use crate::wal_decoder;
 
 pub(crate) mod outbox;
 pub(crate) mod publication;
+pub(crate) mod scheduler_control;
+pub(crate) mod spec;
 
 // ── G13-EH: Enriched error reporting ────────────────────────────────────────
 

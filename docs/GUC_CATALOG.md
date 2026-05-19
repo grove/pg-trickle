@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**115 configuration parameters** extracted from `src/config.rs`.
+**117 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -47,6 +47,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.diff_output_format` | `text` | `"split"` | Controls how the DI-2 aggregate UPDATE-split surfaces changes: - `"split"` (default): Emit DELETE+INSERT pairs for aggregate UPDATEs. |
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
+| `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
 | `pg_trickle.enable_vector_agg` | `bool` | `false` | F4 (v0.37.0): Enable pgVectorMV — incremental vector aggregate operators. |
 | `pg_trickle.enabled` | `bool` | `true` | Master enable/disable switch for the extension. |
@@ -103,6 +104,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.reindex_drift_threshold` | `float8` | `0.20` | Default: 0.20. |
 | `pg_trickle.schedule_alert_cooldown_seconds` | `int4` | `300` | Prevents alert spam when the cost model consistently predicts SLA breach. |
 | `pg_trickle.schedule_recommendation_min_samples` | `int4` | `20` | When fewer samples are available, `confidence` is returned as 0.0 and the recommendation fields are NULL or conservative defaults. |
+| `pg_trickle.scheduler_drain_timeout` | `int4` | `30` | Default: 30 seconds. |
 | `pg_trickle.scheduler_interval_ms` | `int4` | `1000` | Default: 1,000 ms (1 s). |
 | `pg_trickle.sla_window_hours` | `int4` | `24` | Default: 24 hours. |
 | `pg_trickle.slot_lag_critical_threshold_mb` | `int4` | `1024` | When a WAL-mode source retains more than this amount of WAL, `pgtrickle.check_cdc_health()` reports a `slot_lag_exceeds_threshold` alert for the source. |

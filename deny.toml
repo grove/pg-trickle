@@ -57,6 +57,8 @@ skip = [
   { name = "getrandom", version = "=0.3.4" },
   # hashbrown: multiple major versions pulled by indexmap and others
   { name = "hashbrown", version = "=0.15.5" },
+  # foldhash: 0.1.x from hashbrown (via pgrx/petgraph) vs 0.2.x from newer hashbrown (via sqlx)
+  { name = "foldhash", version = "=0.1.5" },
   # wasi: 0.11 from older crates, 0.14 from newer wasmtime-based stack
   { name = "wasi", version = "=0.11.1+wasi-snapshot-preview1" },
   # windows-* crates: version skew between ring (0.52) and socket2/hyper-util
