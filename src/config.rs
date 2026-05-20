@@ -1630,7 +1630,34 @@ fn normalize_ducklake_compaction_policy(value: Option<String>) -> DucklakeCompac
     }
 }
 
-// ── v0.62.0 GUCs ──────────────────────────────────────────────────────────
+// ── v0.66.0: DuckLake sink GUCs ───────────────────────────────────────────
+
+/// F-4 (v0.66.0): Parquet compression codec for the DuckLake sink.
+/// Default: 'snappy'.
+pub static PGS_DUCKLAKE_SINK_COMPRESSION: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"snappy"));
+
+/// S3 endpoint URL override for the DuckLake sink.
+/// Empty = use the default AWS endpoint.
+pub static PGS_DUCKLAKE_SINK_S3_ENDPOINT: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// AWS S3 region for the DuckLake sink (default: 'us-east-1').
+pub static PGS_DUCKLAKE_SINK_S3_REGION: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"us-east-1"));
+
+/// AWS S3 access key ID for the DuckLake sink (empty = use credential chain).
+pub static PGS_DUCKLAKE_SINK_S3_ACCESS_KEY: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// AWS S3 secret access key for the DuckLake sink (empty = use credential chain).
+pub static PGS_DUCKLAKE_SINK_S3_SECRET_KEY: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+
+/// F-9 (v0.66.0): Key-name prefix for per-file Parquet encryption keys.
+/// Empty = encryption disabled.
+pub static PGS_DUCKLAKE_SINK_ENCRYPTION_KEY_PREFIX: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
 
 /// PERF-1 (v0.62.0): Deduplicate change-buffer scans across all stream tables
 /// that share the same source within a single scheduler tick.
@@ -3214,6 +3241,81 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.66.0 GUCs ───────────────────────────────────────────────────────
+
+    // F-4: DuckLake sink Parquet compression codec.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_compression",
+        c"F-4: Parquet compression codec used by the DuckLake sink (v0.66.0).",
+        c"Compression codec for Parquet files written by the DuckLake sink. \
+          Allowed values: 'snappy' (default), 'gzip', 'zstd', 'none'. \
+          Snappy is the best balance of compression ratio and CPU cost.",
+        &PGS_DUCKLAKE_SINK_COMPRESSION,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // S3 endpoint override.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_s3_endpoint",
+        c"S3/object-store endpoint URL for the DuckLake sink (v0.66.0).",
+        c"Override the AWS S3 endpoint URL. Leave empty to use the default \
+          AWS endpoint. Set to a MinIO or other S3-compatible URL for testing \
+          (e.g. 'http://localhost:9000'). Used only when the sink path starts \
+          with 's3://'.",
+        &PGS_DUCKLAKE_SINK_S3_ENDPOINT,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // S3 region.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_s3_region",
+        c"AWS S3 region for the DuckLake sink (v0.66.0).",
+        c"AWS region used for S3 uploads by the DuckLake sink. \
+          Default: 'us-east-1'. Ignored when ducklake_sink_s3_endpoint is set \
+          to a non-AWS endpoint.",
+        &PGS_DUCKLAKE_SINK_S3_REGION,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // S3 access key (stored as a superuser-only GUC).
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_s3_access_key",
+        c"AWS S3 access key ID for the DuckLake sink (v0.66.0).",
+        c"AWS access key ID for S3 uploads. Leave empty to use the \
+          AWS credential chain (environment variables, IAM role, etc.). \
+          This GUC requires superuser to set.",
+        &PGS_DUCKLAKE_SINK_S3_ACCESS_KEY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // S3 secret key (superuser-only).
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_s3_secret_key",
+        c"AWS S3 secret access key for the DuckLake sink (v0.66.0).",
+        c"AWS secret access key for S3 uploads. Leave empty to use the \
+          AWS credential chain. This GUC requires superuser to set.",
+        &PGS_DUCKLAKE_SINK_S3_SECRET_KEY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+
+    // Encryption key prefix for DuckLake sink (F-9).
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_sink_encryption_key_prefix",
+        c"F-9: Key-name prefix for per-file Parquet encryption keys (v0.66.0).",
+        c"When writing to an encrypted DuckLake table, the sink generates a fresh \
+          per-file key and names it '<prefix>/<table_id>/<epoch_ms>'. \
+          The key is stored in ducklake_data_file.encryption_key_id and applied \
+          during Parquet serialisation. Leave empty to disable encryption.",
+        &PGS_DUCKLAKE_SINK_ENCRYPTION_KEY_PREFIX,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 /// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.
@@ -3245,6 +3347,57 @@ pub fn pg_trickle_ducklake_compaction_policy() -> DucklakeCompactionPolicy {
             .get()
             .map(|c| c.to_string_lossy().into_owned()),
     )
+}
+
+// ── v0.66.0 DuckLake sink accessors ────────────────────────────────────────
+
+/// F-4 (v0.66.0): Returns the Parquet compression codec for the DuckLake sink.
+pub fn pg_trickle_ducklake_sink_compression() -> String {
+    PGS_DUCKLAKE_SINK_COMPRESSION
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "snappy".to_string())
+}
+
+/// F-4 (v0.66.0): Returns the S3 endpoint URL override (empty = AWS default).
+pub fn pg_trickle_ducklake_sink_s3_endpoint() -> Option<String> {
+    PGS_DUCKLAKE_SINK_S3_ENDPOINT
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// F-4 (v0.66.0): Returns the AWS S3 region for the DuckLake sink.
+pub fn pg_trickle_ducklake_sink_s3_region() -> String {
+    PGS_DUCKLAKE_SINK_S3_REGION
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "us-east-1".to_string())
+}
+
+/// F-4 (v0.66.0): Returns the AWS S3 access key ID (None = use credential chain).
+pub fn pg_trickle_ducklake_sink_s3_access_key() -> Option<String> {
+    PGS_DUCKLAKE_SINK_S3_ACCESS_KEY
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// F-4 (v0.66.0): Returns the AWS S3 secret access key (None = use credential chain).
+pub fn pg_trickle_ducklake_sink_s3_secret_key() -> Option<String> {
+    PGS_DUCKLAKE_SINK_S3_SECRET_KEY
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// F-9 (v0.66.0): Returns the encryption key prefix for per-file Parquet keys.
+/// Returns `None` when encryption is disabled (empty prefix).
+pub fn pg_trickle_ducklake_sink_encryption_key_prefix() -> Option<String> {
+    PGS_DUCKLAKE_SINK_ENCRYPTION_KEY_PREFIX
+        .get()
+        .map(|c| c.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────

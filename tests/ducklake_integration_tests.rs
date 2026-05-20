@@ -239,3 +239,162 @@ async fn test_ducklake_frontier_snapshot_id_never_moves_backward() {
         "snapshot_id must only move forward (monotonicity): {old_id} -> {new_id}"
     );
 }
+
+// ── v0.66.0: DuckLake Parquet Sink catalog column tests ───────────────────
+
+/// F-2 (v0.66.0): The `ducklake_sink_mode` catalog column accepts 'append'
+/// and 'replace' and rejects other values.
+#[tokio::test]
+async fn test_ducklake_sink_mode_accepts_valid_values() {
+    let db = TestDb::with_catalog().await;
+
+    // 'append' is valid.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET ducklake_sink_mode = 'append'
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+
+    // 'replace' is valid.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET ducklake_sink_mode = 'replace'
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+
+    // NULL is valid (disables the sink).
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables SET ducklake_sink_mode = NULL
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+}
+
+/// F-2 (v0.66.0): `ducklake_sink_mode` rejects values outside the CHECK constraint.
+#[tokio::test]
+async fn test_ducklake_sink_mode_rejects_invalid_values() {
+    let db = TestDb::with_catalog().await;
+
+    // 'full' is NOT a valid sink mode — the CHECK constraint must reject it.
+    let result = db
+        .try_execute(
+            "UPDATE pgtrickle.pgt_stream_tables SET ducklake_sink_mode = 'full'
+             WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "invalid sink mode 'full' should have been rejected by CHECK constraint"
+    );
+}
+
+/// F-4 (v0.66.0): `ducklake_sink_path` can be set to any text value.
+#[tokio::test]
+async fn test_ducklake_sink_path_can_be_set() {
+    let db = TestDb::with_catalog().await;
+
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET ducklake_sink_path = 's3://my-bucket/prefix/',
+             ducklake_sink_mode = 'append'
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+
+    let path: String = db
+        .query_scalar(
+            "SELECT ducklake_sink_path
+             FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+        )
+        .await;
+    assert_eq!(path, "s3://my-bucket/prefix/");
+}
+
+/// F-4 (v0.66.0): `ducklake_sink_table_id` can be set and cleared.
+#[tokio::test]
+async fn test_ducklake_sink_table_id_can_be_set() {
+    let db = TestDb::with_catalog().await;
+
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET ducklake_sink_table_id = 42
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+
+    let table_id: i64 = db
+        .query_scalar(
+            "SELECT ducklake_sink_table_id
+             FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+        )
+        .await;
+    assert_eq!(table_id, 42);
+
+    // Clear it.
+    db.execute(
+        "UPDATE pgtrickle.pgt_stream_tables
+         SET ducklake_sink_table_id = NULL
+         WHERE pgt_id = (SELECT MIN(pgt_id) FROM pgtrickle.pgt_stream_tables)",
+    )
+    .await;
+}
+
+/// F-2 (v0.66.0): Stream tables with NULL `ducklake_sink_mode` do not write
+/// any Parquet files (the sink fast-exits when mode is None).
+/// This test verifies the catalog columns default to NULL on creation.
+#[tokio::test]
+async fn test_ducklake_sink_columns_default_to_null() {
+    let db = TestDb::with_catalog().await;
+
+    // Create a minimal stream table.
+    db.execute("CREATE TABLE sink_null_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+             'public.sink_null_st',
+             'SELECT id FROM sink_null_src',
+             initialize := FALSE
+         )",
+    )
+    .await;
+
+    let mode: Option<String> = db
+        .query_scalar_opt(
+            "SELECT ducklake_sink_mode
+             FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'sink_null_st'",
+        )
+        .await;
+    let path: Option<String> = db
+        .query_scalar_opt(
+            "SELECT ducklake_sink_path
+             FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'sink_null_st'",
+        )
+        .await;
+    let table_id: Option<i64> = db
+        .query_scalar_opt(
+            "SELECT ducklake_sink_table_id
+             FROM pgtrickle.pgt_stream_tables
+             WHERE pgt_name = 'sink_null_st'",
+        )
+        .await;
+
+    assert!(
+        mode.is_none(),
+        "ducklake_sink_mode should default to NULL, got: {:?}",
+        mode
+    );
+    assert!(
+        path.is_none(),
+        "ducklake_sink_path should default to NULL, got: {:?}",
+        path
+    );
+    assert!(
+        table_id.is_none(),
+        "ducklake_sink_table_id should default to NULL, got: {:?}",
+        table_id
+    );
+}

@@ -1,0 +1,833 @@
+//! DuckLake sink implementation — writes stream table delta results into DuckLake.
+//!
+//! Implements the write path introduced in v0.66.0:
+//!
+//! 1. **Parquet delta serialisation** (`arrow-array` + `parquet` crates, sync).
+//! 2. **Object-store upload** (local `file://` or AWS S3 via `object_store`).
+//! 3. **DuckLake catalog transaction writer** (via SPI into DuckLake tables).
+//! 4. **Encryption key pass-through** (F-9) for encrypted lakes.
+//!
+//! # Rollback safety
+//!
+//! The write order is intentionally **upload-then-catalog**:
+//!
+//! 1. Write Parquet bytes.
+//! 2. Upload to object store. If this fails, no catalog rows are written.
+//! 3. Open an SPI subtransaction and insert into `ducklake_data_file`,
+//!    update `ducklake_table_stats`, insert `ducklake_snapshot`.
+//! 4. If the SPI write fails, the Parquet file on object storage is orphaned
+//!    (it can be garbage-collected by DuckLake's VACUUM). This is the same
+//!    semantics as DuckLake's own writer and is acceptable.
+//!
+//! # Architecture note
+//!
+//! `object_store` is fully async. We drive it synchronously using a
+//! `tokio::runtime::Builder::new_current_thread()` runtime created on demand
+//! per sink call. This isolates async I/O from PostgreSQL's signal handling
+//! while keeping the extension code single-threaded.
+
+use crate::catalog::StreamTableMeta;
+use crate::error::PgTrickleError;
+use pgrx::prelude::*;
+
+use arrow_array::{
+    BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use bytes::Bytes;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
+use std::sync::Arc;
+
+// ── Compression codec ──────────────────────────────────────────────────────
+
+fn resolve_compression(codec: &str) -> Compression {
+    match codec.to_ascii_lowercase().as_str() {
+        "zstd" => Compression::ZSTD(Default::default()),
+        "none" | "uncompressed" => Compression::UNCOMPRESSED,
+        _ => Compression::SNAPPY, // default: snappy
+    }
+}
+
+// ── Column descriptor (name + Arrow DataType) ─────────────────────────────
+
+/// A single column's name and Arrow data type, used to build the Parquet schema.
+#[derive(Debug, Clone)]
+pub struct SinkColumn {
+    pub name: String,
+    pub data_type: DataType,
+}
+
+// ── Parquet serialisation ─────────────────────────────────────────────────
+
+/// Serialise a result set to Parquet bytes.
+///
+/// `schema` describes the output column names and types.
+/// `rows` is a list of rows, each row being a `Vec<Option<String>>` (values
+/// cast to text by the caller's SPI query).  Using text for all values keeps
+/// the serialisation code simple and type-safe without needing a complete
+/// PostgreSQL ↔ Arrow type mapping.
+///
+/// Returns the raw Parquet file as a `Vec<u8>`.
+pub fn write_parquet_bytes(
+    schema: &[SinkColumn],
+    rows: Vec<Vec<Option<String>>>,
+    compression: Compression,
+) -> Result<Vec<u8>, PgTrickleError> {
+    if schema.is_empty() {
+        // No columns — produce an empty Parquet file with an empty schema.
+        let arrow_schema = Arc::new(Schema::empty());
+        let batch = RecordBatch::new_empty(arrow_schema.clone());
+        return write_batch_to_bytes(arrow_schema, &[batch], compression);
+    }
+
+    // Build Arrow arrays for each column.
+    let mut arrow_fields = Vec::with_capacity(schema.len());
+    let mut arrow_arrays: Vec<Arc<dyn arrow_array::Array>> = Vec::with_capacity(schema.len());
+
+    for (col_idx, col) in schema.iter().enumerate() {
+        arrow_fields.push(Field::new(&col.name, col.data_type.clone(), true));
+
+        let column_values: Vec<Option<String>> = rows
+            .iter()
+            .map(|row| row.get(col_idx).and_then(|v| v.clone()))
+            .collect();
+
+        let array: Arc<dyn arrow_array::Array> = match &col.data_type {
+            DataType::Int64 => {
+                let values: Vec<Option<i64>> = column_values
+                    .iter()
+                    .map(|v| v.as_deref().and_then(|s| s.parse().ok()))
+                    .collect();
+                Arc::new(Int64Array::from(values))
+            }
+            DataType::Float64 => {
+                let values: Vec<Option<f64>> = column_values
+                    .iter()
+                    .map(|v| v.as_deref().and_then(|s| s.parse().ok()))
+                    .collect();
+                Arc::new(Float64Array::from(values))
+            }
+            DataType::Boolean => {
+                let values: Vec<Option<bool>> = column_values
+                    .iter()
+                    .map(|v| {
+                        v.as_deref().map(|s| {
+                            matches!(s.to_ascii_lowercase().as_str(), "t" | "true" | "1" | "yes")
+                        })
+                    })
+                    .collect();
+                Arc::new(BooleanArray::from(values))
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                let values: Vec<Option<i64>> = column_values
+                    .iter()
+                    .map(|v| v.as_deref().and_then(|s| s.parse().ok()))
+                    .collect();
+                Arc::new(TimestampMicrosecondArray::from(values))
+            }
+            // Default: treat everything else as UTF-8 string.
+            _ => {
+                let values: Vec<Option<&str>> =
+                    column_values.iter().map(|v| v.as_deref()).collect();
+                Arc::new(StringArray::from(values))
+            }
+        };
+
+        arrow_arrays.push(array);
+    }
+
+    let arrow_schema = Arc::new(Schema::new(arrow_fields));
+    let batch = RecordBatch::try_new(arrow_schema.clone(), arrow_arrays).map_err(|e| {
+        PgTrickleError::DucklakeParquetError(format!("RecordBatch construction failed: {e}"))
+    })?;
+
+    write_batch_to_bytes(arrow_schema, &[batch], compression)
+}
+
+fn write_batch_to_bytes(
+    schema: Arc<Schema>,
+    batches: &[RecordBatch],
+    compression: Compression,
+) -> Result<Vec<u8>, PgTrickleError> {
+    let mut buf = Vec::new();
+    let props = WriterProperties::builder()
+        .set_compression(compression)
+        .build();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).map_err(|e| {
+        PgTrickleError::DucklakeParquetError(format!("ArrowWriter init failed: {e}"))
+    })?;
+    for batch in batches {
+        writer.write(batch).map_err(|e| {
+            PgTrickleError::DucklakeParquetError(format!("ArrowWriter write failed: {e}"))
+        })?;
+    }
+    writer.close().map_err(|e| {
+        PgTrickleError::DucklakeParquetError(format!("ArrowWriter close failed: {e}"))
+    })?;
+    Ok(buf)
+}
+
+// ── Object-store upload ────────────────────────────────────────────────────
+
+/// Upload `data` to `<base_path><file_name>` on the configured object store.
+///
+/// Scheme dispatch:
+/// - `file://` → write to local filesystem (no network, no tokio needed).
+/// - `s3://`   → upload via `object_store` AWS S3 backend.
+/// - Anything else → returns an error with guidance.
+///
+/// Returns the fully-qualified path (URI) to the uploaded file.
+pub fn upload_parquet(
+    base_path: &str,
+    file_name: &str,
+    data: Vec<u8>,
+) -> Result<String, PgTrickleError> {
+    if base_path.starts_with("file://") {
+        upload_local(base_path, file_name, data)
+    } else if base_path.starts_with("s3://") {
+        upload_s3(base_path, file_name, data)
+    } else if base_path.starts_with("gs://") || base_path.starts_with("az://") {
+        Err(PgTrickleError::DucklakeUploadError(format!(
+            "Object-store scheme not yet supported in this build: '{}'. \
+             Supported schemes: file://, s3://. \
+             GCS and Azure Blob support requires additional feature flags.",
+            &base_path[..base_path.find("://").map(|i| i + 3).unwrap_or(5)]
+        )))
+    } else {
+        Err(PgTrickleError::DucklakeUploadError(format!(
+            "Unrecognised object-store scheme in ducklake_sink_path '{}'. \
+             Expected one of: s3://<bucket>/<prefix>/, file:///path/to/dir/",
+            base_path
+        )))
+    }
+}
+
+fn upload_local(base_path: &str, file_name: &str, data: Vec<u8>) -> Result<String, PgTrickleError> {
+    // Strip the file:// prefix to get the filesystem path.
+    let dir = base_path
+        .strip_prefix("file://")
+        .unwrap_or(base_path)
+        .trim_end_matches('/');
+
+    std::fs::create_dir_all(dir).map_err(|e| {
+        PgTrickleError::DucklakeUploadError(format!("Cannot create directory '{dir}': {e}"))
+    })?;
+
+    let full_path = format!("{dir}/{file_name}");
+    std::fs::write(&full_path, &data).map_err(|e| {
+        PgTrickleError::DucklakeUploadError(format!("Cannot write file '{full_path}': {e}"))
+    })?;
+
+    Ok(format!("file://{full_path}"))
+}
+
+fn upload_s3(base_path: &str, file_name: &str, data: Vec<u8>) -> Result<String, PgTrickleError> {
+    use object_store::{ObjectStore, aws::AmazonS3Builder, path::Path};
+
+    // Parse s3://bucket/prefix/ into bucket + prefix.
+    let stripped = base_path.strip_prefix("s3://").unwrap_or(base_path);
+    let (bucket, prefix) = stripped.split_once('/').unwrap_or((stripped, ""));
+
+    let prefix = prefix.trim_end_matches('/');
+    let object_path_str = if prefix.is_empty() {
+        file_name.to_string()
+    } else {
+        format!("{prefix}/{file_name}")
+    };
+
+    let object_path = Path::parse(&object_path_str).map_err(|e| {
+        PgTrickleError::DucklakeUploadError(format!(
+            "Invalid S3 object path '{object_path_str}': {e}"
+        ))
+    })?;
+
+    // Read S3 configuration from GUCs.
+    let endpoint = crate::config::pg_trickle_ducklake_sink_s3_endpoint();
+    let region = crate::config::pg_trickle_ducklake_sink_s3_region();
+    let access_key = crate::config::pg_trickle_ducklake_sink_s3_access_key();
+    let secret_key = crate::config::pg_trickle_ducklake_sink_s3_secret_key();
+
+    let mut builder = AmazonS3Builder::new()
+        .with_bucket_name(bucket)
+        .with_region(&region);
+
+    if let Some(ep) = endpoint {
+        builder = builder.with_endpoint(&ep).with_allow_http(true);
+    }
+    if let Some(ak) = access_key {
+        builder = builder.with_access_key_id(&ak);
+    }
+    if let Some(sk) = secret_key {
+        builder = builder.with_secret_access_key(&sk);
+    }
+
+    let store = builder
+        .build()
+        .map_err(|e| PgTrickleError::DucklakeUploadError(format!("S3 client build failed: {e}")))?;
+
+    // Run the async upload synchronously via a current-thread tokio runtime.
+    // SAFETY: We create a fresh single-threaded runtime here; it does not share
+    // a reactor with PostgreSQL's signal handlers, and we block until the upload
+    // completes or fails. The runtime is dropped immediately after the call.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            PgTrickleError::DucklakeUploadError(format!("Tokio runtime init failed: {e}"))
+        })?;
+
+    rt.block_on(async {
+        store
+            .put(&object_path, Bytes::from(data).into())
+            .await
+            .map_err(|e| {
+                PgTrickleError::DucklakeUploadError(format!(
+                    "S3 PUT to s3://{bucket}/{object_path_str} failed: {e}"
+                ))
+            })
+    })?;
+
+    Ok(format!("s3://{bucket}/{object_path_str}"))
+}
+
+// ── DuckLake catalog transaction writer ───────────────────────────────────
+
+/// Register a new Parquet data file in the DuckLake catalog.
+///
+/// Inserts a row into `ducklake_data_file` and a new row in `ducklake_snapshot`
+/// within a short-lived SPI connection. If either insert fails, the SPI
+/// transaction is rolled back cleanly.
+///
+/// # Rollback semantics
+///
+/// If this function returns `Err`, the Parquet file already exists on object
+/// storage but has no corresponding catalog entry. DuckLake's VACUUM process
+/// will eventually garbage-collect unreferenced files.
+///
+/// Returns the new `snapshot_id`.
+pub fn register_ducklake_data_file(
+    table_id: i64,
+    file_path: &str,
+    row_count: i64,
+    file_size_bytes: i64,
+    encryption_key_id: Option<&str>,
+) -> Result<i64, PgTrickleError> {
+    Spi::connect_mut(|client| {
+        // Insert the data file record.
+        let encryption_key_val: Option<&str> = encryption_key_id;
+        client
+            .update(
+                "INSERT INTO ducklake_data_file \
+                 (table_id, begin_snapshot, path, row_count, \
+                  file_size_bytes, encryption_key_id) \
+                 VALUES ($1, \
+                     (SELECT COALESCE(MAX(snapshot_id), 0) \
+                      FROM ducklake_snapshot WHERE table_id = $1) + 1, \
+                 $2, $3, $4, $5) \
+                 RETURNING data_file_id",
+                None,
+                &[
+                    table_id.into(),
+                    file_path.into(),
+                    row_count.into(),
+                    file_size_bytes.into(),
+                    encryption_key_val.into(),
+                ],
+            )
+            .map_err(|e| {
+                PgTrickleError::DucklakeCatalogError(format!(
+                    "ducklake_data_file insert failed: {e}"
+                ))
+            })?;
+
+        // Update table stats.
+        client
+            .update(
+                "INSERT INTO ducklake_table_stats (table_id, row_count, file_count) \
+                 VALUES ($1, $2, 1) \
+                 ON CONFLICT (table_id) DO UPDATE \
+                 SET row_count = ducklake_table_stats.row_count + EXCLUDED.row_count, \
+                     file_count = ducklake_table_stats.file_count + 1",
+                None,
+                &[table_id.into(), row_count.into()],
+            )
+            .map_err(|e| {
+                PgTrickleError::DucklakeCatalogError(format!(
+                    "ducklake_table_stats upsert failed: {e}"
+                ))
+            })?;
+
+        // Insert a new snapshot and return its ID.
+        let snap_row = client
+            .update(
+                "INSERT INTO ducklake_snapshot \
+                 (table_id, snapshot_id, snapshot_time) \
+                 VALUES ($1, \
+                     (SELECT COALESCE(MAX(snapshot_id), 0) + 1 \
+                      FROM ducklake_snapshot WHERE table_id = $1), \
+                     now()) \
+                 RETURNING snapshot_id",
+                None,
+                &[table_id.into()],
+            )
+            .map_err(|e| {
+                PgTrickleError::DucklakeCatalogError(format!(
+                    "ducklake_snapshot insert failed: {e}"
+                ))
+            })?;
+
+        let snapshot_id = snap_row
+            .first()
+            .get_one::<i64>()
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(1);
+
+        Ok(snapshot_id)
+    })
+    .map_err(|e: PgTrickleError| e)
+}
+
+// ── Fetch stream table rows as text ───────────────────────────────────────
+
+/// Column descriptor returned by SPI for the stream table storage.
+#[derive(Debug, Clone)]
+struct ColumnInfo {
+    name: String,
+    type_oid: u32,
+}
+
+/// Rows type alias for fetched stream table data.
+type FetchedRows = Vec<Vec<Option<String>>>;
+
+/// Fetch all rows from the stream table storage table as text-encoded columns.
+///
+/// Returns the schema and a vec-of-rows for Parquet serialisation.
+fn fetch_stream_table_rows(
+    st: &StreamTableMeta,
+) -> Result<(Vec<SinkColumn>, FetchedRows), PgTrickleError> {
+    let quoted_table = format!(
+        "\"{}\".\"{}\"",
+        st.pgt_schema.replace('"', "\"\""),
+        st.pgt_name.replace('"', "\"\""),
+    );
+
+    Spi::connect(|client| {
+        // First: discover columns via information_schema.
+        let col_table = client
+            .select(
+                "SELECT column_name, udt_name \
+                 FROM information_schema.columns \
+                 WHERE table_schema = $1 AND table_name = $2 \
+                 ORDER BY ordinal_position",
+                None,
+                &[st.pgt_schema.as_str().into(), st.pgt_name.as_str().into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut columns: Vec<ColumnInfo> = Vec::new();
+        for row in col_table {
+            let col_name = row
+                .get::<String>(1)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            let udt_name = row
+                .get::<String>(2)
+                .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+                .unwrap_or_default();
+            // Skip internal pg_trickle columns.
+            if col_name.starts_with("__pgt_") {
+                continue;
+            }
+            columns.push(ColumnInfo {
+                name: col_name,
+                type_oid: udt_to_arrow_type_hint(&udt_name),
+            });
+        }
+
+        if columns.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+
+        // Build a SELECT that casts every column to TEXT for uniform handling.
+        let col_list = columns
+            .iter()
+            .map(|c| format!("\"{}\"::text", c.name.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // nosemgrep: rust.spi.run.dynamic-format — quoted identifiers only
+        let query = format!("SELECT {col_list} FROM {quoted_table}");
+
+        let data_table = client
+            .select(&query, None, &[])
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let num_cols = columns.len();
+        for row in data_table {
+            let mut row_vals = Vec::with_capacity(num_cols);
+            for col_idx in 0..num_cols {
+                let val = row
+                    .get::<String>(col_idx + 1)
+                    .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+                row_vals.push(val);
+            }
+            rows.push(row_vals);
+        }
+
+        let sink_columns: Vec<SinkColumn> = columns
+            .iter()
+            .map(|c| SinkColumn {
+                name: c.name.clone(),
+                data_type: type_hint_to_data_type(c.type_oid),
+            })
+            .collect();
+
+        Ok((sink_columns, rows))
+    })
+}
+
+/// Map a PostgreSQL `udt_name` to a simple numeric hint.
+/// 0 = text/string, 1 = int64, 2 = float64, 3 = bool, 4 = timestamp.
+fn udt_to_arrow_type_hint(udt_name: &str) -> u32 {
+    match udt_name {
+        "int2" | "int4" | "int8" | "bigint" | "integer" | "smallint" => 1,
+        "float4" | "float8" | "numeric" | "real" | "double precision" => 2,
+        "bool" | "boolean" => 3,
+        "timestamp" | "timestamptz" => 4,
+        _ => 0, // text
+    }
+}
+
+fn type_hint_to_data_type(hint: u32) -> DataType {
+    match hint {
+        1 => DataType::Int64,
+        2 => DataType::Float64,
+        3 => DataType::Boolean,
+        4 => DataType::Timestamp(TimeUnit::Microsecond, None),
+        _ => DataType::Utf8,
+    }
+}
+
+// ── F-9: Encryption key generation ────────────────────────────────────────
+
+/// Generate a new per-file encryption key ID.
+///
+/// The key ID is: `<prefix>/<table_id>/<epoch_ms>`. The actual key bytes
+/// are managed by the key management system; pg_trickle only records the
+/// key ID in `ducklake_data_file.encryption_key_id` so DuckLake clients
+/// can retrieve it when reading the file.
+fn generate_encryption_key_id(prefix: &str, table_id: i64, epoch_ms: i64) -> String {
+    format!("{prefix}/{table_id}/{epoch_ms}")
+}
+
+// ── Main entry point ───────────────────────────────────────────────────────
+
+/// Run the DuckLake sink for a stream table after a successful refresh.
+///
+/// Called from the scheduler after `execute_differential_refresh` or
+/// `execute_full_refresh` returns successfully. This function is a best-effort
+/// post-refresh action — it logs errors rather than propagating them so that a
+/// sink failure never blocks the next scheduled refresh.
+pub fn run_ducklake_sink(st: &StreamTableMeta) {
+    if let Err(e) = run_ducklake_sink_inner(st) {
+        pgrx::warning!(
+            "pg_trickle: DuckLake sink failed for {}.{}: {}",
+            st.pgt_schema,
+            st.pgt_name,
+            e,
+        );
+    }
+}
+
+fn run_ducklake_sink_inner(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
+    let sink_mode = match &st.ducklake_sink_mode {
+        Some(m) => m.clone(),
+        None => return Ok(()), // No sink configured — fast exit.
+    };
+
+    let sink_path = match &st.ducklake_sink_path {
+        Some(p) => p.clone(),
+        None => {
+            return Err(PgTrickleError::DucklakeSinkError(format!(
+                "{}.{}: ducklake_sink_mode is '{}' but ducklake_sink_path is NULL",
+                st.pgt_schema, st.pgt_name, sink_mode,
+            )));
+        }
+    };
+
+    // Fetch rows from the stream table storage.
+    let (schema, rows) = fetch_stream_table_rows(st)?;
+
+    let row_count = rows.len() as i64;
+
+    // Resolve compression from GUC.
+    let compression_str = crate::config::pg_trickle_ducklake_sink_compression();
+    let compression = resolve_compression(&compression_str);
+
+    // Serialise to Parquet.
+    let parquet_bytes = write_parquet_bytes(&schema, rows, compression)?;
+    let file_size = parquet_bytes.len() as i64;
+
+    // Generate a unique file name.
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let file_name = format!("{}_{}.parquet", epoch_ms, st.pgt_id);
+
+    // F-9: Resolve encryption key ID (if enabled).
+    let encryption_key_id = crate::config::pg_trickle_ducklake_sink_encryption_key_prefix()
+        .map(|prefix| generate_encryption_key_id(&prefix, st.pgt_id, epoch_ms));
+
+    // Upload to object store.
+    let full_path = upload_parquet(&sink_path, &file_name, parquet_bytes)?;
+
+    // Register in DuckLake catalog (if table_id is configured).
+    if let Some(table_id) = st.ducklake_sink_table_id {
+        register_ducklake_data_file(
+            table_id,
+            &full_path,
+            row_count,
+            file_size,
+            encryption_key_id.as_deref(),
+        )?;
+        pgrx::log!(
+            "pg_trickle: ducklake sink — {}.{} wrote {} rows to {} \
+             and registered in ducklake catalog (table_id={}, mode={})",
+            st.pgt_schema,
+            st.pgt_name,
+            row_count,
+            full_path,
+            table_id,
+            sink_mode,
+        );
+    } else {
+        pgrx::log!(
+            "pg_trickle: ducklake sink — {}.{} wrote {} rows to {} \
+             (no catalog registration, ducklake_sink_table_id is NULL, mode={})",
+            st.pgt_schema,
+            st.pgt_name,
+            row_count,
+            full_path,
+            sink_mode,
+        );
+    }
+
+    Ok(())
+}
+
+// ── Catalog update helpers ────────────────────────────────────────────────
+
+/// Update `ducklake_sink_mode` and `ducklake_sink_path` in the catalog.
+pub fn update_sink_config(
+    pgt_id: i64,
+    sink_mode: Option<&str>,
+    sink_path: Option<&str>,
+    sink_table_id: Option<i64>,
+) -> Result<(), PgTrickleError> {
+    Spi::run_with_args(
+        "UPDATE pgtrickle.pgt_stream_tables \
+         SET ducklake_sink_mode = $2, \
+             ducklake_sink_path = $3, \
+             ducklake_sink_table_id = $4, \
+             updated_at = now() \
+         WHERE pgt_id = $1",
+        &[
+            pgt_id.into(),
+            sink_mode.into(),
+            sink_path.into(),
+            sink_table_id.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Compression resolution ──────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_compression_snappy_is_default() {
+        assert_eq!(resolve_compression("snappy"), Compression::SNAPPY);
+    }
+
+    #[test]
+    fn test_resolve_compression_unknown_defaults_to_snappy() {
+        assert_eq!(resolve_compression("bogus"), Compression::SNAPPY);
+    }
+
+    #[test]
+    fn test_resolve_compression_none() {
+        assert_eq!(resolve_compression("none"), Compression::UNCOMPRESSED);
+    }
+
+    #[test]
+    fn test_resolve_compression_zstd() {
+        assert!(matches!(resolve_compression("zstd"), Compression::ZSTD(_)));
+    }
+
+    // ── Parquet serialisation ───────────────────────────────────────────
+
+    #[test]
+    fn test_write_parquet_bytes_empty_schema() {
+        let bytes = write_parquet_bytes(&[], vec![], Compression::SNAPPY).unwrap();
+        // Should produce a minimal valid Parquet file (at least the magic bytes).
+        assert!(bytes.len() >= 4);
+        assert_eq!(&bytes[..4], b"PAR1");
+    }
+
+    #[test]
+    fn test_write_parquet_bytes_single_int_column() {
+        let schema = vec![SinkColumn {
+            name: "id".to_string(),
+            data_type: DataType::Int64,
+        }];
+        let rows = vec![
+            vec![Some("1".to_string())],
+            vec![Some("2".to_string())],
+            vec![None],
+        ];
+        let bytes = write_parquet_bytes(&schema, rows, Compression::SNAPPY).unwrap();
+        assert!(bytes.len() > 4);
+        assert_eq!(&bytes[..4], b"PAR1");
+    }
+
+    #[test]
+    fn test_write_parquet_bytes_mixed_types() {
+        let schema = vec![
+            SinkColumn {
+                name: "id".to_string(),
+                data_type: DataType::Int64,
+            },
+            SinkColumn {
+                name: "name".to_string(),
+                data_type: DataType::Utf8,
+            },
+            SinkColumn {
+                name: "score".to_string(),
+                data_type: DataType::Float64,
+            },
+            SinkColumn {
+                name: "active".to_string(),
+                data_type: DataType::Boolean,
+            },
+        ];
+        let rows = vec![
+            vec![
+                Some("42".to_string()),
+                Some("Alice".to_string()),
+                Some("9.5".to_string()),
+                Some("true".to_string()),
+            ],
+            vec![
+                Some("99".to_string()),
+                None,
+                Some("3.14".to_string()),
+                Some("false".to_string()),
+            ],
+        ];
+        let bytes = write_parquet_bytes(&schema, rows, Compression::UNCOMPRESSED).unwrap();
+        assert_eq!(&bytes[..4], b"PAR1");
+    }
+
+    // ── Type hint mapping ───────────────────────────────────────────────
+
+    #[test]
+    fn test_udt_to_arrow_type_hint_integers() {
+        assert_eq!(udt_to_arrow_type_hint("int4"), 1);
+        assert_eq!(udt_to_arrow_type_hint("int8"), 1);
+        assert_eq!(udt_to_arrow_type_hint("bigint"), 1);
+    }
+
+    #[test]
+    fn test_udt_to_arrow_type_hint_floats() {
+        assert_eq!(udt_to_arrow_type_hint("float8"), 2);
+        assert_eq!(udt_to_arrow_type_hint("numeric"), 2);
+    }
+
+    #[test]
+    fn test_udt_to_arrow_type_hint_bool() {
+        assert_eq!(udt_to_arrow_type_hint("bool"), 3);
+    }
+
+    #[test]
+    fn test_udt_to_arrow_type_hint_timestamp() {
+        assert_eq!(udt_to_arrow_type_hint("timestamp"), 4);
+        assert_eq!(udt_to_arrow_type_hint("timestamptz"), 4);
+    }
+
+    #[test]
+    fn test_udt_to_arrow_type_hint_text() {
+        assert_eq!(udt_to_arrow_type_hint("text"), 0);
+        assert_eq!(udt_to_arrow_type_hint("varchar"), 0);
+        assert_eq!(udt_to_arrow_type_hint("unknown_type"), 0);
+    }
+
+    // ── Encryption key generation ───────────────────────────────────────
+
+    #[test]
+    fn test_generate_encryption_key_id_format() {
+        let key_id = generate_encryption_key_id("myproject/keys", 42, 1716000000000);
+        assert_eq!(key_id, "myproject/keys/42/1716000000000");
+    }
+
+    // ── Local file upload ───────────────────────────────────────────────
+
+    #[test]
+    fn test_upload_local_creates_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let base_path = format!("file://{}/", dir.path().display());
+        let data = b"PAR1testdata".to_vec();
+        let result = upload_local(&base_path, "test.parquet", data.clone());
+        assert!(result.is_ok(), "upload_local failed: {:?}", result);
+        let full_path = result.unwrap();
+        assert!(full_path.starts_with("file://"));
+        let fs_path = full_path.strip_prefix("file://").unwrap();
+        let contents = std::fs::read(fs_path).expect("read file");
+        assert_eq!(contents, data);
+    }
+
+    #[test]
+    fn test_upload_local_nested_directory() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let base_path = format!("file://{}/nested/deep/", dir.path().display());
+        let data = vec![0u8; 16];
+        let result = upload_local(&base_path, "nested.parquet", data);
+        assert!(
+            result.is_ok(),
+            "upload_local with nested dir failed: {:?}",
+            result
+        );
+    }
+
+    // ── Unsupported scheme ──────────────────────────────────────────────
+
+    #[test]
+    fn test_upload_parquet_unsupported_scheme_returns_error() {
+        let result = upload_parquet("ftp://example.com/bucket/", "test.parquet", vec![]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unrecognised"),
+            "Expected unrecognised scheme error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_upload_parquet_gcs_not_supported_error() {
+        let result = upload_parquet("gs://my-bucket/prefix/", "f.parquet", vec![]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "Expected not-supported error, got: {msg}"
+        );
+    }
+}

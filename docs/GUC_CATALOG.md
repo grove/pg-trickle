@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**120 configuration parameters** extracted from `src/config.rs`.
+**126 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -48,6 +48,12 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
 | `pg_trickle.ducklake_compaction_policy` | `text` | `"fallback"` | Individual stream tables may override this with the `ducklake_compaction_policy` column in `pgtrickle.pgt_stream_tables`. |
+| `pg_trickle.ducklake_sink_compression` | `text` | `"snappy"` | F-4 (v0.66.0): Parquet compression codec for the DuckLake sink. |
+| `pg_trickle.ducklake_sink_encryption_key_prefix` | `text` | `None` | F-9 (v0.66.0): Key-name prefix for per-file Parquet encryption keys. |
+| `pg_trickle.ducklake_sink_s3_access_key` | `text` | `None` | AWS S3 access key ID for the DuckLake sink (empty = use credential chain). |
+| `pg_trickle.ducklake_sink_s3_endpoint` | `text` | `None` | S3 endpoint URL override for the DuckLake sink. |
+| `pg_trickle.ducklake_sink_s3_region` | `text` | `"us-east-1"` | AWS S3 region for the DuckLake sink (default: 'us-east-1'). |
+| `pg_trickle.ducklake_sink_s3_secret_key` | `text` | `None` | AWS S3 secret access key for the DuckLake sink (empty = use credential chain). |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
