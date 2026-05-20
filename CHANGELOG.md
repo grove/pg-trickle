@@ -434,12 +434,11 @@ production-quality observability dashboard. Five minutes from `git clone` to
 live operational visibility. Includes `teardown_monitoring.sql` for clean removal.
 
 **Community Outreach Plan**
-(`docs/DUCKLAKE_COMMUNITY_OUTREACH.md`)
 
 Documented outreach plan for six named DuckLake production users (PostHog,
 Windmill, locals.com, Ascend.io, Sliplane, Media Cluster Norway). Complete CFP
 submission texts for DuckCon, PGConf EU, and PGCon. GitHub Discussion draft for
-`duckdb/ducklake`. All scripts and tracking in a single document.
+`duckdb/ducklake`.
 
 ### Upgrading
 
