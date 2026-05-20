@@ -47,6 +47,10 @@ async fn test_upgrade_catalog_schema_stability() {
         ("downstream_publication_name", "text"),
         // v0.65.0 CDC-6: DuckLake compaction policy override
         ("ducklake_compaction_policy", "text"),
+        // v0.66.0 F-2/F-4: DuckLake Parquet sink
+        ("ducklake_sink_mode", "text"),
+        ("ducklake_sink_path", "text"),
+        ("ducklake_sink_table_id", "bigint"),
         ("effective_refresh_mode", "text"),
         ("freshness_deadline_ms", "bigint"),
         ("frontier", "jsonb"),
