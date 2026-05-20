@@ -68,3 +68,105 @@ COMMENT ON COLUMN pgtrickle.pgt_stream_tables.ducklake_sink_table_id IS
     'registers each new Parquet file in the DuckLake catalog under this '
     'table. NULL means no DuckLake catalog registration is performed '
     '(files are written to object storage only).';
+
+-- ── FUNC-1: Update create_stream_table with sink parameters ──────────────
+--
+-- The 0.65.0 binary registered create_stream_table with 16 parameters.
+-- The 0.66.0 binary adds sink, ducklake_sink_path, ducklake_sink_table_id
+-- at positions 17-19.  pgrx unboxes arguments by ordinal position, so the
+-- catalog function signature MUST match the Rust function signature exactly.
+-- DROP the old 16-parameter overload and replace it with the 19-parameter one.
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table"(
+    TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN,
+    TEXT, INT, FLOAT8, TEXT, BOOLEAN, TEXT
+);
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table"(
+    "name"                       TEXT,
+    "query"                      TEXT,
+    "schedule"                   TEXT    DEFAULT 'calculated',
+    "refresh_mode"               TEXT    DEFAULT 'AUTO',
+    "initialize"                 BOOLEAN DEFAULT true,
+    "diamond_consistency"        TEXT    DEFAULT NULL,
+    "diamond_schedule_policy"    TEXT    DEFAULT NULL,
+    "cdc_mode"                   TEXT    DEFAULT NULL,
+    "append_only"                BOOLEAN DEFAULT false,
+    "pooler_compatibility_mode"  BOOLEAN DEFAULT false,
+    "partition_by"               TEXT    DEFAULT NULL,
+    "max_differential_joins"     INT     DEFAULT NULL,
+    "max_delta_fraction"         FLOAT8  DEFAULT NULL,
+    "output_distribution_column" TEXT    DEFAULT NULL,
+    "temporal"                   BOOLEAN DEFAULT false,
+    "storage_backend"            TEXT    DEFAULT NULL,
+    "sink"                       TEXT    DEFAULT NULL,
+    "ducklake_sink_path"         TEXT    DEFAULT NULL,
+    "ducklake_sink_table_id"     BIGINT  DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_wrapper';
+
+-- ── FUNC-2: Update create_stream_table_if_not_exists with sink parameters ──
+
+DROP FUNCTION IF EXISTS pgtrickle."create_stream_table_if_not_exists"(
+    TEXT, TEXT, TEXT, TEXT, BOOLEAN, TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN,
+    TEXT, INT, FLOAT8, TEXT, BOOLEAN, TEXT
+);
+CREATE OR REPLACE FUNCTION pgtrickle."create_stream_table_if_not_exists"(
+    "name"                       TEXT,
+    "query"                      TEXT,
+    "schedule"                   TEXT    DEFAULT 'calculated',
+    "refresh_mode"               TEXT    DEFAULT 'AUTO',
+    "initialize"                 BOOLEAN DEFAULT true,
+    "diamond_consistency"        TEXT    DEFAULT NULL,
+    "diamond_schedule_policy"    TEXT    DEFAULT NULL,
+    "cdc_mode"                   TEXT    DEFAULT NULL,
+    "append_only"                BOOLEAN DEFAULT false,
+    "pooler_compatibility_mode"  BOOLEAN DEFAULT false,
+    "partition_by"               TEXT    DEFAULT NULL,
+    "max_differential_joins"     INT     DEFAULT NULL,
+    "max_delta_fraction"         FLOAT8  DEFAULT NULL,
+    "output_distribution_column" TEXT    DEFAULT NULL,
+    "temporal"                   BOOLEAN DEFAULT false,
+    "storage_backend"            TEXT    DEFAULT NULL,
+    "sink"                       TEXT    DEFAULT NULL,
+    "ducklake_sink_path"         TEXT    DEFAULT NULL,
+    "ducklake_sink_table_id"     BIGINT  DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'create_stream_table_if_not_exists_wrapper';
+
+-- ── FUNC-3: Update alter_stream_table with sink parameters ───────────────
+--
+-- The 0.65.0 alter_stream_table had 19 parameters (no sink columns).
+-- The 0.66.0 binary adds sink, ducklake_sink_path, ducklake_sink_table_id.
+
+DROP FUNCTION IF EXISTS pgtrickle."alter_stream_table"(
+    TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BOOLEAN, BOOLEAN,
+    TEXT, TEXT, BIGINT, INT, TEXT, INT, FLOAT8, TEXT, FLOAT8
+);
+CREATE OR REPLACE FUNCTION pgtrickle."alter_stream_table"(
+    "name"                       TEXT,
+    "query"                      TEXT    DEFAULT NULL,
+    "schedule"                   TEXT    DEFAULT NULL,
+    "refresh_mode"               TEXT    DEFAULT NULL,
+    "status"                     TEXT    DEFAULT NULL,
+    "diamond_consistency"        TEXT    DEFAULT NULL,
+    "diamond_schedule_policy"    TEXT    DEFAULT NULL,
+    "cdc_mode"                   TEXT    DEFAULT NULL,
+    "append_only"                BOOLEAN DEFAULT NULL,
+    "pooler_compatibility_mode"  BOOLEAN DEFAULT NULL,
+    "tier"                       TEXT    DEFAULT NULL,
+    "fuse"                       TEXT    DEFAULT NULL,
+    "fuse_ceiling"               BIGINT  DEFAULT NULL,
+    "fuse_sensitivity"           INT     DEFAULT NULL,
+    "partition_by"               TEXT    DEFAULT NULL,
+    "max_differential_joins"     INT     DEFAULT NULL,
+    "max_delta_fraction"         FLOAT8  DEFAULT NULL,
+    "post_refresh_action"        TEXT    DEFAULT NULL,
+    "reindex_drift_threshold"    FLOAT8  DEFAULT NULL,
+    "sink"                       TEXT    DEFAULT NULL,
+    "ducklake_sink_path"         TEXT    DEFAULT NULL,
+    "ducklake_sink_table_id"     BIGINT  DEFAULT NULL
+) RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'alter_stream_table_wrapper';
