@@ -208,6 +208,51 @@ Nine deliverables, all documentation / community / demo:
 |---------|-------|--------|-------|-------------- |
 | [v0.64.0](roadmap/v0.64.0.md) | DuckLake ecosystem (Phase 1): 3 tutorials + 2 blog posts + docs + 2 containerised demos + community outreach — no extension code changes | ✅ Released | Small | [Full details](roadmap/v0.64.0.md-full.md) |
 
+### DuckLake Phase 2 Arc (v0.65.x)
+
+Phase 2 ships the first engineering that makes pg_trickle a first-class DuckLake
+citizen at the code level. The centrepiece is a purpose-built change-feed adapter
+(`CdcMode::DuckLakeChangeFeed`) that calls DuckLake's `table_changes()` API and
+processes O(Δ) rows instead of re-scanning the foreign table on every refresh
+cycle. A snapshot-based frontier model lets a single stream table mix PostgreSQL
+CDC events and DuckLake snapshot IDs in one coherent consistency story. An
+inlined-data trigger adapter covers the fast path for tables small enough to live
+in PostgreSQL, and row-ID plumbing wires DuckLake's `rowid` virtual column
+directly into the DVM engine for O(1) delta application. Compaction-safety logic
+handles the case where a DuckLake snapshot expires before pg_trickle can consume
+it, with a configurable `fallback | error` policy. An integration test suite
+built on DuckDB validates end-to-end correctness, and two new tutorials ship
+alongside the code.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.65.0](roadmap/v0.65.0.md) | DuckLake Phase 2: change-feed adapter, snapshot frontier, inlined-data CDC, row-ID plumbing, compaction safety, integration tests, 2 tutorials, 1 demo | Planned | Large | [Full details](roadmap/v0.65.0.md) |
+
+### DuckLake Phase 3 Arc (v0.66.x – v0.67.x)
+
+Phase 3 implements the DuckLake *sink*: the ability for any pg_trickle stream
+table to write its incrementally computed results into a DuckLake-managed Parquet
+table on object storage, making those results immediately queryable from DuckDB,
+Spark, Trino, and every other engine that speaks DuckLake. This closes the full
+bidirectional loop — pg_trickle can now both *read* from DuckLake and *publish*
+back into it.
+
+v0.66.0 delivers the infrastructure layer: Parquet delta serialisation via
+`arrow-rs`, S3 and object-store upload integration, a DuckLake catalog
+transaction writer that atomically records new data files in the PostgreSQL
+catalog, and per-file encryption key pass-through so encrypted lakes work from
+day one. A full E2E test suite validates the write path. v0.67.0 completes the
+arc with discoverability and ecosystem polish: DuckLake view registration
+auto-inserts a `ducklake_view` entry for every stream table so results are
+visible to every DuckLake client as a native object, snapshot provenance (INT-11)
+records which stream table produced each snapshot for end-to-end lineage, and
+four tutorials plus two containerised demos ship with the code.
+
+| Version | Theme | Status | Scope | Full details |
+|---------|-------|--------|-------|--------------|
+| [v0.66.0](roadmap/v0.66.0.md) | DuckLake Phase 3a: Parquet delta export (`arrow-rs`), DuckLake sink output mode, S3 upload, catalog transaction writer, encryption key pass-through, E2E tests | Planned | Large | [Full details](roadmap/v0.66.0.md) |
+| [v0.67.0](roadmap/v0.67.0.md) | DuckLake Phase 3b: view registration, snapshot provenance (INT-11), pg-tide tutorial, 2 tutorials, 2 containerised demos | Planned | Medium | [Full details](roadmap/v0.67.0.md) |
+
 
 ### Beyond v1.0
 
@@ -302,6 +347,12 @@ v0.60    ─── Code quality, test coverage & CI: cdc.rs split, codegen decom
 v0.61    ─── DX, docs & pre-1.0 polish: health_check foreign-owner row, SQL_REFERENCE complete, snapshot secondary equality, cte_counter reset, outbox name fix, sublinks decompose, 3 ADRs, LATERAL docs
     │
 v0.64    ─── DuckLake Phase 1: 3 tutorials + 2 blog posts + 2 containerised demos + named-user outreach (no extension code)
+    │
+v0.65    ─── DuckLake Phase 2: change-feed adapter, snapshot frontier, inlined-data CDC, row-ID plumbing, compaction safety
+    │
+v0.66    ─── DuckLake Phase 3a: Parquet delta export, DuckLake sink output mode, S3 upload, catalog writer, encryption
+    │
+v0.67    ─── DuckLake Phase 3b: view registration, snapshot provenance, pg-tide tutorial, tutorials & demos
     │
 v1.0.0   ─── Stable release, PostgreSQL 19, package registries, signed artifacts, SBOMs
 ```
