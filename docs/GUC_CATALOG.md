@@ -4,7 +4,7 @@
 
 # GUC Reference — pg_trickle
 
-**119 configuration parameters** extracted from `src/config.rs`.
+**120 configuration parameters** extracted from `src/config.rs`.
 
 See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage examples.
 
@@ -47,6 +47,7 @@ See [docs/CONFIGURATION.md](CONFIGURATION.md) for full descriptions and usage ex
 | `pg_trickle.diff_output_format` | `text` | `"split"` | Controls how the DI-2 aggregate UPDATE-split surfaces changes: - `"split"` (default): Emit DELETE+INSERT pairs for aggregate UPDATEs. |
 | `pg_trickle.differential_max_change_ratio` | `float8` | `0.15` | Set to 0.0 to disable adaptive fallback (always use DIFFERENTIAL). |
 | `pg_trickle.drain_timeout` | `int4` | `60` | Default: 60 seconds. |
+| `pg_trickle.ducklake_compaction_policy` | `text` | `"fallback"` | Individual stream tables may override this with the `ducklake_compaction_policy` column in `pgtrickle.pgt_stream_tables`. |
 | `pg_trickle.enable_change_buffer_fanout` | `bool` | `true` | Disable only if the shared cache is producing incorrect change-detection results (should not occur in practice). |
 | `pg_trickle.enable_fused_refresh` | `bool` | `true` | Disable if a specific DAG shape causes unexpected planner behaviour. |
 | `pg_trickle.enable_trace_propagation` | `bool` | `false` | F10 (v0.37.0): Enable W3C Trace Context propagation through the refresh pipeline. |
