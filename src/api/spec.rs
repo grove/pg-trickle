@@ -152,6 +152,7 @@ mod tests {
             rows_changed_since_last_reindex: 0,
             last_reindex_at: None,
             defining_query_hash: 0,
+            ducklake_compaction_policy: None,
         };
 
         // Build the spec from metadata only (no SPI calls needed for the JSON struct).

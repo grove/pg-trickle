@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: ghcr.io/trickle-labs/pg-trickle:latest
+    container_name: ducklake_timetravel_postgres
+    environment:
+      POSTGRES_DB: timetravel_demo
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d timetravel_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  generator:
+    build: ./generator
+    container_name: ducklake_timetravel_generator
+    environment:
+      POSTGRES_DSN: "postgresql://postgres:postgres@postgres:5432/timetravel_demo"
+      BATCH_SIZE: "${BATCH_SIZE:-50}"
+      INTERVAL_MS: "${INTERVAL_MS:-2000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

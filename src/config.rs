@@ -1593,6 +1593,43 @@ pub static PGS_ENABLE_FUSED_REFRESH: GucSetting<bool> = GucSetting::<bool>::new(
 /// Default: 500 000. Set to 0 to disable the cardinality gate (always fuse).
 pub static PGS_FUSED_REFRESH_MAX_DELTA_ROWS: GucSetting<i32> = GucSetting::<i32>::new(500_000);
 
+// ── v0.65.0 GUCs ─────────────────────────────────────────────────────────
+
+/// CDC-6 (v0.65.0): Global default compaction policy for DuckLake change-feed sources.
+///
+/// Controls what happens when a DuckLake snapshot referenced by a stream table's
+/// frontier has been compacted away and is no longer accessible:
+///
+/// - `"fallback"` (default): Fall back to a full refresh automatically.
+/// - `"error"`: Raise an error and halt the refresh until the user reinitializes.
+///
+/// Individual stream tables may override this with the `ducklake_compaction_policy`
+/// column in `pgtrickle.pgt_stream_tables`.
+pub static PGS_DUCKLAKE_COMPACTION_POLICY: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(Some(c"fallback"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DucklakeCompactionPolicy {
+    Fallback,
+    Error,
+}
+
+impl DucklakeCompactionPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DucklakeCompactionPolicy::Fallback => "fallback",
+            DucklakeCompactionPolicy::Error => "error",
+        }
+    }
+}
+
+fn normalize_ducklake_compaction_policy(value: Option<String>) -> DucklakeCompactionPolicy {
+    match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("error") => DucklakeCompactionPolicy::Error,
+        _ => DucklakeCompactionPolicy::Fallback,
+    }
+}
+
 // ── v0.62.0 GUCs ──────────────────────────────────────────────────────────
 
 /// PERF-1 (v0.62.0): Deduplicate change-buffer scans across all stream tables
@@ -3165,6 +3202,18 @@ pub fn register_gucs() {
         GucContext::Suset,
         GucFlags::default(),
     );
+
+    // ── v0.65.0 GUCs ───────────────────────────────────────────────────────
+
+    // CDC-6: DuckLake compaction policy.
+    GucRegistry::define_string_guc(
+        c"pg_trickle.ducklake_compaction_policy",
+        c"CDC-6: Action when a DuckLake snapshot is no longer accessible after compaction (v0.65.0).",
+        c"Controls what happens when a DuckLake change-feed source\'s frontier snapshot has been           compacted away. \'fallback\' (default) triggers a full refresh automatically;           \'error\' halts the refresh until the user reinitializes.",
+        &PGS_DUCKLAKE_COMPACTION_POLICY,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
 }
 
 /// PERF-1 (v0.62.0): Returns whether the change-buffer fan-out deduplication is enabled.
@@ -3187,6 +3236,15 @@ pub fn pg_trickle_enable_fused_refresh() -> bool {
 pub fn pg_trickle_fused_refresh_max_delta_rows() -> Option<i64> {
     let v = PGS_FUSED_REFRESH_MAX_DELTA_ROWS.get();
     if v > 0 { Some(v as i64) } else { None }
+}
+
+/// CDC-6 (v0.65.0): Returns the global default DuckLake compaction policy.
+pub fn pg_trickle_ducklake_compaction_policy() -> DucklakeCompactionPolicy {
+    normalize_ducklake_compaction_policy(
+        PGS_DUCKLAKE_COMPACTION_POLICY
+            .get()
+            .map(|c| c.to_string_lossy().into_owned()),
+    )
 }
 
 // ── Convenience accessors ──────────────────────────────────────────────────
@@ -3950,14 +4008,15 @@ pub fn pg_trickle_reindex_drift_threshold() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CdcTriggerMode, ColumnarBackend, DiffOutputFormat, FrontierHoldbackMode, LogFormat,
-        MergeJoinStrategy, MergeStrategy, ParallelRefreshMode, RefreshStrategy,
-        SelfMonitoringAutoApply, UserTriggersMode, VolatileFunctionPolicy,
+        CdcTriggerMode, ColumnarBackend, DiffOutputFormat, DucklakeCompactionPolicy,
+        FrontierHoldbackMode, LogFormat, MergeJoinStrategy, MergeStrategy, ParallelRefreshMode,
+        RefreshStrategy, SelfMonitoringAutoApply, UserTriggersMode, VolatileFunctionPolicy,
         normalize_cdc_trigger_mode, normalize_columnar_backend, normalize_diff_output_format,
-        normalize_frontier_holdback_mode, normalize_log_format, normalize_merge_join_strategy,
-        normalize_merge_strategy, normalize_parallel_refresh_mode, normalize_recursive_max_depth,
-        normalize_refresh_strategy, normalize_self_monitoring_auto_apply,
-        normalize_user_triggers_mode, normalize_volatile_function_policy, threshold_mb_to_bytes,
+        normalize_ducklake_compaction_policy, normalize_frontier_holdback_mode,
+        normalize_log_format, normalize_merge_join_strategy, normalize_merge_strategy,
+        normalize_parallel_refresh_mode, normalize_recursive_max_depth, normalize_refresh_strategy,
+        normalize_self_monitoring_auto_apply, normalize_user_triggers_mode,
+        normalize_volatile_function_policy, threshold_mb_to_bytes,
     };
 
     #[test]
@@ -4602,5 +4661,55 @@ mod tests {
         assert_eq!(ColumnarBackend::None.as_str(), "none");
         assert_eq!(ColumnarBackend::Citus.as_str(), "citus");
         assert_eq!(ColumnarBackend::PgMooncake.as_str(), "pg_mooncake");
+    }
+
+    // ── DucklakeCompactionPolicy tests (v0.65.0) ─────────────────────────
+
+    #[test]
+    fn test_normalize_ducklake_compaction_policy_defaults_to_fallback() {
+        // None (GUC not set) and unknown strings must default to Fallback.
+        assert_eq!(
+            normalize_ducklake_compaction_policy(None),
+            DucklakeCompactionPolicy::Fallback
+        );
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("unknown".to_string())),
+            DucklakeCompactionPolicy::Fallback
+        );
+    }
+
+    #[test]
+    fn test_normalize_ducklake_compaction_policy_accepts_error() {
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("error".to_string())),
+            DucklakeCompactionPolicy::Error
+        );
+        // Must be case-insensitive.
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("ERROR".to_string())),
+            DucklakeCompactionPolicy::Error
+        );
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("Error".to_string())),
+            DucklakeCompactionPolicy::Error
+        );
+    }
+
+    #[test]
+    fn test_normalize_ducklake_compaction_policy_accepts_fallback() {
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("fallback".to_string())),
+            DucklakeCompactionPolicy::Fallback
+        );
+        assert_eq!(
+            normalize_ducklake_compaction_policy(Some("FALLBACK".to_string())),
+            DucklakeCompactionPolicy::Fallback
+        );
+    }
+
+    #[test]
+    fn test_ducklake_compaction_policy_as_str() {
+        assert_eq!(DucklakeCompactionPolicy::Fallback.as_str(), "fallback");
+        assert_eq!(DucklakeCompactionPolicy::Error.as_str(), "error");
     }
 }

@@ -171,6 +171,15 @@ pub enum PgTrickleError {
     #[error("snapshot schema version mismatch: {0}")]
     SnapshotSchemaVersionMismatch(String),
 
+    // ── DuckLake CDC errors (v0.65.0) ─────────────────────────────────────
+    /// v0.65.0: A DuckLake snapshot has expired and is no longer accessible.
+    #[error("DuckLake snapshot expired: {0}")]
+    DuckLakeSnapshotExpired(String),
+
+    /// v0.65.0: An error occurred in the DuckLake change-feed pipeline.
+    #[error("DuckLake change-feed error: {0}")]
+    DuckLakeChangeFeedError(String),
+
     // ── Outbox/pg_tide integration errors (v0.46.0) ──────────────────────
     /// v0.46.0: Outbox already attached for this stream table.
     #[error("outbox already attached for stream table: {0}")]
@@ -590,6 +599,11 @@ impl PgTrickleError {
             PgTrickleError::SnapshotAlreadyExists(_)
             | PgTrickleError::SnapshotSourceNotFound(_)
             | PgTrickleError::SnapshotSchemaVersionMismatch(_) => PgTrickleErrorKind::User,
+
+            // v0.65.0: DuckLake CDC errors — snapshot expired is user-facing;
+            // change-feed error is system-level (may be retried).
+            PgTrickleError::DuckLakeSnapshotExpired(_) => PgTrickleErrorKind::User,
+            PgTrickleError::DuckLakeChangeFeedError(_) => PgTrickleErrorKind::System,
 
             // v0.46.0: Outbox/pg_tide integration errors.
             PgTrickleError::OutboxAlreadyEnabled(_)

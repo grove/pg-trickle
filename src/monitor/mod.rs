@@ -1435,6 +1435,19 @@ fn check_cdc_health() -> TableIterator<
                     selective,
                 ));
             }
+            CdcMode::DuckLakeChangeFeed => {
+                // DuckLake change-feed sources do not use WAL replication slots.
+                rows.push((
+                    oid_u32 as i64,
+                    source_name,
+                    mode_str,
+                    None,
+                    None,
+                    None,
+                    None,
+                    selective,
+                ));
+            }
         }
     }
 

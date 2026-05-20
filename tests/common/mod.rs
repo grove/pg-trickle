@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     requested_cdc_mode TEXT
                      CHECK (requested_cdc_mode IN ('auto', 'trigger', 'wal')),
     pooler_compatibility_mode BOOLEAN NOT NULL DEFAULT FALSE,
+    ducklake_compaction_policy TEXT DEFAULT NULL
+                     CHECK (
+                         ducklake_compaction_policy IS NULL
+                         OR ducklake_compaction_policy IN ('fallback', 'error')
+                     ),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
