@@ -398,3 +398,263 @@ async fn test_ducklake_sink_columns_default_to_null() {
         table_id
     );
 }
+
+// ── v0.67.0: INT-11 Snapshot Provenance ───────────────────────────────────
+
+/// INT-11 (v0.67.0): `pgtrickle.pgt_ducklake_provenance` table must exist
+/// with the correct columns after installation.
+#[tokio::test]
+async fn test_ducklake_provenance_table_exists() {
+    let db = TestDb::with_catalog().await;
+
+    let table_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'pgtrickle'
+                   AND table_name   = 'pgt_ducklake_provenance'
+             )",
+        )
+        .await;
+    assert!(
+        table_exists,
+        "pgtrickle.pgt_ducklake_provenance must exist after catalog creation"
+    );
+}
+
+/// INT-11 (v0.67.0): Required columns must be present in the provenance table.
+#[tokio::test]
+async fn test_ducklake_provenance_table_has_required_columns() {
+    let db = TestDb::with_catalog().await;
+
+    let required_columns = [
+        "provenance_id",
+        "stream_table_oid",
+        "stream_table_name",
+        "ducklake_snapshot_id",
+        "refresh_id",
+        "delta_row_count",
+        "written_at",
+    ];
+
+    for col in &required_columns {
+        let col_exists: bool = db
+            .query_scalar(&format!(
+                "SELECT EXISTS (
+                     SELECT 1 FROM information_schema.columns
+                     WHERE table_schema  = 'pgtrickle'
+                       AND table_name    = 'pgt_ducklake_provenance'
+                       AND column_name   = '{col}'
+                 )"
+            ))
+            .await;
+        assert!(
+            col_exists,
+            "pgt_ducklake_provenance must have column '{col}'"
+        );
+    }
+}
+
+/// INT-11 (v0.67.0): Provenance rows can be inserted and queried.
+#[tokio::test]
+async fn test_ducklake_provenance_row_insert_and_query() {
+    let db = TestDb::with_catalog().await;
+
+    // Insert a synthetic provenance record.
+    db.execute(
+        "INSERT INTO pgtrickle.pgt_ducklake_provenance
+         (stream_table_oid, stream_table_name, ducklake_snapshot_id,
+          refresh_id, delta_row_count)
+         VALUES (9999, 'test_stream', 42, 7, 150)",
+    )
+    .await;
+
+    let row_count: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*)
+             FROM pgtrickle.pgt_ducklake_provenance
+             WHERE stream_table_name = 'test_stream'
+               AND ducklake_snapshot_id = 42",
+        )
+        .await;
+    assert_eq!(
+        row_count, 1,
+        "provenance row must be queryable after insert"
+    );
+
+    let delta_count: i64 = db
+        .query_scalar(
+            "SELECT delta_row_count
+             FROM pgtrickle.pgt_ducklake_provenance
+             WHERE stream_table_name = 'test_stream'",
+        )
+        .await;
+    assert_eq!(delta_count, 150, "delta_row_count must be stored correctly");
+}
+
+/// INT-11 (v0.67.0): Multiple provenance rows can be inserted for the same
+/// stream table (one per refresh cycle) — the table must not have a unique
+/// constraint on (stream_table_oid, ducklake_snapshot_id).
+#[tokio::test]
+async fn test_ducklake_provenance_multiple_rows_per_stream_table() {
+    let db = TestDb::with_catalog().await;
+
+    for i in 1i64..=10 {
+        db.execute(&format!(
+            "INSERT INTO pgtrickle.pgt_ducklake_provenance
+             (stream_table_oid, stream_table_name, ducklake_snapshot_id,
+              refresh_id, delta_row_count)
+             VALUES (1234, 'multi_cycle_st', {i}, {i}, {delta})",
+            delta = i * 50
+        ))
+        .await;
+    }
+
+    let count: i64 = db
+        .query_scalar(
+            "SELECT COUNT(*)
+             FROM pgtrickle.pgt_ducklake_provenance
+             WHERE stream_table_name = 'multi_cycle_st'",
+        )
+        .await;
+    assert_eq!(count, 10, "provenance must store one row per refresh cycle");
+}
+
+// ── v0.67.0: F-6 DuckLake View Registration (schema / unit level) ─────────
+
+/// F-6 (v0.67.0): When `ducklake_view` table does not exist, the sink
+/// does not error — it skips view registration gracefully.
+/// This test verifies that no `ducklake_view` table is created by pg_trickle;
+/// that table is DuckLake-owned and must be created externally.
+#[tokio::test]
+async fn test_ducklake_view_not_created_by_pgtrickle() {
+    let db = TestDb::with_catalog().await;
+
+    // pg_trickle must NOT create ducklake_view — that is DuckLake's table.
+    let view_table_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                 WHERE table_name = 'ducklake_view'
+             )",
+        )
+        .await;
+    assert!(
+        !view_table_exists,
+        "pg_trickle must NOT create ducklake_view — it is DuckLake's catalog table"
+    );
+}
+
+/// F-6 (v0.67.0): When a minimal `ducklake_view` table exists (simulating
+/// DuckLake installed), `create_stream_table` with `sink='ducklake'` upserts
+/// the view entry and `drop_stream_table` removes it.
+#[tokio::test]
+async fn test_ducklake_view_registration_with_stub_table() {
+    let db = TestDb::with_catalog().await;
+
+    // Create a minimal stub ducklake_view table to simulate DuckLake.
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS ducklake_view (
+             view_name        TEXT PRIMARY KEY,
+             view_definition  TEXT
+         )",
+    )
+    .await;
+
+    // Create source and stream tables.
+    db.execute("CREATE TABLE view_reg_src (id INT PRIMARY KEY, val TEXT)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+             'public.view_reg_st',
+             'SELECT id, val FROM view_reg_src',
+             initialize := FALSE,
+             sink := 'ducklake',
+             ducklake_sink_path := 'file:///tmp/view_reg_test/'
+         )",
+    )
+    .await;
+
+    // The view entry should have been inserted.
+    let entry_exists: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM ducklake_view WHERE view_name = 'view_reg_st'
+             )",
+        )
+        .await;
+    assert!(
+        entry_exists,
+        "create_stream_table with sink='ducklake' must upsert ducklake_view"
+    );
+
+    // Drop the stream table — the view entry must be removed.
+    db.execute("SELECT pgtrickle.drop_stream_table('public.view_reg_st')")
+        .await;
+
+    let entry_after_drop: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM ducklake_view WHERE view_name = 'view_reg_st'
+             )",
+        )
+        .await;
+    assert!(
+        !entry_after_drop,
+        "drop_stream_table must remove the ducklake_view entry"
+    );
+}
+
+/// F-6 (v0.67.0): `alter_stream_table` with `sink => 'none'` (disabling the
+/// sink) must remove the `ducklake_view` entry.
+#[tokio::test]
+async fn test_ducklake_view_deregistered_when_sink_disabled() {
+    let db = TestDb::with_catalog().await;
+
+    // Stub DuckLake view table.
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS ducklake_view (
+             view_name        TEXT PRIMARY KEY,
+             view_definition  TEXT
+         )",
+    )
+    .await;
+
+    db.execute("CREATE TABLE view_dereg_src (id INT PRIMARY KEY)")
+        .await;
+    db.execute(
+        "SELECT pgtrickle.create_stream_table(
+             'public.view_dereg_st',
+             'SELECT id FROM view_dereg_src',
+             initialize := FALSE,
+             sink := 'ducklake',
+             ducklake_sink_path := 'file:///tmp/view_dereg_test/'
+         )",
+    )
+    .await;
+
+    // Confirm view entry exists.
+    let exists_before: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM ducklake_view WHERE view_name = 'view_dereg_st')",
+        )
+        .await;
+    assert!(
+        exists_before,
+        "view entry must exist after create with sink"
+    );
+
+    // Disable the sink.
+    db.execute("SELECT pgtrickle.alter_stream_table('public.view_dereg_st', sink := 'none')")
+        .await;
+
+    let exists_after: bool = db
+        .query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM ducklake_view WHERE view_name = 'view_dereg_st')",
+        )
+        .await;
+    assert!(
+        !exists_after,
+        "disabling the sink must remove the ducklake_view entry"
+    );
+}

@@ -1591,6 +1591,10 @@ pub(crate) fn create_stream_table_impl(
             ducklake_sink_path,
             ducklake_sink_table_id,
         )?;
+        // F-6 (v0.67.0): Register view in DuckLake catalog when sink is active.
+        if resolved_mode.is_some() {
+            crate::ducklake_sink::register_ducklake_view(&table_name, query);
+        }
     }
 
     pgrx::info!(
@@ -2200,6 +2204,14 @@ pub(crate) fn alter_stream_table_impl(
             ducklake_sink_path,
             ducklake_sink_table_id,
         )?;
+        // F-6 (v0.67.0): Keep DuckLake view registration in sync.
+        if resolved_mode.is_some() {
+            let current_query = query.unwrap_or(&st.defining_query);
+            crate::ducklake_sink::register_ducklake_view(&st.pgt_name, current_query);
+        } else {
+            // Sink disabled — remove the view entry.
+            crate::ducklake_sink::deregister_ducklake_view(&st.pgt_name);
+        }
     }
 
     Ok(())
@@ -2301,6 +2313,11 @@ fn drop_stream_table_impl_inner(
     );
     Spi::run(&drop_sql)
         .map_err(|e| PgTrickleError::SpiError(format!("Failed to drop storage table: {}", e)))?;
+
+    // F-6 (v0.67.0): Remove DuckLake view entry if sink was configured.
+    if st.ducklake_sink_mode.is_some() {
+        crate::ducklake_sink::deregister_ducklake_view(&st.pgt_name);
+    }
 
     // Delete catalog entries (cascade handles pgt_dependencies)
     StreamTableMeta::delete(st.pgt_id)?;

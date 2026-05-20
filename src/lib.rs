@@ -513,6 +513,25 @@ CREATE UNLOGGED TABLE IF NOT EXISTS pgtrickle.pgt_template_cache (
     cached_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- v0.67.0 INT-11: DuckLake snapshot provenance audit trail.
+-- Records which stream table produced each DuckLake snapshot for end-to-end lineage.
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_provenance (
+    provenance_id       BIGSERIAL PRIMARY KEY,
+    stream_table_oid    BIGINT NOT NULL,
+    stream_table_name   TEXT NOT NULL,
+    ducklake_snapshot_id BIGINT NOT NULL,
+    refresh_id          BIGINT NOT NULL DEFAULT 0,
+    delta_row_count     BIGINT NOT NULL DEFAULT 0,
+    written_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_provenance_st_oid
+    ON pgtrickle.pgt_ducklake_provenance (stream_table_oid, written_at DESC);
+CREATE INDEX IF NOT EXISTS idx_provenance_snapshot
+    ON pgtrickle.pgt_ducklake_provenance (ducklake_snapshot_id);
+
+SELECT pg_catalog.pg_extension_config_dump('pgtrickle.pgt_ducklake_provenance', '');
+
 
 "#,
     name = "pg_trickle_catalog",

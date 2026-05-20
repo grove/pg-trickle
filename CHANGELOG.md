@@ -7,7 +7,9 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.67.0 — DuckLake Phase 3b: View Registration, Provenance & Ecosystem](#0670--ducklake-phase-3b-view-registration-provenance--ecosystem)
 - [0.66.0 — DuckLake Phase 3a: Parquet Sink Infrastructure](#0660--ducklake-phase-3a-parquet-sink-infrastructure)
+- [0.65.0 — DuckLake Phase 2: Change-Feed Adapter](#0650--ducklake-phase-2-change-feed-adapter)
 - [0.64.0 — DuckLake Ecosystem Phase 1](#0640--ducklake-ecosystem-phase-1)
 - [0.63.0 — Fused Multi-Node Refresh](#0630--fused-multi-node-refresh)
 - [0.62.0 — Scheduler Throughput & pg_aqueduct Prerequisites](#0620--scheduler-throughput--pg_aqueduct-prerequisites)
@@ -80,6 +82,96 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.67.0] — DuckLake Phase 3b: View Registration, Provenance & Ecosystem
+
+### What's New
+
+v0.67.0 completes the DuckLake Phase 3 arc with discoverability and ecosystem
+polish: stream tables with a DuckLake sink are now automatically visible to
+every DuckLake client as native catalog objects, and every Parquet delta is
+traceable back to the exact refresh cycle that produced it.
+
+**F-6: DuckLake View Registration**
+
+When a stream table is created or altered with `sink => 'ducklake'`, pg_trickle
+automatically upserts a matching row in `ducklake_view` so the result set is
+immediately visible to every DuckDB, Spark, and Trino client that queries the
+DuckLake catalog — no manual catalog surgery required:
+
+```sql
+SELECT pgtrickle.create_stream_table(
+    'revenue_by_region',
+    query             => 'SELECT region, SUM(amount) FROM orders GROUP BY region',
+    schedule          => '5s',
+    sink              => 'ducklake',
+    ducklake_sink_path => 's3://my-lake/revenue_by_region/'
+);
+-- DuckDB now sees:  SELECT * FROM my_lake.revenue_by_region;
+```
+
+When the stream table is dropped, the `ducklake_view` entry is removed in the
+same transaction. If DuckLake is not installed (i.e. the `ducklake_view` table
+does not exist), registration is silently skipped — no error.
+
+**INT-11: Snapshot Provenance & Audit Trails**
+
+Every successful DuckLake sink run now:
+
+1. Writes the `created_by` field in `ducklake_snapshot` with a structured
+   identifier: `pg_trickle/<version>/stream_table/<oid>/<name>`.
+2. Inserts a row into the new `pgtrickle.pgt_ducklake_provenance` catalog table:
+
+```sql
+SELECT *
+FROM pgtrickle.pgt_ducklake_provenance
+ORDER BY written_at DESC LIMIT 10;
+--  provenance_id | stream_table_oid | stream_table_name | ducklake_snapshot_id | delta_row_count | written_at
+--            1   |        42        | revenue_by_region |          7           |       150       | 2026-05-20 ...
+```
+
+This table enables end-to-end lineage queries: from the raw PostgreSQL event,
+through the differential computation, to the Parquet file on object storage.
+
+**New catalog table:** `pgtrickle.pgt_ducklake_provenance`
+
+| Column | Description |
+|--------|-------------|
+| `stream_table_oid` | OID (pgt_id) of the producing stream table |
+| `stream_table_name` | Human-readable name |
+| `ducklake_snapshot_id` | The DuckLake snapshot ID |
+| `refresh_id` | pg_trickle internal refresh sequence number |
+| `delta_row_count` | Rows in the Parquet delta |
+| `written_at` | Timestamp |
+
+**Three new tutorials:**
+
+- [Tutorial 3: The Modern Data Stack in One Box](docs/tutorial-modern-data-stack-one-box.md) —
+  PostgreSQL + pg_trickle + DuckLake + DuckDB in a single `docker compose up`.
+- [Tutorial 4: Streaming PostgreSQL to a Data Lake without Kafka](docs/tutorial-streaming-postgres-to-data-lake.md) —
+  replicating a PostgreSQL table into DuckLake using the sink output mode.
+- [INT-10: pg-tide DuckLake Pipeline Tutorial](docs/tutorial-pg-tide-ducklake-pipeline.md) —
+  transactional relay from pg_trickle stream tables to DuckLake via pg-tide.
+
+**Two new containerised demos:**
+
+- [Demo C: Multi-Engine Leaderboard](demos/ducklake-leaderboard/) —
+  a game leaderboard maintained in both PostgreSQL and DuckLake simultaneously.
+- [Demo E: OLTP-to-Lake Loop](demos/ducklake-oltp-lake/) —
+  end-to-end from PostgreSQL order inserts to DuckLake snapshots on MinIO.
+
+### Breaking Changes
+
+None. All new columns default to NULL. Existing stream tables are unaffected
+until explicitly configured with a sink.
+
+### Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.67.0';
+```
 
 ---
 
@@ -157,6 +249,100 @@ Existing stream tables are unaffected until explicitly configured.
 Run the migration:
 ```sql
 ALTER EXTENSION pg_trickle UPDATE TO '0.66.0';
+```
+
+---
+
+## [0.65.0] — DuckLake Phase 2: Change-Feed Adapter
+
+### What's New
+
+v0.65.0 wires DuckLake's `table_changes()` API directly into pg_trickle's CDC
+pipeline so that refreshes do O(Δ) work — proportional to the change, not the
+table size — instead of the previous O(N) full `EXCEPT ALL` scan.
+
+**F-1: DuckLake Change-Feed Adapter (`CdcMode::DuckLakeChangeFeed`)**
+
+Replaces generic polling for DuckLake foreign tables with a snapshot-aware
+adapter that calls `table_changes(from_snapshot, to_snapshot)`. The adapter
+tracks `last_consumed_snapshot_id` rather than LSN and is detected automatically
+when the source table's foreign data wrapper is identified as DuckLake.
+
+**F-3: Snapshot-Based Frontier**
+
+Extends the frontier model to carry DuckLake snapshot IDs alongside WAL LSNs
+and clock-based markers. A frontier row for a mixed-source stream table looks
+like:
+
+```json
+{
+  "ducklake:lake.events":  { "snapshot_id": 42 },
+  "ducklake:lake.users":   { "snapshot_id": 38 },
+  "wal:postgres":          { "lsn": "0/16A4F08" }
+}
+```
+
+This lets a single stream table join a PostgreSQL OLTP table with a DuckLake
+analytics table and still have a coherent, single-transaction consistency
+guarantee.
+
+**F-5: Inlined-Data Trigger Adapter**
+
+Adds a specialised trigger function for DuckLake tables stored as
+`ducklake_inlined_data_table_<id>_<version>` (native PostgreSQL tables with
+virtual columns `row_id`, `begin_snapshot`, `end_snapshot`, `is_deleted`). The
+adapter translates those columns into standard INSERT/DELETE change-buffer rows
+and a DDL watcher recreates the trigger whenever DuckLake rotates the inlined
+table to a new schema version. Enables sub-millisecond CDC for small,
+high-frequency DuckLake event streams.
+
+**F-7: Row-ID Plumbing**
+
+Extends the row-identity interface to accept a caller-supplied stable
+identifier. For DuckLake sources, the `rowid` virtual column is used directly,
+eliminating the hash computation and enabling exact O(1) delta application.
+
+**F-8: Snapshot-Window Compaction Safety**
+
+Detects when `last_consumed_snapshot_id` falls before DuckLake's compaction
+horizon (old snapshots expired) and applies the configured policy:
+
+- `fallback` (default) — automatically falls back to a full refresh and logs a
+  warning.
+- `error` — raises a clear, actionable error rather than silently re-scanning.
+
+Configure via:
+```sql
+ALTER STREAM TABLE … SET (ducklake_compaction_policy = 'error');
+```
+
+**New GUC:** `pg_trickle.ducklake_compaction_policy` — cluster-wide default
+for the compaction safety policy (`'fallback'` or `'error'`).
+
+### Tutorials
+
+- **Tutorial 2: "IVM for DuckLake before v2.0"** — walks through creating a
+  stream table on a DuckLake foreign table and benchmarks the change-feed
+  adapter (v0.65.0) against the generic polling path (pre-v0.65.0): same
+  result, 100× less work on large tables.
+- **Tutorial 6: "Sub-millisecond inlined-data CDC"** — demonstrates the
+  inlined-data fast path for small DuckLake tables kept in PostgreSQL.
+
+### Demo
+
+**Demo B: Time-travel debugging** — a stream table over a DuckLake change-feed
+queried at a specific past snapshot ID. Shows the snapshot-based frontier:
+roll back `last_consumed_snapshot_id` and the stream table rewinds
+deterministically. Ships as a self-contained `docker-compose up` demo.
+
+### Breaking Changes
+
+None.
+
+### Upgrade
+
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.65.0';
 ```
 
 ---

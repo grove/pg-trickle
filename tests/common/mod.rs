@@ -36,10 +36,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
                      CHECK (requested_cdc_mode IN ('auto', 'trigger', 'wal')),
     pooler_compatibility_mode BOOLEAN NOT NULL DEFAULT FALSE,
     ducklake_compaction_policy TEXT DEFAULT NULL
-                     CHECK (
-                         ducklake_compaction_policy IS NULL
-                         OR ducklake_compaction_policy IN ('fallback', 'error')
-                     ),
+                     CHECK (ducklake_compaction_policy IN ('fallback', 'error')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -226,6 +223,16 @@ SELECT
                     pgtrickle.parse_duration_seconds(schedule)) > 0 THEN 'WARNING'
         ELSE 'OK'
     END AS status;
+
+CREATE TABLE IF NOT EXISTS pgtrickle.pgt_ducklake_provenance (
+    provenance_id        BIGSERIAL PRIMARY KEY,
+    stream_table_oid     BIGINT NOT NULL,
+    stream_table_name    TEXT NOT NULL,
+    ducklake_snapshot_id BIGINT NOT NULL,
+    refresh_id           BIGINT NOT NULL DEFAULT 0,
+    delta_row_count      BIGINT NOT NULL DEFAULT 0,
+    written_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 "#;
 
 /// A test database backed by a Testcontainers PostgreSQL 18.3 instance.

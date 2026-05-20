@@ -7,6 +7,14 @@
 //! 3. **DuckLake catalog transaction writer** (via SPI into DuckLake tables).
 //! 4. **Encryption key pass-through** (F-9) for encrypted lakes.
 //!
+//! v0.67.0 additions:
+//!
+//! 5. **View registration (F-6)** — upserts a `ducklake_view` entry so the
+//!    stream table appears as a native catalog object to every DuckLake client.
+//! 6. **Snapshot provenance (INT-11)** — records `created_by` in every
+//!    `ducklake_snapshot` row and writes to `pgtrickle.pgt_ducklake_provenance`
+//!    for end-to-end lineage.
+//!
 //! # Rollback safety
 //!
 //! The write order is intentionally **upload-then-catalog**:
@@ -313,6 +321,7 @@ pub fn register_ducklake_data_file(
     row_count: i64,
     file_size_bytes: i64,
     encryption_key_id: Option<&str>,
+    created_by: &str,
 ) -> Result<i64, PgTrickleError> {
     Spi::connect_mut(|client| {
         // Insert the data file record.
@@ -359,18 +368,18 @@ pub fn register_ducklake_data_file(
                 ))
             })?;
 
-        // Insert a new snapshot and return its ID.
+        // INT-11 (v0.67.0): Insert a new snapshot with created_by provenance.
         let snap_row = client
             .update(
                 "INSERT INTO ducklake_snapshot \
-                 (table_id, snapshot_id, snapshot_time) \
+                 (table_id, snapshot_id, snapshot_time, created_by) \
                  VALUES ($1, \
                      (SELECT COALESCE(MAX(snapshot_id), 0) + 1 \
                       FROM ducklake_snapshot WHERE table_id = $1), \
-                     now()) \
+                     now(), $2) \
                  RETURNING snapshot_id",
                 None,
-                &[table_id.into()],
+                &[table_id.into(), created_by.into()],
             )
             .map_err(|e| {
                 PgTrickleError::DucklakeCatalogError(format!(
@@ -585,23 +594,30 @@ fn run_ducklake_sink_inner(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
     // Upload to object store.
     let full_path = upload_parquet(&sink_path, &file_name, parquet_bytes)?;
 
+    // INT-11 (v0.67.0): Build structured provenance identifier.
+    let created_by = build_created_by(st.pgt_id, &st.pgt_name);
+
     // Register in DuckLake catalog (if table_id is configured).
     if let Some(table_id) = st.ducklake_sink_table_id {
-        register_ducklake_data_file(
+        let snapshot_id = register_ducklake_data_file(
             table_id,
             &full_path,
             row_count,
             file_size,
             encryption_key_id.as_deref(),
+            &created_by,
         )?;
+        // INT-11 (v0.67.0): Record provenance in pgtrickle.pgt_ducklake_provenance.
+        insert_ducklake_provenance(st.pgt_id, &st.pgt_name, snapshot_id, row_count);
         pgrx::log!(
             "pg_trickle: ducklake sink — {}.{} wrote {} rows to {} \
-             and registered in ducklake catalog (table_id={}, mode={})",
+             and registered in ducklake catalog (table_id={}, snapshot_id={}, mode={})",
             st.pgt_schema,
             st.pgt_name,
             row_count,
             full_path,
             table_id,
+            snapshot_id,
             sink_mode,
         );
     } else {
@@ -620,6 +636,176 @@ fn run_ducklake_sink_inner(st: &StreamTableMeta) -> Result<(), PgTrickleError> {
 }
 
 // ── Catalog update helpers ────────────────────────────────────────────────
+
+// ── INT-11 (v0.67.0): Snapshot provenance ────────────────────────────────
+
+/// Build the structured `created_by` identifier for DuckLake snapshot rows.
+///
+/// Format: `pg_trickle/<version>/stream_table/<oid>/<name>`
+pub fn build_created_by(pgt_id: i64, pgt_name: &str) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!("pg_trickle/{version}/stream_table/{pgt_id}/{pgt_name}")
+}
+
+/// Record a provenance row in `pgtrickle.pgt_ducklake_provenance`.
+///
+/// Best-effort: errors are logged as warnings and never propagated.
+pub fn insert_ducklake_provenance(
+    pgt_id: i64,
+    pgt_name: &str,
+    ducklake_snapshot_id: i64,
+    delta_row_count: i64,
+) {
+    if let Err(e) =
+        insert_ducklake_provenance_inner(pgt_id, pgt_name, ducklake_snapshot_id, delta_row_count)
+    {
+        pgrx::warning!(
+            "pg_trickle: provenance record for '{}' snapshot {} failed: {}",
+            pgt_name,
+            ducklake_snapshot_id,
+            e
+        );
+    }
+}
+
+fn insert_ducklake_provenance_inner(
+    pgt_id: i64,
+    pgt_name: &str,
+    ducklake_snapshot_id: i64,
+    delta_row_count: i64,
+) -> Result<(), PgTrickleError> {
+    // Fetch the most recent refresh_id for this stream table.
+    let refresh_id: i64 = Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT COALESCE(MAX(refresh_id), 0) \
+                 FROM pgtrickle.pgt_refresh_history \
+                 WHERE pgt_id = $1",
+                None,
+                &[pgt_id.into()],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let id = row
+            .first()
+            .get_one::<i64>()
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(0);
+        Ok(id)
+    })?;
+
+    Spi::run_with_args(
+        "INSERT INTO pgtrickle.pgt_ducklake_provenance \
+         (stream_table_oid, stream_table_name, ducklake_snapshot_id, \
+          refresh_id, delta_row_count, written_at) \
+         VALUES ($1, $2, $3, $4, $5, now())",
+        &[
+            pgt_id.into(),
+            pgt_name.into(),
+            ducklake_snapshot_id.into(),
+            refresh_id.into(),
+            delta_row_count.into(),
+        ],
+    )
+    .map_err(|e| PgTrickleError::SpiError(e.to_string()))
+}
+
+// ── F-6 (v0.67.0): DuckLake view registration ────────────────────────────
+
+/// Upsert a `ducklake_view` entry so the stream table appears as a native
+/// catalog object in every DuckLake client.
+///
+/// Best-effort: if `ducklake_view` is not present (DuckLake not installed),
+/// the call is silently skipped. Errors are logged as warnings.
+pub fn register_ducklake_view(pgt_name: &str, defining_query: &str) {
+    if let Err(e) = register_ducklake_view_inner(pgt_name, defining_query) {
+        pgrx::warning!(
+            "pg_trickle: ducklake_view registration failed for '{}': {}",
+            pgt_name,
+            e
+        );
+    }
+}
+
+fn register_ducklake_view_inner(
+    pgt_name: &str,
+    defining_query: &str,
+) -> Result<(), PgTrickleError> {
+    if !ducklake_view_table_exists()? {
+        pgrx::log!(
+            "pg_trickle: ducklake_view table not present; \
+             skipping view registration for '{}'",
+            pgt_name
+        );
+        return Ok(());
+    }
+
+    Spi::run_with_args(
+        "INSERT INTO ducklake_view (view_name, view_definition) \
+         VALUES ($1, $2) \
+         ON CONFLICT (view_name) DO UPDATE \
+         SET view_definition = EXCLUDED.view_definition",
+        &[pgt_name.into(), defining_query.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::DucklakeCatalogError(format!(
+            "ducklake_view upsert for '{}' failed: {e}",
+            pgt_name
+        ))
+    })
+}
+
+/// Remove a `ducklake_view` entry when the stream table is dropped.
+///
+/// Best-effort: if `ducklake_view` is not present, the call is silently skipped.
+pub fn deregister_ducklake_view(pgt_name: &str) {
+    if let Err(e) = deregister_ducklake_view_inner(pgt_name) {
+        pgrx::warning!(
+            "pg_trickle: ducklake_view deregistration failed for '{}': {}",
+            pgt_name,
+            e
+        );
+    }
+}
+
+fn deregister_ducklake_view_inner(pgt_name: &str) -> Result<(), PgTrickleError> {
+    if !ducklake_view_table_exists()? {
+        return Ok(());
+    }
+
+    Spi::run_with_args(
+        "DELETE FROM ducklake_view WHERE view_name = $1",
+        &[pgt_name.into()],
+    )
+    .map_err(|e| {
+        PgTrickleError::DucklakeCatalogError(format!(
+            "ducklake_view delete for '{}' failed: {e}",
+            pgt_name
+        ))
+    })
+}
+
+/// Returns `true` when the `ducklake_view` catalog table exists in the
+/// current database's search path.
+fn ducklake_view_table_exists() -> Result<bool, PgTrickleError> {
+    Spi::connect(|client| {
+        let row = client
+            .select(
+                "SELECT EXISTS (
+                     SELECT 1 FROM information_schema.tables
+                     WHERE table_name = 'ducklake_view'
+                 )",
+                None,
+                &[],
+            )
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?;
+        let exists = row
+            .first()
+            .get_one::<bool>()
+            .map_err(|e| PgTrickleError::SpiError(e.to_string()))?
+            .unwrap_or(false);
+        Ok(exists)
+    })
+}
 
 /// Update `ducklake_sink_mode` and `ducklake_sink_path` in the catalog.
 pub fn update_sink_config(
