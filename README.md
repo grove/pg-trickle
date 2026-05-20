@@ -15,8 +15,6 @@
 
 > For a plain-language description of the problem pg_trickle solves, the differential dataflow approach, and the hybrid CDC architecture, read **[ESSENCE.md](ESSENCE.md)**.
 
-**Latest release: [v0.64.0](CHANGELOG.md)** — DuckLake ecosystem Phase 1: tutorials, blog posts, containerised demos, and reference architectures for running pg_trickle with DuckLake's PostgreSQL-backed catalog. Also includes v0.63.0 fused multi-node refresh (≥20% wall-time improvement on complex DAGs via single-statement CTE-chain composition) and v0.62.0 scheduler fanout cache with per-node pause/resume. See [CHANGELOG.md](CHANGELOG.md) for the full history.
-
 ## Stream Tables for PostgreSQL 18
 
 pg_trickle brings declarative, automatically-refreshing materialized views to PostgreSQL, inspired by the [DBSP](https://arxiv.org/abs/2203.16684) differential dataflow framework ([comparison](docs/research/DBSP_COMPARISON.md)). Define a SQL query and a schedule; the extension handles the rest.
@@ -140,8 +138,9 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 pg_trickle is positioning itself as the incremental view maintenance engine for [DuckLake](https://ducklake.select) — the PostgreSQL-catalog-backed lakehouse format from the DuckDB team.
 
 - **Phase 1 (v0.64.0, shipped)** — tutorials, blog posts, and containerised demos for running pg_trickle as the IVM layer for DuckLake-backed data lakes using the existing foreign-table path; zero new extension code required.
-- **Phase 2 (v0.65.0, planned)** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application.
-- **Phase 3 (v0.66.0–v0.67.0, planned)** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet via `arrow-rs`, uploaded to S3, and registered in the DuckLake catalog — queryable by DuckDB, Spark, and Trino with no custom export code.
+- **Phase 2 (v0.65.0, shipped)** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application; compaction-window safety policy.
+- **Phase 3a (v0.66.0, shipped)** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet (Snappy/ZSTD) via `arrow-rs`/`parquet` crates, uploaded to `file://` or `s3://`, and registered in the DuckLake catalog (data files, stats, snapshot) — queryable by DuckDB, Spark, and Trino with no custom export code.
+- **Phase 3b (v0.67.0, shipped)** — automatic DuckLake view registration on `create_stream_table` / `drop_stream_table`; snapshot provenance table (`pgtrickle.pgt_ducklake_provenance`) recording every sink run with `created_by` identity, snapshot ID, and delta row count for full end-to-end lineage.
 
 See [DuckLake Integration Plan](plans/ecosystem/PLAN_DUCKLAKE.md) and [ROADMAP.md](ROADMAP.md) for the full roadmap.
 
@@ -378,7 +377,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.64.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.67.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -392,7 +391,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.64.0
+          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.67.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -501,7 +500,7 @@ The `dbt-pgtrickle` package provides a custom `stream_table` materialization for
 # packages.yml
 packages:
   - git: "https://github.com/trickle-labs/pg-trickle.git"
-    revision: v0.64.0
+    revision: v0.67.0
     subdirectory: "dbt-pgtrickle"
 ```
 

@@ -251,7 +251,7 @@ four tutorials plus two containerised demos ship with the code.
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
 | [v0.66.0](roadmap/v0.66.0.md) | DuckLake Phase 3a: Parquet delta export (`arrow-rs`), DuckLake sink output mode, S3 upload, catalog transaction writer, encryption key pass-through, E2E tests | ✅ Released | Large | [Full details](roadmap/v0.66.0.md) |
-| [v0.67.0](roadmap/v0.67.0.md) | DuckLake Phase 3b: view registration, snapshot provenance (INT-11), pg-tide tutorial, 2 tutorials, 2 containerised demos | Planned | Medium | [Full details](roadmap/v0.67.0.md) |
+| [v0.67.0](roadmap/v0.67.0.md) | DuckLake Phase 3b: view registration, snapshot provenance (INT-11), pg-tide tutorial, 2 tutorials, 2 containerised demos | ✅ Released | Medium | [Full details](roadmap/v0.67.0.md-full.md) |
 
 
 ### Beyond v1.0
