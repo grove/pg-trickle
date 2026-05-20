@@ -32,8 +32,7 @@
 --   Demo D: "DuckLake Observability in a Box" docker-compose dashboard
 --           demos/ducklake-observability/
 --
---   C-1/C-2/C-3: Community outreach plan
---                docs/DUCKLAKE_COMMUNITY_OUTREACH.md
+--   C-1/C-2/C-3: Community outreach plan (internal)
 --
 -- No SQL schema changes in this release.
 -- All v0.64.0 additions are documentation, demos, and community resources.

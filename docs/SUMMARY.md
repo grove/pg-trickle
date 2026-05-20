@@ -31,7 +31,10 @@
 - [Performance Cookbook](PERFORMANCE_COOKBOOK.md)
 - [Performance Cheat Sheet](PERFORMANCE_CHEATSHEET.md)
 - [SQL Reference](SQL_REFERENCE.md)
+- [SQL API Reference](SQL_API_CATALOG.md)
+- [GUC Reference](GUC_CATALOG.md)
 - [Configuration](CONFIGURATION.md)
+- [Storage Backends](STORAGE_BACKENDS.md)
 - [Predictive Cost Model](COST_MODEL.md)
 
 ---
@@ -47,7 +50,9 @@
 - [High Availability and Replication](HA_AND_REPLICATION.md)
 - [Upgrading](UPGRADING.md)
 - [Security Guide](SECURITY_GUIDE.md)
+- [Security Model](SECURITY_MODEL.md)
 - [Troubleshooting & Runbook](TROUBLESHOOTING.md)
+- [Drain-Mode Runbook](RUNBOOK_DRAIN.md)
 - [Error Reference](ERRORS.md)
 
 ---
@@ -84,6 +89,16 @@
 - [ETL & Bulk Load Patterns](tutorials/ETL_BULK_LOAD.md)
 - [Migrating from Materialized Views](tutorials/MIGRATING_FROM_MATERIALIZED_VIEWS.md)
 - [Migrating from pg_ivm](tutorials/MIGRATING_FROM_PG_IVM.md)
+- [IVM for DuckLake Before v2.0](tutorial-ivm-ducklake-before-v2.md)
+- [The Modern Data Stack in One Box](tutorial-modern-data-stack-one-box.md)
+- [Streaming PostgreSQL to a Data Lake](tutorial-streaming-postgres-to-data-lake.md)
+- [Sub-Millisecond Inlined-Data CDC](tutorial-sub-millisecond-inlined-cdc.md)
+- [pg-tide DuckLake Pipeline](tutorial-pg-tide-ducklake-pipeline.md)
+- [Hybrid Search Patterns](tutorials/HYBRID_SEARCH_PATTERNS.md)
+- [pgvector RAG Cookbook](tutorials/PGVECTOR_RAG_COOKBOOK.md)
+- [pgVector Embedding Pipelines](tutorials/PGVECTOR_EMBEDDING_PIPELINES.md)
+- [Vector RAG Starter](tutorials/VECTOR_RAG_STARTER.md)
+- [Per-Tenant ANN Indexing Patterns](tutorials/PER_TENANT_ANN_PATTERNS.md)
 
 ---
 
@@ -98,6 +113,7 @@
 - [ORM Integration](integrations/orm.md)
 - [Multi-Tenant](integrations/multi-tenant.md)
 - [dbt Hub Submission](integrations/dbt-hub-submission.md)
+- [OpenTelemetry](OPENTELEMETRY.md)
 
 ---
 
@@ -130,3 +146,4 @@
 - [Triggers vs Replication](research/TRIGGERS_VS_REPLICATION.md)
 - [Prior Art](research/PRIOR_ART.md)
 - [Multi-DB Refresh Broker](research/multi_db_refresh_broker.md)
+- [Materialised k-NN Graph Trade-offs](research/KNN_GRAPH_TRADEOFFS.md)
