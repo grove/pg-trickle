@@ -226,7 +226,7 @@ alongside the code.
 
 | Version | Theme | Status | Scope | Full details |
 |---------|-------|--------|-------|--------------|
-| [v0.65.0](roadmap/v0.65.0.md) | DuckLake Phase 2: change-feed adapter, snapshot frontier, inlined-data CDC, row-ID plumbing, compaction safety, integration tests, 2 tutorials, 1 demo | Planned | Large | [Full details](roadmap/v0.65.0.md) |
+| [v0.65.0](roadmap/v0.65.0.md) | DuckLake Phase 2: change-feed adapter, snapshot frontier, inlined-data CDC, row-ID plumbing, compaction safety, integration tests, 2 tutorials, 1 demo | ✅ Released | Large | [Full details](roadmap/v0.65.0.md) |
 
 ### DuckLake Phase 3 Arc (v0.66.x – v0.67.x)
 

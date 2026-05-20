@@ -617,6 +617,9 @@ fn raise_error_with_context(e: PgTrickleError) -> ! {
             .report(PgLogLevel::ERROR);
             unreachable!()
         }
+        PgTrickleError::DuckLakeSnapshotExpired(_) | PgTrickleError::DuckLakeChangeFeedError(_) => {
+            pgrx::error!("{}", e);
+        }
     }
 }
 
@@ -3550,6 +3553,7 @@ mod tests {
             rows_changed_since_last_reindex: 0,
             last_reindex_at: None,
             defining_query_hash: 0,
+            ducklake_compaction_policy: None,
         }
     }
 

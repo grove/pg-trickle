@@ -18,6 +18,8 @@ pub enum RowIdStrategy {
     GroupByKey { group_columns: Vec<String> },
     /// Pass through the child's row ID (for project/filter).
     PassThrough,
+    /// Use an externally-provided stable row ID column (e.g. DuckLake `rowid`).
+    ExternalStableId { id_column: String },
 }
 
 /// A18 (v0.36.0): Formal schema declaration for row-id hash computation.

@@ -166,6 +166,13 @@ pub struct StreamTableMeta {
     /// full query string on every differential refresh.
     /// 0 means not yet computed (triggers one-time cache rebuild).
     pub defining_query_hash: i64,
+    /// F-8 (v0.65.0): Per-stream-table DuckLake compaction safety policy.
+    /// Controls behaviour when a DuckLake source's change-feed history no
+    /// longer covers `last_consumed_snapshot_id` (snapshot was compacted).
+    /// `None` means use the global `pg_trickle.ducklake_compaction_policy` GUC.
+    /// `Some("fallback")` — fall back to a full refresh and log a warning.
+    /// `Some("error")` — raise a clear actionable error instead.
+    pub ducklake_compaction_policy: Option<String>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -178,6 +185,10 @@ pub enum CdcMode {
     Transitioning,
     /// Only the WAL decoder populates the buffer table; trigger dropped.
     Wal,
+    /// F-1 (v0.65.0): DuckLake change-feed adapter — calls `table_changes()`
+    /// and processes O(Δ) rows rather than re-scanning the foreign table.
+    /// Tracks `last_consumed_snapshot_id` in the frontier rather than LSN.
+    DuckLakeChangeFeed,
 }
 
 impl CdcMode {
@@ -187,6 +198,7 @@ impl CdcMode {
             CdcMode::Trigger => "TRIGGER",
             CdcMode::Transitioning => "TRANSITIONING",
             CdcMode::Wal => "WAL",
+            CdcMode::DuckLakeChangeFeed => "DUCKLAKE_CHANGE_FEED",
         }
     }
 
@@ -196,6 +208,7 @@ impl CdcMode {
             "TRIGGER" => CdcMode::Trigger,
             "TRANSITIONING" => CdcMode::Transitioning,
             "WAL" => CdcMode::Wal,
+            "DUCKLAKE_CHANGE_FEED" => CdcMode::DuckLakeChangeFeed,
             _ => CdcMode::Trigger,
         }
     }
@@ -365,7 +378,8 @@ impl StreamTableMeta {
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     ducklake_compaction_policy \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -406,7 +420,8 @@ impl StreamTableMeta {
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     ducklake_compaction_policy \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -452,7 +467,8 @@ impl StreamTableMeta {
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     ducklake_compaction_policy \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -493,7 +509,8 @@ impl StreamTableMeta {
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     ducklake_compaction_policy \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -538,7 +555,8 @@ impl StreamTableMeta {
                      reindex_drift_threshold, \
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
-                     COALESCE(defining_query_hash, 0) AS defining_query_hash \
+                     COALESCE(defining_query_hash, 0) AS defining_query_hash, \
+                     ducklake_compaction_policy \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1329,6 +1347,7 @@ impl StreamTableMeta {
         let rows_changed_since_last_reindex = table.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = table.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
+        let ducklake_compaction_policy = table.get::<String>(52).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1382,6 +1401,7 @@ impl StreamTableMeta {
             rows_changed_since_last_reindex,
             last_reindex_at,
             defining_query_hash,
+            ducklake_compaction_policy,
         })
     }
 
@@ -1508,6 +1528,7 @@ impl StreamTableMeta {
         let rows_changed_since_last_reindex = row.get::<i64>(49).map_err(map_spi)?.unwrap_or(0);
         let last_reindex_at = row.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = row.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
+        let ducklake_compaction_policy = row.get::<String>(52).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1561,6 +1582,7 @@ impl StreamTableMeta {
             rows_changed_since_last_reindex,
             last_reindex_at,
             defining_query_hash,
+            ducklake_compaction_policy,
         })
     }
 }

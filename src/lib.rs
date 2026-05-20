@@ -307,6 +307,9 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     column_lineage  JSONB,
     -- v0.59.0 PERF-2: hash of defining_query to skip recomputation on every refresh
     defining_query_hash BIGINT NOT NULL DEFAULT 0,
+    -- v0.65.0 CDC-6: DuckLake compaction policy override
+    ducklake_compaction_policy TEXT DEFAULT NULL
+                     CHECK (ducklake_compaction_policy IN ('fallback', 'error')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -325,7 +328,7 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_dependencies (
     column_snapshot JSONB,
     schema_fingerprint TEXT,
     cdc_mode     TEXT NOT NULL DEFAULT 'TRIGGER'
-                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL')),
+                  CHECK (cdc_mode IN ('TRIGGER', 'TRANSITIONING', 'WAL', 'DUCKLAKE_CHANGE_FEED')),
     slot_name    TEXT,
     decoder_confirmed_lsn PG_LSN,
     transition_started_at TIMESTAMPTZ,
