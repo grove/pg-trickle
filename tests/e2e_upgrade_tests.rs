@@ -45,6 +45,8 @@ async fn test_upgrade_catalog_schema_stability() {
         ("diamond_consistency", "text"),
         ("diamond_schedule_policy", "text"),
         ("downstream_publication_name", "text"),
+        // v0.65.0 CDC-6: DuckLake compaction policy override
+        ("ducklake_compaction_policy", "text"),
         ("effective_refresh_mode", "text"),
         ("freshness_deadline_ms", "bigint"),
         ("frontier", "jsonb"),
