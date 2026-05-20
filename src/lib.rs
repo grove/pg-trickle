@@ -30,6 +30,7 @@ pub mod citus;
 pub mod config;
 pub mod dag;
 mod diagnostics;
+pub mod ducklake_sink;
 pub mod dvm;
 pub mod error;
 pub mod fuzz_pub;
@@ -310,6 +311,12 @@ CREATE TABLE IF NOT EXISTS pgtrickle.pgt_stream_tables (
     -- v0.65.0 CDC-6: DuckLake compaction policy override
     ducklake_compaction_policy TEXT DEFAULT NULL
                      CHECK (ducklake_compaction_policy IN ('fallback', 'error')),
+    -- v0.66.0 F-2/F-4: DuckLake sink output mode and path
+    ducklake_sink_mode TEXT DEFAULT NULL
+                     CHECK (ducklake_sink_mode IS NULL OR ducklake_sink_mode IN ('append', 'replace')),
+    ducklake_sink_path TEXT DEFAULT NULL,
+    -- v0.66.0 F-4: DuckLake table_id for catalog registration (NULL = file-only)
+    ducklake_sink_table_id BIGINT DEFAULT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

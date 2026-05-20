@@ -173,6 +173,19 @@ pub struct StreamTableMeta {
     /// `Some("fallback")` — fall back to a full refresh and log a warning.
     /// `Some("error")` — raise a clear actionable error instead.
     pub ducklake_compaction_policy: Option<String>,
+    /// F-2 (v0.66.0): DuckLake sink output mode.
+    /// `None` = no sink. `Some("append")` = accumulate Parquet deltas.
+    /// `Some("replace")` = overwrite on every refresh cycle.
+    pub ducklake_sink_mode: Option<String>,
+    /// F-4 (v0.66.0): Object-store path for Parquet delta files.
+    /// Required when `ducklake_sink_mode` is `Some`. Supports s3://, gs://,
+    /// az://, and file:// schemes.
+    pub ducklake_sink_path: Option<String>,
+    /// F-4 (v0.66.0): DuckLake `table_id` for catalog registration.
+    /// When `Some`, each Parquet file is registered in `ducklake_data_file`
+    /// under this table ID and a new `ducklake_snapshot` row is inserted.
+    /// When `None`, files are written to object storage but not registered.
+    pub ducklake_sink_table_id: Option<i64>,
 }
 
 /// CDC mode for a source dependency — tracks whether change capture uses
@@ -379,7 +392,8 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy \
+                     ducklake_compaction_policy, \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_schema = $1 AND pgt_name = $2",
                     None,
@@ -421,7 +435,8 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy \
+                     ducklake_compaction_policy, \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_relid = $1",
                     None,
@@ -468,7 +483,8 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy \
+                     ducklake_compaction_policy, \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE pgt_id = $1",
                     None,
@@ -510,7 +526,8 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy \
+                     ducklake_compaction_policy, \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
                      FROM pgtrickle.pgt_stream_tables",
                     None,
                     &[],
@@ -556,7 +573,8 @@ impl StreamTableMeta {
                      COALESCE(rows_changed_since_last_reindex, 0) AS rows_changed_since_last_reindex, \
                      last_reindex_at, \
                      COALESCE(defining_query_hash, 0) AS defining_query_hash, \
-                     ducklake_compaction_policy \
+                     ducklake_compaction_policy, \
+                     ducklake_sink_mode, ducklake_sink_path, ducklake_sink_table_id \
                      FROM pgtrickle.pgt_stream_tables \
                      WHERE status = 'ACTIVE'",
                     None,
@@ -1348,6 +1366,9 @@ impl StreamTableMeta {
         let last_reindex_at = table.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = table.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
         let ducklake_compaction_policy = table.get::<String>(52).map_err(map_spi)?;
+        let ducklake_sink_mode = table.get::<String>(53).map_err(map_spi)?;
+        let ducklake_sink_path = table.get::<String>(54).map_err(map_spi)?;
+        let ducklake_sink_table_id = table.get::<i64>(55).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1402,6 +1423,9 @@ impl StreamTableMeta {
             last_reindex_at,
             defining_query_hash,
             ducklake_compaction_policy,
+            ducklake_sink_mode,
+            ducklake_sink_path,
+            ducklake_sink_table_id,
         })
     }
 
@@ -1529,6 +1553,9 @@ impl StreamTableMeta {
         let last_reindex_at = row.get::<TimestampWithTimeZone>(50).map_err(map_spi)?;
         let defining_query_hash = row.get::<i64>(51).map_err(map_spi)?.unwrap_or(0);
         let ducklake_compaction_policy = row.get::<String>(52).map_err(map_spi)?;
+        let ducklake_sink_mode = row.get::<String>(53).map_err(map_spi)?;
+        let ducklake_sink_path = row.get::<String>(54).map_err(map_spi)?;
+        let ducklake_sink_table_id = row.get::<i64>(55).map_err(map_spi)?;
 
         Ok(StreamTableMeta {
             pgt_id,
@@ -1583,6 +1610,9 @@ impl StreamTableMeta {
             last_reindex_at,
             defining_query_hash,
             ducklake_compaction_policy,
+            ducklake_sink_mode,
+            ducklake_sink_path,
+            ducklake_sink_table_id,
         })
     }
 }

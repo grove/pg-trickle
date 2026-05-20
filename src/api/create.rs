@@ -43,6 +43,10 @@ fn create_stream_table(
     temporal: default!(bool, false),
     // CORR-2/UX-3 (v0.36.0): columnar storage backend
     storage_backend: default!(Option<&str>, "NULL"),
+    // F-2/F-4 (v0.66.0): DuckLake sink parameters
+    sink: default!(Option<&str>, "NULL"),
+    ducklake_sink_path: default!(Option<&str>, "NULL"),
+    ducklake_sink_table_id: default!(Option<i64>, "NULL"),
 ) {
     let result = create_stream_table_impl(CreateStreamTableOptions {
         name,
@@ -61,6 +65,9 @@ fn create_stream_table(
         output_distribution_column,
         temporal_mode: temporal,
         storage_backend,
+        ducklake_sink: sink,
+        ducklake_sink_path,
+        ducklake_sink_table_id,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -95,6 +102,10 @@ fn create_stream_table_if_not_exists(
     temporal: default!(bool, false),
     // CORR-2/UX-3 (v0.36.0): columnar storage backend
     storage_backend: default!(Option<&str>, "NULL"),
+    // F-2/F-4 (v0.66.0): DuckLake sink parameters
+    sink: default!(Option<&str>, "NULL"),
+    ducklake_sink_path: default!(Option<&str>, "NULL"),
+    ducklake_sink_table_id: default!(Option<i64>, "NULL"),
 ) {
     let result = create_stream_table_if_not_exists_impl(CreateStreamTableOptions {
         name,
@@ -113,6 +124,9 @@ fn create_stream_table_if_not_exists(
         output_distribution_column,
         temporal_mode: temporal,
         storage_backend,
+        ducklake_sink: sink,
+        ducklake_sink_path,
+        ducklake_sink_table_id,
     });
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -240,6 +254,10 @@ pub(crate) fn bulk_create_impl(
             .unwrap_or(false);
         // CORR-2/UX-3 (v0.36.0): columnar storage backend
         let storage_backend = obj.get("storage_backend").and_then(|v| v.as_str());
+        // F-2/F-4 (v0.66.0): DuckLake sink parameters
+        let ducklake_sink = obj.get("sink").and_then(|v| v.as_str());
+        let ducklake_sink_path = obj.get("ducklake_sink_path").and_then(|v| v.as_str());
+        let ducklake_sink_table_id = obj.get("ducklake_sink_table_id").and_then(|v| v.as_i64());
 
         match create_stream_table_impl(CreateStreamTableOptions {
             name,
@@ -258,6 +276,9 @@ pub(crate) fn bulk_create_impl(
             output_distribution_column,
             temporal_mode: temporal,
             storage_backend,
+            ducklake_sink,
+            ducklake_sink_path,
+            ducklake_sink_table_id,
         }) {
             Ok(()) => {
                 // Look up pgt_id for the result
@@ -345,6 +366,9 @@ fn create_or_replace_stream_table(
         output_distribution_column,
         temporal,
         storage_backend,
+        None, // sink: not set via create_or_replace
+        None, // ducklake_sink_path: not set via create_or_replace
+        None, // ducklake_sink_table_id: not set via create_or_replace
     );
     if let Err(e) = result {
         raise_error_with_context(e);
@@ -485,6 +509,10 @@ fn create_or_replace_stream_table_impl(
     temporal_mode: bool,
     // CORR-2/UX-3 (v0.36.0): columnar storage backend (used only on first creation).
     storage_backend: Option<&str>,
+    // F-2/F-4 (v0.66.0): DuckLake sink parameters (used only on first creation).
+    ducklake_sink: Option<&str>,
+    ducklake_sink_path: Option<&str>,
+    ducklake_sink_table_id: Option<i64>,
 ) -> Result<(), PgTrickleError> {
     let (schema, table_name) = parse_qualified_name(name)?;
 
@@ -550,6 +578,9 @@ fn create_or_replace_stream_table_impl(
                 max_delta_fraction,
                 None, // post_refresh_action: not set via create_or_replace
                 None, // reindex_drift_threshold: not set via create_or_replace
+                None, // sink: not set via create_or_replace
+                None, // ducklake_sink_path: not set via create_or_replace
+                None, // ducklake_sink_table_id: not set via create_or_replace
             )?;
 
             pgrx::info!(
@@ -581,6 +612,9 @@ fn create_or_replace_stream_table_impl(
                 output_distribution_column,
                 temporal_mode,   // passed through from caller
                 storage_backend, // passed through from caller
+                ducklake_sink,
+                ducklake_sink_path,
+                ducklake_sink_table_id,
             })
         }
         Err(e) => Err(e),

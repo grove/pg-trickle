@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [0.66.0 — DuckLake Phase 3a: Parquet Sink Infrastructure](#0660--ducklake-phase-3a-parquet-sink-infrastructure)
 - [0.64.0 — DuckLake Ecosystem Phase 1](#0640--ducklake-ecosystem-phase-1)
 - [0.63.0 — Fused Multi-Node Refresh](#0630--fused-multi-node-refresh)
 - [0.62.0 — Scheduler Throughput & pg_aqueduct Prerequisites](#0620--scheduler-throughput--pg_aqueduct-prerequisites)
@@ -79,6 +80,84 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [0.1.1 — CloudNativePG Image & Test Hardening](#011--cloudnativepg-image--test-hardening)
 - [0.1.0 — Initial Release](#010--initial-release)
 <!-- TOC end -->
+
+---
+
+## [0.66.0] — DuckLake Phase 3a: Parquet Sink Infrastructure
+
+### What's New
+
+v0.66.0 adds the foundational write path that lets pg_trickle stream tables
+export their computed results directly into a DuckLake-compatible Parquet data
+lake, closing the loop from PostgreSQL OLTP → incremental view maintenance →
+object-storage lake.
+
+**F-1 / F-2: Parquet Sink Mode & API**
+
+Two new parameters on `create_stream_table()` and `alter_stream_table()`:
+
+- `sink => 'ducklake'` — enable the DuckLake sink for this stream table.
+  Accepted values: `'ducklake'`/`'append'` (write new files per refresh),
+  `'replace'` (overwrite the previous file), `'none'` (disable).
+- `ducklake_sink_path => 's3://bucket/prefix/'` — object-store path where
+  Parquet files are written. Supports `file://` (local) and `s3://` (AWS S3).
+
+Three new catalog columns in `pgtrickle.pgt_stream_tables`:
+- `ducklake_sink_mode TEXT` — `'append'` or `'replace'` (NULL = disabled).
+- `ducklake_sink_path TEXT` — fully-qualified object-store path.
+- `ducklake_sink_table_id BIGINT` — DuckLake `table_id` for catalog writes.
+
+**F-3: Parquet Serialisation** (Rust `parquet` + `arrow-array` crates)
+
+Stream table output is serialised to Apache Parquet with per-column Arrow
+type mapping (INT64, FLOAT64, BOOL, TIMESTAMP, UTF8). Compression defaults
+to Snappy; ZSTD is also supported via the
+`pg_trickle.ducklake_sink_compression` GUC.
+
+**F-4: Object-Store Upload**
+
+- `file://` scheme: direct filesystem write (no network, suitable for development,
+  NFS, and EFS mounts).
+- `s3://` scheme: synchronous upload via the `object_store` crate with a
+  per-call single-threaded Tokio runtime. Credentials configured via GUCs:
+  `pg_trickle.ducklake_sink_s3_region`, `pg_trickle.ducklake_sink_s3_endpoint`,
+  `pg_trickle.ducklake_sink_s3_access_key`, `pg_trickle.ducklake_sink_s3_secret_key`.
+  Omit the key GUCs to use the AWS credential chain (environment variables, IAM role).
+
+**F-5 / F-6: DuckLake Catalog Transaction Writer**
+
+When `ducklake_sink_table_id` is set, each sink run inserts into:
+- `ducklake_data_file` — registers the new Parquet file with row count and
+  file size.
+- `ducklake_table_stats` — updates cumulative row and file counts.
+- `ducklake_snapshot` — creates a new snapshot entry so DuckDB readers see
+  the new data immediately on the next query.
+
+**F-9: Encryption Key Pass-Through**
+
+When `pg_trickle.ducklake_sink_encryption_key_prefix` is set, the sink
+generates a per-file key ID (`<prefix>/<table_id>/<epoch_ms>`) and records it
+in `ducklake_data_file.encryption_key_id`. Key management is handled externally;
+pg_trickle only records the reference.
+
+**Sink Scheduling Integration**
+
+The DuckLake sink runs after every successful scheduler refresh. Failures are
+logged as warnings and never block the next scheduled refresh — best-effort
+semantics match the DuckLake writer model (orphaned Parquet files are
+garbage-collected by DuckLake VACUUM).
+
+### Breaking Changes
+
+None. All new columns default to NULL and all new API parameters default to NULL.
+Existing stream tables are unaffected until explicitly configured.
+
+### Upgrade
+
+Run the migration:
+```sql
+ALTER EXTENSION pg_trickle UPDATE TO '0.66.0';
+```
 
 ---
 

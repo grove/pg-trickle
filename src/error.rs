@@ -180,6 +180,23 @@ pub enum PgTrickleError {
     #[error("DuckLake change-feed error: {0}")]
     DuckLakeChangeFeedError(String),
 
+    // ── v0.66.0: DuckLake sink errors ────────────────────────────────────
+    /// v0.66.0: Parquet serialisation failed.
+    #[error("DuckLake sink Parquet error: {0}")]
+    DucklakeParquetError(String),
+
+    /// v0.66.0: Object-store upload failed.
+    #[error("DuckLake sink upload error: {0}")]
+    DucklakeUploadError(String),
+
+    /// v0.66.0: DuckLake catalog write failed.
+    #[error("DuckLake catalog write error: {0}")]
+    DucklakeCatalogError(String),
+
+    /// v0.66.0: Generic DuckLake sink error.
+    #[error("DuckLake sink error: {0}")]
+    DucklakeSinkError(String),
+
     // ── Outbox/pg_tide integration errors (v0.46.0) ──────────────────────
     /// v0.46.0: Outbox already attached for this stream table.
     #[error("outbox already attached for stream table: {0}")]
@@ -618,6 +635,13 @@ impl PgTrickleError {
 
             // C-4: Dropped ST source is a schema-level error (requires reinitialize).
             PgTrickleError::StSourceFrontierMissing(_) => PgTrickleErrorKind::Schema,
+
+            // F-2/F-4 (v0.66.0): DuckLake sink errors — parquet and upload errors
+            // are system-level; catalog errors are also system-level.
+            PgTrickleError::DucklakeParquetError(_)
+            | PgTrickleError::DucklakeUploadError(_)
+            | PgTrickleError::DucklakeCatalogError(_)
+            | PgTrickleError::DucklakeSinkError(_) => PgTrickleErrorKind::System,
         }
     }
 }
