@@ -15,7 +15,7 @@
 
 > For a plain-language description of the problem pg_trickle solves, the differential dataflow approach, and the hybrid CDC architecture, read **[ESSENCE.md](ESSENCE.md)**.
 
-**Latest release: [v0.57.0](CHANGELOG.md#0570--documentation-excellence)** — four new end-to-end tutorials (real-time dashboard, event sourcing, zero-downtime migration, security hardening), world-class docs, and a full terminology consistency pass. See [CHANGELOG.md](CHANGELOG.md) for the full history.
+**Latest release: [v0.64.0](CHANGELOG.md)** — DuckLake ecosystem Phase 1: tutorials, blog posts, containerised demos, and reference architectures for running pg_trickle with DuckLake's PostgreSQL-backed catalog. Also includes v0.63.0 fused multi-node refresh (≥20% wall-time improvement on complex DAGs via single-statement CTE-chain composition) and v0.62.0 scheduler fanout cache with per-node pause/resume. See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
 ## Stream Tables for PostgreSQL 18
 
@@ -135,6 +135,16 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Shard rebalance auto-recovery** — topology changes are detected by comparing `pg_dist_node` against `pgt_worker_slots`; stale slots are pruned and new ones inserted without operator intervention.
 - **Worker failure isolation** — per-worker poll failures are logged and skipped; after `pg_trickle.citus_worker_retry_ticks` (default 5) consecutive failures a WARNING is raised while healthy workers continue uninterrupted.
 
+### DuckLake lakehouse integration (v0.64.0+)
+
+pg_trickle is positioning itself as the incremental view maintenance engine for [DuckLake](https://ducklake.select) — the PostgreSQL-catalog-backed lakehouse format from the DuckDB team.
+
+- **Phase 1 (v0.64.0, shipped)** — tutorials, blog posts, and containerised demos for running pg_trickle as the IVM layer for DuckLake-backed data lakes using the existing foreign-table path; zero new extension code required.
+- **Phase 2 (v0.65.0, planned)** — native `CdcMode::DuckLakeChangeFeed` adapter calling DuckLake's `table_changes()` API for O(Δ) change consumption; snapshot-based frontier model; inlined-data trigger adapter; row-ID plumbing for O(1) delta application.
+- **Phase 3 (v0.66.0–v0.67.0, planned)** — DuckLake sink output mode (`sink => 'ducklake'`): stream table results serialised as Parquet via `arrow-rs`, uploaded to S3, and registered in the DuckLake catalog — queryable by DuckDB, Spark, and Trino with no custom export code.
+
+See [DuckLake Integration Plan](plans/ecosystem/PLAN_DUCKLAKE.md) and [ROADMAP.md](ROADMAP.md) for the full roadmap.
+
 ### Production & operations
 
 - **PgBouncer / connection-pool compatible** — works behind PgBouncer in transaction-pool mode (Supabase, Railway, Neon, etc.); row-level locking replaces session locks; per-table `pooler_compatibility_mode` available.
@@ -143,7 +153,7 @@ aggregates, window functions, multi-table joins, time-series, and EXISTS subquer
 - **Self-healing repair** — `pgtrickle.repair_stream_table(name)` rebuilds any missing CDC triggers and change buffer tables, resets the refresh frontier, and clears fuse state — use after PITR restores or operator-level DDL.
 - **CNPG / Kubernetes ready** — purpose-built Docker images and CloudNativePG manifests included; a `lifecycle.preStop` drain hook (`pgtrickle.drain(timeout_s => 120)`) ensures clean rolling upgrades.
 - **SQL-injection safe Citus paths** — all `dblink` call sites escape connection strings and queries via `pg_catalog.quote_literal`, eliminating injection risk through attacker-controlled hostnames or slot names.
-- **Supply-chain hardened Docker images** — all Dockerfiles pin `postgres:18.3-bookworm` to an exact SHA256 digest for reproducible builds; `scripts/update_base_image_digests.sh` automates quarterly refreshes.
+- **Supply-chain hardened Docker images** — all Dockerfiles pin `postgres:18.4-bookworm` to an exact SHA256 digest for reproducible builds; `scripts/update_base_image_digests.sh` automates quarterly refreshes.
 
 ### Observability
 
@@ -257,7 +267,7 @@ Changes propagate through multi-level stream table DAGs efficiently:
 | Wide DAG (3 levels × 20 wide) | 60 | ~2,430 ms |
 | Diamond (4-way fan-out + join) | 5 | ~200 ms |
 
-PARALLEL refresh mode processes independent branches concurrently, reducing wall-clock time for wide DAGs.
+PARALLEL refresh mode processes independent branches concurrently, reducing wall-clock time for wide DAGs. Since v0.63.0, the scheduler composes all per-node delta SQL into a single CTE-chain statement (**fused multi-node refresh**), eliminating round-trips between nodes and achieving a ≥20% wall-time improvement on complex DAGs.
 
 **Tips:** Enable `PARALLEL` refresh mode (`ALTER STREAM TABLE ... SET refresh_mode = 'parallel'`) to process independent DAG branches concurrently. For deep linear chains (> 5 levels), consider consolidating intermediate steps into a single defining query to reduce propagation hops and transaction overhead.
 
@@ -368,7 +378,7 @@ CREATE EXTENSION pg_trickle;
 pg_trickle is distributed as a minimal OCI extension image for [CloudNativePG Image Volume Extensions](https://cloudnative-pg.io/docs/1.28/imagevolume_extensions/). The image is `scratch`-based (< 10 MB) and contains only the extension files — no PostgreSQL server, no OS.
 
 ```bash
-docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.57.0
+docker pull ghcr.io/trickle-labs/pg_trickle-ext:0.64.0
 ```
 
 Deploy with the official CNPG PostgreSQL 18 operand image:
@@ -382,7 +392,7 @@ spec:
     extensions:
       - name: pg-trickle
         image:
-          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.57.0
+          reference: ghcr.io/trickle-labs/pg_trickle-ext:0.64.0
 ```
 
 See [cnpg/cluster-example.yaml](cnpg/cluster-example.yaml) and [cnpg/database-example.yaml](cnpg/database-example.yaml) for complete examples. Requires Kubernetes 1.33+ and CNPG 1.28+.
@@ -491,7 +501,7 @@ The `dbt-pgtrickle` package provides a custom `stream_table` materialization for
 # packages.yml
 packages:
   - git: "https://github.com/trickle-labs/pg-trickle.git"
-    revision: v0.57.0
+    revision: v0.64.0
     subdirectory: "dbt-pgtrickle"
 ```
 
